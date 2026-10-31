@@ -12,7 +12,8 @@ Entries are generated from Conventional Commits with git-cliff
 ### Added
 
 - Project governance, security policy, contribution guide and license files.
-- Architecture decision records ADR-0001 to ADR-0020.
+- Architecture decision records ADR-0001 to ADR-0024.
 - Threat model with the PTY-based identity design.
+- Roadmap, and memory targets updated from the M0 measurements.
 - Cargo workspace with empty crates, `cargo xtask`, CI and a dry-run release workflow.
 - M0 spike results for caller identity, tiered scrollback, the process split and window memory, with the M0 report.
