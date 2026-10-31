@@ -83,26 +83,29 @@ fn fuzz_smoke() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn build_core() -> io::Result<()> {
+fn build(profile: &str, binary: &str) -> io::Result<()> {
     let status = Command::new("cargo")
-        .args(["build", "--locked", "--profile", "release-core"])
-        .args(["--package", "pinfold-cli", "--bin", "pinfold-core"])
+        .args(["build", "--locked", "--profile", profile])
+        .args(["--package", "pinfold-cli", "--bin", binary])
         .status()?;
     if status.success() {
         Ok(())
     } else {
-        Err(io::Error::other("building pinfold-core failed"))
+        Err(io::Error::other(format!("building {binary} failed")))
     }
 }
 
 fn mem_gate_task() -> ExitCode {
-    if let Err(error) = build_core() {
+    if let Err(error) =
+        build("release-core", "pinfold-core").and_then(|()| build("release", "pinfold"))
+    {
         eprintln!("mem-gate: {error}");
         return ExitCode::FAILURE;
     }
     let target = std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into());
     let core = Path::new(&target).join("release-core/pinfold-core");
-    let budgets = [
+    let window = Path::new(&target).join("release/pinfold");
+    let mut budgets = vec![
         mem_gate::Budget {
             metric: "Core, 8 idle panes",
             limit: mem_gate::CORE_LIMIT,
@@ -118,6 +121,16 @@ fn mem_gate_task() -> ExitCode {
             per_pane_over: Some((&["--idle", "1"], 7)),
         },
     ];
+    // macOS waits for the Metal renderer in #20, and CPU drawing there is over budget.
+    if cfg!(target_os = "linux") {
+        budgets.push(mem_gate::Budget {
+            metric: "Window on X11, 1920x1080",
+            limit: mem_gate::WINDOW_LIMIT_FULL_HD,
+            program: &window,
+            args: &["--size", "1920x1080"],
+            per_pane_over: None,
+        });
+    }
     if mem_gate::run(&budgets) {
         ExitCode::SUCCESS
     } else {

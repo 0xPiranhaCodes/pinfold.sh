@@ -9,15 +9,17 @@ use std::time::Duration;
 /// Budgets use MB of 10^6 bytes, the unit of the M0 measurements behind them.
 pub const CORE_LIMIT: u64 = 4_000_000;
 pub const PANE_LIMIT: u64 = 250_000;
+/// The window budget on Linux for an inner size of 1920x1080.
+pub const WINDOW_LIMIT_FULL_HD: u64 = 8_000_000 + 2 * 4 * 1920 * 1080;
 
 const RUNS: usize = 3;
 const SETTLE: Duration = Duration::from_secs(1);
 
 /// ADR-0021 budgets with nothing to measure yet, and the issue that makes them measurable.
 const NOT_MEASURED: [(&str, &str); 4] = [
+    ("Window on Wayland", "a compositor in CI"),
     ("10k lines of typical text", "#24"),
     ("Cold scrollback per pane", "#24"),
-    ("Window on Linux", "#19"),
     ("Window on macOS", "#20"),
 ];
 

@@ -11,10 +11,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use mio::unix::SourceFd;
-use mio::{Events, Interest, Poll, Token, Waker};
+use mio::{Events, Interest, Poll, Token};
 use pinfold_sys::pty::Pty;
 
 use crate::vt::{AlacrittyEngine, VtEngine};
+
+pub use mio::Waker;
 
 /// Most bytes read from one pane per pass.
 pub const READ_BUDGET: usize = 64 * 1024;

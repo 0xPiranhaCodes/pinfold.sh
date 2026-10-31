@@ -94,7 +94,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: cargo xtask mem-gate
+      - if: runner.os == 'Linux'
+        run: sudo apt-get install -y xvfb
+      - if: runner.os == 'Linux'
+        run: xvfb-run -a -s "-screen 0 1920x1080x24" cargo xtask mem-gate
+      - if: runner.os == 'macOS'
+        run: cargo xtask mem-gate
 
   dco:
     if: github.event_name == 'pull_request'
