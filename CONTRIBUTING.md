@@ -17,9 +17,6 @@ cargo build
 cargo xtask --help
 ```
 
-> The Cargo workspace arrives in the second Phase 0 PR. Until then only the
-> documentation exists.
-
 Optional tools, used by the checks below:
 
 ```sh
@@ -60,13 +57,15 @@ cargo +nightly fuzz run <target> -- -max_total_time=60
 ```
 
 `cargo xtask fuzz-smoke` runs a short pass over every target, which is what CI
-does on each PR. Any crash is a release blocker.
+does on each PR. Any crash is a release blocker. There are no targets yet, so it
+reports SKIPPED until M1.
 
 ### The memory gate
 
 `cargo xtask mem-gate` runs a scripted headless session and checks every budget in
 [ADR-0008](docs/adr/0008-memory-targets.md). It prints a table and fails on a
-regression. If your change affects memory, paste that table into your PR.
+regression. If your change affects memory, paste that table into your PR. It reports
+SKIPPED until M0 builds something to measure.
 
 Every number in the docs or a PR must come from committed code. If you cannot
 reproduce it with a script in this repository, leave it out.
