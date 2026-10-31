@@ -1,0 +1,14 @@
+[package]
+name = "pinfold-benches"
+description = "Latency and throughput benches."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+path = "lib.rs"
+
+[lints]
+workspace = true

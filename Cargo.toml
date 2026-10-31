@@ -1,0 +1,43 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "xtask", "tests", "benches"]
+exclude = ["fuzz"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/0xPiranhaCodes/pinfold.sh"
+homepage = "https://pinfold.sh"
+publish = false
+
+[workspace.dependencies]
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+dbg_macro = "deny"
+expect_used = "deny"
+panic = "deny"
+print_stdout = "deny"
+todo = "deny"
+unwrap_used = "deny"
+
+# Panic strategy is per profile, so release-core is how only the core gets abort (ADR-0017).
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+
+[profile.release.package.pinfold-api]
+opt-level = "s"
+
+[profile.release.package.pinfold-tools]
+opt-level = "s"
+
+[profile.release-core]
+inherits = "release"
+panic = "abort"
