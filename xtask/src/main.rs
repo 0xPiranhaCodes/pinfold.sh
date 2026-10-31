@@ -83,9 +83,10 @@ fn fuzz_smoke() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn build(profile: &str, binary: &str) -> io::Result<()> {
+fn build(profile: &str, binary: &str, features: &[&str]) -> io::Result<()> {
     let status = Command::new("cargo")
         .args(["build", "--locked", "--profile", profile])
+        .args(features)
         .args(["--package", "pinfold-cli", "--bin", binary])
         .status()?;
     if status.success() {
@@ -96,8 +97,8 @@ fn build(profile: &str, binary: &str) -> io::Result<()> {
 }
 
 fn mem_gate_task() -> ExitCode {
-    if let Err(error) =
-        build("release-core", "pinfold-core").and_then(|()| build("release", "pinfold"))
+    if let Err(error) = build("release-core", "pinfold-core", &["--no-default-features"])
+        .and_then(|()| build("release", "pinfold", &[]))
     {
         eprintln!("mem-gate: {error}");
         return ExitCode::FAILURE;

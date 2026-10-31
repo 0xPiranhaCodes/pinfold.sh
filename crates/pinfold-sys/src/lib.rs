@@ -5,7 +5,7 @@
 use std::io;
 
 pub mod mapped;
-#[cfg(target_os = "macos")]
+#[cfg(all(target_os = "macos", feature = "metal"))]
 pub mod metal;
 pub mod pty;
 
