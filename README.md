@@ -17,7 +17,8 @@ _Screenshot to come. The design direction, "Graphite Grid", is in
 
 Pinfold is a standalone desktop terminal for Linux (X11 and Wayland) and macOS.
 It has a built-in multiplexer (tabs, splits, detach and attach, so no tmux is
-needed), a markdown reader, a ranger-style file manager and a git diff viewer.
+needed). A markdown reader, a ranger-style file manager and a git diff viewer are
+planned for v0.2.
 Coding agents can drive panes through a local, permissioned API (a CLI and an MCP
 server). It warns you when an agent needs you, and it restores sessions after a
 reboot.
@@ -44,19 +45,21 @@ reboot.
 
 ## Memory targets
 
-These are design targets from [ADR-0008](docs/adr/0008-memory-targets.md). **None
-of them has been measured yet.** Measurements will land in
-[`docs/spikes/`](docs/spikes/) with the scripts that produced them, and these
-targets will be re-baselined after milestone M0.
+These targets come from [ADR-0021](docs/adr/0021-memory-targets-m0.md), after the
+[M0 measurements](docs/spikes/m0-report.md). They are targets for a product that does not
+exist yet: the spikes behind them left out fonts and a real renderer, so real numbers will be
+higher.
 
-| Metric                     | Target                                |
-| -------------------------- | ------------------------------------- |
-| Core process               | ≤ 4 MB                                |
-| Window process             | ≤ 6 MB + about 2 × 4 B × window pixels |
-| Each idle pane             | ≤ 250 KB + scrollback                 |
-| 10k lines of scrollback    | ≤ 1 MB                                |
+| Metric                                 | Linux                       | macOS                        |
+| -------------------------------------- | --------------------------- | ---------------------------- |
+| Core, 8 idle panes, no scrollback      | ≤ 4 MB                      | ≤ 4 MB                       |
+| Each idle pane, no scrollback          | ≤ 250 KB                    | ≤ 250 KB                     |
+| 10k lines of typical text              | ≤ 1 MB                      | ≤ 1.5 MB                     |
+| Cold scrollback per pane, hard cap     | 2 MB                        | 2 MB                         |
+| Window process                         | ≤ 8 MB + 2 × 4 B × pixels   | ≤ 26 MB + 2 × 4 B × pixels   |
 
-Memory is measured as PSS on Linux and `phys_footprint` on macOS.
+Memory is measured as PSS on Linux and `phys_footprint` on macOS. macOS costs more because an
+empty window takes about 19 MB there.
 
 ## Install
 
@@ -67,6 +70,7 @@ Memory is measured as PSS on Linux and `phys_footprint` on macOS.
 - [Architecture](docs/design/architecture.md) and its
   [review](docs/design/architecture-review.md). Where they disagree the review
   wins, and the [ADRs](docs/adr/) override both.
+- [Roadmap](docs/roadmap.md)
 - [Threat model](docs/design/threat-model.md)
 - [UI design](docs/design/ui/)
 

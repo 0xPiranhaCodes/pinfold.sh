@@ -1,6 +1,7 @@
 # M0 report
 
-Date: 2026-10-31. **Awaiting maintainer go-ahead.** Nothing here changes an ADR yet.
+Date: 2026-10-31. **Decided:** the maintainer accepted all four recommendations, recorded in
+ADR-0021 to ADR-0024.
 
 M0 tested the four bets the design rests on. Two hold with limits, one holds on one platform,
 and one fails. The headline memory goal has to change on macOS.

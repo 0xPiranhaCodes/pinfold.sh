@@ -10,7 +10,7 @@ const HELP: &str = "\
 Usage: cargo xtask <command>
 
 Commands:
-  mem-gate     Check every ADR-0008 memory budget (arrives in M0)
+  mem-gate     Check every ADR-0021 memory budget (arrives in M1)
   fuzz-smoke   Run each fuzz target briefly
   schema-gen   Generate API JSON Schemas (arrives in M3)
   release      Prepare a release (arrives in M5)
@@ -89,7 +89,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Task::MemGate => {
-            println!("mem-gate: SKIPPED, nothing to measure until M0");
+            println!("mem-gate: SKIPPED, nothing to measure until M1");
             ExitCode::SUCCESS
         }
         Task::FuzzSmoke => fuzz_smoke(),

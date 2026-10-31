@@ -63,9 +63,9 @@ reports SKIPPED until M1.
 ### The memory gate
 
 `cargo xtask mem-gate` runs a scripted headless session and checks every budget in
-[ADR-0008](docs/adr/0008-memory-targets.md). It prints a table and fails on a
+[ADR-0021](docs/adr/0021-memory-targets-m0.md). It prints a table and fails on a
 regression. If your change affects memory, paste that table into your PR. It reports
-SKIPPED until M0 builds something to measure.
+SKIPPED until M1 builds something to measure.
 
 Every number in the docs or a PR must come from committed code. If you cannot
 reproduce it with a script in this repository, leave it out.
