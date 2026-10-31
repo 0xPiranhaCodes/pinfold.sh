@@ -15,4 +15,4 @@ Entries are generated from Conventional Commits with git-cliff
 - Architecture decision records ADR-0001 to ADR-0020.
 - Threat model with the PTY-based identity design.
 - Cargo workspace with empty crates, `cargo xtask`, CI and a dry-run release workflow.
-- M0 spike results for caller identity.
+- M0 spike results for caller identity and tiered scrollback.
