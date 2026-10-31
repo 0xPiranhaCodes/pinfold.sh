@@ -1,6 +1,6 @@
 # ADR-0025: Pure-Rust fonts with swash
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-31
 
 ## Context

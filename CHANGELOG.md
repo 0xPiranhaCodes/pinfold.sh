@@ -16,7 +16,8 @@ Entries are generated from Conventional Commits with git-cliff
 - Threat model with the PTY-based identity design.
 - Roadmap, and memory targets updated from the M0 measurements.
 - `cargo xtask mem-gate` now measures the core on Linux and macOS.
-- Font stack spike and a proposal for pure-Rust fonts with `swash`.
+- Font stack spike, and pure-Rust fonts with `swash`.
+- Glyph cache capped at 1 MB, and CPU drawing of cell rows.
 - One I/O loop for every PTY, with fair read budgets.
 - PTY spawning, and the `VtEngine` trait over `alacritty_terminal`.
 - Cargo workspace with empty crates, `cargo xtask`, CI and a dry-run release workflow.
