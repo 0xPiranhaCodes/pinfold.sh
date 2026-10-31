@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pinfold workspace</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0E1014}
+button{font:inherit}
+a{color:#9CC0FF}a:hover{color:#C4D9FF}
+</style>
+</helmet>
+<div style="width: 100%; height: 900px; box-sizing: border-box; background: #0E1014; color: #E2E5EA; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; line-height: 20px; display: flex; flex-direction: column">
+
+  <div style="height: 40px; flex-shrink: 0; display: flex; align-items: center; gap: 4px; padding: 0 12px; background: #0A0C0F; border-bottom: 1px solid #262B33; overflow-x: auto">
+    <button style="display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px; background: #151920; color: #E2E5EA; border: 1px solid #343A44; border-radius: 6px; cursor: pointer">
+      <span style="color: #858D98">1</span><span>api-refactor</span><span style="color: #F5B544" aria-label="needs you">◆</span>
+    </button>
+    <button style="display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px; background: transparent; color: #9AA1AC; border: 1px solid transparent; border-radius: 6px; cursor: pointer">
+      <span style="color: #858D98">2</span><span>docs-site</span><span style="color: #7AA7FF" aria-label="running">●</span>
+    </button>
+    <button style="display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px; background: transparent; color: #9AA1AC; border: 1px solid transparent; border-radius: 6px; cursor: pointer">
+      <span style="color: #858D98">3</span><span>infra</span><span style="color: #63D29A" aria-label="done">✓</span>
+    </button>
+    <button style="display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px; background: transparent; color: #9AA1AC; border: 1px solid transparent; border-radius: 6px; cursor: pointer">
+      <span style="color: #858D98">4</span><span>notes</span>
+    </button>
+    <button aria-label="New tab" style="width: 30px; height: 30px; background: transparent; color: #9AA1AC; border: 1px solid transparent; border-radius: 6px; cursor: pointer">+</button>
+    <div style="flex: 1"></div>
+    <span style="color: #858D98">session</span><span style="color: #E2E5EA">pinfold-dev</span>
+  </div>
+
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 8px; padding: 8px">
+
+    <section aria-label="Pane 1, agent" style="flex: 1.2 1 560px; min-width: 0; display: flex; flex-direction: column; background: #12151A; border: 1px solid {{accent}}; border-radius: 6px; overflow: hidden">
+      <div style="height: 30px; flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding: 0 12px; background: #151920; border-bottom: 1px solid #262B33">
+        <span style="display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 18px; background: {{accent}}; color: #0E1014; border-radius: 3px; font-weight: 700; font-size: 12px">1</span>
+        <span style="font-weight: 600">agent</span>
+        <span style="color: #9AA1AC">claude · ~/code/api</span>
+        <div style="flex: 1"></div>
+        <span style="display: inline-flex; align-items: center; gap: 6px; height: 20px; padding: 0 8px; color: #F5B544; background: rgba(245,181,68,0.12); border: 1px solid rgba(245,181,68,0.4); border-radius: 4px; font-size: 12px">◆ needs you · 0:42</span>
+      </div>
+      <div style="flex: 1; padding: 14px 16px; white-space: pre; overflow: hidden">
+<div><span style="color: {{accent}}">❯</span> refactor the rate limiter to use a token bucket</div>
+<div> </div>
+<div style="color: #9AA1AC">  ▸ Read   <span style="color: #E2E5EA">src/limiter.rs</span>                        212 lines</div>
+<div style="color: #9AA1AC">  ▸ Edit   <span style="color: #E2E5EA">src/limiter.rs</span>                        <span style="color: #63D29A">+48</span> <span style="color: #FF8A8A">−31</span></div>
+<div style="color: #9AA1AC">  ▸ Run    <span style="color: #E2E5EA">cargo test limiter</span></div>
+<div style="color: #9AA1AC">      test limiter::burst_allows_10 ...... <span style="color: #63D29A">ok</span></div>
+<div style="color: #9AA1AC">      test limiter::refill_rate .......... <span style="color: #63D29A">ok</span></div>
+<div style="color: #9AA1AC">      test limiter::config_reload ........ <span style="color: #FF8A8A">FAILED</span></div>
+<div style="color: #9AA1AC">  ▸ Plan   <span style="color: #E2E5EA">PLAN.md</span>                               3 of 5 steps done</div>
+<div> </div>
+<div>  config_reload fails because Config has no bucket size yet.</div>
+<div>  I need to add one field to src/config.rs.</div>
+<div> </div>
+<div style="color: #F5B544">  ┌─ Allow edit to src/config.rs? ─────────────────────────┐</div>
+<div style="color: #F5B544">  │ <span style="color: #63D29A">+     pub bucket_size: u32,</span>                             │</div>
+<div style="color: #F5B544">  │ <span style="color: #E2E5EA">[y] yes   [n] no   [a] always for this file</span>          │</div>
+<div style="color: #F5B544">  └────────────────────────────────────────────────────────┘</div>
+<div> </div>
+<div><span style="color: {{accent}}">❯</span> <span style="display: inline-block; width: 8px; height: 16px; background: #E2E5EA; vertical-align: -3px"></span></div>
+      </div>
+    </section>
+
+    <div style="flex: 1 1 480px; min-width: 0; display: flex; flex-direction: column; gap: 8px">
+
+      <section aria-label="Pane 2, tests" style="flex: 0 0 auto; display: flex; flex-direction: column; background: #12151A; border: 1px solid #262B33; border-radius: 6px; overflow: hidden">
+        <div style="height: 30px; display: flex; align-items: center; gap: 10px; padding: 0 12px; background: #151920; border-bottom: 1px solid #262B33">
+          <span style="display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 18px; background: #262B33; color: #E2E5EA; border-radius: 3px; font-weight: 700; font-size: 12px">2</span>
+          <span style="font-weight: 600">tests</span>
+          <span style="color: #9AA1AC">cargo watch</span>
+          <div style="flex: 1"></div>
+          <span style="display: inline-flex; align-items: center; gap: 6px; height: 20px; padding: 0 8px; color: #FF8A8A; background: rgba(255,122,122,0.10); border: 1px solid rgba(255,122,122,0.35); border-radius: 4px; font-size: 12px">✕ exit 101</span>
+        </div>
+        <div style="padding: 12px 16px; white-space: pre; overflow: hidden; color: #C9CDD4">
+<div><span style="color: #63D29A">~/code/api</span> <span style="color: #9AA1AC">$</span> cargo watch -x 'test --lib'</div>
+<div style="color: #9AA1AC">[Running 'cargo test --lib']</div>
+<div>   <span style="color: #63D29A">Compiling</span> api v0.4.2 (~/code/api)</div>
+<div>    <span style="color: #63D29A">Finished</span> test profile in 3.41s</div>
+<div>     <span style="color: #63D29A">Running</span> unittests src/lib.rs</div>
+<div>test result: <span style="color: #FF8A8A">FAILED</span>. 41 passed; 1 failed; 0 ignored</div>
+<div style="color: #9AA1AC">[Finished running. Exit status: 101]</div>
+        </div>
+      </section>
+
+      <section aria-label="Pane 3, diff viewer" style="flex: 1; min-height: 0; display: flex; flex-direction: column; background: #12151A; border: 1px solid #262B33; border-radius: 6px; overflow: hidden">
+        <div style="height: 30px; display: flex; align-items: center; gap: 10px; padding: 0 12px; background: #151920; border-bottom: 1px solid #262B33">
+          <span style="display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 18px; background: #262B33; color: #E2E5EA; border-radius: 3px; font-weight: 700; font-size: 12px">3</span>
+          <span style="font-weight: 600">diff</span>
+          <span style="color: #9AA1AC">working tree · watching</span>
+          <div style="flex: 1"></div>
+          <span style="color: #9AA1AC; font-size: 12px">s stage · r revert · c comment</span>
+        </div>
+        <div style="flex: 1; min-height: 0; display: flex">
+          <div style="width: 200px; flex-shrink: 0; border-right: 1px solid #262B33; padding: 10px 0">
+            <div style="display: flex; gap: 8px; padding: 2px 12px; background: rgba(122,167,255,0.12)"><span style="color: #F5B544">M</span><span style="flex: 1">limiter.rs</span><span style="color: #63D29A">+48</span></div>
+            <div style="display: flex; gap: 8px; padding: 2px 12px"><span style="color: #F5B544">M</span><span style="flex: 1; color: #C9CDD4">config.rs</span><span style="color: #63D29A">+1</span></div>
+            <div style="display: flex; gap: 8px; padding: 2px 12px"><span style="color: #63D29A">A</span><span style="flex: 1; color: #C9CDD4">PLAN.md</span><span style="color: #63D29A">+22</span></div>
+          </div>
+          <div style="flex: 1; min-width: 0; padding: 10px 0; white-space: pre; overflow: hidden">
+<div style="padding: 0 12px; color: #9CC0FF">@@ -40,9 +40,14 @@ impl Limiter</div>
+<div style="padding: 0 12px; color: #C9CDD4"><span style="color: #858D98">40 </span>  pub fn allow(&amp;mut self) -&gt; bool {</div>
+<div style="padding: 0 12px; background: rgba(255,122,122,0.10); color: #FFB3B3"><span style="color: #858D98">41 </span>-     let now = Instant::now();</div>
+<div style="padding: 0 12px; background: rgba(255,122,122,0.10); color: #FFB3B3"><span style="color: #858D98">42 </span>-     self.window.retain(|t| now - *t &lt; self.period);</div>
+<div style="padding: 0 12px; background: rgba(99,210,154,0.10); color: #A9E8C6"><span style="color: #858D98">41 </span>+     self.refill();</div>
+<div style="padding: 0 12px; background: rgba(99,210,154,0.10); color: #A9E8C6"><span style="color: #858D98">42 </span>+     if self.tokens &gt;= 1.0 {</div>
+<div style="padding: 0 12px; background: rgba(99,210,154,0.10); color: #A9E8C6"><span style="color: #858D98">43 </span>+         self.tokens -= 1.0;</div>
+<div style="padding: 0 12px; background: rgba(99,210,154,0.10); color: #A9E8C6"><span style="color: #858D98">44 </span>+         return true;</div>
+<div style="padding: 0 12px; background: rgba(99,210,154,0.10); color: #A9E8C6"><span style="color: #858D98">45 </span>+     }</div>
+<div style="padding: 0 12px; color: #C9CDD4"><span style="color: #858D98">46 </span>      false</div>
+<div style="padding: 0 12px; color: #C9CDD4"><span style="color: #858D98">47 </span>  }</div>
+          </div>
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div style="height: 30px; flex-shrink: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 0 12px; background: #0A0C0F; border-top: 1px solid #262B33; font-size: 12px">
+    <span style="display: inline-flex; align-items: center; height: 20px; padding: 0 8px; background: #262B33; border-radius: 4px; color: #E2E5EA">⌃a</span>
+    <span style="color: #9AA1AC">pinfold-dev · 3 panes</span>
+    <div style="flex: 1"></div>
+    <span style="color: #F5B544">◆ 1 needs you</span>
+    <span style="color: #7AA7FF">● 2 running</span>
+    <span style="color: #63D29A">✓ 1 done</span>
+    <div style="flex: 1"></div>
+    <span style="color: #9AA1AC">mem <span style="color: #E2E5EA">11.8 MB</span></span>
+    <span style="color: #9AA1AC">⌃⇧p palette</span>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#7AA7FF","options":["#7AA7FF","#5FD4D0","#C49BFF"]},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { accent: this.props.accent ?? '#7AA7FF' };
+  }
+}
+</script>
+</body>
+</html>

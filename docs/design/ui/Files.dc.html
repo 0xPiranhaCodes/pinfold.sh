@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Files with markdown preview</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0E1014}
+button{font:inherit}
+a{color:#9CC0FF}a:hover{color:#C4D9FF}
+</style>
+</helmet>
+<div style="width: 100%; height: 900px; box-sizing: border-box; background: #0E1014; color: #E2E5EA; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; line-height: 20px; display: flex; flex-direction: column">
+
+  <div style="height: 40px; flex-shrink: 0; display: flex; align-items: center; gap: 4px; padding: 0 12px; background: #0A0C0F; border-bottom: 1px solid #262B33; overflow-x: auto">
+    <button style="display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px; background: #151920; color: #E2E5EA; border: 1px solid #343A44; border-radius: 6px; cursor: pointer">
+      <span style="color: #858D98">1</span><span>api-refactor</span>
+    </button>
+    <button style="display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 12px; background: transparent; color: #9AA1AC; border: 1px solid transparent; border-radius: 6px; cursor: pointer">
+      <span style="color: #858D98">2</span><span>docs-site</span><span style="color: #7AA7FF" aria-label="running">●</span>
+    </button>
+    <div style="flex: 1"></div>
+    <span style="color: #858D98">session</span><span>pinfold-dev</span>
+  </div>
+
+  <div style="flex: 1; min-height: 0; display: flex; flex-wrap: wrap; gap: 8px; padding: 8px">
+
+    <section aria-label="Pane 5, files" style="flex: 2 1 760px; min-width: 0; display: flex; flex-direction: column; background: #12151A; border: 1px solid {{accent}}; border-radius: 6px; overflow: hidden">
+      <div style="height: 30px; flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding: 0 12px; background: #151920; border-bottom: 1px solid #262B33">
+        <span style="display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 18px; background: {{accent}}; color: #0E1014; border-radius: 3px; font-weight: 700; font-size: 12px">5</span>
+        <span style="font-weight: 600">files</span>
+        <span style="color: #9AA1AC">~/code/api/<span style="color: #E2E5EA">docs/rate-limits.md</span></span>
+        <div style="flex: 1"></div>
+        <span style="color: #9AA1AC; font-size: 12px">main <span style="color: #F5B544">+2</span></span>
+      </div>
+
+      <div style="flex: 1; min-height: 0; display: flex">
+        <nav aria-label="Parent folder" style="width: 190px; flex-shrink: 0; padding: 8px 0; border-right: 1px solid #262B33; color: #C9CDD4">
+          <div style="padding: 1px 12px; color: #9CC0FF">.github/</div>
+          <div style="padding: 1px 12px; background: #262B33; color: #9CC0FF">docs/</div>
+          <div style="padding: 1px 12px; color: #9CC0FF">src/</div>
+          <div style="padding: 1px 12px; color: #9CC0FF">tests/</div>
+          <div style="padding: 1px 12px">Cargo.toml</div>
+          <div style="padding: 1px 12px; display: flex"><span style="flex: 1">PLAN.md</span><span style="color: #63D29A">A</span></div>
+          <div style="padding: 1px 12px">README.md</div>
+        </nav>
+
+        <div aria-label="Current folder" style="width: 260px; flex-shrink: 0; padding: 8px 0; border-right: 1px solid #262B33; color: #C9CDD4">
+          <div style="padding: 1px 12px; display: flex"><span style="flex: 1">architecture.md</span><span style="color: #858D98">4.1K</span></div>
+          <div style="padding: 1px 12px; display: flex"><span style="flex: 1">deploy.md</span><span style="color: #858D98">2.7K</span></div>
+          <div style="padding: 1px 12px; display: flex; background: rgba(122,167,255,0.16); color: #E2E5EA"><span style="flex: 1">rate-limits.md</span><span style="color: #F5B544; margin-right: 8px">M</span><span style="color: #9AA1AC">1.9K</span></div>
+          <div style="padding: 1px 12px; display: flex"><span style="flex: 1">runbook.md</span><span style="color: #858D98">6.3K</span></div>
+          <div style="padding: 1px 12px; display: flex; color: #FF8A8A"><span style="flex: 1">invoice‹U+202E›txt.exe</span><span>!</span></div>
+          <div style="margin: 10px 12px 0; padding: 8px 10px; border: 1px solid rgba(255,122,122,0.4); border-radius: 4px; color: #FFB3B3; font-size: 12px; line-height: 18px; white-space: normal">Hidden right-to-left character in this name. Shown escaped; it would display as a .txt file.</div>
+        </div>
+
+        <article aria-label="Preview of rate-limits.md" style="flex: 1; min-width: 0; padding: 16px 24px; overflow: hidden">
+          <div style="font-weight: 700; font-size: 15px"><span style="color: {{accent}}"># </span>Rate limits</div>
+          <p style="margin: 10px 0 0; color: #C9CDD4">Every API key gets a token bucket. A bucket holds a burst of requests and refills at a steady rate per second.</p>
+          <div style="margin-top: 18px; font-weight: 700"><span style="color: {{accent}}">## </span>Defaults</div>
+          <div style="margin-top: 8px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid #343A44; border-radius: 4px; overflow: hidden">
+            <span style="padding: 4px 10px; background: #1B1F26; font-weight: 600">Plan</span><span style="padding: 4px 10px; background: #1B1F26; font-weight: 600">Burst</span><span style="padding: 4px 10px; background: #1B1F26; font-weight: 600">Refill / s</span>
+            <span style="padding: 4px 10px; border-top: 1px solid #262B33">Free</span><span style="padding: 4px 10px; border-top: 1px solid #262B33">10</span><span style="padding: 4px 10px; border-top: 1px solid #262B33">2</span>
+            <span style="padding: 4px 10px; border-top: 1px solid #262B33">Team</span><span style="padding: 4px 10px; border-top: 1px solid #262B33">50</span><span style="padding: 4px 10px; border-top: 1px solid #262B33">10</span>
+          </div>
+          <div style="margin-top: 18px; font-weight: 700"><span style="color: {{accent}}">## </span>Changing limits</div>
+          <div style="margin-top: 8px; color: #C9CDD4">
+            <div><span style="color: #9AA1AC">•</span> Edit <span style="padding: 0 4px; background: #1B1F26; border-radius: 3px; color: #E2E5EA">bucket_size</span> in config.rs</div>
+            <div><span style="color: #9AA1AC">•</span> Reload without a restart:</div>
+          </div>
+          <div style="margin-top: 8px; padding: 10px 12px; background: #0E1014; border: 1px solid #262B33; border-radius: 4px; white-space: pre"><span style="color: #9AA1AC">$</span> api reload --config config.toml</div>
+        </article>
+      </div>
+
+      <div style="display: flex; flex-wrap: wrap; gap: 18px; padding: 6px 12px; background: #151920; border-top: 1px solid #262B33; font-size: 12px; color: #9AA1AC">
+        <span><span style="color: #E2E5EA">⏎</span> open</span>
+        <span><span style="color: #E2E5EA">@</span> send path to agent</span>
+        <span><span style="color: #E2E5EA">⌃⏎</span> new agent here</span>
+        <span><span style="color: #E2E5EA">/</span> filter</span>
+        <span><span style="color: #E2E5EA">space</span> select</span>
+        <span><span style="color: #E2E5EA">d</span> trash</span>
+      </div>
+    </section>
+
+    <section aria-label="Pane 1, agent" style="flex: 1 1 400px; min-width: 0; display: flex; flex-direction: column; background: #12151A; border: 1px solid #262B33; border-radius: 6px; overflow: hidden">
+      <div style="height: 30px; flex-shrink: 0; display: flex; align-items: center; gap: 10px; padding: 0 12px; background: #151920; border-bottom: 1px solid #262B33">
+        <span style="display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 18px; background: #262B33; color: #E2E5EA; border-radius: 3px; font-weight: 700; font-size: 12px">1</span>
+        <span style="font-weight: 600">agent</span>
+        <span style="color: #9AA1AC">claude</span>
+        <div style="flex: 1"></div>
+        <span style="color: #9AA1AC; font-size: 12px">○ idle</span>
+      </div>
+      <div style="flex: 1; padding: 14px 16px; white-space: pre-wrap; color: #C9CDD4">
+<div style="color: #9AA1AC">  ✓ Turn complete · 4 files changed</div>
+<div> </div>
+<div><span style="color: {{accent}}">❯</span> update <span style="padding: 0 4px; background: rgba(122,167,255,0.18); color: #C4D9FF; border-radius: 3px">@docs/rate-limits.md</span> with the new defaults<span style="display: inline-block; width: 8px; height: 16px; background: #E2E5EA; vertical-align: -3px; margin-left: 2px"></span></div>
+      </div>
+      <div style="margin: 0 12px 12px; padding: 8px 10px; background: #1B1F26; border: 1px solid #343A44; border-radius: 4px; font-size: 12px; color: #C9CDD4">Path inserted from files · not sent until you press Enter</div>
+    </section>
+  </div>
+
+  <div style="height: 30px; flex-shrink: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 16px; padding: 0 12px; background: #0A0C0F; border-top: 1px solid #262B33; font-size: 12px">
+    <span style="display: inline-flex; align-items: center; height: 20px; padding: 0 8px; background: #262B33; border-radius: 4px">⌃a</span>
+    <span style="color: #9AA1AC">pinfold-dev · 2 panes</span>
+    <div style="flex: 1"></div>
+    <span style="color: #7AA7FF">● 1 running</span>
+    <span style="color: #9AA1AC">○ 1 idle</span>
+    <div style="flex: 1"></div>
+    <span style="color: #9AA1AC">mem <span style="color: #E2E5EA">13.1 MB</span></span>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#7AA7FF","options":["#7AA7FF","#5FD4D0","#C49BFF"]},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { accent: this.props.accent ?? '#7AA7FF' };
+  }
+}
+</script>
+</body>
+</html>

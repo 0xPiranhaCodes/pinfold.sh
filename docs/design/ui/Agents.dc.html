@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Command palette, jump to agents</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0E1014}
+button,input{font:inherit}
+a{color:#9CC0FF}a:hover{color:#C4D9FF}
+</style>
+</helmet>
+<div style="position: relative; width: 100%; height: 900px; box-sizing: border-box; background: #0E1014; color: #E2E5EA; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; line-height: 20px; display: flex; flex-direction: column; overflow: hidden">
+
+  <div aria-hidden="true" style="height: 40px; flex-shrink: 0; background: #0A0C0F; border-bottom: 1px solid #262B33"></div>
+  <div aria-hidden="true" style="flex: 1; display: flex; gap: 8px; padding: 8px">
+    <div style="flex: 1.2; background: #12151A; border: 1px solid #262B33; border-radius: 6px"></div>
+    <div style="flex: 1; display: flex; flex-direction: column; gap: 8px">
+      <div style="flex: 1; background: #12151A; border: 1px solid #262B33; border-radius: 6px"></div>
+      <div style="flex: 1.4; background: #12151A; border: 1px solid #262B33; border-radius: 6px"></div>
+    </div>
+  </div>
+  <div aria-hidden="true" style="height: 30px; flex-shrink: 0; background: #0A0C0F; border-top: 1px solid #262B33"></div>
+
+  <div style="position: absolute; top: 0; right: 0; bottom: 0; left: 0; background: rgba(5,6,8,0.66); display: flex; justify-content: center; align-items: flex-start; padding: 96px 16px 0">
+    <div role="dialog" aria-label="Command palette" style="width: 100%; max-width: 760px; background: #151920; border: 1px solid #343A44; border-radius: 8px; overflow: hidden">
+
+      <div style="display: flex; align-items: center; gap: 10px; padding: 0 16px; height: 52px; border-bottom: 1px solid #262B33">
+        <label for="palette-q" style="color: {{accent}}; font-weight: 700">❯</label>
+        <input id="palette-q" value="agents" aria-label="Command or pane" style="flex: 1; height: 36px; background: transparent; border: none; color: #E2E5EA; outline: none">
+        <span style="color: #9AA1AC; font-size: 12px">esc close</span>
+      </div>
+
+      <div style="padding: 8px 0">
+        <div style="padding: 4px 16px; color: #9AA1AC; font-size: 12px">AGENTS · needs you first</div>
+
+        <button style="width: 100%; display: grid; grid-template-columns: 24px 150px minmax(0, 1fr) 64px 56px; align-items: center; gap: 12px; padding: 8px 16px; background: rgba(122,167,255,0.16); color: #E2E5EA; border: none; text-align: left; cursor: pointer; min-height: 44px">
+          <span style="color: #F5B544">◆</span>
+          <span>1·1 api-refactor</span>
+          <span style="color: #C9CDD4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">Allow edit to src/config.rs?</span>
+          <span style="color: #F5B544; text-align: right">0:42</span>
+          <span style="color: #9AA1AC; text-align: right">⏎ go</span>
+        </button>
+
+        <button style="width: 100%; display: grid; grid-template-columns: 24px 150px minmax(0, 1fr) 64px 56px; align-items: center; gap: 12px; padding: 8px 16px; background: transparent; color: #E2E5EA; border: none; text-align: left; cursor: pointer; min-height: 44px">
+          <span style="color: #FF8A8A">✕</span>
+          <span>1·2 tests</span>
+          <span style="color: #C9CDD4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">exit 101 · 1 failed</span>
+          <span style="color: #9AA1AC; text-align: right">1:10</span>
+          <span style="color: #9AA1AC; text-align: right"></span>
+        </button>
+
+        <button style="width: 100%; display: grid; grid-template-columns: 24px 150px minmax(0, 1fr) 64px 56px; align-items: center; gap: 12px; padding: 8px 16px; background: transparent; color: #E2E5EA; border: none; text-align: left; cursor: pointer; min-height: 44px">
+          <span style="color: #7AA7FF">●</span>
+          <span>2·1 docs-site</span>
+          <span style="color: #C9CDD4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">Writing guides/limits.md …</span>
+          <span style="color: #9AA1AC; text-align: right">6:03</span>
+          <span style="color: #9AA1AC; text-align: right"></span>
+        </button>
+
+        <button style="width: 100%; display: grid; grid-template-columns: 24px 150px minmax(0, 1fr) 64px 56px; align-items: center; gap: 12px; padding: 8px 16px; background: transparent; color: #E2E5EA; border: none; text-align: left; cursor: pointer; min-height: 44px">
+          <span style="color: #7AA7FF">●</span>
+          <span>2·2 docs-build</span>
+          <span style="color: #C9CDD4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">npm run dev · watching</span>
+          <span style="color: #9AA1AC; text-align: right">22:15</span>
+          <span style="color: #9AA1AC; text-align: right"></span>
+        </button>
+
+        <button style="width: 100%; display: grid; grid-template-columns: 24px 150px minmax(0, 1fr) 64px 56px; align-items: center; gap: 12px; padding: 8px 16px; background: transparent; color: #E2E5EA; border: none; text-align: left; cursor: pointer; min-height: 44px">
+          <span style="color: #63D29A">✓</span>
+          <span>3·1 infra</span>
+          <span style="color: #C9CDD4; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">Turn complete · terraform plan clean</span>
+          <span style="color: #9AA1AC; text-align: right">done</span>
+          <span style="color: #9AA1AC; text-align: right"></span>
+        </button>
+
+        <div style="margin-top: 8px; padding: 4px 16px; color: #9AA1AC; font-size: 12px; border-top: 1px solid #262B33; padding-top: 12px">ACTIONS</div>
+        <button style="width: 100%; display: flex; align-items: center; gap: 12px; padding: 8px 16px; background: transparent; color: #E2E5EA; border: none; text-align: left; cursor: pointer; min-height: 44px"><span style="flex: 1">New agent pane here</span><span style="color: #9AA1AC">⌃a A</span></button>
+        <button style="width: 100%; display: flex; align-items: center; gap: 12px; padding: 8px 16px; background: transparent; color: #E2E5EA; border: none; text-align: left; cursor: pointer; min-height: 44px"><span style="flex: 1">Review agent changes (diff)</span><span style="color: #9AA1AC">⌃a g</span></button>
+        <button style="width: 100%; display: flex; align-items: center; gap: 12px; padding: 8px 16px; background: transparent; color: #E2E5EA; border: none; text-align: left; cursor: pointer; min-height: 44px"><span style="flex: 1">Show agent grants and audit log</span><span style="color: #9AA1AC">⌃a l</span></button>
+      </div>
+
+      <div style="display: flex; flex-wrap: wrap; gap: 18px; padding: 8px 16px; border-top: 1px solid #262B33; background: #12151A; font-size: 12px; color: #9AA1AC">
+        <span><span style="color: #E2E5EA">↑↓</span> move</span>
+        <span><span style="color: #E2E5EA">⏎</span> jump</span>
+        <span><span style="color: #E2E5EA">⌃⇧w</span> next waiting agent</span>
+        <div style="flex: 1"></div>
+        <span>5 agents · <span style="color: #F5B544">1 needs you</span></span>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#7AA7FF","options":["#7AA7FF","#5FD4D0","#C49BFF"]},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return { accent: this.props.accent ?? '#7AA7FF' };
+  }
+}
+</script>
+</body>
+</html>
