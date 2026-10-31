@@ -20,10 +20,14 @@ Linux, but hostile output can use about 20 MB, so a line limit does not bound me
 | 10k lines at 120 columns, typical text | ≤ 1 MB on Linux, ≤ 1.5 MB on macOS |
 | Cold scrollback per pane | Hard cap of 2 MB by default; the oldest blocks are dropped |
 | Window process on Linux | ≤ 8 MB + 2 × 4 B × window pixels |
-| Window process on macOS | ≤ 26 MB + 2 × 4 B × window pixels, drawing with Metal |
+| Window process on macOS | ≤ 30 MB + 2 × 4 B × window pixels, drawing with Metal |
 
 We measure PSS on Linux and `phys_footprint` on macOS. CI fails the build on any regression
 over budget.
+
+The macOS fixed part was 26 MB until the Metal renderer measured 51.48 MB at 1512x1890, against
+48.10 MB for M0's bare Metal path. The maintainer raised it to 30 MB. That window process still
+holds the core, so re-check this budget after M2 moves the core out.
 
 ## Consequences
 

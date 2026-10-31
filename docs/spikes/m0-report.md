@@ -1,6 +1,8 @@
 # M0 report
 
-Date: 2026-10-31. **Decided:** the maintainer accepted all four recommendations, recorded in
+Date: 2026-10-31. Later change: the macOS window fixed part is now 30 MB, see ADR-0021.
+
+**Decided:** the maintainer accepted all four recommendations, recorded in
 ADR-0021 to ADR-0024.
 
 M0 tested the four bets the design rests on. Two hold with limits, one holds on one platform,

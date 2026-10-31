@@ -68,6 +68,9 @@ exceeded or a measurement fails. If your change affects memory, paste that table
 PR. Budgets that nothing can measure yet show as `not measured` with the issue that adds
 them, and those rows prove nothing. On Linux it needs an X server, such as `xvfb-run`.
 
+The macOS window row means little on hosted CI, which reads about 30 MB where an M1 Pro with a
+Retina display reads about 51 MB. For a change that can affect it, run the gate on a real Mac.
+
 `tests/window/run.sh` drives the real window in a container: it types into a shell under Xvfb
 and starts the window under headless Weston.
 

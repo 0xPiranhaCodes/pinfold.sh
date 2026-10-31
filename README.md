@@ -56,7 +56,7 @@ higher.
 | Each idle pane, no scrollback          | ≤ 250 KB                    | ≤ 250 KB                     |
 | 10k lines of typical text              | ≤ 1 MB                      | ≤ 1.5 MB                     |
 | Cold scrollback per pane, hard cap     | 2 MB                        | 2 MB                         |
-| Window process                         | ≤ 8 MB + 2 × 4 B × pixels   | ≤ 26 MB + 2 × 4 B × pixels   |
+| Window process                         | ≤ 8 MB + 2 × 4 B × pixels   | ≤ 30 MB + 2 × 4 B × pixels   |
 
 Memory is measured as PSS on Linux and `phys_footprint` on macOS. macOS costs more because an
 empty window takes about 19 MB there.
