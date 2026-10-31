@@ -1,0 +1,49 @@
+name: Bug report
+description: Something does not work as documented
+labels: ["type/bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: OS
+      options:
+        - Linux
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+    validations:
+      required: true
+  - type: dropdown
+    id: display
+    attributes:
+      label: Display server
+      options:
+        - Wayland
+        - X11
+        - macOS
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `pinfold --version`, or a commit hash.
+    validations:
+      required: true
+  - type: textarea
+    id: mem
+    attributes:
+      label: "`pinfold ctl mem` output"
+      render: text
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
