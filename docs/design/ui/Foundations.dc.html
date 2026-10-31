@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pinfold foundations</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<style>
+body{margin:0;background:#0E1014}
+a{color:#9CC0FF}a:hover{color:#C4D9FF}
+</style>
+</helmet>
+<div style="width: 1440px; height: 900px; box-sizing: border-box; padding: 48px 56px; background: #0E1014; color: #E2E5EA; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; line-height: 20px; display: flex; flex-direction: column; gap: 32px">
+
+  <div style="display: flex; align-items: baseline; gap: 20px">
+    <h1 style="margin: 0; font-size: 28px; line-height: 36px; font-weight: 700">Graphite Grid</h1>
+    <span style="color: #9AA1AC">One font, one grid. Colour only where something needs you.</span>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 32px; flex: 1">
+
+    <section style="display: flex; flex-direction: column; gap: 14px">
+      <h2 style="margin: 0; font-size: 13px; color: #9AA1AC; font-weight: 600">SURFACES AND TEXT</h2>
+      <div style="display: flex; align-items: center; gap: 12px"><span style="width: 48px; height: 32px; background: #0A0C0F; border: 1px solid #343A44; border-radius: 4px"></span><span style="flex: 1">Chrome</span><span style="color: #9AA1AC">#0A0C0F</span></div>
+      <div style="display: flex; align-items: center; gap: 12px"><span style="width: 48px; height: 32px; background: #0E1014; border: 1px solid #343A44; border-radius: 4px"></span><span style="flex: 1">Ground</span><span style="color: #9AA1AC">#0E1014</span></div>
+      <div style="display: flex; align-items: center; gap: 12px"><span style="width: 48px; height: 32px; background: #12151A; border: 1px solid #343A44; border-radius: 4px"></span><span style="flex: 1">Pane</span><span style="color: #9AA1AC">#12151A</span></div>
+      <div style="display: flex; align-items: center; gap: 12px"><span style="width: 48px; height: 32px; background: #151920; border: 1px solid #343A44; border-radius: 4px"></span><span style="flex: 1">Pane header, palette</span><span style="color: #9AA1AC">#151920</span></div>
+      <div style="display: flex; align-items: center; gap: 12px"><span style="width: 48px; height: 32px; background: #262B33; border-radius: 4px"></span><span style="flex: 1">Rule, quiet fill</span><span style="color: #9AA1AC">#262B33</span></div>
+      <div style="display: flex; align-items: center; gap: 12px"><span style="width: 48px; height: 32px; background: #E2E5EA; border-radius: 4px"></span><span style="flex: 1">Text</span><span style="color: #9AA1AC">#E2E5EA</span></div>
+      <div style="display: flex; align-items: center; gap: 12px"><span style="width: 48px; height: 32px; background: #9AA1AC; border-radius: 4px"></span><span style="flex: 1">Secondary text</span><span style="color: #9AA1AC">#9AA1AC</span></div>
+      <div style="display: flex; align-items: center; gap: 12px"><span style="width: 48px; height: 32px; background: #7AA7FF; border-radius: 4px"></span><span style="flex: 1">Focus accent</span><span style="color: #9AA1AC">#7AA7FF</span></div>
+    </section>
+
+    <section style="display: flex; flex-direction: column; gap: 14px">
+      <h2 style="margin: 0; font-size: 13px; color: #9AA1AC; font-weight: 600">AGENT STATES · glyph + colour + word</h2>
+      <div style="display: grid; grid-template-columns: 28px 140px minmax(0, 1fr); row-gap: 14px; column-gap: 12px; align-items: start">
+        <span style="color: #F5B544; font-size: 16px">◆</span><span style="color: #F5B544; font-weight: 600">needs you</span><span style="color: #C9CDD4">Approval or input waiting. The only state allowed to notify.</span>
+        <span style="color: #7AA7FF; font-size: 16px">●</span><span style="color: #7AA7FF; font-weight: 600">running</span><span style="color: #C9CDD4">Thinking or producing output. Silent.</span>
+        <span style="color: #63D29A; font-size: 16px">✓</span><span style="color: #63D29A; font-weight: 600">done</span><span style="color: #C9CDD4">Turn complete. Notifies only if the window is unfocused.</span>
+        <span style="color: #FF8A8A; font-size: 16px">✕</span><span style="color: #FF8A8A; font-weight: 600">error</span><span style="color: #C9CDD4">Non-zero exit or agent error.</span>
+        <span style="color: #9AA1AC; font-size: 16px">○</span><span style="color: #9AA1AC; font-weight: 600">idle</span><span style="color: #C9CDD4">Back at a prompt, nothing pending.</span>
+      </div>
+      <div style="margin-top: 8px; padding: 12px; background: #12151A; border: 1px solid #262B33; border-radius: 6px; color: #C9CDD4">States never rely on colour alone: every one has its own glyph and word, so they read in greyscale and for colour-blind users.</div>
+    </section>
+
+    <section style="display: flex; flex-direction: column; gap: 14px">
+      <h2 style="margin: 0; font-size: 13px; color: #9AA1AC; font-weight: 600">TYPE · JetBrains Mono only</h2>
+      <div style="font-size: 15px; font-weight: 700">15 / 700 · Markdown H1, palette title</div>
+      <div style="font-weight: 600">13 / 600 · Pane names, tab names</div>
+      <div>13 / 400 · Terminal text, everything else</div>
+      <div style="font-size: 12px; color: #9AA1AC">12 / 400 · Status bar, key hints</div>
+      <div style="margin-top: 6px; color: #C9CDD4">Chrome snaps to the terminal's cell grid: heights are whole rows, so tabs, headers and panes line up with text.</div>
+
+      <h2 style="margin: 18px 0 0; font-size: 13px; color: #9AA1AC; font-weight: 600">PANE ANATOMY</h2>
+      <div style="background: #12151A; border: 1px solid #7AA7FF; border-radius: 6px; overflow: hidden">
+        <div style="height: 30px; display: flex; align-items: center; gap: 10px; padding: 0 12px; background: #151920; border-bottom: 1px solid #262B33">
+          <span style="display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 18px; background: #7AA7FF; color: #0E1014; border-radius: 3px; font-weight: 700; font-size: 12px">1</span>
+          <span style="font-weight: 600">name</span><span style="color: #9AA1AC">profile · cwd</span><div style="flex: 1"></div><span style="color: #F5B544; font-size: 12px">◆ state · time</span>
+        </div>
+        <div style="padding: 10px 12px; color: #9AA1AC; font-size: 12px">Number = jump key. Focused pane: accent border and number.</div>
+      </div>
+    </section>
+  </div>
+
+  <div style="display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px">
+    <div style="padding: 14px; background: #12151A; border: 1px solid #262B33; border-radius: 6px"><div style="font-weight: 600">Needs-you first</div><div style="margin-top: 6px; color: #C9CDD4">Every list sorts waiting agents to the top.</div></div>
+    <div style="padding: 14px; background: #12151A; border: 1px solid #262B33; border-radius: 6px"><div style="font-weight: 600">Never steal focus</div><div style="margin-top: 6px; color: #C9CDD4">Alerts badge and count; they never move your cursor.</div></div>
+    <div style="padding: 14px; background: #12151A; border: 1px solid #262B33; border-radius: 6px"><div style="font-weight: 600">Pinfold's voice is boxed</div><div style="margin-top: 6px; color: #C9CDD4">Prompts drawn by Pinfold sit outside pane text, so output can't fake them.</div></div>
+    <div style="padding: 14px; background: #12151A; border: 1px solid #262B33; border-radius: 6px"><div style="font-weight: 600">Keys before mouse</div><div style="margin-top: 6px; color: #C9CDD4">Every action shows its key; the palette finds the rest.</div></div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  renderVals() {
+    return {};
+  }
+}
+</script>
+</body>
+</html>

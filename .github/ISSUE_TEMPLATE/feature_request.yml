@@ -1,0 +1,22 @@
+name: Feature request
+description: Suggest a change or new capability
+labels: ["type/feature"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what gets in the way?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+    validations:
+      required: true
+  - type: textarea
+    id: memory
+    attributes:
+      label: Memory and security impact
+      description: Memory is Pinfold's first goal. What would this cost, and does it touch the security model?
