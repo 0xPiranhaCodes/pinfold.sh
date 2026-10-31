@@ -11,16 +11,20 @@ pub const CORE_LIMIT: u64 = 4_000_000;
 pub const PANE_LIMIT: u64 = 250_000;
 /// The window budget on Linux for an inner size of 1920x1080.
 pub const WINDOW_LIMIT_FULL_HD: u64 = 8_000_000 + 2 * 4 * 1920 * 1080;
+/// The window budget on macOS for half a Retina screen, the size M0 measured.
+pub const WINDOW_LIMIT_HALF_RETINA: u64 = 26_000_000 + 2 * 4 * 1512 * 1890;
 
 const RUNS: usize = 3;
-const SETTLE: Duration = Duration::from_secs(1);
+/// Long enough for a process to finish starting.
+pub const SETTLE: Duration = Duration::from_secs(1);
+/// A window takes seconds to fall from its startup peak, and budgets are for idle windows.
+pub const WINDOW_SETTLE: Duration = Duration::from_secs(7);
 
 /// ADR-0021 budgets with nothing to measure yet, and the issue that makes them measurable.
-const NOT_MEASURED: [(&str, &str); 4] = [
+const NOT_MEASURED: [(&str, &str); 3] = [
     ("Window on Wayland", "a compositor in CI"),
     ("10k lines of typical text", "#24"),
     ("Cold scrollback per pane", "#24"),
-    ("Window on macOS", "#20"),
 ];
 
 pub struct Budget<'a> {
@@ -30,14 +34,15 @@ pub struct Budget<'a> {
     pub args: &'a [&'a str],
     /// Measures the growth per pane instead: `args`, minus these arguments, over this many panes.
     pub per_pane_over: Option<(&'a [&'a str], u64)>,
+    pub settle: Duration,
 }
 
-fn measure_once(program: &Path, args: &[&str]) -> io::Result<u64> {
+fn measure_once(program: &Path, args: &[&str], settle: Duration) -> io::Result<u64> {
     let mut child = Command::new(program)
         .args(args)
         .stdout(Stdio::null())
         .spawn()?;
-    thread::sleep(SETTLE);
+    thread::sleep(settle);
     let exited = child.try_wait()?.is_some();
     let bytes = if exited {
         Err(io::Error::other("exited before it could be measured"))
@@ -52,20 +57,20 @@ fn measure_once(program: &Path, args: &[&str]) -> io::Result<u64> {
     }
 }
 
-fn median(program: &Path, args: &[&str]) -> io::Result<u64> {
+fn median(program: &Path, args: &[&str], settle: Duration) -> io::Result<u64> {
     let mut samples = (0..RUNS)
-        .map(|_| measure_once(program, args))
+        .map(|_| measure_once(program, args, settle))
         .collect::<io::Result<Vec<u64>>>()?;
     samples.sort_unstable();
     Ok(samples[RUNS / 2])
 }
 
 fn measure(budget: &Budget) -> io::Result<u64> {
-    let bytes = median(budget.program, budget.args)?;
+    let bytes = median(budget.program, budget.args, budget.settle)?;
     match budget.per_pane_over {
         None => Ok(bytes),
         Some((baseline, panes)) => {
-            let growth = bytes.saturating_sub(median(budget.program, baseline)?);
+            let growth = bytes.saturating_sub(median(budget.program, baseline, budget.settle)?);
             Ok(growth / panes)
         }
     }
@@ -128,6 +133,7 @@ mod tests {
             program: Path::new("sleep"),
             args: seconds,
             per_pane_over: None,
+            settle: SETTLE,
         }
     }
 
@@ -154,6 +160,7 @@ mod tests {
             program: Path::new("does/not/exist"),
             args: &[],
             per_pane_over: None,
+            settle: SETTLE,
         };
         assert!(!run(&[budget]));
     }

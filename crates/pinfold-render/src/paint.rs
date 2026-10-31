@@ -3,10 +3,7 @@
 use pinfold_proto::Cell;
 
 use crate::font::Font;
-use crate::glyphs::{CACHE_LIMIT, GlyphCache};
-
-const MIN_SIZE: f32 = 4.0;
-const MAX_SIZE: f32 = 256.0;
+use crate::glyphs::{CACHE_LIMIT, GlyphCache, Metrics, clamp_size};
 
 /// A pixel buffer of `0x00RRGGBB` values.
 #[derive(Debug)]
@@ -67,22 +64,12 @@ impl Painter {
     }
 
     fn with_limit(font: Font, size: f32, limit: usize) -> Self {
-        let size = if size.is_finite() {
-            size.clamp(MIN_SIZE, MAX_SIZE)
-        } else {
-            MIN_SIZE
-        };
-        let face = font.face();
-        let metrics = face.metrics(&[]).scale(size);
-        let advance = face
-            .glyph_metrics(&[])
-            .scale(size)
-            .advance_width(face.charmap().map('M'));
-        let (cell_width, cell_height) = (
-            (advance.round() as usize).max(1),
-            ((metrics.ascent + metrics.descent + metrics.leading).ceil() as usize).max(1),
-        );
-        let baseline = metrics.ascent.round() as i32;
+        let size = clamp_size(size);
+        let Metrics {
+            cell_width,
+            cell_height,
+            baseline,
+        } = Metrics::new(&font, size);
         Self {
             cache: GlyphCache::new(font, size, limit),
             cell_width,
