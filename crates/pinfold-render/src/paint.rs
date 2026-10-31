@@ -1,21 +1,12 @@
 //! Draws rows of cells into a 32-bit pixel buffer.
 
+use pinfold_proto::Cell;
+
 use crate::font::Font;
 use crate::glyphs::{CACHE_LIMIT, GlyphCache};
 
 const MIN_SIZE: f32 = 4.0;
 const MAX_SIZE: f32 = 256.0;
-
-/// One character with its colours, as `0x00RRGGBB`.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Cell {
-    /// The character. A space draws only the background.
-    pub character: char,
-    /// Text colour.
-    pub foreground: u32,
-    /// Background colour.
-    pub background: u32,
-}
 
 /// A pixel buffer of `0x00RRGGBB` values.
 #[derive(Debug)]

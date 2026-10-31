@@ -7,10 +7,11 @@
 use std::io::{self, ErrorKind, Read, Write};
 use std::os::fd::AsRawFd;
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 
 use mio::unix::SourceFd;
-use mio::{Events, Interest, Poll, Token};
+use mio::{Events, Interest, Poll, Token, Waker};
 use pinfold_sys::pty::Pty;
 
 use crate::vt::{AlacrittyEngine, VtEngine};
@@ -21,6 +22,8 @@ pub const READ_BUDGET: usize = 64 * 1024;
 pub const MAX_REPLIES: usize = 4 * 1024;
 
 const EVENT_CAPACITY: usize = 64;
+/// Beyond any pane number, so a wake-up is never mistaken for PTY activity.
+const WAKE: Token = Token(usize::MAX);
 
 /// How a pass over one pane ended.
 #[derive(Debug, PartialEq)]
@@ -39,6 +42,7 @@ fn pump(
     engine: &mut dyn VtEngine,
     replies: &mut Vec<u8>,
     buffer: &mut [u8],
+    fed: &mut bool,
 ) -> Pumped {
     let mut left = READ_BUDGET;
     while left > 0 {
@@ -47,6 +51,7 @@ fn pump(
             Ok(0) => return Pumped::Closed,
             Ok(count) => {
                 left -= count;
+                *fed = true;
                 engine.feed(&buffer[..count], replies);
                 replies.truncate(MAX_REPLIES);
             }
@@ -79,11 +84,13 @@ struct Pane {
     replies: Vec<u8>,
     readable: bool,
     closed: bool,
+    dirty: bool,
 }
 
 /// Every PTY and its terminal state, driven from a single thread.
 pub struct Reactor {
     poll: Poll,
+    waker: Arc<Waker>,
     events: Events,
     panes: Vec<Pane>,
     buffer: Vec<u8>,
@@ -96,8 +103,11 @@ impl Reactor {
     ///
     /// Returns an error if the operating system's poller cannot be created.
     pub fn new() -> io::Result<Self> {
+        let poll = Poll::new()?;
+        let waker = Arc::new(Waker::new(poll.registry(), WAKE)?);
         Ok(Self {
-            poll: Poll::new()?,
+            poll,
+            waker,
             events: Events::with_capacity(EVENT_CAPACITY),
             panes: Vec::new(),
             buffer: vec![0; READ_BUDGET],
@@ -126,6 +136,7 @@ impl Reactor {
             replies: Vec::new(),
             readable: true,
             closed: false,
+            dirty: true,
         });
         Ok(pane)
     }
@@ -159,6 +170,7 @@ impl Reactor {
                     pane.engine.as_mut(),
                     &mut pane.replies,
                     &mut self.buffer,
+                    &mut pane.dirty,
                 );
                 pane.readable = pumped == Pumped::Budget;
                 pane.closed |= pumped == Pumped::Closed;
@@ -166,6 +178,44 @@ impl Reactor {
             flush(&mut pane.pty.master(), &mut pane.replies);
         }
         Ok(())
+    }
+
+    /// Returns a handle that makes a blocked [`Reactor::turn`] return, from any thread.
+    #[must_use]
+    pub fn waker(&self) -> Arc<Waker> {
+        Arc::clone(&self.waker)
+    }
+
+    /// Queues bytes for a pane's program, such as keyboard input.
+    pub fn write(&mut self, pane: usize, bytes: &[u8]) {
+        if let Some(pane) = self.panes.get_mut(pane) {
+            pane.replies.extend_from_slice(bytes);
+            // shortcut: shares the reply cap, so a large paste would be cut, fix with paste in #22.
+            pane.replies.truncate(MAX_REPLIES);
+            flush(&mut pane.pty.master(), &mut pane.replies);
+        }
+    }
+
+    /// Resizes a pane's terminal and tells its program.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the PTY rejects the new size.
+    pub fn resize(&mut self, pane: usize, rows: u16, columns: u16) -> io::Result<()> {
+        let Some(pane) = self.panes.get_mut(pane) else {
+            return Ok(());
+        };
+        pane.engine.resize(rows, columns);
+        let (rows, columns) = pane.engine.size();
+        pane.dirty = true;
+        pane.pty.resize(rows, columns)
+    }
+
+    /// Returns whether a pane changed since the last call, and clears that.
+    pub fn take_dirty(&mut self, pane: usize) -> bool {
+        self.panes
+            .get_mut(pane)
+            .is_some_and(|pane| std::mem::take(&mut pane.dirty))
     }
 
     /// Returns a pane's terminal.
@@ -210,8 +260,16 @@ mod tests {
         let (mut engine, mut replies) = (AlacrittyEngine::new(4, 20), Vec::new());
         let mut buffer = vec![0; READ_BUDGET];
         let mut source = io::repeat(b'x');
-        let pumped = pump(&mut source, &mut engine, &mut replies, &mut buffer);
+        let mut fed = false;
+        let pumped = pump(
+            &mut source,
+            &mut engine,
+            &mut replies,
+            &mut buffer,
+            &mut fed,
+        );
         assert_eq!(pumped, Pumped::Budget);
+        assert!(fed);
     }
 
     #[test]
@@ -220,7 +278,13 @@ mod tests {
         let mut buffer = vec![0; READ_BUDGET];
         let bytes = b"\x1b[6n".repeat(10_000);
         let mut source = bytes.as_slice();
-        pump(&mut source, &mut engine, &mut replies, &mut buffer);
+        pump(
+            &mut source,
+            &mut engine,
+            &mut replies,
+            &mut buffer,
+            &mut false,
+        );
         assert_eq!(replies.len(), MAX_REPLIES);
     }
 
@@ -266,8 +330,62 @@ mod tests {
 
     #[test]
     fn unknown_panes_are_handled() {
-        let reactor = Reactor::new().unwrap();
+        let mut reactor = Reactor::new().unwrap();
         assert!(reactor.engine(9).is_none());
         assert!(reactor.is_closed(9));
+        assert!(!reactor.take_dirty(9));
+        reactor.write(9, b"x");
+        reactor.resize(9, 24, 80).unwrap();
+    }
+
+    #[test]
+    fn input_reaches_the_program() {
+        let mut reactor = Reactor::new().unwrap();
+        let pane = reactor
+            .spawn(shell("read line; echo got-$line; sleep 30"), 24, 80)
+            .unwrap();
+        reactor.write(pane, b"key\n");
+        assert!(turn_until(&mut reactor, |r| on_screen(r, pane, "got-key")));
+    }
+
+    #[test]
+    fn resize_reaches_the_terminal_and_program() {
+        let mut reactor = Reactor::new().unwrap();
+        let pane = reactor
+            .spawn(shell("read line; stty size; sleep 30"), 24, 80)
+            .unwrap();
+        reactor.resize(pane, 30, 100).unwrap();
+        assert_eq!(reactor.engine(pane).unwrap().size(), (30, 100));
+        reactor.write(pane, b"\n");
+        assert!(turn_until(&mut reactor, |r| on_screen(r, pane, "30 100")));
+    }
+
+    #[test]
+    fn output_marks_a_pane_dirty_once() {
+        let mut reactor = Reactor::new().unwrap();
+        let pane = reactor
+            .spawn(shell("read line; echo hello; sleep 30"), 24, 80)
+            .unwrap();
+        assert!(reactor.take_dirty(pane));
+        assert!(!reactor.take_dirty(pane));
+        reactor.write(pane, b"\n");
+        assert!(turn_until(&mut reactor, |r| on_screen(r, pane, "hello")));
+        assert!(reactor.take_dirty(pane));
+        assert!(!reactor.take_dirty(pane));
+    }
+
+    #[test]
+    fn a_waker_ends_a_blocked_turn() {
+        let mut reactor = Reactor::new().unwrap();
+        reactor.turn(Some(Duration::ZERO)).unwrap();
+        let waker = reactor.waker();
+        let wake = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            waker.wake().unwrap();
+        });
+        let start = Instant::now();
+        reactor.turn(Some(Duration::from_secs(20))).unwrap();
+        assert!(start.elapsed() < Duration::from_secs(10));
+        wake.join().unwrap();
     }
 }
