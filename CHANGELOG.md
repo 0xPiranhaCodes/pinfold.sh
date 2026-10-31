@@ -19,6 +19,7 @@ Entries are generated from Conventional Commits with git-cliff
 - Font stack spike, and pure-Rust fonts with `swash`.
 - Glyph cache capped at 1 MB, and CPU drawing of cell rows.
 - Metal renderer on macOS, with CPU drawing as its fallback.
+- macOS window budget raised to 30 MB plus pixels.
 - A window that runs a real shell, drawn by the CPU renderer on Linux.
 - Coloured pane frames, plus input and resize in the I/O loop.
 - JetBrains Mono as the bundled default font, under the SIL OFL 1.1.
