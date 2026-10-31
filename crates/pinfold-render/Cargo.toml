@@ -1,0 +1,13 @@
+[package]
+name = "pinfold-render"
+description = "Renderer trait, CPU renderer and glyph cache."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

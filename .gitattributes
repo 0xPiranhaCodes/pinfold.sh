@@ -1,0 +1,3 @@
+* text=auto eol=lf
+Cargo.lock linguist-generated=true
+docs/design/ui/** linguist-documentation=true
