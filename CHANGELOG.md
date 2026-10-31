@@ -12,12 +12,13 @@ Entries are generated from Conventional Commits with git-cliff
 ### Added
 
 - Project governance, security policy, contribution guide and license files.
-- Architecture decision records ADR-0001 to ADR-0024.
+- Architecture decision records ADR-0001 to ADR-0026.
 - Threat model with the PTY-based identity design.
 - Roadmap, and memory targets updated from the M0 measurements.
 - `cargo xtask mem-gate` now measures the core on Linux and macOS.
 - Font stack spike, and pure-Rust fonts with `swash`.
 - Glyph cache capped at 1 MB, and CPU drawing of cell rows.
+- JetBrains Mono as the bundled default font, under the SIL OFL 1.1.
 - One I/O loop for every PTY, with fair read budgets.
 - PTY spawning, and the `VtEngine` trait over `alacritty_terminal`.
 - Cargo workspace with empty crates, `cargo xtask`, CI and a dry-run release workflow.

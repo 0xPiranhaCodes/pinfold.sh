@@ -173,7 +173,7 @@ mod tests {
     }
 
     fn painter() -> Painter {
-        Painter::new(Font::system().unwrap(), 16.0)
+        Painter::new(Font::bundled().unwrap(), 16.0)
     }
 
     fn pixels(painter: &Painter, columns: usize, rows: usize) -> (Vec<u32>, usize, usize) {
@@ -191,7 +191,8 @@ mod tests {
         let (mut buffer, width, height) = pixels(&painter, 2, 1);
         let mut canvas = Canvas::new(&mut buffer, width, height).unwrap();
         painter.draw_row(&mut canvas, 0, &[cell('M'), cell(' ')]);
-        assert!(buffer.contains(&INK));
+        let brightest = buffer.iter().map(|pixel| pixel & 0xff).max().unwrap();
+        assert!(brightest > 0xa0, "text is too faint: {brightest:#x}");
         assert!(buffer.contains(&PAPER));
         assert!(!buffer.contains(&0));
     }
@@ -239,7 +240,7 @@ mod tests {
     #[test]
     fn bad_sizes_are_clamped() {
         for size in [0.0, -1.0, f32::NAN, f32::INFINITY, 1e9] {
-            let (width, height) = Painter::new(Font::system().unwrap(), size).cell_size();
+            let (width, height) = Painter::new(Font::bundled().unwrap(), size).cell_size();
             assert!(width > 0 && width <= 1024 && height > 0 && height <= 1024);
         }
     }
@@ -258,7 +259,7 @@ mod tests {
     #[test]
     fn the_cache_stays_under_its_limit() {
         let limit = 2_000;
-        let mut painter = Painter::with_limit(Font::system().unwrap(), 16.0, limit);
+        let mut painter = Painter::with_limit(Font::bundled().unwrap(), 16.0, limit);
         let (mut buffer, width, height) = pixels(&painter, 1, 1);
         let mut canvas = Canvas::new(&mut buffer, width, height).unwrap();
         for character in '!'..='~' {
@@ -271,14 +272,14 @@ mod tests {
     #[test]
     fn a_glyph_bigger_than_the_cache_is_skipped() {
         assert!(
-            GlyphCache::new(Font::system().unwrap(), 16.0, 0)
+            GlyphCache::new(Font::bundled().unwrap(), 16.0, 0)
                 .get('M')
                 .is_none()
         );
     }
 
     fn cost(character: char) -> usize {
-        let mut cache = GlyphCache::new(Font::system().unwrap(), 16.0, CACHE_LIMIT);
+        let mut cache = GlyphCache::new(Font::bundled().unwrap(), 16.0, CACHE_LIMIT);
         cache.get(character);
         cache.used()
     }
@@ -287,7 +288,7 @@ mod tests {
     fn the_least_recently_used_glyph_goes_first() {
         // One byte too small for all three, so exactly one glyph has to leave.
         let limit = cost('H') + cost('I') + cost('O') - 1;
-        let mut cache = GlyphCache::new(Font::system().unwrap(), 16.0, limit);
+        let mut cache = GlyphCache::new(Font::bundled().unwrap(), 16.0, limit);
         cache.get('H');
         cache.get('I');
         cache.get('H');
