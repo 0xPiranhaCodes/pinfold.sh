@@ -1,0 +1,5 @@
+[files]
+extend-exclude = ["docs/design/ui/", "LICENSE-*"]
+
+[default.extend-words]
+ratatui = "ratatui"
