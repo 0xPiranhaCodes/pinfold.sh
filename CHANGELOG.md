@@ -18,6 +18,7 @@ Entries are generated from Conventional Commits with git-cliff
 - `cargo xtask mem-gate` now measures the core on Linux and macOS.
 - Font stack spike, and pure-Rust fonts with `swash`.
 - Glyph cache capped at 1 MB, and CPU drawing of cell rows.
+- Coloured pane frames, plus input and resize in the I/O loop.
 - JetBrains Mono as the bundled default font, under the SIL OFL 1.1.
 - One I/O loop for every PTY, with fair read budgets.
 - PTY spawning, and the `VtEngine` trait over `alacritty_terminal`.

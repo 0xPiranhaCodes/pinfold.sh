@@ -270,6 +270,7 @@ version = "0.0.0"
 dependencies = [
  "alacritty_terminal",
  "mio",
+ "pinfold-proto",
  "pinfold-sys",
 ]
 
@@ -281,6 +282,7 @@ version = "0.0.0"
 name = "pinfold-render"
 version = "0.0.0"
 dependencies = [
+ "pinfold-proto",
  "pinfold-sys",
  "swash",
  "thiserror",

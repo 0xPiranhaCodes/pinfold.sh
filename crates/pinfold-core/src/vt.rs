@@ -5,9 +5,14 @@ use std::sync::{Arc, Mutex};
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::term::cell::Flags;
-use alacritty_terminal::term::{Config, Term};
-use alacritty_terminal::vte::ansi::Processor;
+use alacritty_terminal::term::cell::{Cell as GridCell, Flags};
+use alacritty_terminal::term::color;
+use alacritty_terminal::term::{Config, Term, TermMode};
+use alacritty_terminal::vte::ansi::{Color, Processor};
+use pinfold_proto::{Cell, Frame};
+
+/// The slot Alacritty's colour table gives the default background.
+const BACKGROUND_SLOT: usize = 257;
 
 /// Larger sizes are clamped, so a bad resize cannot allocate gigabytes of cells.
 pub const MAX_DIMENSION: u16 = 1024;
@@ -29,6 +34,47 @@ pub trait VtEngine {
 
     /// Returns a visible line without trailing spaces, or nothing if `line` is off screen.
     fn line_text(&self, line: u16) -> String;
+
+    /// Copies the visible screen into `frame`, reusing its allocation.
+    fn frame(&self, frame: &mut Frame);
+}
+
+/// The "Graphite Grid" ground and text colours (`docs/design/ui/`).
+const BACKGROUND: u32 = 0x000e_1014;
+const FOREGROUND: u32 = 0x00e2_e5ea;
+
+// shortcut: the design has no ANSI palette, so this reuses its tokens, and magenta is a stand-in.
+const ANSI: [u32; 16] = [
+    0x0012_151a,
+    0x00ff_8a8a,
+    0x0063_d29a,
+    0x00f5_b544,
+    0x007a_a7ff,
+    0x00d9_a7e0,
+    0x009c_c0ff,
+    0x00c9_cdd4,
+    0x0034_3a44,
+    0x00ff_8a8a,
+    0x0063_d29a,
+    0x00f5_b544,
+    0x009c_c0ff,
+    0x00d9_a7e0,
+    0x00c4_d9ff,
+    0x00e2_e5ea,
+];
+
+/// The standard 256-colour table: 16 ANSI colours, a 6×6×6 cube and a grey ramp.
+fn indexed(index: usize) -> u32 {
+    let level = |step: usize| if step == 0 { 0 } else { 55 + 40 * step as u32 };
+    match index {
+        0..=15 => ANSI[index],
+        16..=231 => {
+            let offset = index - 16;
+            level(offset / 36) << 16 | level(offset / 6 % 6) << 8 | level(offset % 6)
+        }
+        232..=255 => (8 + 10 * (index as u32 - 232)) * 0x0001_0101,
+        _ => FOREGROUND,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -101,6 +147,39 @@ impl AlacrittyEngine {
     }
 }
 
+impl AlacrittyEngine {
+    fn colour(&self, colour: Color) -> u32 {
+        let index = match colour {
+            Color::Spec(rgb) => {
+                return u32::from(rgb.r) << 16 | u32::from(rgb.g) << 8 | u32::from(rgb.b);
+            }
+            Color::Indexed(index) => usize::from(index),
+            Color::Named(name) => name as usize,
+        };
+        match self.term.colors()[index.min(color::COUNT - 1)] {
+            Some(rgb) => u32::from(rgb.r) << 16 | u32::from(rgb.g) << 8 | u32::from(rgb.b),
+            None if index == BACKGROUND_SLOT => BACKGROUND,
+            None => indexed(index),
+        }
+    }
+
+    fn cell(&self, cell: &GridCell) -> Cell {
+        let (mut foreground, mut background) = (self.colour(cell.fg), self.colour(cell.bg));
+        if cell.flags.contains(Flags::INVERSE) {
+            std::mem::swap(&mut foreground, &mut background);
+        }
+        if cell.flags.contains(Flags::HIDDEN) {
+            foreground = background;
+        }
+        let spacer = cell.flags.contains(Flags::WIDE_CHAR_SPACER);
+        Cell {
+            character: if spacer { ' ' } else { cell.c },
+            foreground,
+            background,
+        }
+    }
+}
+
 impl VtEngine for AlacrittyEngine {
     fn feed(&mut self, bytes: &[u8], replies: &mut Vec<u8>) {
         self.parser.advance(&mut self.term, bytes);
@@ -132,6 +211,24 @@ impl VtEngine for AlacrittyEngine {
             .map(|cell| cell.c)
             .collect();
         text.trim_end().to_owned()
+    }
+
+    fn frame(&self, frame: &mut Frame) {
+        let grid = self.term.grid();
+        (frame.rows, frame.columns) = self.size();
+        frame.cells.clear();
+        for line in 0..frame.rows {
+            let row = &grid[Line(i32::from(line))];
+            frame
+                .cells
+                .extend((0..grid.columns()).map(|column| self.cell(&row[Column(column)])));
+        }
+        let point = grid.cursor.point;
+        let visible = self.term.mode().contains(TermMode::SHOW_CURSOR);
+        let position = u16::try_from(point.line.0)
+            .ok()
+            .zip(u16::try_from(point.column.0).ok());
+        frame.cursor = position.filter(|_| visible);
     }
 }
 
@@ -202,6 +299,76 @@ mod tests {
         assert_eq!(engine.size(), (1, 1));
         engine.resize(u16::MAX, u16::MAX);
         assert_eq!(engine.size(), (MAX_DIMENSION, MAX_DIMENSION));
+    }
+
+    fn screen(bytes: &[u8]) -> Frame {
+        let (mut engine, mut frame) = (AlacrittyEngine::new(4, 20), Frame::default());
+        feed(&mut engine, bytes);
+        engine.frame(&mut frame);
+        frame
+    }
+
+    #[test]
+    fn a_frame_holds_every_cell() {
+        let frame = screen(b"hi");
+        assert_eq!((frame.rows, frame.columns), (4, 20));
+        assert_eq!(frame.cells.len(), 80);
+        assert_eq!(frame.cells[1].character, 'i');
+        assert_eq!(frame.cells[0].foreground, FOREGROUND);
+        assert_eq!(frame.cells[0].background, BACKGROUND);
+    }
+
+    #[test]
+    fn colours_resolve() {
+        assert_eq!(screen(b"\x1b[31mx").cells[0].foreground, ANSI[1]);
+        assert_eq!(screen(b"\x1b[38;5;196mx").cells[0].foreground, 0x00ff_0000);
+        assert_eq!(screen(b"\x1b[38;5;232mx").cells[0].foreground, 0x0008_0808);
+        assert_eq!(
+            screen(b"\x1b[48;2;1;2;3mx").cells[0].background,
+            0x0001_0203
+        );
+    }
+
+    #[test]
+    fn programs_can_change_the_palette() {
+        assert_eq!(
+            screen(b"\x1b]4;1;rgb:01/02/03\x07\x1b[31mx").cells[0].foreground,
+            0x0001_0203
+        );
+    }
+
+    #[test]
+    fn inverse_and_hidden_text_apply() {
+        let inverse = screen(b"\x1b[7mx").cells[0];
+        assert_eq!(
+            (inverse.foreground, inverse.background),
+            (BACKGROUND, FOREGROUND)
+        );
+        let hidden = screen(b"\x1b[8mx").cells[0];
+        assert_eq!(hidden.foreground, hidden.background);
+    }
+
+    #[test]
+    fn wide_spacers_are_blank() {
+        let frame = screen("漢".as_bytes());
+        assert_eq!(frame.cells[0].character, '漢');
+        assert_eq!(frame.cells[1].character, ' ');
+    }
+
+    #[test]
+    fn the_cursor_follows_the_program() {
+        assert_eq!(screen(b"ab\r\nc").cursor, Some((1, 1)));
+        assert_eq!(screen(b"\x1b[?25l").cursor, None);
+    }
+
+    #[test]
+    fn every_colour_index_is_safe() {
+        for index in 0..=300 {
+            let _ = indexed(index);
+        }
+        for byte in 0..=255 {
+            screen(format!("\x1b[38;5;{byte}m\x1b[48;5;{byte}mx").as_bytes());
+        }
     }
 
     #[test]
