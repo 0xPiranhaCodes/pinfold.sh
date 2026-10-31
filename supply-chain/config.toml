@@ -28,6 +28,14 @@ criteria = "safe-to-deploy"
 version = "2.13.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.bytemuck]]
+version = "1.25.2"
+criteria = "safe-to-deploy"
+
+[[exemptions.bytemuck_derive]]
+version = "1.12.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.cfg-if]]
 version = "1.0.5"
 criteria = "safe-to-deploy"
@@ -50,6 +58,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.fastrand]]
 version = "2.5.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.font-types]]
+version = "0.12.7"
 criteria = "safe-to-deploy"
 
 [[exemptions.futures-io]]
@@ -92,6 +104,10 @@ criteria = "safe-to-deploy"
 version = "0.6.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.once_cell]]
+version = "1.21.4"
+criteria = "safe-to-deploy"
+
 [[exemptions.parking_lot]]
 version = "0.12.5"
 criteria = "safe-to-deploy"
@@ -118,6 +134,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.quote]]
 version = "1.0.47"
+criteria = "safe-to-deploy"
+
+[[exemptions.read-fonts]]
+version = "0.41.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.redox_syscall]]
@@ -164,12 +184,28 @@ criteria = "safe-to-deploy"
 version = "1.4.8"
 criteria = "safe-to-deploy"
 
+[[exemptions.skrifa]]
+version = "0.44.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.smallvec]]
 version = "1.16.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.swash]]
+version = "0.2.10"
+criteria = "safe-to-deploy"
+
 [[exemptions.syn]]
 version = "3.0.9"
+criteria = "safe-to-deploy"
+
+[[exemptions.thiserror]]
+version = "2.0.21"
+criteria = "safe-to-deploy"
+
+[[exemptions.thiserror-impl]]
+version = "2.0.21"
 criteria = "safe-to-deploy"
 
 [[exemptions.unicode-ident]]
@@ -234,4 +270,12 @@ criteria = "safe-to-deploy"
 
 [[exemptions.windows_x86_64_msvc]]
 version = "0.52.6"
+criteria = "safe-to-deploy"
+
+[[exemptions.yazi]]
+version = "0.2.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.zeno]]
+version = "0.3.3"
 criteria = "safe-to-deploy"

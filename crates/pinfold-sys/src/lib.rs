@@ -4,6 +4,7 @@
 
 use std::io;
 
+pub mod mapped;
 pub mod pty;
 
 /// Returns a process's memory footprint in bytes: PSS on Linux and `phys_footprint` on
