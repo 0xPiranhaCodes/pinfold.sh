@@ -96,8 +96,8 @@ Every PR that changes behavior needs tests.
   allowed.
 - **Conventional Commits:** use them for commit messages and PR titles, for example
   `feat(api): add hello handshake`. Common types are `feat`, `fix`, `docs`,
-  `refactor`, `perf`, `test`, `build`, `ci` and `chore`. PR titles are checked in CI
-  because squash merges use them for the changelog.
+  `refactor`, `perf`, `test`, `build`, `ci` and `chore`. Commits are kept on merge, so
+  each one should read well in the changelog. PR titles are checked in CI too.
 - **Fill in the PR template:** the memory-impact and security-impact sections are
   required, even if the answer is "none".
 - **Update `CHANGELOG.md`:** add a line under `[Unreleased]` for any user-visible

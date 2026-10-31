@@ -1,6 +1,6 @@
 # ADR-0015: Screen readers are a v1 non-goal
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-10-31
 
 ## Context
@@ -11,7 +11,7 @@ an explicit v1 non-goal.
 
 ## Decision
 
-Proposed: make screen-reader support an explicit v1 non-goal, and revisit it after v0.1.
+Make screen-reader support an explicit v1 non-goal, and revisit it after v0.1.
 Agent states already use a glyph, a colour and a word, so they do not rely on colour.
 
 ## Consequences
