@@ -20,5 +20,8 @@ name = "pinfold-core"
 path = "src/bin/pinfold-core.rs"
 doc = false
 
+[dependencies]
+pinfold-core = { path = "../pinfold-core", version = "0.0.0" }
+
 [lints]
 workspace = true
