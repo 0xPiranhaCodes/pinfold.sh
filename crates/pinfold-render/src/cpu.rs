@@ -26,6 +26,18 @@ pub trait Renderer {
     fn draw(&mut self, frame: &Frame) -> Result<(), RenderError>;
 }
 
+/// Copies a frame's cells into `cells`, with the cursor's cell inverted.
+pub(crate) fn cells_with_cursor(frame: &Frame, cells: &mut Vec<Cell>) {
+    cells.clear();
+    cells.extend_from_slice(&frame.cells);
+    if let Some((row, column)) = frame.cursor {
+        let at = usize::from(row) * usize::from(frame.columns) + usize::from(column);
+        if let Some(cell) = cells.get_mut(at) {
+            std::mem::swap(&mut cell.foreground, &mut cell.background);
+        }
+    }
+}
+
 /// Draws cells with the CPU into a `softbuffer` surface.
 pub struct CpuRenderer<D, W> {
     surface: Surface<D, W>,
@@ -80,14 +92,7 @@ where
             return Ok(());
         };
         let columns = usize::from(frame.columns).max(1);
-        self.next.clear();
-        self.next.extend_from_slice(&frame.cells);
-        if let Some((row, column)) = frame.cursor {
-            let at = usize::from(row) * columns + usize::from(column);
-            if let Some(cell) = self.next.get_mut(at) {
-                std::mem::swap(&mut cell.foreground, &mut cell.background);
-            }
-        }
+        cells_with_cursor(frame, &mut self.next);
         self.surface.resize(width, height)?;
         let mut buffer = self.surface.buffer_mut()?;
         // Only a buffer that holds the previous frame can keep its unchanged rows.

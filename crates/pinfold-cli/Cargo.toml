@@ -14,14 +14,20 @@ publish.workspace = true
 name = "pinfold"
 path = "src/bin/pinfold.rs"
 doc = false
+required-features = ["window"]
 
 [[bin]]
 name = "pinfold-core"
 path = "src/bin/pinfold-core.rs"
 doc = false
 
+# Build pinfold-core with --no-default-features, so the window stack is not linked into it.
+[features]
+default = ["window"]
+window = ["dep:pinfold-ui"]
+
 [dependencies]
-pinfold-ui = { path = "../pinfold-ui", version = "0.0.0" }
+pinfold-ui = { path = "../pinfold-ui", version = "0.0.0", optional = true }
 pinfold-core = { path = "../pinfold-core", version = "0.0.0" }
 
 [lints]

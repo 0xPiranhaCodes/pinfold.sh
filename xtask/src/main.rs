@@ -83,9 +83,10 @@ fn fuzz_smoke() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn build(profile: &str, binary: &str) -> io::Result<()> {
+fn build(profile: &str, binary: &str, features: &[&str]) -> io::Result<()> {
     let status = Command::new("cargo")
         .args(["build", "--locked", "--profile", profile])
+        .args(features)
         .args(["--package", "pinfold-cli", "--bin", binary])
         .status()?;
     if status.success() {
@@ -96,8 +97,8 @@ fn build(profile: &str, binary: &str) -> io::Result<()> {
 }
 
 fn mem_gate_task() -> ExitCode {
-    if let Err(error) =
-        build("release-core", "pinfold-core").and_then(|()| build("release", "pinfold"))
+    if let Err(error) = build("release-core", "pinfold-core", &["--no-default-features"])
+        .and_then(|()| build("release", "pinfold", &[]))
     {
         eprintln!("mem-gate: {error}");
         return ExitCode::FAILURE;
@@ -112,6 +113,7 @@ fn mem_gate_task() -> ExitCode {
             program: &core,
             args: &["--idle", "8"],
             per_pane_over: None,
+            settle: mem_gate::SETTLE,
         },
         mem_gate::Budget {
             metric: "Each idle pane",
@@ -119,9 +121,19 @@ fn mem_gate_task() -> ExitCode {
             program: &core,
             args: &["--idle", "8"],
             per_pane_over: Some((&["--idle", "1"], 7)),
+            settle: mem_gate::SETTLE,
         },
     ];
-    // macOS waits for the Metal renderer in #20, and CPU drawing there is over budget.
+    if cfg!(target_os = "macos") {
+        budgets.push(mem_gate::Budget {
+            metric: "Window on macOS, 1512x1890",
+            limit: mem_gate::WINDOW_LIMIT_HALF_RETINA,
+            program: &window,
+            args: &["--size", "1512x1890"],
+            per_pane_over: None,
+            settle: mem_gate::WINDOW_SETTLE,
+        });
+    }
     if cfg!(target_os = "linux") {
         budgets.push(mem_gate::Budget {
             metric: "Window on X11, 1920x1080",
@@ -129,6 +141,7 @@ fn mem_gate_task() -> ExitCode {
             program: &window,
             args: &["--size", "1920x1080"],
             per_pane_over: None,
+            settle: mem_gate::WINDOW_SETTLE,
         });
     }
     if mem_gate::run(&budgets) {

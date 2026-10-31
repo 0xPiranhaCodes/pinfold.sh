@@ -103,7 +103,24 @@ fn run_io(
 
 struct Open {
     window: Rc<Window>,
-    renderer: CpuRenderer<Rc<Window>, Rc<Window>>,
+    renderer: Box<dyn Renderer>,
+}
+
+/// Metal on macOS (ADR-0022), or CPU drawing if this Mac has no Metal device.
+fn renderer(window: &Rc<Window>, size: f32) -> Result<Box<dyn Renderer>, Error> {
+    #[cfg(target_os = "macos")]
+    if let Some(renderer) =
+        pinfold_render::metal::MetalRenderer::new(window.as_ref(), Font::bundled()?, size)
+    {
+        return Ok(Box::new(renderer));
+    }
+    let font = Font::bundled()?;
+    Ok(Box::new(CpuRenderer::new(
+        window.clone(),
+        window.clone(),
+        font,
+        size,
+    )?))
 }
 
 struct App {
@@ -133,7 +150,7 @@ impl App {
         let window = Rc::new(event_loop.create_window(attributes)?);
         // shortcut: fixed at the first scale factor, so moving between displays blurs, fix in #21.
         let size = FONT_SIZE * window.scale_factor() as f32;
-        let renderer = CpuRenderer::new(window.clone(), window.clone(), Font::bundled()?, size)?;
+        let renderer = renderer(&window, size)?;
         self.open = Some(Open { window, renderer });
         Ok(())
     }
