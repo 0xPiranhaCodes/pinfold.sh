@@ -161,6 +161,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
+name = "mio"
+version = "1.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
+dependencies = [
+ "libc",
+ "log",
+ "wasi",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "miow"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -209,6 +221,9 @@ version = "0.0.0"
 [[package]]
 name = "pinfold-cli"
 version = "0.0.0"
+dependencies = [
+ "pinfold-core",
+]
 
 [[package]]
 name = "pinfold-config"
@@ -219,6 +234,8 @@ name = "pinfold-core"
 version = "0.0.0"
 dependencies = [
  "alacritty_terminal",
+ "mio",
+ "pinfold-sys",
 ]
 
 [[package]]
@@ -439,6 +456,12 @@ dependencies = [
  "memchr",
  "serde",
 ]
+
+[[package]]
+name = "wasi"
+version = "0.11.1+wasi-snapshot-preview1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ccf3ec651a847eb01de73ccad15eb7d99f80485de043efb2f370cd654f4ea44b"
 
 [[package]]
 name = "windows-link"

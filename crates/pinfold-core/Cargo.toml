@@ -11,6 +11,8 @@ publish.workspace = true
 
 [dependencies]
 alacritty_terminal = "=0.26.0"
+mio = { version = "1.2.4", features = ["os-ext", "os-poll"] }
+pinfold-sys = { path = "../pinfold-sys", version = "0.0.0" }
 
 [lints]
 workspace = true

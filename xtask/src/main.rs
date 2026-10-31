@@ -102,12 +102,22 @@ fn mem_gate_task() -> ExitCode {
     }
     let target = std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into());
     let core = Path::new(&target).join("release-core/pinfold-core");
-    let budgets = [mem_gate::Budget {
-        metric: "Core, no panes (stand-in until #18)",
-        limit: mem_gate::CORE_LIMIT,
-        program: &core,
-        args: &["--idle"],
-    }];
+    let budgets = [
+        mem_gate::Budget {
+            metric: "Core, 8 idle panes",
+            limit: mem_gate::CORE_LIMIT,
+            program: &core,
+            args: &["--idle", "8"],
+            per_pane_over: None,
+        },
+        mem_gate::Budget {
+            metric: "Each idle pane",
+            limit: mem_gate::PANE_LIMIT,
+            program: &core,
+            args: &["--idle", "8"],
+            per_pane_over: Some((&["--idle", "1"], 7)),
+        },
+    ];
     if mem_gate::run(&budgets) {
         ExitCode::SUCCESS
     } else {
