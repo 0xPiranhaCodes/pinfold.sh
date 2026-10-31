@@ -1,0 +1,36 @@
+--- a/src/grid/mod.rs
++++ b/src/grid/mod.rs
+@@ -135,6 +135,9 @@
+ 
+     /// Maximum number of lines in history.
+     max_scroll_limit: usize,
++
++    /// Rows that fell out of history, oldest first, for the owner to drain.
++    pub evicted: Vec<Row<T>>,
+ }
+ 
+ impl<T: GridCell + Default + PartialEq> Grid<T> {
+@@ -142,6 +145,7 @@
+         Grid {
+             raw: Storage::with_capacity(lines, columns),
+             max_scroll_limit,
++            evicted: Vec::new(),
+             display_offset: 0,
+             saved_cursor: Cursor::default(),
+             cursor: Cursor::default(),
+@@ -270,6 +274,15 @@
+ 
+         // Only rotate the entire history if the active region starts at the top.
+         if region.start == 0 {
++            // Hand rows that are about to leave history to the owner.
++            let history = self.history_size();
++            let evicted = (history + positions).saturating_sub(self.max_scroll_limit);
++            for i in 0..evicted {
++                let line = Line(i as i32 - history as i32);
++                let columns = self.columns;
++                self.evicted.push(std::mem::replace(&mut self.raw[line], Row::new(columns)));
++            }
++
+             // Create scrollback for the new lines.
+             self.increase_scroll_limit(positions);
+ 
