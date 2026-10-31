@@ -3,8 +3,9 @@
 This document is the source of truth for Pinfold's security design. It restates the
 Security design section of [`architecture.md`](architecture.md) as amended by review
 finding B1 in [`architecture-review.md`](architecture-review.md) and by
-[ADR-0004](../adr/0004-agent-identity-from-pty.md) and
-[ADR-0010](../adr/0010-security-model.md). Bearer tokens, `PINFOLD_TOKEN` and the
+[ADR-0004](../adr/0004-agent-identity-from-pty.md),
+[ADR-0010](../adr/0010-security-model.md) and
+[ADR-0020](../adr/0020-identity-hardening.md). Bearer tokens, `PINFOLD_TOKEN` and the
 owner token no longer exist, whatever older text says.
 
 **Status: design.** None of these controls is implemented yet. The milestone table at
@@ -37,7 +38,10 @@ they make misuse visible. **Only a sandboxed agent is contained.**
 - **In scope:** the threats below, and escape from a sandboxed agent profile.
 - **Not defended:** actions an unsandboxed agent takes with its own user rights outside
   the API. Pinfold reduces the damage of these (window confirmation of config changes,
-  a tamper-evident audit log) but cannot prevent them.
+  a tamper-evident audit log) but cannot prevent them. In particular, without a sandbox
+  Pinfold cannot stop same-user ptrace of another pane's processes, where the OS allows
+  it, or writes to another pane's terminal. Those writes reach that pane's VT parser as
+  program output, not its input.
 - **Out of scope:** root and kernel compromise.
 
 ## Threats
@@ -74,20 +78,28 @@ into the core:
    directory is a symlink or owned by someone else.
 2. **PTY mapping.** The core reads the peer's pid (`SO_PEERCRED` on Linux,
    `LOCAL_PEERPID` on macOS), finds its controlling terminal and session, and maps that
-   to a pane. A pane's environment holds no credential, so reading another pane's
+   to a pane. A caller must hold the pane's terminal and be in its session. On Linux,
+   `SO_PEERPIDFD` guards this lookup against pid reuse. A pane's environment holds no credential, so reading another pane's
    environment gives nothing.
-3. **Outside a pane.** No token exists on disk. An owner-level action from outside a
+3. **No terminal.** A caller with no controlling terminal is unidentified and gets no
+   pane scopes. An MCP server must stay in its agent's session.
+4. **Outside a pane.** No token exists on disk. An owner-level action from outside a
    pane needs a one-time confirmation drawn in the Pinfold window.
 
-M0 must prove on Linux and macOS that a process in pane A cannot act as pane B, even
-with full knowledge of pane B's environment.
+5. **Core hardening.** Before opening any PTY, the core sets `PR_SET_DUMPABLE(0)` on Linux
+   and `PT_DENY_ATTACH` on macOS, so that a same-user process cannot copy a PTY master out
+   of it.
 
-### Open questions for M0
+The [M0 spike](../spikes/m0-caller-identity/README.md) showed on Linux and macOS that a
+process in pane A was never identified as pane B through the API, even with pane B's full
+environment.
 
-- How to treat a caller with no controlling terminal, such as an MCP server its agent
-  started in a new session. The safe default is to give it no pane scopes.
-- How to avoid pid-reuse races between `connect` and the terminal lookup.
-- How the mapping behaves across the PID namespaces of a sandboxed agent.
+### Still open
+
+- How macOS closes the pid-reuse race. `LOCAL_PEERTOKEN` is the likely answer and is
+  untested.
+- How sandboxed agents block TIOCSTI while staying in their pane's session, tested with
+  real bubblewrap and `sandbox-exec`.
 
 ## Authorization
 
@@ -143,7 +155,8 @@ you can rewrite the file on disk.
 **Sandbox.** An agent profile may set `sandbox`, which launches the agent under
 bubblewrap or Landlock on Linux and `sandbox-exec` on macOS, or under the agent CLI's own
 sandbox mode. The sandbox hides `~/.ssh`, `~/.config/pinfold`, `~/.local/state/pinfold`
-and other users' panes.
+and other users' panes. Sandboxed agents run inside their pane's session, so they keep
+their identity.
 
 ## Hardening untrusted input
 
@@ -182,9 +195,9 @@ snapshot and spill-file rules are in the Security design section of
 | Milestone  | Deliverables                                                                                       |
 | ---------- | -------------------------------------------------------------------------------------------------- |
 | Phase 0    | `unsafe` lint policy, `cargo-deny` and `cargo-audit` in CI, this document                          |
-| M0         | Caller-identity proof on Linux and macOS                                                           |
+| M0         | Caller-identity proof on Linux and macOS (done)                                                    |
 | M1         | Escape-sequence policy, paste sanitizer, fuzzing of the VT input path                              |
-| M2         | Socket directory checks, peer UID check                                                            |
+| M2         | Core hardening, socket directory checks, peer UID check                                            |
 | M3         | Scopes, approvals, protected panes, newline splitting, redaction, audit log, sandbox, API fuzzing  |
 | M4         | Filename and markdown sanitizing, hardened git invocation, tool size and time caps                 |
 | M5         | Workspace trust, encrypted spill files, snapshot redaction, signed and notarized releases          |

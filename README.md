@@ -40,7 +40,7 @@ reboot.
 - A blocks-style, browser-like UI
 - Remote SSH multiplexing, or any TCP listener
 - Windows support (platform code stays behind `cfg` and traits so it can come later)
-- Screen-reader support ([proposed, ADR-0015](docs/adr/0015-accessibility-v1.md))
+- Screen-reader support ([ADR-0015](docs/adr/0015-accessibility-v1.md))
 
 ## Memory targets
 

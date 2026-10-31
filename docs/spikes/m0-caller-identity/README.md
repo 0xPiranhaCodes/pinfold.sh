@@ -55,7 +55,9 @@ The last three need explaining.
   check in this spike. `LOCAL_PEERTOKEN` is the likely answer, and it is untested.
 - **PID namespaces:** a caller in a child PID namespace kept its identity.
 
-## Proposed security changes, for maintainer decision
+## Security changes
+
+These were accepted in [ADR-0020](../../adr/0020-identity-hardening.md).
 
 1. The core sets `PR_SET_DUMPABLE(0)` at startup on Linux, and `pinfold-core` also tries
    `PT_DENY_ATTACH` on macOS.
