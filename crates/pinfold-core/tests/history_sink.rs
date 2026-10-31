@@ -67,7 +67,10 @@ impl Pane {
     }
 
     fn history(&self) -> Vec<String> {
-        self.rows.lock().map(|rows| rows.0.clone()).unwrap_or_default()
+        self.rows
+            .lock()
+            .map(|rows| rows.0.clone())
+            .unwrap_or_default()
     }
 }
 
