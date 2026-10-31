@@ -17,4 +17,4 @@ M1, M2, M3, M5, then M4.
 ## Consequences
 
 v0.1 ships without three features in the product pitch, so the docs must say they come later. Tool
-fuzz targets and threats T5 and T6 for the tools also move, but workspace trust stays in M5.
+fuzz targets and the controls for threat T6 also move. Threat T5, workspace trust, stays in M5.
