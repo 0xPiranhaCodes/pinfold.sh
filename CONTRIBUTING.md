@@ -66,7 +66,10 @@ reports SKIPPED until M1.
 [ADR-0021](docs/adr/0021-memory-targets-m0.md). It prints a table and fails if a budget is
 exceeded or a measurement fails. If your change affects memory, paste that table into your
 PR. Budgets that nothing can measure yet show as `not measured` with the issue that adds
-them, and those rows prove nothing.
+them, and those rows prove nothing. On Linux it needs an X server, such as `xvfb-run`.
+
+`tests/window/run.sh` drives the real window in a container: it types into a shell under Xvfb
+and starts the window under headless Weston.
 
 Every number in the docs or a PR must come from committed code. If you cannot
 reproduce it with a script in this repository, leave it out.

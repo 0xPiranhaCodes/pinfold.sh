@@ -27,6 +27,11 @@ impl<'a> Canvas<'a> {
         })
     }
 
+    /// Fills every pixel.
+    pub fn clear(&mut self, colour: u32) {
+        self.pixels.fill(colour);
+    }
+
     fn fill(&mut self, left: usize, top: usize, right: usize, bottom: usize, colour: u32) {
         let right = right.min(self.width);
         for y in top..bottom.min(self.height) {

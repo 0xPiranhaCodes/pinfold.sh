@@ -11,6 +11,8 @@ publish.workspace = true
 
 [dependencies]
 pinfold-proto = { path = "../pinfold-proto", version = "0.0.0" }
+raw-window-handle = "0.6.2"
+softbuffer = { version = "=0.4.8", default-features = false, features = ["wayland", "wayland-dlopen", "x11", "x11-dlopen"] }
 pinfold-sys = { path = "../pinfold-sys", version = "0.0.0" }
 swash = "=0.2.10"
 thiserror = "2.0.21"

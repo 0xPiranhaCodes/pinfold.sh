@@ -21,6 +21,7 @@ path = "src/bin/pinfold-core.rs"
 doc = false
 
 [dependencies]
+pinfold-ui = { path = "../pinfold-ui", version = "0.0.0" }
 pinfold-core = { path = "../pinfold-core", version = "0.0.0" }
 
 [lints]
