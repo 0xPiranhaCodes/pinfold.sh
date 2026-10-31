@@ -88,4 +88,7 @@ Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
 [MIT license](LICENSE-MIT), at your option. Any fork of `alacritty_terminal` code
 stays Apache-2.0 only ([ADR-0012](docs/adr/0012-license.md)).
 
+The bundled JetBrains Mono font is under the
+[SIL Open Font License 1.1](crates/pinfold-render/fonts/OFL.txt).
+
 The name and logo are covered by [TRADEMARK.md](TRADEMARK.md).
