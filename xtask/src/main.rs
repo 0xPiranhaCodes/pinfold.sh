@@ -2,15 +2,17 @@
 
 #![allow(clippy::print_stdout, reason = "command-line output")]
 
-use std::fs;
 use std::path::Path;
 use std::process::{Command, ExitCode};
+use std::{fs, io};
+
+mod mem_gate;
 
 const HELP: &str = "\
 Usage: cargo xtask <command>
 
 Commands:
-  mem-gate     Check every ADR-0021 memory budget (arrives in M1)
+  mem-gate     Check every ADR-0021 memory budget (rest arrive in M1)
   fuzz-smoke   Run each fuzz target briefly
   schema-gen   Generate API JSON Schemas (arrives in M3)
   release      Prepare a release (arrives in M5)
@@ -81,6 +83,38 @@ fn fuzz_smoke() -> ExitCode {
     ExitCode::SUCCESS
 }
 
+fn build_core() -> io::Result<()> {
+    let status = Command::new("cargo")
+        .args(["build", "--locked", "--profile", "release-core"])
+        .args(["--package", "pinfold-cli", "--bin", "pinfold-core"])
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other("building pinfold-core failed"))
+    }
+}
+
+fn mem_gate_task() -> ExitCode {
+    if let Err(error) = build_core() {
+        eprintln!("mem-gate: {error}");
+        return ExitCode::FAILURE;
+    }
+    let target = std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into());
+    let core = Path::new(&target).join("release-core/pinfold-core");
+    let budgets = [mem_gate::Budget {
+        metric: "Core, no panes (stand-in until #18)",
+        limit: mem_gate::CORE_LIMIT,
+        program: &core,
+        args: &["--idle"],
+    }];
+    if mem_gate::run(&budgets) {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
 fn main() -> ExitCode {
     let arg = std::env::args().nth(1);
     match parse(arg.as_deref()) {
@@ -88,10 +122,7 @@ fn main() -> ExitCode {
             println!("{HELP}");
             ExitCode::SUCCESS
         }
-        Task::MemGate => {
-            println!("mem-gate: SKIPPED, nothing to measure until M1");
-            ExitCode::SUCCESS
-        }
+        Task::MemGate => mem_gate_task(),
         Task::FuzzSmoke => fuzz_smoke(),
         Task::NotYet { name, milestone } => {
             eprintln!("{name}: not implemented until {milestone}");

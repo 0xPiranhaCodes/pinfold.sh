@@ -3,3 +3,7 @@
 
 [cargo-vet]
 version = "0.10"
+
+[[exemptions.libc]]
+version = "0.2.191"
+criteria = "safe-to-deploy"
