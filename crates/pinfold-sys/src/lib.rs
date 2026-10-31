@@ -4,6 +4,8 @@
 
 use std::io;
 
+pub mod pty;
+
 /// Returns a process's memory footprint in bytes: PSS on Linux and `phys_footprint` on
 /// macOS, the two metrics ADR-0021 budgets are written in.
 ///

@@ -16,5 +16,6 @@ Entries are generated from Conventional Commits with git-cliff
 - Threat model with the PTY-based identity design.
 - Roadmap, and memory targets updated from the M0 measurements.
 - `cargo xtask mem-gate` now measures the core on Linux and macOS.
+- PTY spawning, and the `VtEngine` trait over `alacritty_terminal`.
 - Cargo workspace with empty crates, `cargo xtask`, CI and a dry-run release workflow.
 - M0 spike results for caller identity, tiered scrollback, the process split and window memory, with the M0 report.

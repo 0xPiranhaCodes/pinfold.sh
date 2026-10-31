@@ -1,5 +1,12 @@
 [graph]
 all-features = true
+# ADR-0002: Linux and macOS only, so Windows-only crates are not shipped or checked.
+targets = [
+  "aarch64-apple-darwin",
+  "aarch64-unknown-linux-gnu",
+  "x86_64-apple-darwin",
+  "x86_64-unknown-linux-gnu",
+]
 
 [advisories]
 version = 2
@@ -8,6 +15,8 @@ yanked = "deny"
 [licenses]
 version = 2
 allow = ["Apache-2.0", "MIT"]
+# Unicode's data license, in a build-time dependency of serde_derive.
+exceptions = [{ crate = "unicode-ident", allow = ["Unicode-3.0"] }]
 
 [bans]
 multiple-versions = "deny"
