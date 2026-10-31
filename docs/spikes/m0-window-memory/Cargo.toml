@@ -1,0 +1,27 @@
+[package]
+name = "spike-window-memory"
+description = "M0 spike: window memory with CPU drawing and a thin Metal path."
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+libc = "0.2.191"
+softbuffer = "=0.4.8"
+winit = "=0.30.13"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-metal = "0.3"
+objc2-quartz-core = "0.3"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+
+# Throwaway spike code, kept out of the product workspace (ADR-0019).
+[workspace]
