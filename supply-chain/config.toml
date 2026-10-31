@@ -12,10 +12,6 @@ criteria = "safe-to-deploy"
 version = "1.1.5"
 criteria = "safe-to-deploy"
 
-[[exemptions.alacritty_terminal]]
-version = "0.26.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.android-activity]]
 version = "0.6.1"
 criteria = "safe-to-deploy"

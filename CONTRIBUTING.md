@@ -131,7 +131,7 @@ Unless you state otherwise, contributions are dual-licensed as `MIT OR Apache-2.
 with no additional terms. The license is declared by SPDX identifiers in `Cargo.toml`.
 Per-file license headers are not required. Code derived from `alacritty_terminal`
 is the exception and stays Apache-2.0 only
-([ADR-0012](docs/adr/0012-license.md)).
+([ADR-0012](docs/adr/0012-license.md)). `vendor/README.md` says how to change it.
 
 ### New dependencies
 

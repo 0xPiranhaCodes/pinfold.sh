@@ -1,7 +1,10 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "xtask", "tests", "benches"]
-exclude = ["fuzz", "docs/spikes"]
+exclude = ["fuzz", "docs/spikes", "vendor"]
+
+[patch.crates-io]
+alacritty_terminal = { path = "vendor/alacritty_terminal" }
 
 [workspace.package]
 version = "0.0.0"
