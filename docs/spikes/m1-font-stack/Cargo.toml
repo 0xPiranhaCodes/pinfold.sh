@@ -1,0 +1,21 @@
+[package]
+name = "spike-font-stack"
+description = "M1 spike: memory and quality of pure-Rust font rasterizers."
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+fontdue = "=0.9.5"
+libc = "0.2.191"
+swash = "=0.2.10"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
+
+# Throwaway spike code, kept out of the product workspace (ADR-0019).
+[workspace]
