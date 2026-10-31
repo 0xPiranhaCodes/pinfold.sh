@@ -1,0 +1,14 @@
+[package]
+name = "spike-caller-identity"
+description = "M0 spike: map an API caller to a pane through its controlling terminal."
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[dependencies]
+libc = "0.2.191"
+
+# Throwaway spike code, kept out of the product workspace (ADR-0019).
+[workspace]
