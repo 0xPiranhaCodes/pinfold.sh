@@ -62,10 +62,11 @@ reports SKIPPED until M1.
 
 ### The memory gate
 
-`cargo xtask mem-gate` runs a scripted headless session and checks every budget in
-[ADR-0021](docs/adr/0021-memory-targets-m0.md). It prints a table and fails on a
-regression. If your change affects memory, paste that table into your PR. It reports
-SKIPPED until M1 builds something to measure.
+`cargo xtask mem-gate` measures real processes against the budgets in
+[ADR-0021](docs/adr/0021-memory-targets-m0.md). It prints a table and fails if a budget is
+exceeded or a measurement fails. If your change affects memory, paste that table into your
+PR. Budgets that nothing can measure yet show as `not measured` with the issue that adds
+them, and those rows prove nothing.
 
 Every number in the docs or a PR must come from committed code. If you cannot
 reproduce it with a script in this repository, leave it out.

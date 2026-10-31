@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "libc"
+version = "0.2.191"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+
+[[package]]
 name = "pinfold-api"
 version = "0.0.0"
 
@@ -33,6 +39,9 @@ version = "0.0.0"
 [[package]]
 name = "pinfold-sys"
 version = "0.0.0"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "pinfold-tests"
@@ -49,3 +58,6 @@ version = "0.0.0"
 [[package]]
 name = "xtask"
 version = "0.0.0"
+dependencies = [
+ "pinfold-sys",
+]
