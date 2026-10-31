@@ -65,6 +65,8 @@ jobs:
         with:
           tool: cargo-vet
       - run: cargo vet --locked
+      # cargo vet does not look at the fork, so this is what catches an unreviewed edit.
+      - run: vendor/check.sh
 
   docs:
     runs-on: ubuntu-latest

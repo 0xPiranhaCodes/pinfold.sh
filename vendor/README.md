@@ -16,5 +16,9 @@ The patch does what history outside the grid needs (ADR-0006, #24):
 Upstream's `tests/` is left out because it is 46 MB of recordings, and its Cargo test targets
 go with it. The crate has `unsafe`, so it stays out of the workspace, whose crates forbid it.
 
-`./check.sh` proves the directory is the published crate plus the patch. To change the fork,
-edit the crate, then run `./check.sh --update`.
+`./check.sh` proves the directory is the published crate plus the patch, and CI runs it. To
+change the fork, edit the crate, then run `./check.sh --update`.
+
+`cargo audit` and `cargo deny` cannot see a path crate, and `cargo update` cannot fix one. The
+Nightly workflow fails when RustSec lists an advisory for this crate. Bug fixes in later
+upstream releases have to be watched for by hand.
