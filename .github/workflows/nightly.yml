@@ -17,6 +17,10 @@ jobs:
         with:
           tool: cargo-audit
       - run: cargo audit
+      - name: Fail on an advisory for the vendored crate, which cargo audit cannot see
+        run: |
+          test "$(curl -s -o /dev/null -w '%{http_code}' \
+            https://api.github.com/repos/rustsec/advisory-db/contents/crates/alacritty_terminal)" = 404
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
 
   # Long fuzz runs and the full soak join here once fuzz targets and the mem-gate exist.

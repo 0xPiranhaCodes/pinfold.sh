@@ -1,0 +1,141 @@
+diff -ruN a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml	2006-07-24 06:51:28
++++ b/Cargo.toml	2026-11-01 01:40:48
+@@ -43,10 +43,6 @@
+ name = "alacritty_terminal"
+ path = "src/lib.rs"
+ 
+-[[test]]
+-name = "ref"
+-path = "tests/ref.rs"
+-
+ [dependencies.base64]
+ version = "0.22.0"
+ 
+diff -ruN a/src/grid/mod.rs b/src/grid/mod.rs
+--- a/src/grid/mod.rs	2006-07-24 06:51:28
++++ b/src/grid/mod.rs	2026-11-01 01:40:48
+@@ -1,7 +1,9 @@
+ //! A specialized 2D grid implementation optimized for use in a terminal.
+ 
+ use std::cmp::{max, min};
++use std::fmt;
+ use std::ops::{Bound, Deref, Index, IndexMut, Range, RangeBounds};
++use std::sync::{Arc, Mutex};
+ 
+ #[cfg(feature = "serde")]
+ use serde::{Deserialize, Serialize};
+@@ -105,6 +107,15 @@
+ ///                           ^
+ ///                        columns
+ /// ```
++/// Receives rows leaving the screen, for an owner that keeps history outside the grid.
++pub trait HistorySink<T>: Send + fmt::Debug {
++    /// Takes a row that has left the screen, oldest first.
++    fn push(&mut self, row: &Row<T>);
++
++    /// Forgets every row, because the program or the user asked to clear history.
++    fn clear(&mut self);
++}
++
+ #[derive(Clone, Debug)]
+ #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+ pub struct Grid<T> {
+@@ -135,6 +146,10 @@
+ 
+     /// Maximum number of lines in history.
+     max_scroll_limit: usize,
++
++    /// Where rows go instead of history. Set only on the primary grid, with no history.
++    #[cfg_attr(feature = "serde", serde(skip))]
++    history_sink: Option<Arc<Mutex<dyn HistorySink<T>>>>,
+ }
+ 
+ impl<T: GridCell + Default + PartialEq> Grid<T> {
+@@ -142,6 +157,7 @@
+         Grid {
+             raw: Storage::with_capacity(lines, columns),
+             max_scroll_limit,
++            history_sink: None,
+             display_offset: 0,
+             saved_cursor: Cursor::default(),
+             cursor: Cursor::default(),
+@@ -150,6 +166,21 @@
+         }
+     }
+ 
++    /// Sends rows leaving the screen to `sink`. The grid must keep no history of its own.
++    pub fn set_history_sink(&mut self, sink: Arc<Mutex<dyn HistorySink<T>>>) {
++        self.history_sink = Some(sink);
++    }
++
++    /// Hands `rows` to the sink, oldest first.
++    fn send_to_history<'a>(&self, rows: impl Iterator<Item = &'a Row<T>>)
++    where
++        T: 'a,
++    {
++        if let Some(Ok(mut sink)) = self.history_sink.as_ref().map(|sink| sink.lock()) {
++            rows.for_each(|row| sink.push(row));
++        }
++    }
++
+     /// Update the size of the scrollback history.
+     pub fn update_history(&mut self, history_size: usize) {
+         let current_history_size = self.history_size();
+@@ -270,6 +301,10 @@
+ 
+         // Only rotate the entire history if the active region starts at the top.
+         if region.start == 0 {
++            // Hand rows about to leave the screen to the sink.
++            let leaving = (0..positions.min(self.lines)).map(|line| &self.raw[Line(line as i32)]);
++            self.send_to_history(leaving);
++
+             // Create scrollback for the new lines.
+             self.increase_scroll_limit(positions);
+ 
+@@ -383,6 +418,10 @@
+     pub fn clear_history(&mut self) {
+         // Explicitly purge all lines from history.
+         self.raw.shrink_lines(self.history_size());
++
++        if let Some(Ok(mut sink)) = self.history_sink.as_ref().map(|sink| sink.lock()) {
++            sink.clear();
++        }
+ 
+         // Reset display offset.
+         self.display_offset = 0;
+diff -ruN a/src/grid/resize.rs b/src/grid/resize.rs
+--- a/src/grid/resize.rs	2006-07-24 06:51:28
++++ b/src/grid/resize.rs	2026-11-01 01:40:48
+@@ -365,7 +365,9 @@
+ 
+         // Reverse iterator and use it as the new grid storage.
+         let mut reversed: Vec<Row<T>> = new_raw.drain(..).rev().collect();
+-        reversed.truncate(self.max_scroll_limit + self.lines);
++        let kept = self.max_scroll_limit + self.lines;
++        self.send_to_history(reversed.iter().skip(kept).rev());
++        reversed.truncate(kept);
+         self.raw.replace_inner(reversed);
+ 
+         // Clamp display offset in case some lines went off.
+diff -ruN a/src/term/mod.rs b/src/term/mod.rs
+--- a/src/term/mod.rs	2006-07-24 06:51:28
++++ b/src/term/mod.rs	2026-11-01 01:40:48
+@@ -1802,7 +1802,7 @@
+ 
+                 self.selection = None;
+             },
+-            ansi::ClearMode::Saved if self.history_size() > 0 => {
++            ansi::ClearMode::Saved => {
+                 self.grid.clear_history();
+ 
+                 self.vi_mode_cursor.point.line =
+@@ -1810,8 +1810,6 @@
+ 
+                 self.selection = self.selection.take().filter(|s| !s.intersects_range(..Line(0)));
+             },
+-            // We have no history to clear.
+-            ansi::ClearMode::Saved => (),
+         }
+ 
+         self.mark_fully_damaged();

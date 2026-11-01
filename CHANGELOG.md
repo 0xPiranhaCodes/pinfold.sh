@@ -18,6 +18,7 @@ Entries are generated from Conventional Commits with git-cliff
 - `cargo xtask mem-gate` now measures the core on Linux and macOS.
 - Font stack spike, and pure-Rust fonts with `swash`.
 - Glyph cache capped at 1 MB, and CPU drawing of cell rows.
+- A fork of `alacritty_terminal` that hands rows leaving the screen to their owner.
 - Metal renderer on macOS, with CPU drawing as its fallback.
 - macOS window budget raised to 30 MB plus pixels.
 - A window that runs a real shell, drawn by the CPU renderer on Linux.
