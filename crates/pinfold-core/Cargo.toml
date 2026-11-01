@@ -18,6 +18,8 @@ pinfold-proto = { path = "../pinfold-proto", version = "0.0.0" }
 pinfold-sys = { path = "../pinfold-sys", version = "0.0.0" }
 
 [dev-dependencies]
+# Off by default: coloured diffs, which pull in `console`.
+insta = { version = "1.49.0", default-features = false }
 proptest = "1.12.0"
 
 [lints]
