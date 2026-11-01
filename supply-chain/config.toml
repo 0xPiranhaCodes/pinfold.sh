@@ -112,12 +112,20 @@ criteria = "safe-to-deploy"
 version = "0.10.2"
 criteria = "safe-to-run"
 
+[[exemptions.clipboard-win]]
+version = "5.4.3"
+criteria = "safe-to-deploy"
+
 [[exemptions.combine]]
 version = "4.6.9"
 criteria = "safe-to-deploy"
 
 [[exemptions.concurrent-queue]]
 version = "2.5.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.copypasta]]
+version = "0.10.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.core-foundation]]
@@ -186,6 +194,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.errno]]
 version = "0.3.14"
+criteria = "safe-to-deploy"
+
+[[exemptions.error-code]]
+version = "3.4.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.fastrand]]
@@ -668,6 +680,10 @@ criteria = "safe-to-deploy"
 version = "0.19.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.smithay-clipboard]]
+version = "0.7.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.smol_str]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
@@ -906,6 +922,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.wit-bindgen]]
 version = "0.57.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.x11-clipboard]]
+version = "0.9.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.x11-dl]]
