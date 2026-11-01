@@ -111,12 +111,14 @@ fn with_alt(modifiers: ModifiersState, bytes: &[u8]) -> Vec<u8> {
 
 /// Returns the bytes for a key press, or nothing if the key sends none.
 ///
-/// `app_cursor` is the program's application cursor mode.
+/// `app_cursor` is the program's application cursor mode. `option_as_alt` is the
+/// `macos_option_as_alt` setting.
 pub fn encode(
     key: &Key,
     text: Option<&str>,
     modifiers: ModifiersState,
     app_cursor: bool,
+    option_as_alt: bool,
 ) -> Vec<u8> {
     // Super belongs to the desktop and to Pinfold's own shortcuts, such as Cmd+C.
     if modifiers.super_key() {
@@ -140,8 +142,8 @@ pub fn encode(
         return with_alt(modifiers, &[byte]);
     }
     let text = text.unwrap_or_default().as_bytes();
-    // shortcut: Option composes text on macOS, as in Terminal.app, make it a setting in #23.
-    if cfg!(target_os = "macos") {
+    // Option composes text on macOS by default, as in Terminal.app.
+    if cfg!(target_os = "macos") && !option_as_alt {
         text.to_vec()
     } else {
         with_alt(modifiers, text)
@@ -158,11 +160,12 @@ mod tests {
     const CONTROL: ModifiersState = ModifiersState::CONTROL;
 
     fn press(text: &str, modifiers: ModifiersState) -> Vec<u8> {
-        encode(&Key::Character(text.into()), Some(text), modifiers, false)
+        let key = Key::Character(text.into());
+        encode(&key, Some(text), modifiers, false, false)
     }
 
     fn named(key: NamedKey, modifiers: ModifiersState) -> Vec<u8> {
-        encode(&Key::Named(key), None, modifiers, false)
+        encode(&Key::Named(key), None, modifiers, false, false)
     }
 
     #[test]
@@ -209,7 +212,7 @@ mod tests {
 
     #[test]
     fn application_cursor_mode_changes_only_cursor_keys() {
-        let press = |key, modifiers| encode(&Key::Named(key), None, modifiers, true);
+        let press = |key, modifiers| encode(&Key::Named(key), None, modifiers, true, false);
         assert_eq!(press(NamedKey::ArrowUp, NONE), b"\x1bOA");
         assert_eq!(press(NamedKey::Home, NONE), b"\x1bOH");
         assert_eq!(press(NamedKey::ArrowUp, CONTROL), b"\x1b[1;5A");
@@ -235,7 +238,13 @@ mod tests {
         assert_eq!(named(NamedKey::Backspace, ALT), [0x1b, 0x7f]);
         assert_eq!(named(NamedKey::Enter, ALT), b"\x1b\r");
         assert_eq!(
-            encode(&Key::Named(NamedKey::Space), Some(" "), CONTROL, false),
+            encode(
+                &Key::Named(NamedKey::Space),
+                Some(" "),
+                CONTROL,
+                false,
+                false
+            ),
             [0]
         );
     }
@@ -249,6 +258,13 @@ mod tests {
             b"\x1bb"
         };
         assert_eq!(press("b", ALT), expected);
+    }
+
+    #[test]
+    fn option_as_alt_prefixes_escape_everywhere() {
+        let key = Key::Character("b".into());
+        assert_eq!(encode(&key, Some("b"), ALT, false, true), b"\x1bb");
+        assert_eq!(encode(&key, Some("b"), NONE, false, true), b"b");
     }
 
     #[test]

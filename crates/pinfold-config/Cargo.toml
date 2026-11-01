@@ -9,5 +9,16 @@ repository.workspace = true
 homepage.workspace = true
 publish.workspace = true
 
+[dependencies]
+libc = "0.2.191"
+pinfold-sys = { path = "../pinfold-sys", version = "0.0.0" }
+serde = { version = "1.0.229", default-features = false, features = ["derive"] }
+thiserror = "2.0.21"
+toml = { version = "1.1.8", default-features = false, features = ["parse", "serde", "std"] }
+
+[dev-dependencies]
+proptest = "1.12.0"
+tempfile = "3"
+
 [lints]
 workspace = true

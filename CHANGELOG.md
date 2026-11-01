@@ -11,6 +11,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Added
 
+- A TOML config file with `font_size` and `macos_option_as_alt`. A bad file means the defaults.
 - Project governance, security policy, contribution guide and license files.
 - Architecture decision records ADR-0001 to ADR-0027.
 - Threat model with the PTY-based identity design.
