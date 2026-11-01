@@ -79,7 +79,7 @@ pub enum Error {
 
 /// Returns where the config file belongs, or nothing if no base directory is set.
 ///
-/// This is `$XDG_CONFIG_HOME/pinfold/config.toml`, or `~/.config/pinfold/config.toml`,
+/// This is `$XDG_CONFIG_HOME/pinfold/pinfold.toml`, or `~/.config/pinfold/pinfold.toml`,
 /// on Linux and macOS alike.
 pub fn path() -> Option<PathBuf> {
     path_from(env::var_os("XDG_CONFIG_HOME"), env::var_os("HOME"))
@@ -89,7 +89,7 @@ fn path_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
     // The XDG spec says to ignore a relative path, and an empty one counts as unset.
     let absolute = |dir: Option<OsString>| dir.map(PathBuf::from).filter(|dir| dir.is_absolute());
     let base = absolute(xdg).or_else(|| Some(absolute(home)?.join(".config")))?;
-    Some(base.join("pinfold/config.toml"))
+    Some(base.join("pinfold/pinfold.toml"))
 }
 
 /// Reads the config file, following a symlink, or returns the defaults if there is none.
@@ -244,9 +244,9 @@ mod tests {
     #[test]
     fn the_path_follows_xdg_then_home() {
         let some = |dir: &str| Some(OsString::from(dir));
-        let expected = PathBuf::from("/xdg/pinfold/config.toml");
+        let expected = PathBuf::from("/xdg/pinfold/pinfold.toml");
         assert_eq!(path_from(some("/xdg"), some("/home/me")), Some(expected));
-        let expected = PathBuf::from("/home/me/.config/pinfold/config.toml");
+        let expected = PathBuf::from("/home/me/.config/pinfold/pinfold.toml");
         for xdg in [None, some(""), some("relative")] {
             assert_eq!(path_from(xdg, some("/home/me")).as_ref(), Some(&expected));
         }
