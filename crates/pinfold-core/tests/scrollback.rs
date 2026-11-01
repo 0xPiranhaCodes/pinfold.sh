@@ -46,6 +46,15 @@ fn stock_history(term: &Term<VoidListener>) -> Vec<Vec<Cell>> {
         .map(|back| {
             let row = &term.grid()[Line(-(back as i32))];
             let mut cells: Vec<Cell> = (0..COLUMNS).map(|c| row[Column(c)].clone()).collect();
+            for cell in &mut cells {
+                // Erasing can leave an empty extra, which means the same as none.
+                if cell.zerowidth().is_none_or(<[char]>::is_empty)
+                    && cell.underline_color().is_none()
+                    && cell.hyperlink().is_none()
+                {
+                    cell.extra = None;
+                }
+            }
             while cells.last() == Some(&default) {
                 cells.pop();
             }
