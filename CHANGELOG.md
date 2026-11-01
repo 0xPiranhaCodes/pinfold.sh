@@ -23,6 +23,7 @@ Entries are generated from Conventional Commits with git-cliff
 - Fuzzing of the terminal input path, on each PR and nightly.
 - Function keys, modifier combinations and application cursor mode, as xterm sends them.
 - Input method composition, drawn at the cursor.
+- Limits on OSC strings, titles and hyperlinks, and replies only in fixed formats.
 - Mouse reporting, and the wheel as arrow keys on the alternate screen.
 - A fork of `alacritty_terminal` that hands rows leaving the screen to their owner.
 - Metal renderer on macOS, with CPU drawing as its fallback.
@@ -39,3 +40,4 @@ Entries are generated from Conventional Commits with git-cliff
 
 - Closing a pane with unread output can no longer hang on macOS.
 - A window narrowed to one column with a wide character on screen no longer exhausts memory.
+- An unterminated OSC string can no longer grow the core without limit.

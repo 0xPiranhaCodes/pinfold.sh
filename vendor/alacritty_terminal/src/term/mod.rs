@@ -39,13 +39,19 @@ pub const MIN_COLUMNS: usize = 2;
 pub const MIN_SCREEN_LINES: usize = 1;
 
 /// Max size of the window title stack.
-const TITLE_STACK_MAX_DEPTH: usize = 4096;
+const TITLE_STACK_MAX_DEPTH: usize = 16;
+
+/// Longest window title kept, in bytes.
+const TITLE_MAX_BYTES: usize = 256;
+
+/// Most hyperlinks a terminal holds at once.
+const MAX_HYPERLINKS: usize = 2000;
 
 /// Default semantic escape characters.
 pub const SEMANTIC_ESCAPE_CHARS: &str = ",│`|:\"' ()[]{}<>\t";
 
 /// Max size of the keyboard modes.
-const KEYBOARD_MODE_STACK_MAX_DEPTH: usize = TITLE_STACK_MAX_DEPTH;
+const KEYBOARD_MODE_STACK_MAX_DEPTH: usize = 4096;
 
 /// Default tab interval, corresponding to terminfo `it` value.
 const INITIAL_TABSTOPS: usize = 8;
@@ -316,6 +322,12 @@ pub struct Term<T> {
     /// term is set.
     title_stack: Vec<Option<String>>,
 
+    /// How many hyperlinks may be set before counting those held again.
+    hyperlink_credit: usize,
+
+    /// How many hyperlinks to refuse before counting again, when none fit.
+    hyperlink_wait: usize,
+
     /// The stack for the keyboard modes.
     keyboard_mode_stack: Vec<KeyboardModes>,
 
@@ -385,6 +397,34 @@ pub enum Osc52 {
 }
 
 impl<T> Term<T> {
+    /// Returns whether another hyperlink fits under `MAX_HYPERLINKS`.
+    ///
+    /// Counting walks both screens, so a full terminal refuses as many links as the limit
+    /// before it counts again, and a flood of links cannot make every one cost a walk.
+    fn allow_hyperlink(&mut self) -> bool {
+        if self.hyperlink_wait > 0 {
+            self.hyperlink_wait -= 1;
+            return false;
+        }
+        if self.hyperlink_credit == 0 {
+            let mut held = std::collections::HashSet::new();
+            for grid in [&self.grid, &self.inactive_grid] {
+                held.extend(
+                    grid.display_iter()
+                        .filter_map(|cell| cell.hyperlink())
+                        .map(|link| link.id().to_owned()),
+                );
+            }
+            self.hyperlink_credit = MAX_HYPERLINKS.saturating_sub(held.len());
+            if self.hyperlink_credit == 0 {
+                self.hyperlink_wait = MAX_HYPERLINKS;
+                return false;
+            }
+        }
+        self.hyperlink_credit -= 1;
+        true
+    }
+
     #[inline]
     pub fn scroll_display(&mut self, scroll: Scroll)
     where
@@ -437,6 +477,8 @@ impl<T> Term<T> {
             cursor_style: Default::default(),
             colors: color::Colors::default(),
             title_stack: Default::default(),
+            hyperlink_credit: 0,
+            hyperlink_wait: 0,
             is_focused: Default::default(),
             selection: Default::default(),
             title: Default::default(),
@@ -1871,6 +1913,7 @@ impl<T: EventListener> Handler for Term<T> {
     #[inline]
     fn set_hyperlink(&mut self, hyperlink: Option<Hyperlink>) {
         trace!("Setting hyperlink: {hyperlink:?}");
+        let hyperlink = hyperlink.filter(|_| self.allow_hyperlink());
         self.grid.cursor.template.set_hyperlink(hyperlink.map(|e| e.into()));
     }
 
@@ -2219,6 +2262,13 @@ impl<T: EventListener> Handler for Term<T> {
     fn set_title(&mut self, title: Option<String>) {
         trace!("Setting title to '{title:?}'");
 
+        let title = title.map(|mut title| {
+            if title.len() > TITLE_MAX_BYTES {
+                let end = (0..=TITLE_MAX_BYTES).rev().find(|&end| title.is_char_boundary(end));
+                title.truncate(end.unwrap_or(0));
+            }
+            title
+        });
         self.title.clone_from(&title);
 
         let title_event = match title {
