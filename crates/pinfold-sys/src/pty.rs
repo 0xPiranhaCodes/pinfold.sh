@@ -2,6 +2,7 @@
 
 use std::fs::File;
 use std::io;
+use std::mem::ManuallyDrop;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -10,7 +11,7 @@ use std::ptr;
 /// A child process attached to a PTY. Dropping it kills the child and closes the master.
 #[derive(Debug)]
 pub struct Pty {
-    master: File,
+    master: ManuallyDrop<File>,
     child: Child,
 }
 
@@ -95,7 +96,7 @@ impl Pty {
         }
         let child = command.spawn()?;
         Ok(Self {
-            master: File::from(master),
+            master: ManuallyDrop::new(File::from(master)),
             child,
         })
     }
@@ -137,6 +138,10 @@ impl Pty {
 impl Drop for Pty {
     fn drop(&mut self) {
         let _ = self.child.kill();
+        // macOS holds a dying child in close until its output drains, so waiting with the
+        // master open and unread can block forever.
+        // SAFETY: this is the only drop of `master`, and nothing uses it afterwards.
+        unsafe { ManuallyDrop::drop(&mut self.master) };
         let _ = self.child.wait();
     }
 }
@@ -169,6 +174,18 @@ mod tests {
             }
         }
         text
+    }
+
+    #[test]
+    fn dropping_a_pty_with_unread_output_returns() {
+        let pty = shell("yes");
+        thread::sleep(Duration::from_millis(200));
+        let (done, finished) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            drop(pty);
+            done.send(()).unwrap();
+        });
+        finished.recv_timeout(Duration::from_secs(5)).unwrap();
     }
 
     #[test]
