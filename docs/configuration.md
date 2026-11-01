@@ -1,7 +1,7 @@
 # Configuration
 
 Pinfold reads one TOML file at startup, on Linux and macOS alike:
-`$XDG_CONFIG_HOME/pinfold/config.toml`, or `~/.config/pinfold/config.toml` when that
+`$XDG_CONFIG_HOME/pinfold/pinfold.toml`, or `~/.config/pinfold/pinfold.toml` when that
 variable is unset. There is no reload yet, so restart to apply a change.
 
 | Key                   | Type   | Default | Meaning                                                  |

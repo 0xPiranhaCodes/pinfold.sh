@@ -46,6 +46,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Fixed
 
+- The config file is `pinfold.toml`, the name the design gives it.
 - Closing a pane with unread output can no longer hang on macOS.
 - A window narrowed to one column with a wide character on screen no longer exhausts memory.
 - An unterminated OSC string can no longer grow the core without limit.
