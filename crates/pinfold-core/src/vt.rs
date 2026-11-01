@@ -12,6 +12,7 @@ use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, Processor};
 use pinfold_proto::{Cell, Frame, MouseEncoding, MouseMode};
 
+use crate::marks::{Marks, ShellMarks, WorkingDirectory};
 use crate::scrollback::Scrollback;
 
 /// The slot Alacritty's colour table gives the default background.
@@ -57,6 +58,12 @@ pub trait VtEngine {
 
     /// Shows what a synchronized update held back, as if the program had ended it.
     fn end_sync(&mut self, replies: &mut Vec<u8>);
+
+    /// Returns what the shell last reported through OSC 133. Output can fake all of it.
+    fn shell_marks(&self) -> ShellMarks;
+
+    /// Returns the last valid OSC 7 directory, which is a hint that output can fake.
+    fn cwd(&self) -> Option<&WorkingDirectory>;
 }
 
 /// The "Graphite Grid" ground and text colours (`docs/design/ui/`).
@@ -174,11 +181,15 @@ enum Scan {
 }
 
 impl Scan {
-    /// Calls `pass` with `bytes`, minus OSC string bytes past `MAX_SEQUENCE`.
+    /// Calls `pass` with `bytes`, minus OSC string bytes past `MAX_SEQUENCE`, and gives
+    /// `marks` every OSC string that fits. The parser drops the ones `marks` wants.
     ///
-    /// This follows the parser exactly: only `ESC ]` opens a string, and BEL, CAN, SUB or
-    /// ESC ends one. A string cut short is still dispatched when it ends.
-    fn filter(&mut self, bytes: &[u8], mut pass: impl FnMut(&[u8])) {
+    /// This follows the parser exactly: only `ESC ]` opens a string, with controls allowed
+    /// between the two, and BEL, CAN, SUB or ESC ends one. A string cut short is still
+    /// dispatched when it ends.
+    // shortcut: marks apply on read, ahead of output a synchronized update holds back, fix
+    // this if marks ever need a position in the grid.
+    fn filter(&mut self, bytes: &[u8], marks: &mut Marks, mut pass: impl FnMut(&[u8])) {
         let ends = |byte: &u8| matches!(byte, 0x07 | 0x18 | 0x1a | 0x1b);
         let (mut start, mut index) = (0, 0);
         while index < bytes.len() {
@@ -192,8 +203,12 @@ impl Scan {
                 },
                 Self::Escape => {
                     *self = match bytes[index] {
-                        b']' => Self::Osc(0),
-                        0x1b => Self::Escape,
+                        b']' => {
+                            marks.start();
+                            Self::Osc(0)
+                        }
+                        0x18 | 0x1a => Self::Ground,
+                        0x00..=0x1f | 0x7f..=0xff => Self::Escape,
                         _ => Self::Ground,
                     };
                     index += 1;
@@ -216,6 +231,7 @@ impl Scan {
                 }
                 Self::Osc(length) => {
                     let byte = bytes[index];
+                    marks.byte(byte);
                     *self = match byte {
                         0x1b => Self::Escape,
                         _ if ends(&byte) => Self::Ground,
@@ -234,6 +250,7 @@ pub struct AlacrittyEngine {
     term: Term<Replies>,
     parser: Processor,
     scan: Scan,
+    marks: Marks,
     replies: Replies,
     scrollback: Arc<Mutex<Scrollback>>,
 }
@@ -254,6 +271,7 @@ impl AlacrittyEngine {
             term,
             parser: Processor::new(),
             scan: Scan::default(),
+            marks: Marks::default(),
             replies,
             scrollback,
         }
@@ -308,7 +326,8 @@ impl AlacrittyEngine {
 impl VtEngine for AlacrittyEngine {
     fn feed(&mut self, bytes: &[u8], replies: &mut Vec<u8>) {
         let (parser, term) = (&mut self.parser, &mut self.term);
-        self.scan.filter(bytes, |bytes| parser.advance(term, bytes));
+        self.scan
+            .filter(bytes, &mut self.marks, |bytes| parser.advance(term, bytes));
         if parser.sync_bytes_count() > MAX_HELD {
             parser.stop_sync(term);
         }
@@ -388,6 +407,14 @@ impl VtEngine for AlacrittyEngine {
     fn end_sync(&mut self, replies: &mut Vec<u8>) {
         self.parser.stop_sync(&mut self.term);
         self.take_replies(replies);
+    }
+
+    fn shell_marks(&self) -> ShellMarks {
+        self.marks.shell
+    }
+
+    fn cwd(&self) -> Option<&WorkingDirectory> {
+        self.marks.cwd.as_ref()
     }
 }
 
@@ -489,7 +516,9 @@ mod tests {
 
     fn filtered(scan: &mut Scan, bytes: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
-        scan.filter(bytes, |bytes| out.extend_from_slice(bytes));
+        scan.filter(bytes, &mut Marks::default(), |bytes| {
+            out.extend_from_slice(bytes);
+        });
         out
     }
 
@@ -528,6 +557,35 @@ mod tests {
         filtered(&mut scan, b"\x1b");
         filtered(&mut scan, b"]");
         assert_eq!(scan, Scan::Osc(0));
+    }
+
+    #[test]
+    fn controls_after_an_escape_do_not_hide_a_string_from_the_limit() {
+        for byte in [0x00, 0x07, 0x1c, 0x7f, 0x80, 0xff] {
+            let mut scan = Scan::default();
+            filtered(&mut scan, &[0x1b, byte, b']']);
+            assert_eq!(scan, Scan::Osc(0), "{byte:#x}");
+        }
+        for byte in [0x18, 0x1a, b'c'] {
+            let mut scan = Scan::default();
+            filtered(&mut scan, &[0x1b, byte, b']']);
+            assert_eq!(scan, Scan::Ground, "{byte:#x}");
+        }
+    }
+
+    #[test]
+    fn marks_hold_no_more_than_one_string() {
+        let mut engine = AlacrittyEngine::new(4, 20);
+        let title = [b"\x1b]2;".as_slice(), &[b'a'; 10_000], b"\x07"].concat();
+        feed(&mut engine, &title);
+        assert!(engine.marks.text.capacity() <= 8);
+        let url = [b"\x1b]7;file:///".as_slice(), &[b'a'; 10_000], b"\x07"].concat();
+        for _ in 0..1000 {
+            feed(&mut engine, &url);
+            feed(&mut engine, b"\x1b]133;D;1\x07");
+        }
+        assert!(engine.marks.text.capacity() <= MAX_SEQUENCE);
+        assert_eq!(engine.cwd(), None);
     }
 
     #[test]

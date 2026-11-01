@@ -28,6 +28,7 @@ Entries are generated from Conventional Commits with git-cliff
 - Input method composition, drawn at the cursor.
 - Synchronized updates end on their own after 150 ms and hold at most 256 KiB per pane.
 - Limits on OSC strings, titles and hyperlinks, and replies only in fixed formats.
+- OSC 133 command marks and the OSC 7 working directory, tracked per pane as hints.
 - Mouse reporting, and the wheel as arrow keys on the alternate screen.
 - A fork of `alacritty_terminal` that hands rows leaving the screen to their owner.
 - Metal renderer on macOS, with CPU drawing as its fallback.
