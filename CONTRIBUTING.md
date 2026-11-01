@@ -49,16 +49,16 @@ cargo audit
 
 ### Fuzzing
 
-Fuzz targets live in `fuzz/` and need a nightly toolchain and `cargo-fuzz`:
+Fuzz targets live in `fuzz/` and need `cargo-fuzz` and the nightly toolchain pinned in
+`xtask/src/main.rs`:
 
 ```sh
-cargo +nightly fuzz list
-cargo +nightly fuzz run <target> -- -max_total_time=60
+rustup toolchain install nightly-2026-10-15 --profile minimal
+cargo +nightly-2026-10-15 fuzz run vt_input -- -dict=fuzz/vt.dict -max_total_time=60
 ```
 
-`cargo xtask fuzz-smoke` runs a short pass over every target, which is what CI
-does on each PR. Any crash is a release blocker. There are no targets yet, so it
-reports SKIPPED until M1.
+`cargo xtask fuzz-smoke` runs every target for 30 seconds, which is what CI does on each
+PR. Nightly runs it for 30 minutes with `FUZZ_SECONDS=1800`. Any crash is a release blocker.
 
 ### The memory gate
 

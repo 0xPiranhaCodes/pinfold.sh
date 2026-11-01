@@ -86,6 +86,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: rustup toolchain install nightly-2026-10-15 --profile minimal
+      # From source, because the prebuilt one defaults to a musl target that cannot sanitize.
+      - run: cargo install cargo-fuzz --version 0.13.2 --locked
       - run: cargo xtask fuzz-smoke
 
   mem-gate:
