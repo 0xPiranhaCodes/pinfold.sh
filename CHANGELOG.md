@@ -12,7 +12,7 @@ Entries are generated from Conventional Commits with git-cliff
 ### Added
 
 - Project governance, security policy, contribution guide and license files.
-- Architecture decision records ADR-0001 to ADR-0026.
+- Architecture decision records ADR-0001 to ADR-0027.
 - Threat model with the PTY-based identity design.
 - Roadmap, and memory targets updated from the M0 measurements.
 - `cargo xtask mem-gate` now measures the core on Linux and macOS.

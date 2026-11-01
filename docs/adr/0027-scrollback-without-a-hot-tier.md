@@ -1,6 +1,6 @@
 # ADR-0027: Scrollback without a separate hot tier
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-01
 
 ## Context
