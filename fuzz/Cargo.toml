@@ -1,0 +1,27 @@
+[package]
+name = "pinfold-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[[bin]]
+name = "vt_input"
+path = "fuzz_targets/vt_input.rs"
+test = false
+doc = false
+bench = false
+
+[dependencies]
+libfuzzer-sys = "0.4"
+pinfold-core = { path = "../crates/pinfold-core" }
+pinfold-proto = { path = "../crates/pinfold-proto" }
+
+# Keeps this out of the workspace, so the C++ in libfuzzer-sys stays out of its builds.
+[workspace]
+
+# `[patch]` is per workspace, so the fork needs naming here too.
+[patch.crates-io]
+alacritty_terminal = { path = "../vendor/alacritty_terminal" }

@@ -20,6 +20,8 @@ Commands:
 ";
 
 const FUZZ_SMOKE_SECONDS: u32 = 30;
+/// Pinned here and in the workflows, so a broken nightly cannot fail every PR.
+const FUZZ_TOOLCHAIN: &str = "+nightly-2026-10-15";
 
 #[derive(Debug, PartialEq)]
 enum Task {
@@ -70,10 +72,12 @@ fn fuzz_smoke() -> ExitCode {
     if targets.is_empty() {
         println!("fuzz-smoke: SKIPPED, no fuzz targets exist yet");
     }
+    let seconds = std::env::var("FUZZ_SECONDS").unwrap_or_else(|_| FUZZ_SMOKE_SECONDS.to_string());
     for target in targets {
-        let time = format!("-max_total_time={FUZZ_SMOKE_SECONDS}");
+        let time = format!("-max_total_time={seconds}");
         let status = Command::new("cargo")
-            .args(["+nightly", "fuzz", "run", &target, "--", &time])
+            .args([FUZZ_TOOLCHAIN, "fuzz", "run", &target, "--"])
+            .args(["-dict=fuzz/vt.dict", "-timeout=10", &time])
             .status();
         if !status.is_ok_and(|status| status.success()) {
             eprintln!("fuzz-smoke: {target} failed");

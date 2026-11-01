@@ -18,6 +18,8 @@ const BACKGROUND_SLOT: usize = 257;
 
 /// Larger sizes are clamped, so a bad resize cannot allocate gigabytes of cells.
 pub const MAX_DIMENSION: u16 = 1024;
+/// A wide character cannot fit in fewer columns: reflowing one wraps forever.
+pub const MIN_COLUMNS: u16 = 2;
 
 /// A terminal state machine that turns program output into a grid.
 ///
@@ -28,7 +30,8 @@ pub trait VtEngine {
     /// appended to `replies`, and the caller writes them back to the PTY.
     fn feed(&mut self, bytes: &[u8], replies: &mut Vec<u8>);
 
-    /// Changes the grid size. Each dimension is clamped to `1..=MAX_DIMENSION`.
+    /// Changes the grid size, clamped to at least one row and `MIN_COLUMNS` columns and at
+    /// most `MAX_DIMENSION` of each.
     fn resize(&mut self, rows: u16, columns: u16);
 
     /// Returns the size as `(rows, columns)`.
@@ -89,7 +92,7 @@ impl Size {
     fn clamped(rows: u16, columns: u16) -> Self {
         Self {
             rows: rows.clamp(1, MAX_DIMENSION),
-            columns: columns.clamp(1, MAX_DIMENSION),
+            columns: columns.clamp(MIN_COLUMNS, MAX_DIMENSION),
         }
     }
 }
@@ -309,9 +312,18 @@ mod tests {
     #[test]
     fn sizes_are_clamped() {
         let mut engine = AlacrittyEngine::new(0, 0);
-        assert_eq!(engine.size(), (1, 1));
+        assert_eq!(engine.size(), (1, MIN_COLUMNS));
         engine.resize(u16::MAX, u16::MAX);
         assert_eq!(engine.size(), (MAX_DIMENSION, MAX_DIMENSION));
+    }
+
+    #[test]
+    fn a_wide_character_survives_the_narrowest_window() {
+        let mut engine = AlacrittyEngine::new(8, 249);
+        feed(&mut engine, "䤬".as_bytes());
+        engine.resize(4, 1);
+        assert_eq!(engine.size(), (4, MIN_COLUMNS));
+        assert_eq!(engine.line_text(0), "䤬");
     }
 
     fn screen(bytes: &[u8]) -> Frame {

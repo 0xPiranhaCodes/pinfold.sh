@@ -20,6 +20,7 @@ Entries are generated from Conventional Commits with git-cliff
 - Glyph cache capped at 1 MB, and CPU drawing of cell rows.
 - A scrollback store with a 2 MB cap per pane, holding what leaves a pane's screen.
 - `cargo xtask mem-gate` measures 10k lines of typical text and a pane at its scrollback cap.
+- Fuzzing of the terminal input path, on each PR and nightly.
 - A fork of `alacritty_terminal` that hands rows leaving the screen to their owner.
 - Metal renderer on macOS, with CPU drawing as its fallback.
 - macOS window budget raised to 30 MB plus pixels.
@@ -34,3 +35,4 @@ Entries are generated from Conventional Commits with git-cliff
 ### Fixed
 
 - Closing a pane with unread output can no longer hang on macOS.
+- A window narrowed to one column with a wide character on screen no longer exhausts memory.
