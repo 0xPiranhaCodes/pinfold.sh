@@ -21,6 +21,7 @@ Entries are generated from Conventional Commits with git-cliff
 - A scrollback store with a 2 MB cap per pane, holding what leaves a pane's screen.
 - `cargo xtask mem-gate` measures 10k lines of typical text and a pane at its scrollback cap.
 - Fuzzing of the terminal input path, on each PR and nightly.
+- Function keys, modifier combinations and application cursor mode, as xterm sends them.
 - A fork of `alacritty_terminal` that hands rows leaving the screen to their owner.
 - Metal renderer on macOS, with CPU drawing as its fallback.
 - macOS window budget raised to 30 MB plus pixels.

@@ -26,6 +26,18 @@ xdotool type --delay 15 'printf "\033[31mred \033[42mgreen\033[0m \033[7minverse
 xdotool key Return
 sleep 0.5
 import -window root /out/x11.png
+# shellcheck disable=SC2016
+xdotool type --delay 15 'stty -echo -icanon; printf "\033[?1h"; head -c 17 | od -An -c > /tmp/keys; printf "\033[?1l"; stty sane'
+xdotool key Return
+sleep 0.5
+xdotool key Up F5 ctrl+Left shift+Tab
+sleep 0.5
+keys=$(tr -s ' ' < /tmp/keys | tr -d '\n')
+if [ "$keys" != ' 033 O A 033 [ 1 5 ~ 033 [ 1 ; 5 D 033 [ Z' ]; then
+  echo "FAIL: keys reached the program as: $keys"
+  exit 1
+fi
+echo "keys reached the program"
 echo "X11 PSS at 1000x640: $(pss "$WINDOW") MB"
 xdotool key ctrl+d
 sleep 1

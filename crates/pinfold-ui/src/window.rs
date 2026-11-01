@@ -212,7 +212,8 @@ impl ApplicationHandler<Notice> for App {
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
                 let text = event.text.as_ref().map(|text| text.as_str());
-                let bytes = input::encode(&event.logical_key, text, self.modifiers);
+                let app_cursor = self.frame.app_cursor;
+                let bytes = input::encode(&event.logical_key, text, self.modifiers, app_cursor);
                 if !bytes.is_empty() {
                     self.request(Request::Input(bytes));
                 }
