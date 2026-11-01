@@ -38,6 +38,10 @@ impl HistorySink<Cell> for Rows {
     fn clear(&mut self) {
         self.0.clear();
     }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 struct Pane {

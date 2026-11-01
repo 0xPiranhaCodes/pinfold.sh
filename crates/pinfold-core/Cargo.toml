@@ -11,9 +11,14 @@ publish.workspace = true
 
 [dependencies]
 alacritty_terminal = "=0.26.0"
+# The safe features make the crate forbid unsafe code. Off by default: its frame format.
+lz4_flex = { version = "=0.14.0", default-features = false, features = ["alloc", "checked-decode", "safe-decode", "safe-encode"] }
 mio = { version = "1.2.4", features = ["os-ext", "os-poll"] }
 pinfold-proto = { path = "../pinfold-proto", version = "0.0.0" }
 pinfold-sys = { path = "../pinfold-sys", version = "0.0.0" }
+
+[dev-dependencies]
+proptest = "1.12.0"
 
 [lints]
 workspace = true
