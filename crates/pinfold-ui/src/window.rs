@@ -184,7 +184,6 @@ impl App {
         });
         let window = Rc::new(event_loop.create_window(attributes)?);
         window.set_ime_allowed(true);
-        // shortcut: fixed at the first scale factor, so moving between displays blurs, fix in #21.
         let size = self.config.font_size * window.scale_factor() as f32;
         let renderer = renderer(&window, size)?;
         self.open = Some(Open { window, renderer });
@@ -200,6 +199,16 @@ impl App {
         open.window.request_redraw();
         let rows = rows.saturating_sub(CHROME_ROWS).max(1);
         self.request(Request::Resize(rows, columns.max(1)));
+    }
+
+    /// Redraws the font for a new display. Winit sends `Resized` after this only sometimes.
+    fn scale_changed(&mut self, scale: f64) {
+        let Some(open) = &mut self.open else { return };
+        open.renderer
+            .set_font_size(self.config.font_size * scale as f32);
+        let size = open.window.inner_size();
+        self.ime_cursor = None;
+        self.resized(size);
     }
 
     fn redraw(&mut self) -> Result<(), Error> {
@@ -390,6 +399,9 @@ impl ApplicationHandler<Notice> for App {
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => self.resized(size),
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                self.scale_changed(scale_factor);
+            }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::Ime(event) => self.ime(event),
             WindowEvent::CursorMoved { position, .. } => {

@@ -2,7 +2,7 @@
 
 use pinfold_proto::Cell;
 
-use crate::font::Font;
+use crate::font::{Font, Fonts};
 use crate::glyphs::{CACHE_LIMIT, GlyphCache, Metrics, clamp_size};
 
 /// A pixel buffer of `0x00RRGGBB` values.
@@ -51,9 +51,6 @@ fn blend(background: u32, foreground: u32, alpha: u8) -> u32 {
 /// Turns cells into pixels, using one font at one size.
 pub struct Painter {
     cache: GlyphCache,
-    cell_width: usize,
-    cell_height: usize,
-    baseline: i32,
 }
 
 impl Painter {
@@ -63,25 +60,22 @@ impl Painter {
         Self::with_limit(font, size, CACHE_LIMIT)
     }
 
-    fn with_limit(font: Font, size: f32, limit: usize) -> Self {
-        let size = clamp_size(size);
-        let Metrics {
-            cell_width,
-            cell_height,
-            baseline,
-        } = Metrics::new(&font, size);
+    fn with_limit(fonts: impl Into<Fonts>, size: f32, limit: usize) -> Self {
         Self {
-            cache: GlyphCache::new(font, size, limit),
-            cell_width,
-            cell_height,
-            baseline,
+            cache: GlyphCache::new(fonts, clamp_size(size), limit),
         }
     }
 
     /// Returns the size of a cell in pixels, as `(width, height)`.
     #[must_use]
     pub fn cell_size(&self) -> (usize, usize) {
-        (self.cell_width, self.cell_height)
+        let metrics = self.cache.metrics();
+        (metrics.cell_width, metrics.cell_height)
+    }
+
+    /// Sets the font size in physical pixels, dropping every glyph drawn at the old one.
+    pub fn set_font_size(&mut self, size: f32) {
+        self.cache.set_size(clamp_size(size));
     }
 
     /// Returns the glyph cache.
@@ -93,25 +87,30 @@ impl Painter {
     /// Draws a row of cells. Anything past the canvas is clipped, and nothing is drawn
     /// outside this row, so damaged rows can be redrawn alone.
     pub fn draw_row(&mut self, canvas: &mut Canvas, row: usize, cells: &[Cell]) {
-        let top = row.saturating_mul(self.cell_height);
+        let Metrics {
+            cell_width,
+            cell_height,
+            baseline,
+        } = self.cache.metrics();
+        let top = row.saturating_mul(cell_height);
         if top >= canvas.height {
             return;
         }
-        let bottom = (top + self.cell_height).min(canvas.height);
+        let bottom = (top + cell_height).min(canvas.height);
         // Backgrounds go first, so a wide glyph is not erased by the cell after it.
         for (column, cell) in cells.iter().enumerate() {
-            let left = column.saturating_mul(self.cell_width);
+            let left = column.saturating_mul(cell_width);
             canvas.fill(
                 left,
                 top,
-                left.saturating_add(self.cell_width),
+                left.saturating_add(cell_width),
                 bottom,
                 cell.background,
             );
         }
         let pen_y = i32::try_from(top)
             .unwrap_or(i32::MAX)
-            .saturating_add(self.baseline);
+            .saturating_add(baseline);
         for (column, cell) in cells.iter().enumerate() {
             if cell.character == ' ' {
                 continue;
@@ -120,7 +119,7 @@ impl Painter {
                 continue;
             };
             let left =
-                i64::try_from(column * self.cell_width).unwrap_or(i64::MAX) + i64::from(glyph.left);
+                i64::try_from(column * cell_width).unwrap_or(i64::MAX) + i64::from(glyph.left);
             let first = i64::from(pen_y) - i64::from(glyph.top);
             for (line, mask) in glyph.mask.chunks(glyph.width.max(1)).enumerate() {
                 let y = first + line as i64;
@@ -143,6 +142,7 @@ impl Painter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::font::fixture::{File, KANJI, kanji_font};
 
     const INK: u32 = 0x00ff_ffff;
     const PAPER: u32 = 0x0010_2030;
@@ -278,6 +278,35 @@ mod tests {
         cache.get('O');
         assert!(cache.contains('H') && cache.contains('O'));
         assert!(!cache.contains('I'));
+    }
+
+    #[test]
+    fn a_scale_change_drops_glyphs_and_changes_the_cell() {
+        let mut painter = painter();
+        let (mut buffer, width, height) = pixels(&painter, 1, 1);
+        let mut canvas = Canvas::new(&mut buffer, width, height).unwrap();
+        painter.draw_row(&mut canvas, 0, &[cell('M')]);
+        assert!(painter.cache().contains('M'));
+        let before = painter.cell_size();
+        painter.set_font_size(32.0);
+        assert_eq!(painter.cache().used(), 0);
+        assert!(!painter.cache().contains('M'));
+        assert!(painter.cell_size().0 > before.0 && painter.cell_size().1 > before.1);
+    }
+
+    #[test]
+    fn a_wide_glyph_inks_both_of_its_cells() {
+        let file = File::new(&kanji_font().unwrap()).unwrap();
+        let fonts = Fonts::with_fallbacks(Font::bundled().unwrap(), file.list);
+        let mut painter = Painter::with_limit(fonts, 16.0, CACHE_LIMIT);
+        let (mut buffer, width, height) = pixels(&painter, 2, 1);
+        let mut canvas = Canvas::new(&mut buffer, width, height).unwrap();
+        painter.draw_row(&mut canvas, 0, &[cell(KANJI), cell(' ')]);
+        let inked = |columns: std::ops::Range<usize>| {
+            let mut rows = buffer.chunks(width);
+            rows.any(|row| row[columns.clone()].iter().any(|&pixel| pixel != PAPER))
+        };
+        assert!(inked(0..width / 2) && inked(width / 2..width));
     }
 
     #[test]
