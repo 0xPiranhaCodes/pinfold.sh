@@ -42,6 +42,16 @@ fn sequence(key: NamedKey) -> Option<Sequence> {
     })
 }
 
+/// Whether this is the paste shortcut: Command+V on macOS, Ctrl+Shift+V elsewhere.
+pub fn is_paste(key: &Key, modifiers: ModifiersState) -> bool {
+    let held = if cfg!(target_os = "macos") {
+        ModifiersState::SUPER
+    } else {
+        ModifiersState::CONTROL | ModifiersState::SHIFT
+    };
+    modifiers == held && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("v"))
+}
+
 /// xterm's modifier parameter, or nothing without modifiers.
 fn parameter(modifiers: ModifiersState) -> Option<u8> {
     let bits = u8::from(modifiers.shift_key())

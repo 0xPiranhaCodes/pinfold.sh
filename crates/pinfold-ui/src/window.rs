@@ -16,6 +16,7 @@ use pinfold_core::io::{Reactor, Waker};
 use pinfold_proto::{Frame, MouseMode};
 use pinfold_render::cpu::{CpuRenderer, Renderer};
 use pinfold_render::font::{Font, FontError};
+use pinfold_sys::clipboard::Clipboard;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::error::{EventLoopError, OsError};
@@ -24,7 +25,8 @@ use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
-use crate::{ime, input, mouse};
+use crate::paste::Prompt;
+use crate::{ime, input, mouse, paste};
 
 /// In logical pixels.
 const FONT_SIZE: f32 = 13.0;
@@ -32,6 +34,8 @@ const DEFAULT_SIZE: LogicalSize<u32> = LogicalSize::new(1000, 640);
 const PANE: usize = 0;
 const ROWS: u16 = 24;
 const COLUMNS: u16 = 80;
+/// Rows under the pane that belong to Pinfold, so program output cannot reach them.
+const CHROME_ROWS: u16 = 1;
 
 /// Why the window could not run.
 #[derive(Debug, thiserror::Error)]
@@ -55,6 +59,7 @@ pub enum Error {
 
 enum Request {
     Input(Vec<u8>),
+    Paste(String),
     Resize(u16, u16),
 }
 
@@ -83,6 +88,9 @@ fn run_io(
             match request {
                 Request::Input(bytes) => {
                     reactor.write(PANE, &bytes);
+                }
+                Request::Paste(text) => {
+                    reactor.paste(PANE, &text);
                 }
                 Request::Resize(rows, columns) => reactor.resize(PANE, rows, columns)?,
             }
@@ -145,6 +153,10 @@ struct App {
     buttons: [bool; 3],
     /// Wheel movement not yet worth a whole line.
     wheel: f32,
+    /// Connected on the first paste, so a window that never pastes does not pay for it.
+    clipboard: Option<Clipboard>,
+    /// A paste waiting for the user. Every key goes to this until it is answered.
+    prompt: Option<Prompt>,
     result: Result<(), Error>,
 }
 
@@ -177,7 +189,8 @@ impl App {
         let columns = u16::try_from(size.width as usize / width).unwrap_or(u16::MAX);
         let rows = u16::try_from(size.height as usize / height).unwrap_or(u16::MAX);
         open.window.request_redraw();
-        self.request(Request::Resize(rows.max(1), columns.max(1)));
+        let rows = rows.saturating_sub(CHROME_ROWS).max(1);
+        self.request(Request::Resize(rows, columns.max(1)));
     }
 
     fn redraw(&mut self) -> Result<(), Error> {
@@ -200,15 +213,50 @@ impl App {
                     );
                 }
             }
-            if self.preedit.0.is_empty() {
+            if self.preedit.0.is_empty() && self.prompt.is_none() {
                 open.renderer.draw(&self.frame)?;
             } else {
                 self.composed.clone_from(&self.frame);
                 ime::overlay(&mut self.composed, &self.preedit.0, self.preedit.1);
+                if let Some(prompt) = &self.prompt {
+                    paste::banner(&mut self.composed, prompt);
+                }
                 open.renderer.draw(&self.composed)?;
             }
         }
         Ok(())
+    }
+
+    fn paste(&mut self) {
+        let Some(open) = &self.open else { return };
+        if self.clipboard.is_none() {
+            self.clipboard = Clipboard::new(open.window.clone());
+        }
+        let Some(text) = self.clipboard.as_mut().and_then(Clipboard::text) else {
+            return;
+        };
+        match paste::check(text) {
+            Ok(text) => self.request(Request::Paste(text)),
+            Err(prompt) => {
+                self.prompt = Some(prompt);
+                open.window.request_redraw();
+            }
+        }
+    }
+
+    fn answer(&mut self, key: &Key) {
+        match key {
+            Key::Named(NamedKey::Enter) => {
+                if let Some(Prompt::Confirm { text, .. }) = self.prompt.take() {
+                    self.request(Request::Paste(text));
+                }
+            }
+            Key::Named(NamedKey::Escape) => self.prompt = None,
+            _ => {}
+        }
+        if let Some(open) = &self.open {
+            open.window.request_redraw();
+        }
     }
 
     fn report(&self, event: mouse::Event) {
@@ -291,7 +339,9 @@ impl App {
             }
             Ime::Commit(text) => {
                 self.preedit.0.clear();
-                self.request(Request::Input(text.into_bytes()));
+                if self.prompt.is_none() {
+                    self.request(Request::Input(text.into_bytes()));
+                }
             }
             Ime::Disabled => self.preedit.0.clear(),
             Ime::Enabled => {}
@@ -338,6 +388,20 @@ impl ApplicationHandler<Notice> for App {
             }
             WindowEvent::MouseInput { state, button, .. } => self.pressed(button, state),
             WindowEvent::MouseWheel { delta, .. } => self.wheel(delta),
+            // A held key repeating must not answer a prompt it did not see.
+            WindowEvent::KeyboardInput { event, .. } if self.prompt.is_some() => {
+                if event.state == ElementState::Pressed && !event.repeat {
+                    self.answer(&event.logical_key);
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed
+                    && input::is_paste(&event.logical_key, self.modifiers) =>
+            {
+                if !event.repeat {
+                    self.paste();
+                }
+            }
             // A key pressed while composing belongs to the input method.
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed && self.preedit.0.is_empty() =>
@@ -398,6 +462,8 @@ pub fn run(size: Option<(u32, u32)>) -> Result<(), Error> {
         pointer: (0, 0),
         buttons: [false; 3],
         wheel: 0.0,
+        clipboard: None,
+        prompt: None,
         result: Ok(()),
     };
     event_loop.run_app(&mut app)?;

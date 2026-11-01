@@ -13,6 +13,7 @@ publish.workspace = true
 pinfold-core = { path = "../pinfold-core", version = "0.0.0" }
 pinfold-proto = { path = "../pinfold-proto", version = "0.0.0" }
 pinfold-render = { path = "../pinfold-render", version = "0.0.0" }
+pinfold-sys = { path = "../pinfold-sys", version = "0.0.0", features = ["clipboard"] }
 thiserror = "2.0.21"
 unicode-width = "0.2.3"
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", "wayland", "wayland-dlopen", "x11"] }
