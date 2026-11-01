@@ -245,6 +245,7 @@ impl VtEngine for AlacrittyEngine {
             .ok()
             .zip(u16::try_from(point.column.0).ok());
         frame.cursor = position.filter(|_| visible);
+        frame.app_cursor = self.term.mode().contains(TermMode::APP_CURSOR);
     }
 }
 
@@ -384,6 +385,13 @@ mod tests {
     fn the_cursor_follows_the_program() {
         assert_eq!(screen(b"ab\r\nc").cursor, Some((1, 1)));
         assert_eq!(screen(b"\x1b[?25l").cursor, None);
+    }
+
+    #[test]
+    fn frames_carry_application_cursor_mode() {
+        assert!(!screen(b"").app_cursor);
+        assert!(screen(b"\x1b[?1h").app_cursor);
+        assert!(!screen(b"\x1b[?1h\x1b[?1l").app_cursor);
     }
 
     #[test]

@@ -22,4 +22,6 @@ pub struct Frame {
     pub cells: Vec<Cell>,
     /// The visible cursor, as `(row, column)`.
     pub cursor: Option<(u16, u16)>,
+    /// Whether the program asked for application cursor keys.
+    pub app_cursor: bool,
 }
