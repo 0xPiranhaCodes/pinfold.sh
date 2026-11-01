@@ -29,8 +29,10 @@ struct Titles(Arc<Mutex<Vec<String>>>);
 
 impl EventListener for Titles {
     fn send_event(&self, event: Event) {
-        if let Event::Title(title) = event {
-            self.0.lock().unwrap().push(title);
+        if let Event::Title(title) = event
+            && let Ok(mut titles) = self.0.lock()
+        {
+            titles.push(title);
         }
     }
 }
