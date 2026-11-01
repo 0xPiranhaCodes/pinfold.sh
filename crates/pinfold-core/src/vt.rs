@@ -1,6 +1,7 @@
 //! The terminal engine behind a trait, with `alacritty_terminal` as its implementation.
 
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
@@ -20,6 +21,9 @@ const BACKGROUND_SLOT: usize = 257;
 pub const MAX_DIMENSION: u16 = 1024;
 /// Longest OSC string that reaches the parser, whose own buffer has no limit.
 pub const MAX_SEQUENCE: usize = 4096;
+/// Most output a synchronized update holds back. Past this it is shown early, which can
+/// tear a frame. The parser's own limit is 2 MiB per pane, outside the scrollback cap.
+pub const MAX_HELD: usize = 256 * 1024;
 /// A wide character cannot fit in fewer columns: reflowing one wraps forever.
 pub const MIN_COLUMNS: u16 = 2;
 
@@ -44,6 +48,12 @@ pub trait VtEngine {
 
     /// Copies the visible screen into `frame`, reusing its allocation.
     fn frame(&self, frame: &mut Frame);
+
+    /// Returns when output held back by a synchronized update must be shown, if any is.
+    fn sync_deadline(&self) -> Option<Instant>;
+
+    /// Shows what a synchronized update held back, as if the program had ended it.
+    fn end_sync(&mut self, replies: &mut Vec<u8>);
 }
 
 /// The "Graphite Grid" ground and text colours (`docs/design/ui/`).
@@ -251,6 +261,12 @@ impl AlacrittyEngine {
     pub fn scrollback(&self) -> &Mutex<Scrollback> {
         &self.scrollback
     }
+
+    fn take_replies(&self, replies: &mut Vec<u8>) {
+        if let Ok(mut pending) = self.replies.0.lock() {
+            replies.append(&mut pending);
+        }
+    }
 }
 
 impl AlacrittyEngine {
@@ -290,9 +306,10 @@ impl VtEngine for AlacrittyEngine {
     fn feed(&mut self, bytes: &[u8], replies: &mut Vec<u8>) {
         let (parser, term) = (&mut self.parser, &mut self.term);
         self.scan.filter(bytes, |bytes| parser.advance(term, bytes));
-        if let Ok(mut pending) = self.replies.0.lock() {
-            replies.append(&mut pending);
+        if parser.sync_bytes_count() > MAX_HELD {
+            parser.stop_sync(term);
         }
+        self.take_replies(replies);
     }
 
     fn resize(&mut self, rows: u16, columns: u16) {
@@ -355,6 +372,15 @@ impl VtEngine for AlacrittyEngine {
             MouseEncoding::Legacy
         };
         frame.alternate_scroll = mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL);
+    }
+
+    fn sync_deadline(&self) -> Option<Instant> {
+        self.parser.sync_timeout().sync_timeout()
+    }
+
+    fn end_sync(&mut self, replies: &mut Vec<u8>) {
+        self.parser.stop_sync(&mut self.term);
+        self.take_replies(replies);
     }
 }
 
@@ -505,6 +531,40 @@ mod tests {
         engine.feed(&vec![b'a'; 1_000_000], &mut replies);
         engine.feed(b"\x07ok", &mut replies);
         assert_eq!(engine.line_text(0), "ok");
+    }
+
+    #[test]
+    fn a_finished_update_appears_at_once() {
+        let mut engine = AlacrittyEngine::new(4, 20);
+        feed(&mut engine, b"\x1b[?2026hheld");
+        assert_eq!(engine.line_text(0), "");
+        assert!(engine.sync_deadline().is_some());
+        feed(&mut engine, b"\x1b[?2026l");
+        assert_eq!(engine.line_text(0), "held");
+        assert!(engine.sync_deadline().is_none());
+    }
+
+    #[test]
+    fn ending_an_update_shows_and_answers_what_it_held() {
+        let mut engine = AlacrittyEngine::new(4, 20);
+        assert!(feed(&mut engine, b"\x1b[?2026hheld\x1b[6n").is_empty());
+        let mut replies = Vec::new();
+        engine.end_sync(&mut replies);
+        assert_eq!(engine.line_text(0), "held");
+        assert_eq!(replies, b"\x1b[1;5R");
+        assert!(engine.sync_deadline().is_none());
+    }
+
+    #[test]
+    fn an_update_stops_holding_output_at_the_limit() {
+        let mut engine = AlacrittyEngine::new(4, 20);
+        feed(&mut engine, b"\x1b[?2026h");
+        let chunk = vec![b'x'; 64 * 1024];
+        for _ in 0..16 {
+            feed(&mut engine, &chunk);
+            assert!(engine.parser.sync_bytes_count() <= MAX_HELD);
+        }
+        assert_eq!(engine.line_text(0).len(), 20);
     }
 
     #[test]

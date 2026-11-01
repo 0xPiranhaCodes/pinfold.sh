@@ -23,6 +23,7 @@ Entries are generated from Conventional Commits with git-cliff
 - Fuzzing of the terminal input path, on each PR and nightly.
 - Function keys, modifier combinations and application cursor mode, as xterm sends them.
 - Input method composition, drawn at the cursor.
+- Synchronized updates end on their own after 150 ms and hold at most 256 KiB per pane.
 - Limits on OSC strings, titles and hyperlinks, and replies only in fixed formats.
 - Mouse reporting, and the wheel as arrow keys on the alternate screen.
 - A fork of `alacritty_terminal` that hands rows leaving the screen to their owner.
