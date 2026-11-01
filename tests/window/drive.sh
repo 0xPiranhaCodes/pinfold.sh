@@ -51,6 +51,25 @@ if [ "$mouse" != '033[<0;1;1M033[<0;1;1m033[<64;1;1M033[<64;1;1M' ]; then
   exit 1
 fi
 echo "the mouse reached the program"
+# A hostile paste: it tries to end its brackets early. Cancelled once, then confirmed.
+printf 'a\033[201~b\nc' | xclip -selection clipboard >/dev/null 2>&1
+# shellcheck disable=SC2016
+xdotool type --delay 15 'stty -echo -icanon; printf "\033[?2004h"; head -c 21 | od -An -c > /tmp/paste; printf "\033[?2004l"; stty sane'
+xdotool key Return
+sleep 0.5
+xdotool key ctrl+shift+v
+sleep 0.5
+xdotool key Escape ctrl+shift+v
+sleep 0.5
+import -window root /out/paste.png
+xdotool key Return
+sleep 0.5
+paste=$(tr -d ' \n' < /tmp/paste)
+if [ "$paste" != '033[200~a[201~b\nc033[201~' ]; then
+  echo "FAIL: the paste reached the program as: $paste"
+  exit 1
+fi
+echo "the paste reached the program as text, after confirmation"
 echo "X11 PSS at 1000x640: $(pss "$WINDOW") MB"
 xdotool key ctrl+d
 sleep 1

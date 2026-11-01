@@ -10,9 +10,13 @@ homepage.workspace = true
 publish.workspace = true
 
 [dependencies]
+copypasta = { version = "0.10.2", optional = true }
 libc = "0.2.191"
+raw-window-handle = { version = "0.6.2", optional = true }
 
 [features]
+# Off in the core, which never touches the clipboard.
+clipboard = ["dep:copypasta", "dep:raw-window-handle"]
 # Off in the core, so it never loads Apple's graphics frameworks.
 metal = [
   "dep:objc2",
@@ -27,7 +31,6 @@ objc2 = { version = "0.6.5", optional = true }
 objc2-foundation = { version = "0.3.2", optional = true }
 objc2-metal = { version = "0.3.2", optional = true }
 objc2-quartz-core = { version = "0.3.2", optional = true }
-raw-window-handle = { version = "0.6.2", optional = true }
 
 # A crate cannot relax an inherited `forbid`, so this mirrors [workspace.lints].
 [lints.rust]

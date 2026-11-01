@@ -4,6 +4,8 @@
 
 use std::io;
 
+#[cfg(feature = "clipboard")]
+pub mod clipboard;
 pub mod mapped;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub mod metal;
