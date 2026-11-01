@@ -8,7 +8,7 @@ use std::io::{self, ErrorKind, Read, Write};
 use std::os::fd::AsRawFd;
 use std::process::Command;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token};
@@ -145,15 +145,24 @@ impl Reactor {
 
     /// Waits for PTY activity for up to `timeout`, then gives each active pane one budget.
     ///
+    /// A synchronized update that outlives its deadline ends the wait early and is shown.
+    ///
     /// # Errors
     ///
     /// Returns an error if polling fails.
     pub fn turn(&mut self, timeout: Option<Duration>) -> io::Result<()> {
         let unfinished = self.panes.iter().any(|pane| pane.readable);
+        let now = Instant::now();
+        let deadline = self
+            .panes
+            .iter()
+            .filter_map(|pane| pane.engine.sync_deadline())
+            .min()
+            .map(|deadline| deadline.saturating_duration_since(now));
         let timeout = if unfinished {
             Some(Duration::ZERO)
         } else {
-            timeout
+            timeout.into_iter().chain(deadline).min()
         };
         match self.poll.poll(&mut self.events, timeout) {
             Err(error) if error.kind() == ErrorKind::Interrupted => return Ok(()),
@@ -176,6 +185,15 @@ impl Reactor {
                 );
                 pane.readable = pumped == Pumped::Budget;
                 pane.closed |= pumped == Pumped::Closed;
+            }
+            if pane
+                .engine
+                .sync_deadline()
+                .is_some_and(|due| due <= Instant::now())
+            {
+                pane.engine.end_sync(&mut pane.replies);
+                pane.replies.truncate(MAX_REPLIES);
+                pane.dirty = true;
             }
             flush(&mut pane.pty.master(), &mut pane.replies);
         }
@@ -236,7 +254,6 @@ impl Reactor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Instant;
 
     fn shell(script: &str) -> Command {
         let mut command = Command::new("/bin/sh");
@@ -374,6 +391,21 @@ mod tests {
         assert!(turn_until(&mut reactor, |r| on_screen(r, pane, "hello")));
         assert!(reactor.take_dirty(pane));
         assert!(!reactor.take_dirty(pane));
+    }
+
+    #[test]
+    fn a_synchronized_update_that_never_ends_still_shows_up() {
+        let mut reactor = Reactor::new().unwrap();
+        let script = r"printf '\033[?2026hhidden'; sleep 30";
+        let pane = reactor.spawn(shell(script), 24, 80).unwrap();
+        reactor.take_dirty(pane);
+        let start = Instant::now();
+        while !on_screen(&reactor, pane, "hidden") && start.elapsed() < Duration::from_secs(10) {
+            reactor.turn(Some(Duration::from_secs(20))).unwrap();
+        }
+        assert!(on_screen(&reactor, pane, "hidden"));
+        assert!(start.elapsed() < Duration::from_secs(10));
+        assert!(reactor.take_dirty(pane));
     }
 
     #[test]
