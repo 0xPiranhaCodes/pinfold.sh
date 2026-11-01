@@ -12,7 +12,7 @@ const HELP: &str = "\
 Usage: cargo xtask <command>
 
 Commands:
-  mem-gate     Check every ADR-0021 memory budget (rest arrive in M1)
+  mem-gate     Check every ADR-0021 memory budget
   fuzz-smoke   Run each fuzz target briefly
   schema-gen   Generate API JSON Schemas (arrives in M3)
   release      Prepare a release (arrives in M5)
@@ -96,14 +96,43 @@ fn build(profile: &str, binary: &str, features: &[&str]) -> io::Result<()> {
     }
 }
 
+/// Saves the scrollback bench's corpora in `dir`.
+fn write_corpora(dir: &Path) -> io::Result<()> {
+    fs::create_dir_all(dir)?;
+    let status = Command::new("cargo")
+        .args(["run", "--locked", "--release"])
+        .args(["--package", "pinfold-benches", "--bin", "scrollback"])
+        .arg("--")
+        .arg("--write")
+        .arg(dir)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other("writing the corpora failed"))
+    }
+}
+
 fn mem_gate_task() -> ExitCode {
+    let target = std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into());
+    let corpora = Path::new(&target).join("corpora");
     if let Err(error) = build("release-core", "pinfold-core", &["--no-default-features"])
         .and_then(|()| build("release", "pinfold", &[]))
+        .and_then(|()| write_corpora(&corpora))
     {
         eprintln!("mem-gate: {error}");
         return ExitCode::FAILURE;
     }
-    let target = std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into());
+    let (Some(typical), Some(hostile)) = (
+        corpora.join("plain-log").to_str().map(str::to_owned),
+        corpora.join("truecolor").to_str().map(str::to_owned),
+    ) else {
+        eprintln!("mem-gate: the target directory is not valid UTF-8");
+        return ExitCode::FAILURE;
+    };
+    let replay_typical = ["--replay", typical.as_str()];
+    let replay_hostile = ["--replay", hostile.as_str()];
+    let replay_baseline: &[&str] = &["--replay", "/dev/null"];
     let core = Path::new(&target).join("release-core/pinfold-core");
     let window = Path::new(&target).join("release/pinfold");
     let mut budgets = vec![
@@ -114,6 +143,25 @@ fn mem_gate_task() -> ExitCode {
             args: &["--idle", "8"],
             per_pane_over: None,
             settle: mem_gate::SETTLE,
+            wait_for_line: false,
+        },
+        mem_gate::Budget {
+            metric: "10k lines of typical text",
+            limit: mem_gate::TYPICAL_TEXT_LIMIT,
+            program: &core,
+            args: &replay_typical,
+            per_pane_over: Some((replay_baseline, 1)),
+            settle: mem_gate::SETTLE,
+            wait_for_line: true,
+        },
+        mem_gate::Budget {
+            metric: "Scrollback at its cap",
+            limit: mem_gate::SCROLLBACK_CAP,
+            program: &core,
+            args: &replay_hostile,
+            per_pane_over: Some((replay_baseline, 1)),
+            settle: mem_gate::SETTLE,
+            wait_for_line: true,
         },
         mem_gate::Budget {
             metric: "Each idle pane",
@@ -122,6 +170,7 @@ fn mem_gate_task() -> ExitCode {
             args: &["--idle", "8"],
             per_pane_over: Some((&["--idle", "1"], 7)),
             settle: mem_gate::SETTLE,
+            wait_for_line: false,
         },
     ];
     if cfg!(target_os = "macos") {
@@ -132,6 +181,7 @@ fn mem_gate_task() -> ExitCode {
             args: &["--size", "1512x1890"],
             per_pane_over: None,
             settle: mem_gate::WINDOW_SETTLE,
+            wait_for_line: false,
         });
     }
     if cfg!(target_os = "linux") {
@@ -142,6 +192,7 @@ fn mem_gate_task() -> ExitCode {
             args: &["--size", "1920x1080"],
             per_pane_over: None,
             settle: mem_gate::WINDOW_SETTLE,
+            wait_for_line: false,
         });
     }
     if mem_gate::run(&budgets) {

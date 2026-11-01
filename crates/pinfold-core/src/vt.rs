@@ -11,6 +11,8 @@ use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, Processor};
 use pinfold_proto::{Cell, Frame};
 
+use crate::scrollback::Scrollback;
+
 /// The slot Alacritty's colour table gives the default background.
 const BACKGROUND_SLOT: usize = 257;
 
@@ -128,10 +130,11 @@ pub struct AlacrittyEngine {
     term: Term<Replies>,
     parser: Processor,
     replies: Replies,
+    scrollback: Arc<Mutex<Scrollback>>,
 }
 
 impl AlacrittyEngine {
-    /// Creates a blank terminal. It keeps no scrollback until #24 adds the tiered store.
+    /// Creates a blank terminal. Rows leaving the primary screen go to its scrollback store.
     #[must_use]
     pub fn new(rows: u16, columns: u16) -> Self {
         let replies = Replies::default();
@@ -139,11 +142,21 @@ impl AlacrittyEngine {
             scrolling_history: 0,
             ..Config::default()
         };
+        let mut term = Term::new(config, &Size::clamped(rows, columns), replies.clone());
+        let scrollback = Arc::new(Mutex::new(Scrollback::new()));
+        term.grid_mut().set_history_sink(scrollback.clone());
         Self {
-            term: Term::new(config, &Size::clamped(rows, columns), replies.clone()),
+            term,
             parser: Processor::new(),
             replies,
+            scrollback,
         }
+    }
+
+    /// Returns the store of rows that have left the screen.
+    #[must_use]
+    pub fn scrollback(&self) -> &Mutex<Scrollback> {
+        &self.scrollback
     }
 }
 
@@ -368,6 +381,51 @@ mod tests {
         }
         for byte in 0..=255 {
             screen(format!("\x1b[38;5;{byte}m\x1b[48;5;{byte}mx").as_bytes());
+        }
+    }
+
+    fn history(engine: &AlacrittyEngine) -> Vec<String> {
+        let store = engine.scrollback().lock().unwrap();
+        store
+            .rows(0, store.len())
+            .iter()
+            .map(|row| row.iter().map(|cell| cell.c).collect::<String>())
+            .map(|text| text.trim_end().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn rows_leaving_the_screen_reach_the_store() {
+        let mut engine = AlacrittyEngine::new(2, 20);
+        feed(&mut engine, b"one\r\ntwo\r\nthree\r\nfour");
+        assert_eq!(history(&engine), ["one", "two"]);
+        assert_eq!(engine.line_text(0), "three");
+    }
+
+    #[test]
+    fn the_alternate_screen_stays_out_of_the_store() {
+        let mut engine = AlacrittyEngine::new(2, 20);
+        feed(&mut engine, b"\x1b[?1049hone\r\ntwo\r\nthree");
+        assert!(history(&engine).is_empty());
+    }
+
+    #[test]
+    fn clearing_scrollback_empties_the_store() {
+        let mut engine = AlacrittyEngine::new(2, 20);
+        feed(&mut engine, b"one\r\ntwo\r\nthree\x1b[3J");
+        assert!(history(&engine).is_empty());
+    }
+
+    #[test]
+    fn hostile_output_through_a_pane_stays_under_the_cap() {
+        let mut engine = AlacrittyEngine::new(2, 120);
+        for line in 0..20_000_u32 {
+            let colour = line.wrapping_mul(2_654_435_761);
+            let [r, g, b, _] = colour.to_le_bytes();
+            let text = format!("\x1b[38;2;{r};{g};{b}m{colour:0>119}\r\n");
+            feed(&mut engine, text.as_bytes());
+            let bytes = engine.scrollback().lock().unwrap().bytes();
+            assert!(bytes <= crate::scrollback::BYTE_CAP);
         }
     }
 

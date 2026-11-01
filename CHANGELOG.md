@@ -18,7 +18,8 @@ Entries are generated from Conventional Commits with git-cliff
 - `cargo xtask mem-gate` now measures the core on Linux and macOS.
 - Font stack spike, and pure-Rust fonts with `swash`.
 - Glyph cache capped at 1 MB, and CPU drawing of cell rows.
-- A scrollback store with a 2 MB cap per pane, not yet connected to panes.
+- A scrollback store with a 2 MB cap per pane, holding what leaves a pane's screen.
+- `cargo xtask mem-gate` measures 10k lines of typical text and a pane at its scrollback cap.
 - A fork of `alacritty_terminal` that hands rows leaving the screen to their owner.
 - Metal renderer on macOS, with CPU drawing as its fallback.
 - macOS window budget raised to 30 MB plus pixels.
