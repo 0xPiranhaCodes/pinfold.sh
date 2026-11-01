@@ -10,6 +10,7 @@ The patch does what history outside the grid needs (ADR-0006, #24):
 - `HistorySink` receives rows as they leave the primary screen, and hears when history is
   cleared. It is called directly, so hostile output cannot pile rows up in a buffer.
 - Rows that reflow off the top when the window narrows go to the sink.
+- A blank screen clears without scrolling once the sink holds rows, as stock does with history.
 - `CSI 3J` no longer depends on the grid holding history. The guard would otherwise skip
   the clear, and a shell's `clear` would leave its rows in the store.
 

@@ -114,6 +114,9 @@ pub trait HistorySink<T>: Send + fmt::Debug {
 
     /// Forgets every row, because the program or the user asked to clear history.
     fn clear(&mut self);
+
+    /// Returns whether no rows are held.
+    fn is_empty(&self) -> bool;
 }
 
 #[derive(Clone, Debug)]
@@ -349,13 +352,19 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         // Determine how many lines to scroll up by.
         let end = Point::new(Line(self.lines as i32 - 1), Column(self.columns()));
         let mut iter = self.iter_from(end);
+        let mut blank = true;
         while let Some(cell) = iter.prev() {
             if !cell.is_empty() || cell.point.line < 0 {
+                blank = false;
                 break;
             }
         }
         debug_assert!(iter.point.line >= -1);
-        let positions = (iter.point.line.0 + 1) as usize;
+        // A blank screen above history scrolls nothing, wherever that history lives.
+        let sink_has_rows = self.history_sink.as_ref().is_some_and(|sink| {
+            sink.lock().is_ok_and(|sink| !sink.is_empty())
+        });
+        let positions = if blank && sink_has_rows { 0 } else { (iter.point.line.0 + 1) as usize };
         let region = Line(0)..Line(self.lines as i32);
 
         // Clear the viewport.

@@ -10,5 +10,13 @@ publish.workspace = true
 [lib]
 path = "lib.rs"
 
+[[bin]]
+name = "scrollback"
+path = "scrollback.rs"
+
+[dependencies]
+alacritty_terminal = "=0.26.0"
+pinfold-core = { path = "../crates/pinfold-core", version = "0.0.0" }
+
 [lints]
 workspace = true

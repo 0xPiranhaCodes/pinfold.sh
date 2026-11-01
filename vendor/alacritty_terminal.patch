@@ -1,6 +1,6 @@
 diff -ruN a/Cargo.toml b/Cargo.toml
 --- a/Cargo.toml	2006-07-24 06:51:28
-+++ b/Cargo.toml	2026-11-01 01:40:48
++++ b/Cargo.toml	2026-11-01 08:15:23
 @@ -43,10 +43,6 @@
  name = "alacritty_terminal"
  path = "src/lib.rs"
@@ -14,7 +14,7 @@ diff -ruN a/Cargo.toml b/Cargo.toml
  
 diff -ruN a/src/grid/mod.rs b/src/grid/mod.rs
 --- a/src/grid/mod.rs	2006-07-24 06:51:28
-+++ b/src/grid/mod.rs	2026-11-01 01:40:48
++++ b/src/grid/mod.rs	2026-11-01 08:15:23
 @@ -1,7 +1,9 @@
  //! A specialized 2D grid implementation optimized for use in a terminal.
  
@@ -25,7 +25,7 @@ diff -ruN a/src/grid/mod.rs b/src/grid/mod.rs
  
  #[cfg(feature = "serde")]
  use serde::{Deserialize, Serialize};
-@@ -105,6 +107,15 @@
+@@ -105,6 +107,18 @@
  ///                           ^
  ///                        columns
  /// ```
@@ -36,12 +36,15 @@ diff -ruN a/src/grid/mod.rs b/src/grid/mod.rs
 +
 +    /// Forgets every row, because the program or the user asked to clear history.
 +    fn clear(&mut self);
++
++    /// Returns whether no rows are held.
++    fn is_empty(&self) -> bool;
 +}
 +
  #[derive(Clone, Debug)]
  #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
  pub struct Grid<T> {
-@@ -135,6 +146,10 @@
+@@ -135,6 +149,10 @@
  
      /// Maximum number of lines in history.
      max_scroll_limit: usize,
@@ -52,7 +55,7 @@ diff -ruN a/src/grid/mod.rs b/src/grid/mod.rs
  }
  
  impl<T: GridCell + Default + PartialEq> Grid<T> {
-@@ -142,6 +157,7 @@
+@@ -142,6 +160,7 @@
          Grid {
              raw: Storage::with_capacity(lines, columns),
              max_scroll_limit,
@@ -60,7 +63,7 @@ diff -ruN a/src/grid/mod.rs b/src/grid/mod.rs
              display_offset: 0,
              saved_cursor: Cursor::default(),
              cursor: Cursor::default(),
-@@ -150,6 +166,21 @@
+@@ -150,6 +169,21 @@
          }
      }
  
@@ -82,7 +85,7 @@ diff -ruN a/src/grid/mod.rs b/src/grid/mod.rs
      /// Update the size of the scrollback history.
      pub fn update_history(&mut self, history_size: usize) {
          let current_history_size = self.history_size();
-@@ -270,6 +301,10 @@
+@@ -270,6 +304,10 @@
  
          // Only rotate the entire history if the active region starts at the top.
          if region.start == 0 {
@@ -93,7 +96,28 @@ diff -ruN a/src/grid/mod.rs b/src/grid/mod.rs
              // Create scrollback for the new lines.
              self.increase_scroll_limit(positions);
  
-@@ -383,6 +418,10 @@
+@@ -314,13 +352,19 @@
+         // Determine how many lines to scroll up by.
+         let end = Point::new(Line(self.lines as i32 - 1), Column(self.columns()));
+         let mut iter = self.iter_from(end);
++        let mut blank = true;
+         while let Some(cell) = iter.prev() {
+             if !cell.is_empty() || cell.point.line < 0 {
++                blank = false;
+                 break;
+             }
+         }
+         debug_assert!(iter.point.line >= -1);
+-        let positions = (iter.point.line.0 + 1) as usize;
++        // A blank screen above history scrolls nothing, wherever that history lives.
++        let sink_has_rows = self.history_sink.as_ref().is_some_and(|sink| {
++            sink.lock().is_ok_and(|sink| !sink.is_empty())
++        });
++        let positions = if blank && sink_has_rows { 0 } else { (iter.point.line.0 + 1) as usize };
+         let region = Line(0)..Line(self.lines as i32);
+ 
+         // Clear the viewport.
+@@ -383,6 +427,10 @@
      pub fn clear_history(&mut self) {
          // Explicitly purge all lines from history.
          self.raw.shrink_lines(self.history_size());
@@ -106,7 +130,7 @@ diff -ruN a/src/grid/mod.rs b/src/grid/mod.rs
          self.display_offset = 0;
 diff -ruN a/src/grid/resize.rs b/src/grid/resize.rs
 --- a/src/grid/resize.rs	2006-07-24 06:51:28
-+++ b/src/grid/resize.rs	2026-11-01 01:40:48
++++ b/src/grid/resize.rs	2026-11-01 08:15:23
 @@ -365,7 +365,9 @@
  
          // Reverse iterator and use it as the new grid storage.
@@ -120,7 +144,7 @@ diff -ruN a/src/grid/resize.rs b/src/grid/resize.rs
          // Clamp display offset in case some lines went off.
 diff -ruN a/src/term/mod.rs b/src/term/mod.rs
 --- a/src/term/mod.rs	2006-07-24 06:51:28
-+++ b/src/term/mod.rs	2026-11-01 01:40:48
++++ b/src/term/mod.rs	2026-11-01 08:15:23
 @@ -1802,7 +1802,7 @@
  
                  self.selection = None;
