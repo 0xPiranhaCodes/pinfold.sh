@@ -29,6 +29,12 @@ pub fn footprint(pid: u32) -> io::Result<u64> {
     platform::footprint(pid)
 }
 
+/// Returns the user this process acts as.
+pub fn effective_uid() -> u32 {
+    // SAFETY: geteuid takes no arguments, cannot fail and touches no memory.
+    unsafe { libc::geteuid() }
+}
+
 #[cfg(target_os = "linux")]
 mod platform {
     use std::io;

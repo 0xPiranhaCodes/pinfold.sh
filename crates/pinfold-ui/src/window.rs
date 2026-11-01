@@ -12,6 +12,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use pinfold_config::Config;
 use pinfold_core::io::{Reactor, Waker};
 use pinfold_proto::{Frame, MouseMode};
 use pinfold_render::cpu::{CpuRenderer, Renderer};
@@ -23,13 +24,13 @@ use winit::error::{EventLoopError, OsError};
 use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
+#[cfg(target_os = "macos")]
+use winit::platform::macos::{OptionAsAlt, WindowAttributesExtMacOS};
 use winit::window::{Window, WindowId};
 
 use crate::paste::Prompt;
 use crate::{ime, input, mouse, paste};
 
-/// In logical pixels.
-const FONT_SIZE: f32 = 13.0;
 const DEFAULT_SIZE: LogicalSize<u32> = LogicalSize::new(1000, 640);
 const PANE: usize = 0;
 const ROWS: u16 = 24;
@@ -134,6 +135,7 @@ fn renderer(window: &Rc<Window>, size: f32) -> Result<Box<dyn Renderer>, Error> 
 }
 
 struct App {
+    config: Config,
     size: Option<(u32, u32)>,
     requests: Sender<Request>,
     latest: Arc<Latest>,
@@ -173,10 +175,17 @@ impl App {
             Some((width, height)) => attributes.with_inner_size(PhysicalSize::new(width, height)),
             None => attributes.with_inner_size(DEFAULT_SIZE),
         };
+        // Without this macOS hands over the composed character, such as ƒ for Option+f.
+        #[cfg(target_os = "macos")]
+        let attributes = attributes.with_option_as_alt(if self.config.macos_option_as_alt {
+            OptionAsAlt::Both
+        } else {
+            OptionAsAlt::None
+        });
         let window = Rc::new(event_loop.create_window(attributes)?);
         window.set_ime_allowed(true);
         // shortcut: fixed at the first scale factor, so moving between displays blurs, fix in #21.
-        let size = FONT_SIZE * window.scale_factor() as f32;
+        let size = self.config.font_size * window.scale_factor() as f32;
         let renderer = renderer(&window, size)?;
         self.open = Some(Open { window, renderer });
         Ok(())
@@ -325,7 +334,7 @@ impl App {
                 self.report(mouse::Event::Wheel(lines > 0.0));
             } else if self.frame.alternate_scroll {
                 let empty = ModifiersState::empty();
-                let arrow = input::encode(&key, None, empty, self.frame.app_cursor);
+                let arrow = input::encode(&key, None, empty, self.frame.app_cursor, false);
                 self.request(Request::Input(arrow));
             }
         }
@@ -407,8 +416,9 @@ impl ApplicationHandler<Notice> for App {
                 if event.state == ElementState::Pressed && self.preedit.0.is_empty() =>
             {
                 let text = event.text.as_ref().map(|text| text.as_str());
-                let app_cursor = self.frame.app_cursor;
-                let bytes = input::encode(&event.logical_key, text, self.modifiers, app_cursor);
+                let (app_cursor, alt) = (self.frame.app_cursor, self.config.macos_option_as_alt);
+                let bytes =
+                    input::encode(&event.logical_key, text, self.modifiers, app_cursor, alt);
                 if !bytes.is_empty() {
                     self.request(Request::Input(bytes));
                 }
@@ -422,6 +432,22 @@ impl ApplicationHandler<Notice> for App {
             _ => {}
         }
     }
+}
+
+/// Reads the config file. A typo must not lock anyone out of their terminal, so a bad
+/// file means the defaults.
+fn config() -> Config {
+    let Some(path) = pinfold_config::path() else {
+        return Config::default();
+    };
+    pinfold_config::load(&path).unwrap_or_else(|error| {
+        // shortcut: stderr only, so a launch from the Dock shows nothing, draw it in the chrome.
+        eprintln!(
+            "pinfold: using the defaults, not {}: {error}",
+            path.display()
+        );
+        Config::default()
+    })
 }
 
 /// Opens a window running the user's shell, and returns when either closes.
@@ -449,6 +475,7 @@ pub fn run(size: Option<(u32, u32)>) -> Result<(), Error> {
             }
         })?;
     let mut app = App {
+        config: config(),
         size,
         requests,
         latest,
