@@ -10,7 +10,7 @@ use alacritty_terminal::term::cell::{Cell as GridCell, Flags};
 use alacritty_terminal::term::color;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, Processor};
-use pinfold_proto::{Cell, Frame, MouseEncoding, MouseMode};
+use pinfold_proto::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode};
 
 use crate::marks::{Marks, ShellMarks, WorkingDirectory};
 use crate::scrollback::Scrollback;
@@ -356,6 +356,12 @@ impl AlacrittyEngine {
         }
         if cell.flags.contains(Flags::HIDDEN) {
             foreground = background;
+        }
+        if cell.flags.contains(Flags::BOLD) {
+            foreground |= BOLD;
+        }
+        if cell.flags.contains(Flags::ITALIC) {
+            foreground |= ITALIC;
         }
         let spacer = cell.flags.contains(Flags::WIDE_CHAR_SPACER);
         Cell {
@@ -733,6 +739,15 @@ mod tests {
         assert_eq!(frame.cells[1].character, 'i');
         assert_eq!(frame.cells[0].foreground, FOREGROUND);
         assert_eq!(frame.cells[0].background, BACKGROUND);
+    }
+
+    #[test]
+    fn styles_reach_the_frame_and_end_with_a_reset() {
+        let frame = screen(b"\x1b[1ma\x1b[3mb\x1b[0mc\x1b[7;1md");
+        let styles: Vec<u32> = frame.cells[..4].iter().map(Cell::style).collect();
+        assert_eq!(styles, [BOLD, BOLD | ITALIC, 0, BOLD]);
+        assert_eq!(frame.cells[0].foreground, FOREGROUND | BOLD);
+        assert_eq!(frame.cells[3].background, FOREGROUND);
     }
 
     #[test]

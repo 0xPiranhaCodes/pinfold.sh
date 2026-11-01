@@ -5,6 +5,7 @@
 
 use std::env;
 use std::io;
+use std::path::Path;
 use std::process::Command;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -121,14 +122,18 @@ struct Open {
 }
 
 /// Metal on macOS (ADR-0022), or CPU drawing if this Mac has no Metal device.
-fn renderer(window: &Rc<Window>, size: f32) -> Result<Box<dyn Renderer>, Error> {
+fn renderer(
+    window: &Rc<Window>,
+    size: f32,
+    font: Option<&Path>,
+) -> Result<Box<dyn Renderer>, Error> {
     #[cfg(target_os = "macos")]
     if let Some(renderer) =
-        pinfold_render::metal::MetalRenderer::new(window.as_ref(), Font::bundled()?, size)
+        pinfold_render::metal::MetalRenderer::new(window.as_ref(), Font::chosen(font)?, size)
     {
         return Ok(Box::new(renderer));
     }
-    let font = Font::bundled()?;
+    let font = Font::chosen(font)?;
     Ok(Box::new(CpuRenderer::new(
         window.clone(),
         window.clone(),
@@ -188,7 +193,7 @@ impl App {
         let window = Rc::new(event_loop.create_window(attributes)?);
         window.set_ime_allowed(true);
         let size = self.config.font_size * window.scale_factor() as f32;
-        let renderer = renderer(&window, size)?;
+        let renderer = renderer(&window, size, self.config.font_path.as_deref())?;
         self.open = Some(Open { window, renderer });
         Ok(())
     }

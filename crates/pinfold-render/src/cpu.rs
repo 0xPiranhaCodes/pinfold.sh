@@ -40,7 +40,7 @@ pub(crate) fn cells_with_cursor(frame: &Frame, cells: &mut Vec<Cell>) {
         // A wide glyph's second half sits on the next cell, which must invert with it.
         let span = cells.get(at).map_or(1, |cell| cell_span(cell.character));
         for cell in cells.iter_mut().skip(at).take(span) {
-            std::mem::swap(&mut cell.foreground, &mut cell.background);
+            cell.invert();
         }
     }
 }
@@ -149,6 +149,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use pinfold_proto::BOLD;
+
     use super::*;
 
     #[test]
@@ -169,5 +171,24 @@ mod tests {
         cells_with_cursor(&frame, &mut cells);
         let backgrounds: Vec<u32> = cells.iter().map(|cell| cell.background).collect();
         assert_eq!(backgrounds, [1, 1, 2]);
+    }
+
+    #[test]
+    fn the_cursor_keeps_a_cells_style_out_of_its_background() {
+        let frame = Frame {
+            columns: 1,
+            rows: 1,
+            cells: vec![Cell {
+                character: 'a',
+                foreground: 1 | BOLD,
+                background: 2,
+            }],
+            cursor: Some((0, 0)),
+            ..Frame::default()
+        };
+        let mut cells = Vec::new();
+        cells_with_cursor(&frame, &mut cells);
+        assert_eq!(cells[0].foreground, 2 | BOLD);
+        assert_eq!(cells[0].background, 1);
     }
 }
