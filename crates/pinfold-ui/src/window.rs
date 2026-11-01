@@ -17,14 +17,14 @@ use pinfold_proto::Frame;
 use pinfold_render::cpu::{CpuRenderer, Renderer};
 use pinfold_render::font::{Font, FontError};
 use winit::application::ApplicationHandler;
-use winit::dpi::{LogicalSize, PhysicalSize};
+use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::error::{EventLoopError, OsError};
-use winit::event::{ElementState, WindowEvent};
+use winit::event::{ElementState, Ime, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::ModifiersState;
 use winit::window::{Window, WindowId};
 
-use crate::input;
+use crate::{ime, input};
 
 /// In logical pixels.
 const FONT_SIZE: f32 = 13.0;
@@ -131,6 +131,12 @@ struct App {
     open: Option<Open>,
     frame: Frame,
     modifiers: ModifiersState,
+    /// Text the input method is composing, and the byte its caret is at.
+    preedit: (String, usize),
+    /// The screen with `preedit` over it. Empty unless something has been composed.
+    composed: Frame,
+    /// Where the input method's window was last told to go.
+    ime_cursor: Option<(u16, u16)>,
     result: Result<(), Error>,
 }
 
@@ -148,6 +154,7 @@ impl App {
             None => attributes.with_inner_size(DEFAULT_SIZE),
         };
         let window = Rc::new(event_loop.create_window(attributes)?);
+        window.set_ime_allowed(true);
         // shortcut: fixed at the first scale factor, so moving between displays blurs, fix in #21.
         let size = FONT_SIZE * window.scale_factor() as f32;
         let renderer = renderer(&window, size)?;
@@ -174,9 +181,44 @@ impl App {
             let _ = self.waker.wake();
         }
         if let Some(open) = &mut self.open {
-            open.renderer.draw(&self.frame)?;
+            if self.ime_cursor != self.frame.cursor {
+                self.ime_cursor = self.frame.cursor;
+                if let Some((row, column)) = self.frame.cursor {
+                    let (width, height) = open.renderer.cell_size();
+                    let (width, height) = (width as u32, height as u32);
+                    open.window.set_ime_cursor_area(
+                        PhysicalPosition::new(u32::from(column) * width, u32::from(row) * height),
+                        PhysicalSize::new(width, height),
+                    );
+                }
+            }
+            if self.preedit.0.is_empty() {
+                open.renderer.draw(&self.frame)?;
+            } else {
+                self.composed.clone_from(&self.frame);
+                ime::overlay(&mut self.composed, &self.preedit.0, self.preedit.1);
+                open.renderer.draw(&self.composed)?;
+            }
         }
         Ok(())
+    }
+
+    fn ime(&mut self, event: Ime) {
+        match event {
+            Ime::Preedit(text, caret) => {
+                self.preedit.1 = caret.map_or(text.len(), |(start, _)| start);
+                self.preedit.0 = text;
+            }
+            Ime::Commit(text) => {
+                self.preedit.0.clear();
+                self.request(Request::Input(text.into_bytes()));
+            }
+            Ime::Disabled => self.preedit.0.clear(),
+            Ime::Enabled => {}
+        }
+        if let Some(open) = &self.open {
+            open.window.request_redraw();
+        }
     }
 }
 
@@ -210,7 +252,11 @@ impl ApplicationHandler<Notice> for App {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => self.resized(size),
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+            WindowEvent::Ime(event) => self.ime(event),
+            // A key pressed while composing belongs to the input method.
+            WindowEvent::KeyboardInput { event, .. }
+                if event.state == ElementState::Pressed && self.preedit.0.is_empty() =>
+            {
                 let text = event.text.as_ref().map(|text| text.as_str());
                 let app_cursor = self.frame.app_cursor;
                 let bytes = input::encode(&event.logical_key, text, self.modifiers, app_cursor);
@@ -261,6 +307,9 @@ pub fn run(size: Option<(u32, u32)>) -> Result<(), Error> {
         open: None,
         frame: Frame::default(),
         modifiers: ModifiersState::empty(),
+        preedit: (String::new(), 0),
+        composed: Frame::default(),
+        ime_cursor: None,
         result: Ok(()),
     };
     event_loop.run_app(&mut app)?;

@@ -1266,6 +1266,7 @@ dependencies = [
  "pinfold-proto",
  "pinfold-render",
  "thiserror 2.0.21",
+ "unicode-width",
  "winit",
 ]
 
