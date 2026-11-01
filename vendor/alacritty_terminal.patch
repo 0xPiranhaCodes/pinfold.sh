@@ -1,6 +1,6 @@
 diff -ruN a/Cargo.toml b/Cargo.toml
 --- a/Cargo.toml	2006-07-24 06:51:28
-+++ b/Cargo.toml	2026-11-01 08:15:23
++++ b/Cargo.toml	2026-11-01 10:03:20
 @@ -43,10 +43,6 @@
  name = "alacritty_terminal"
  path = "src/lib.rs"
@@ -14,7 +14,7 @@ diff -ruN a/Cargo.toml b/Cargo.toml
  
 diff -ruN a/src/grid/mod.rs b/src/grid/mod.rs
 --- a/src/grid/mod.rs	2006-07-24 06:51:28
-+++ b/src/grid/mod.rs	2026-11-01 08:15:23
++++ b/src/grid/mod.rs	2026-11-01 10:03:20
 @@ -1,7 +1,9 @@
  //! A specialized 2D grid implementation optimized for use in a terminal.
  
@@ -130,8 +130,19 @@ diff -ruN a/src/grid/mod.rs b/src/grid/mod.rs
          self.display_offset = 0;
 diff -ruN a/src/grid/resize.rs b/src/grid/resize.rs
 --- a/src/grid/resize.rs	2006-07-24 06:51:28
-+++ b/src/grid/resize.rs	2026-11-01 08:15:23
-@@ -365,7 +365,9 @@
++++ b/src/grid/resize.rs	2026-11-01 10:03:20
+@@ -57,7 +57,10 @@
+         // Move existing lines up for every line that couldn't be pulled from history.
+         if from_history != lines_added {
+             let delta = lines_added - from_history;
++            // These rows are the blank ones just added, so they are not history.
++            let sink = self.history_sink.take();
+             self.scroll_up(&(Line(0)..Line(target as i32)), delta);
++            self.history_sink = sink;
+         }
+ 
+         // Move cursor down for every line pulled from history.
+@@ -365,7 +368,9 @@
  
          // Reverse iterator and use it as the new grid storage.
          let mut reversed: Vec<Row<T>> = new_raw.drain(..).rev().collect();
@@ -144,7 +155,7 @@ diff -ruN a/src/grid/resize.rs b/src/grid/resize.rs
          // Clamp display offset in case some lines went off.
 diff -ruN a/src/term/mod.rs b/src/term/mod.rs
 --- a/src/term/mod.rs	2006-07-24 06:51:28
-+++ b/src/term/mod.rs	2026-11-01 08:15:23
++++ b/src/term/mod.rs	2026-11-01 10:03:20
 @@ -1802,7 +1802,7 @@
  
                  self.selection = None;
