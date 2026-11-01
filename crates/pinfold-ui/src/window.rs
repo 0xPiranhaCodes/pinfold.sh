@@ -81,7 +81,9 @@ fn run_io(
         reactor.turn(None)?;
         while let Ok(request) = requests.try_recv() {
             match request {
-                Request::Input(bytes) => reactor.write(PANE, &bytes),
+                Request::Input(bytes) => {
+                    reactor.write(PANE, &bytes);
+                }
                 Request::Resize(rows, columns) => reactor.resize(PANE, rows, columns)?,
             }
         }

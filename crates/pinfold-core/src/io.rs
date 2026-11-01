@@ -14,6 +14,7 @@ use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token};
 use pinfold_sys::pty::Pty;
 
+use crate::paste;
 use crate::vt::{AlacrittyEngine, VtEngine};
 
 pub use mio::Waker;
@@ -22,6 +23,11 @@ pub use mio::Waker;
 pub const READ_BUDGET: usize = 64 * 1024;
 /// Most reply bytes held for a program that is not reading them. The rest are dropped.
 pub const MAX_REPLIES: usize = 4 * 1024;
+/// Most input waiting for a program that is not reading it. Input past this is refused
+/// whole, since a paste cut short would lose its closing bracket.
+pub const MAX_INPUT: usize = 1024 * 1024;
+/// Queue capacity an empty pane keeps, so one large paste does not cost memory for good.
+const KEPT_INPUT: usize = 4 * 1024;
 
 const EVENT_CAPACITY: usize = 64;
 /// Beyond any pane number, so a wake-up is never mistaken for PTY activity.
@@ -84,9 +90,20 @@ struct Pane {
     pty: Pty,
     engine: Box<dyn VtEngine + Send>,
     replies: Vec<u8>,
+    input: Vec<u8>,
     readable: bool,
     closed: bool,
     dirty: bool,
+}
+
+impl Pane {
+    fn flush(&mut self) {
+        flush(&mut self.pty.master(), &mut self.replies);
+        flush(&mut self.pty.master(), &mut self.input);
+        if self.input.is_empty() && self.input.capacity() > KEPT_INPUT {
+            self.input = Vec::new();
+        }
+    }
 }
 
 /// Every PTY and its terminal state, driven from a single thread.
@@ -136,6 +153,7 @@ impl Reactor {
             pty,
             engine: Box::new(AlacrittyEngine::new(rows, columns)),
             replies: Vec::new(),
+            input: Vec::new(),
             readable: true,
             closed: false,
             dirty: true,
@@ -195,7 +213,7 @@ impl Reactor {
                 pane.replies.truncate(MAX_REPLIES);
                 pane.dirty = true;
             }
-            flush(&mut pane.pty.master(), &mut pane.replies);
+            pane.flush();
         }
         Ok(())
     }
@@ -206,14 +224,28 @@ impl Reactor {
         Arc::clone(&self.waker)
     }
 
-    /// Queues bytes for a pane's program, such as keyboard input.
-    pub fn write(&mut self, pane: usize, bytes: &[u8]) {
-        if let Some(pane) = self.panes.get_mut(pane) {
-            pane.replies.extend_from_slice(bytes);
-            // shortcut: shares the reply cap, so a large paste would be cut, fix with paste in #22.
-            pane.replies.truncate(MAX_REPLIES);
-            flush(&mut pane.pty.master(), &mut pane.replies);
+    /// Queues bytes for a pane's program, such as keyboard input. Returns false if the queue
+    /// has no room for all of them, or the pane is unknown, and then queues none.
+    pub fn write(&mut self, pane: usize, bytes: &[u8]) -> bool {
+        let Some(pane) = self.panes.get_mut(pane) else {
+            return false;
+        };
+        if pane.input.len() + bytes.len() > MAX_INPUT {
+            return false;
         }
+        pane.input.extend_from_slice(bytes);
+        pane.flush();
+        true
+    }
+
+    /// Queues pasted text for a pane's program, sanitized. Returns what [`Reactor::write`]
+    /// returns.
+    pub fn paste(&mut self, pane: usize, text: &str) -> bool {
+        let Some(engine) = self.panes.get(pane).map(|pane| &pane.engine) else {
+            return false;
+        };
+        let bracketed = engine.bracketed_paste();
+        text.len() <= MAX_INPUT && self.write(pane, &paste::encode(text, bracketed))
     }
 
     /// Resizes a pane's terminal and tells its program.
@@ -365,6 +397,47 @@ mod tests {
             .unwrap();
         reactor.write(pane, b"key\n");
         assert!(turn_until(&mut reactor, |r| on_screen(r, pane, "got-key")));
+    }
+
+    #[test]
+    fn a_large_write_reaches_the_program_whole() {
+        let mut reactor = Reactor::new().unwrap();
+        let script = "stty raw -echo; echo ready; head -c 300000 | wc -c | sed 's/ //g; s/^/got-/'; sleep 30";
+        let pane = reactor.spawn(shell(script), 24, 80).unwrap();
+        assert!(turn_until(&mut reactor, |r| on_screen(r, pane, "ready")));
+        assert!(reactor.write(pane, &vec![b'x'; 300_000]));
+        assert!(turn_until(&mut reactor, |r| on_screen(
+            r,
+            pane,
+            "got-300000"
+        )));
+        assert_eq!(reactor.panes[pane].input.capacity(), 0);
+    }
+
+    #[test]
+    fn input_past_the_limit_is_refused_whole() {
+        let mut reactor = Reactor::new().unwrap();
+        let script = "stty raw -echo; echo ready; sleep 30";
+        let pane = reactor.spawn(shell(script), 24, 80).unwrap();
+        assert!(turn_until(&mut reactor, |r| on_screen(r, pane, "ready")));
+        assert!(reactor.write(pane, &vec![b'x'; MAX_INPUT]));
+        let queued = reactor.panes[pane].input.len();
+        assert!(queued > 0, "the kernel took all of it");
+        let room = MAX_INPUT - queued;
+        assert!(!reactor.write(pane, &vec![b'x'; room + 1]));
+        assert_eq!(reactor.panes[pane].input.len(), queued);
+        assert!(!reactor.paste(pane, &"x".repeat(MAX_INPUT + 1)));
+    }
+
+    #[test]
+    fn a_paste_is_sanitized_and_bracketed_as_the_program_asked() {
+        let mut reactor = Reactor::new().unwrap();
+        let script = r"stty raw -echo; printf '\033[?2004h'; dd bs=1 count=20 2>/dev/null | od -An -c | tr -d ' \n' | sed 's/^/got-/'; sleep 30";
+        let pane = reactor.spawn(shell(script), 24, 80).unwrap();
+        turn_until(&mut reactor, |r| r.engine(pane).unwrap().bracketed_paste());
+        assert!(reactor.paste(pane, "ab\x1b[201~c"));
+        let expected = r"got-033[200~ab[201~c033[201~";
+        assert!(turn_until(&mut reactor, |r| on_screen(r, pane, expected)));
     }
 
     #[test]
