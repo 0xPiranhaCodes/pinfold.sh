@@ -38,6 +38,19 @@ if [ "$keys" != ' 033 O A 033 [ 1 5 ~ 033 [ 1 ; 5 D 033 [ Z' ]; then
   exit 1
 fi
 echo "keys reached the program"
+# shellcheck disable=SC2016
+xdotool type --delay 15 'stty -echo -icanon; printf "\033[?1000h\033[?1006h"; head -c 38 | od -An -c > /tmp/mouse; printf "\033[?1000l\033[?1006l"; stty sane'
+xdotool key Return
+sleep 0.5
+xdotool mousemove --window "$ID" 3 3 click 1 click 4
+sleep 0.5
+mouse=$(tr -d ' \n' < /tmp/mouse)
+# Two wheel reports: winit counts a synthetic wheel button's press and its release.
+if [ "$mouse" != '033[<0;1;1M033[<0;1;1m033[<64;1;1M033[<64;1;1M' ]; then
+  echo "FAIL: the mouse reached the program as: $mouse"
+  exit 1
+fi
+echo "the mouse reached the program"
 echo "X11 PSS at 1000x640: $(pss "$WINDOW") MB"
 xdotool key ctrl+d
 sleep 1

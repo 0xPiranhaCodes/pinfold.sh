@@ -53,7 +53,7 @@ mod tests {
             columns: 4,
             cells: vec![cell; 8],
             cursor: Some((1, 1)),
-            app_cursor: false,
+            ..Frame::default()
         }
     }
 
