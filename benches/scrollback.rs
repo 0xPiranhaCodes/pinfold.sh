@@ -1,4 +1,4 @@
-//! Scrollback size, feed speed and read latency on the M0 spike's corpora.
+//! Scrollback size, feed speed, read latency and wheel latency on the M0 spike's corpora.
 //!
 //! Run with `cargo run --release -p pinfold-benches --bin scrollback`. Adding
 //! `-- --write <dir>` saves the corpora instead, which is how `cargo xtask mem-gate` gets them.
@@ -14,6 +14,8 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 use pinfold_core::scrollback::Scrollback;
+use pinfold_core::vt::{AlacrittyEngine, VtEngine};
+use pinfold_proto::Frame;
 
 const COLUMNS: usize = 120;
 const SCREEN: usize = 50;
@@ -183,6 +185,42 @@ fn feed(bytes: &[u8], sink: Option<&Arc<Mutex<Scrollback>>>) -> f64 {
     bytes.len() as f64 / 1e6 / start.elapsed().as_secs_f64()
 }
 
+/// Prints a table row for one wheel notch: a scroll and the frame it needs, over a pane's whole
+/// store and back. Each corpus runs in its own process, so footprint growth is its own.
+fn notches(name: &str) -> std::io::Result<()> {
+    let mut engine = AlacrittyEngine::new(SCREEN as u16, COLUMNS as u16);
+    let mut replies = Vec::new();
+    for read in corpus(name)?.chunks(64 * 1024) {
+        engine.feed(read, &mut replies);
+    }
+    let held = engine.scrollback().lock().map_or(0, |store| store.len());
+    let mut frame = Frame::default();
+    engine.frame(&mut frame);
+    // Written before the first reading, so these pages do not count as growth.
+    let mut times = vec![0.0; held * 2];
+    times.clear();
+    let before = pinfold_sys::footprint(std::process::id())?;
+    for lines in [1, -1] {
+        loop {
+            let start = Instant::now();
+            let moved = engine.scroll(lines);
+            engine.frame(&mut frame);
+            std::hint::black_box(&frame);
+            if !moved {
+                break;
+            }
+            times.push(start.elapsed().as_secs_f64() * 1e3);
+        }
+    }
+    let grown = pinfold_sys::footprint(std::process::id())?.saturating_sub(before);
+    times.sort_by(f64::total_cmp);
+    let at = |share: usize| times.get(times.len() * share / 100).copied().unwrap_or(0.0);
+    let (p50, p99, most) = (at(50), at(99), times.last().copied().unwrap_or(0.0));
+    let grown = grown as f64 / 1e6;
+    println!("| {name} | {held} | {p50:.3} | {p99:.3} | {most:.3} | {grown:.3} |");
+    Ok(())
+}
+
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let [flag, dir] = args.as_slice()
@@ -192,6 +230,11 @@ fn main() -> std::io::Result<()> {
             std::fs::write(std::path::Path::new(dir).join(name), corpus(name)?)?;
         }
         return Ok(());
+    }
+    if let [flag, name] = args.as_slice()
+        && flag == "--notches"
+    {
+        return notches(name);
     }
     println!("{COLUMNS} columns, {SCREEN}-row screen, {FED_LINES} lines fed.\n");
     println!(
@@ -220,6 +263,13 @@ fn main() -> std::io::Result<()> {
             "| {name} | {} | {held:.2} | {plain:.0} | {stored:.0} | {p99:.2} |",
             store.len()
         );
+    }
+    println!("\n| Corpus | Rows held | Notch p50 ms | p99 ms | Max ms | Footprint growth MB |");
+    println!("| --- | --- | --- | --- | --- | --- |");
+    for name in CORPORA {
+        std::process::Command::new(std::env::current_exe()?)
+            .args(["--notches", name])
+            .status()?;
     }
     Ok(())
 }

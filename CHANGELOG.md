@@ -32,6 +32,7 @@ Entries are generated from Conventional Commits with git-cliff
 - Limits on OSC strings, titles and hyperlinks, and replies only in fixed formats.
 - OSC 133 command marks and the OSC 7 working directory, tracked per pane as hints.
 - Mouse reporting, and the wheel as arrow keys on the alternate screen.
+- The wheel scrolls through history on the primary screen, and input returns to the live screen.
 - A fork of `alacritty_terminal` that hands rows leaving the screen to their owner.
 - Metal renderer on macOS, with CPU drawing as its fallback.
 - macOS window budget raised to 30 MB plus pixels.

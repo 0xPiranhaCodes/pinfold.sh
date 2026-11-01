@@ -4,6 +4,7 @@
 //! written inline per run, because LZ4 removes their repeats within a block.
 
 use std::collections::VecDeque;
+use std::ops::Range;
 
 use alacritty_terminal::grid::{HistorySink, Row};
 use alacritty_terminal::index::Column;
@@ -338,8 +339,8 @@ impl Ring {
         }
     }
 
-    fn read(&self, offset: usize, size: usize) -> Vec<u8> {
-        let mut out = Vec::with_capacity(size);
+    fn read(&self, offset: usize, size: usize, out: &mut Vec<u8>) {
+        out.clear();
         let mut at = self.start + offset;
         while out.len() < size {
             let Some(chunk) = self.chunks.get(at / CHUNK_BYTES) else {
@@ -350,7 +351,6 @@ impl Ring {
             out.extend_from_slice(&chunk[begin..end]);
             at += end - begin;
         }
-        out
     }
 
     fn bytes(&self) -> usize {
@@ -358,39 +358,62 @@ impl Ring {
     }
 }
 
-/// Decodes `count` rows. Returns nothing if the data is not what `Open` wrote.
-fn decode_rows(count: usize, mut runs: &[u8], text: &str) -> Option<Vec<Vec<Cell>>> {
+/// Calls `visit` with the `wanted` rows of `count`, which are the only ones built. Returns
+/// nothing if the data is not what `Open` wrote.
+fn decode_rows(
+    count: usize,
+    mut runs: &[u8],
+    text: &str,
+    wanted: &Range<usize>,
+    visit: &mut impl FnMut(&[Cell]),
+) -> Option<()> {
     let mut characters = text.chars();
-    let mut rows = Vec::new();
-    for _ in 0..count {
+    let mut row = Vec::new();
+    for index in 0..count.min(wanted.end) {
+        let keep = wanted.contains(&index);
         let mut left = get_varint(&mut runs)?;
-        let mut row = Vec::new();
+        row.clear();
         while left > 0 {
             let length = get_varint(&mut runs)?;
             if length == 0 || length > left {
                 return None;
             }
             let style = get_style(&mut runs)?;
-            for _ in 0..length {
-                row.push(style.cell(characters.next()?));
+            if keep {
+                for _ in 0..length {
+                    row.push(style.cell(characters.next()?));
+                }
+            } else {
+                characters.nth(length - 1)?;
             }
             left -= length;
         }
-        rows.push(row);
+        if keep {
+            visit(&row);
+        }
     }
-    Some(rows)
+    Some(())
 }
 
-fn decode_block(count: usize, data: &[u8]) -> Option<Vec<Vec<Cell>>> {
+/// Inflates a block into `raw` and decodes it as [`decode_rows`] does.
+fn decode_block(
+    count: usize,
+    data: &[u8],
+    raw: &mut Vec<u8>,
+    wanted: &Range<usize>,
+    visit: &mut impl FnMut(&[Cell]),
+) -> Option<()> {
     let (size, compressed) = lz4_flex::block::uncompressed_size(data).ok()?;
     if size > MAX_INFLATED {
         return None;
     }
-    let raw = lz4_flex::block::decompress(compressed, size).ok()?;
-    let mut input = raw.as_slice();
+    raw.clear();
+    raw.resize(size, 0);
+    let size = lz4_flex::block::decompress_into(compressed, raw).ok()?;
+    let mut input = raw.get(..size)?;
     let length = get_varint(&mut input)?;
     let (runs, text) = input.split_at_checked(length)?;
-    decode_rows(count, runs, std::str::from_utf8(text).ok()?)
+    decode_rows(count, runs, std::str::from_utf8(text).ok()?, wanted, visit)
 }
 
 /// One pane's scrollback.
@@ -409,6 +432,10 @@ pub struct Scrollback {
     block_rows: usize,
     byte_cap: usize,
     line_cap: usize,
+    /// The number of the oldest row held. See [`Scrollback::end`].
+    oldest: usize,
+    /// Rows numbered below this were cleared, not evicted.
+    floor: usize,
 }
 
 impl Default for Scrollback {
@@ -433,6 +460,8 @@ impl Scrollback {
             block_rows: 0,
             byte_cap,
             line_cap,
+            oldest: 0,
+            floor: 0,
         }
     }
 
@@ -446,6 +475,22 @@ impl Scrollback {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+
+    /// Returns the number the next row will get. Numbers count every row pushed and are never
+    /// reused, so a viewer's place survives pushes and evictions.
+    #[must_use]
+    pub fn end(&self) -> usize {
+        self.oldest + self.len()
+    }
+
+    /// Returns the index for [`Scrollback::rows`] of row `number`, or of the oldest row held
+    /// if that one was evicted. Returns nothing for a row not pushed yet or since cleared.
+    #[must_use]
+    pub fn index(&self, number: usize) -> Option<usize> {
+        (self.floor..self.end())
+            .contains(&number)
+            .then(|| number.saturating_sub(self.oldest))
     }
 
     /// Returns the bytes held, which never exceed the cap once a row has been pushed.
@@ -464,10 +509,32 @@ impl Scrollback {
     #[must_use]
     pub fn rows(&self, first: usize, count: usize) -> Vec<Vec<Cell>> {
         let mut out = Vec::new();
+        let mut spare = Spare::default();
+        let mut visit = |row: &[Cell]| out.push(row.to_vec());
+        self.walk(first, count, &mut spare, &mut visit);
+        out
+    }
+
+    /// Calls `visit` with what [`Scrollback::rows`] returns, one row at a time. This decodes
+    /// through the store's own buffers and builds only those rows, so a frame leaves no freed
+    /// rows in the heap. `benches/scrollback.rs` measures what scrolling adds to footprint.
+    pub fn read_rows(&mut self, first: usize, count: usize, mut visit: impl FnMut(&[Cell])) {
+        let mut spare = std::mem::take(&mut self.spare);
+        self.walk(first, count, &mut spare, &mut visit);
+        self.spare = spare;
+    }
+
+    fn walk(
+        &self,
+        first: usize,
+        mut count: usize,
+        spare: &mut Spare,
+        visit: &mut impl FnMut(&[Cell]),
+    ) {
         let (mut skip, mut offset) = (first, 0);
         for block in &self.blocks {
-            if out.len() == count {
-                return out;
+            if count == 0 {
+                return;
             }
             let start = offset;
             offset += block.size;
@@ -475,16 +542,15 @@ impl Scrollback {
                 skip -= block.rows;
                 continue;
             }
-            let data = self.ring.read(start, block.size);
-            let rows = decode_block(block.rows, &data).unwrap_or_default();
-            let wanted = count - out.len();
-            out.extend(rows.into_iter().skip(skip).take(wanted));
+            self.ring.read(start, block.size, &mut spare.packed);
+            let wanted = skip..skip.saturating_add(count);
+            let _ = decode_block(block.rows, &spare.packed, &mut spare.raw, &wanted, visit);
+            count -= count.min(block.rows - skip);
             skip = 0;
         }
-        let rows = decode_rows(self.open.rows, &self.open.runs, &self.open.text);
-        let wanted = count - out.len();
-        out.extend(rows.unwrap_or_default().into_iter().skip(skip).take(wanted));
-        out
+        let wanted = skip..skip.saturating_add(count);
+        let open = &self.open;
+        let _ = decode_rows(open.rows, &open.runs, &open.text, &wanted, visit);
     }
 
     fn seal(&mut self) {
@@ -502,6 +568,7 @@ impl Scrollback {
             return false;
         };
         self.block_rows -= block.rows;
+        self.oldest += block.rows;
         self.ring.drop_oldest(block.size);
         true
     }
@@ -517,7 +584,10 @@ impl HistorySink<Cell> for Scrollback {
     }
 
     fn clear(&mut self) {
+        let end = self.end();
         *self = Self::with_caps(self.byte_cap, self.line_cap);
+        self.oldest = end;
+        self.floor = end;
     }
 
     fn is_empty(&self) -> bool {
@@ -536,14 +606,16 @@ mod tests {
             (0..size).map(|index| (seed + index * 7) as u8).collect()
         };
         let sizes = [10, CHUNK_BYTES, 3, 2 * CHUNK_BYTES + 5, CHUNK_BYTES - 1, 1];
-        let (mut offset, mut oldest) = (0, 0);
+        let (mut offset, mut oldest, mut out) = (0, 0, Vec::new());
         for (seed, &size) in sizes.iter().enumerate() {
             ring.push(&block(seed, size));
-            assert_eq!(ring.read(offset, size), block(seed, size));
+            ring.read(offset, size, &mut out);
+            assert_eq!(out, block(seed, size));
             offset += size;
         }
         for (seed, &size) in sizes.iter().enumerate() {
-            assert_eq!(ring.read(oldest, size), block(seed, size));
+            ring.read(oldest, size, &mut out);
+            assert_eq!(out, block(seed, size));
             oldest += size;
         }
         let mut live = offset;
@@ -687,14 +759,58 @@ mod tests {
         assert!(scrollback.rows(0, 9).is_empty());
     }
 
+    #[test]
+    fn reading_uses_the_stores_buffers_and_matches_rows() {
+        let mut store = Scrollback::new();
+        for number in 0..BLOCK_ROWS * 3 + 5 {
+            store.push(&row(&format!("row {number}")));
+        }
+        let held = store.bytes();
+        let mut read = Vec::new();
+        store.read_rows(BLOCK_ROWS - 2, BLOCK_ROWS * 2 + 4, |row| {
+            read.push(text(row))
+        });
+        let rows = store.rows(BLOCK_ROWS - 2, BLOCK_ROWS * 2 + 4);
+        assert_eq!(read, rows.iter().map(|row| text(row)).collect::<Vec<_>>());
+        assert_eq!(read[0], format!("row {}", BLOCK_ROWS - 2));
+        assert_eq!(read.len(), BLOCK_ROWS * 2 + 4);
+        assert_eq!(store.bytes(), held);
+    }
+
+    #[test]
+    fn numbers_outlive_eviction_and_clearing() {
+        let mut store = Scrollback::with_caps(usize::MAX, BLOCK_ROWS * 2);
+        for number in 0..BLOCK_ROWS * 3 {
+            store.push(&row(&number.to_string()));
+        }
+        assert_eq!(store.end(), BLOCK_ROWS * 3);
+        assert_eq!(
+            store.index(0),
+            Some(0),
+            "an evicted row clamps to the oldest"
+        );
+        let newest = store.end() - 1;
+        let index = store.index(newest).unwrap_or(usize::MAX);
+        assert_eq!(text(&store.rows(index, 1)[0]), newest.to_string());
+        assert_eq!(store.index(store.end()), None);
+        store.clear();
+        store.push(&row("after"));
+        assert_eq!(
+            store.index(newest),
+            None,
+            "a cleared row is gone, not clamped"
+        );
+        assert_eq!(store.index(store.end() - 1), Some(0));
+    }
+
     proptest::proptest! {
         #[test]
         fn decoding_arbitrary_bytes_never_panics(
             count in 0..100_usize,
             data in proptest::collection::vec(0..=255_u8, 0..2048),
         ) {
-            let _ = decode_block(count, &data);
-            let _ = decode_rows(count, &data, "text");
+            let _ = decode_block(count, &data, &mut Vec::new(), &(0..count), &mut |_| {});
+            let _ = decode_rows(count, &data, "text", &(0..count), &mut |_| {});
         }
     }
 }
