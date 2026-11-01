@@ -9,13 +9,18 @@ use alacritty_terminal::grid::{HistorySink, Row};
 use alacritty_terminal::index::Column;
 use alacritty_terminal::term::cell::{Cell, Flags, Hyperlink};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
-use lz4_flex::block::{compress_into, get_maximum_output_size};
+use lz4_flex::block::{CompressTable, compress_into_with_table, get_maximum_output_size};
 
 /// The hard cap on one pane's scrollback.
 pub const BYTE_CAP: usize = 2_000_000;
 /// Kept out of the store's share of the cap, for the heap around it that it cannot count.
-/// Measured with `cargo xtask mem-gate`, which is what holds a pane to the cap.
-const HEAP_RESERVE: usize = 400_000;
+/// `cargo xtask mem-gate` holds a pane to the cap. The same allocations cost up to 0.9 MB more
+/// from run to run on macOS, whose heap adds regions as the thread moves between cores.
+const HEAP_RESERVE: usize = if cfg!(target_os = "macos") {
+    1_000_000
+} else {
+    400_000
+};
 /// Scrollback keeps fewer rows than this, so a quiet pane stays far under the byte cap.
 pub const LINE_CAP: usize = 10_000;
 
@@ -24,6 +29,8 @@ const BLOCK_ROWS: usize = 64;
 const BLOCK_BYTES: usize = 64 * 1024;
 /// Counted for each block: its queue entry.
 const BLOCK_OVERHEAD: usize = size_of::<Block>();
+/// The size of LZ4's hash table, once a block has been compressed.
+const TABLE_BYTES: usize = 16 * 1024;
 /// The size of each chunk of compressed bytes.
 const CHUNK_BYTES: usize = 64 * 1024;
 /// Longer links are dropped from history, so one cell cannot hold megabytes.
@@ -249,14 +256,18 @@ impl Open {
     /// as the store, because allocating them per seal leaves freed pages behind.
     fn seal(&mut self, spare: &mut Spare) -> Option<usize> {
         spare.raw.clear();
+        spare.raw.reserve_exact(self.bytes() + 8);
         put_varint(&mut spare.raw, self.runs.len());
         spare.raw.extend_from_slice(&self.runs);
         spare.raw.extend_from_slice(self.text.as_bytes());
         let (raw, packed) = (&spare.raw, &mut spare.packed);
+        let table = spare.table.get_or_insert_with(CompressTable::large);
+        let packed_size = 4 + get_maximum_output_size(raw.len());
         packed.clear();
+        packed.reserve_exact(packed_size);
         packed.extend_from_slice(&(raw.len() as u32).to_le_bytes());
-        packed.resize(4 + get_maximum_output_size(raw.len()), 0);
-        let size = compress_into(raw, &mut packed[4..]);
+        packed.resize(packed_size, 0);
+        let size = compress_into_with_table(raw, &mut packed[4..], table);
         self.runs.clear();
         self.text.clear();
         self.rows = 0;
@@ -265,10 +276,17 @@ impl Open {
 }
 
 /// Working buffers kept between seals.
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct Spare {
     raw: Vec<u8>,
     packed: Vec<u8>,
+    table: Option<CompressTable>,
+}
+
+impl std::fmt::Debug for Spare {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Spare")
+    }
 }
 
 #[derive(Debug)]
@@ -284,6 +302,8 @@ struct Block {
 #[derive(Debug, Default)]
 struct Ring {
     chunks: VecDeque<Box<[u8]>>,
+    /// The last chunk emptied. Reusing it means a full ring never touches the allocator.
+    spare: Option<Box<[u8]>>,
     /// Where the oldest byte sits in the first chunk.
     start: usize,
     len: usize,
@@ -294,7 +314,9 @@ impl Ring {
         while !data.is_empty() {
             let end = self.start + self.len;
             if end == self.chunks.len() * CHUNK_BYTES {
-                self.chunks.push_back(vec![0; CHUNK_BYTES].into());
+                let chunk = self.spare.take();
+                self.chunks
+                    .push_back(chunk.unwrap_or_else(|| vec![0; CHUNK_BYTES].into()));
             }
             let Some(chunk) = self.chunks.get_mut(end / CHUNK_BYTES) else {
                 return;
@@ -311,7 +333,7 @@ impl Ring {
         self.start += size;
         self.len -= size;
         while self.start >= CHUNK_BYTES {
-            self.chunks.pop_front();
+            self.spare = self.chunks.pop_front();
             self.start -= CHUNK_BYTES;
         }
     }
@@ -332,7 +354,7 @@ impl Ring {
     }
 
     fn bytes(&self) -> usize {
-        self.chunks.len() * CHUNK_BYTES
+        (self.chunks.len() + usize::from(self.spare.is_some())) * CHUNK_BYTES
     }
 }
 
@@ -432,7 +454,8 @@ impl Scrollback {
         let working = self.open.runs.capacity()
             + self.open.text.capacity()
             + self.spare.raw.capacity()
-            + self.spare.packed.capacity();
+            + self.spare.packed.capacity()
+            + self.spare.table.as_ref().map_or(0, |_| TABLE_BYTES);
         self.ring.bytes() + self.blocks.len() * BLOCK_OVERHEAD + working
     }
 
