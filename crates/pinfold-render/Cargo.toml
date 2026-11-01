@@ -16,6 +16,7 @@ softbuffer = { version = "=0.4.8", default-features = false, features = ["waylan
 pinfold-sys = { path = "../pinfold-sys", version = "0.0.0", features = ["metal"] }
 swash = "=0.2.10"
 thiserror = "2.0.21"
+unicode-width = "0.2.3"
 
 [lints]
 workspace = true

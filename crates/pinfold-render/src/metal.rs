@@ -8,7 +8,7 @@ use raw_window_handle::HasWindowHandle;
 use swash::scale::ScaleContext;
 
 use crate::cpu::{RenderError, Renderer, cells_with_cursor};
-use crate::font::Font;
+use crate::font::{Font, Fonts};
 use crate::glyphs::{Metrics, clamp_size, rasterize};
 
 /// The atlas is 1 MB of 8-bit coverage, the same cap as the CPU renderer's glyph cache.
@@ -114,7 +114,7 @@ fn instances(
 /// Draws cells with Metal, the macOS default.
 pub struct MetalRenderer {
     gpu: Gpu,
-    font: Font,
+    fonts: Fonts,
     size: f32,
     metrics: Metrics,
     context: ScaleContext,
@@ -132,7 +132,7 @@ impl MetalRenderer {
         let metrics = Metrics::new(&font, size);
         Some(Self {
             gpu: Gpu::new(window, ATLAS_SIZE)?,
-            font,
+            fonts: font.into(),
             size,
             metrics,
             context: ScaleContext::new(),
@@ -153,12 +153,21 @@ impl Renderer for MetalRenderer {
         self.gpu.resize(width, height);
     }
 
+    fn set_font_size(&mut self, size: f32) {
+        self.size = clamp_size(size);
+        self.metrics = Metrics::new(self.fonts.primary(), self.size);
+        // The atlas keeps its size, and new glyphs overwrite the old ones.
+        self.slots = HashMap::new();
+        self.shelves = Shelves::new(ATLAS_SIZE);
+    }
+
     fn draw(&mut self, frame: &Frame) -> Result<(), RenderError> {
         cells_with_cursor(frame, &mut self.cells);
         let clear = frame.cells.first().map_or(0, |cell| cell.background);
+        let metrics = self.metrics;
         let Self {
             gpu,
-            font,
+            fonts,
             size,
             context,
             shelves,
@@ -169,10 +178,11 @@ impl Renderer for MetalRenderer {
             if let Some(slot) = slots.get(&character) {
                 return Some(*slot);
             }
-            let glyph = rasterize(context, font, *size, character);
+            let glyph = rasterize(context, fonts, *size, metrics, character);
             let height = glyph.mask.len().checked_div(glyph.width).unwrap_or(0);
             let (x, y) = shelves.place(glyph.width, height).or_else(|| {
-                // shortcut: a full atlas restarts, so one frame of over 2,000 glyphs can glitch.
+                // shortcut: a full atlas restarts, so a frame over its capacity glitches: 2,000
+                // ASCII-sized glyphs, or 1,300 wide ones at 26 px. Grow it if CJK users see that.
                 slots.clear();
                 *shelves = Shelves::new(ATLAS_SIZE);
                 shelves.place(glyph.width, height)
@@ -193,7 +203,7 @@ impl Renderer for MetalRenderer {
         instances(
             &self.cells,
             columns,
-            self.metrics,
+            metrics,
             clear,
             slot,
             &mut self.instances,

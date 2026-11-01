@@ -6,6 +6,7 @@ use pinfold_proto::{Cell, Frame};
 use softbuffer::{Context, Rect, Surface};
 
 use crate::font::Font;
+use crate::glyphs::cell_span;
 use crate::paint::{Canvas, Painter};
 
 pub use softbuffer::SoftBufferError as RenderError;
@@ -17,6 +18,10 @@ pub trait Renderer {
 
     /// Sets the surface size in physical pixels.
     fn resize(&mut self, width: u32, height: u32);
+
+    /// Sets the font size in physical pixels, dropping every glyph drawn at the old one.
+    /// `cell_size` changes with it, so the grid needs resizing afterwards.
+    fn set_font_size(&mut self, size: f32);
 
     /// Draws `frame`, redrawing only rows that changed where the surface allows it.
     ///
@@ -32,7 +37,9 @@ pub(crate) fn cells_with_cursor(frame: &Frame, cells: &mut Vec<Cell>) {
     cells.extend_from_slice(&frame.cells);
     if let Some((row, column)) = frame.cursor {
         let at = usize::from(row) * usize::from(frame.columns) + usize::from(column);
-        if let Some(cell) = cells.get_mut(at) {
+        // A wide glyph's second half sits on the next cell, which must invert with it.
+        let span = cells.get(at).map_or(1, |cell| cell_span(cell.character));
+        for cell in cells.iter_mut().skip(at).take(span) {
             std::mem::swap(&mut cell.foreground, &mut cell.background);
         }
     }
@@ -85,6 +92,12 @@ where
         (self.width, self.height) = (width, height);
     }
 
+    fn set_font_size(&mut self, size: f32) {
+        self.painter.set_font_size(size);
+        // Equal cells no longer mean equal pixels.
+        self.drawn.clear();
+    }
+
     fn draw(&mut self, frame: &Frame) -> Result<(), RenderError> {
         let (Some(width), Some(height)) =
             (NonZeroU32::new(self.width), NonZeroU32::new(self.height))
@@ -131,5 +144,30 @@ where
         } else {
             buffer.present_with_damage(&damage)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_cursor_inverts_both_cells_of_a_wide_character() {
+        let cell = |character| Cell {
+            character,
+            foreground: 1,
+            background: 2,
+        };
+        let frame = Frame {
+            columns: 3,
+            rows: 1,
+            cells: vec![cell('日'), cell(' '), cell('a')],
+            cursor: Some((0, 0)),
+            ..Frame::default()
+        };
+        let mut cells = Vec::new();
+        cells_with_cursor(&frame, &mut cells);
+        let backgrounds: Vec<u32> = cells.iter().map(|cell| cell.background).collect();
+        assert_eq!(backgrounds, [1, 1, 2]);
     }
 }

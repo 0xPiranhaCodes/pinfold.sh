@@ -12,6 +12,8 @@ Entries are generated from Conventional Commits with git-cliff
 ### Added
 
 - A TOML config file with `font_size` and `macos_option_as_alt`. A bad file means the defaults.
+- CJK text from a system font, opened only when the bundled font lacks a character.
+- Text stays sharp across displays: the font size follows the window's scale factor.
 - Project governance, security policy, contribution guide and license files.
 - Architecture decision records ADR-0001 to ADR-0027.
 - Threat model with the PTY-based identity design.
