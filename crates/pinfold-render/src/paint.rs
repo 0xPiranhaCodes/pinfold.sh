@@ -1,5 +1,7 @@
 //! Draws rows of cells into a 32-bit pixel buffer.
 
+use std::sync::LazyLock;
+
 use pinfold_proto::Cell;
 
 use crate::font::{Font, Fonts};
@@ -39,11 +41,44 @@ impl<'a> Canvas<'a> {
     }
 }
 
-// shortcut: blends in gamma space, which thins light text a little, revisit with #21.
+/// The steps of linear light in the tables. Each sRGB byte lands within half a step of its
+/// own value, so it comes back from the round trip unchanged.
+const LINEAR_MAX: u32 = 4095;
+
+/// sRGB bytes as linear light, the decoding Metal does.
+static LINEAR: LazyLock<[u16; 256]> = LazyLock::new(|| {
+    std::array::from_fn(|byte| {
+        let value = byte as f32 / 255.0;
+        let light = if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        };
+        (light * LINEAR_MAX as f32).round() as u16
+    })
+});
+
+/// Linear light as sRGB bytes.
+static SRGB: LazyLock<[u8; LINEAR_MAX as usize + 1]> = LazyLock::new(|| {
+    std::array::from_fn(|step| {
+        let light = step as f32 / LINEAR_MAX as f32;
+        let value = if light <= 0.003_130_8 {
+            light * 12.92
+        } else {
+            1.055 * light.powf(1.0 / 2.4) - 0.055
+        };
+        (value * 255.0).round() as u8
+    })
+});
+
+/// Mixes in linear light, as coverage measures light and sRGB bytes do not. Only the colour
+/// bytes of `foreground` are read, so a style in its top byte does nothing.
 fn blend(background: u32, foreground: u32, alpha: u8) -> u32 {
+    let (linear, srgb, alpha) = (&*LINEAR, &*SRGB, u32::from(alpha));
     let mix = |shift: u32| {
-        let (back, front) = ((background >> shift) & 0xff, (foreground >> shift) & 0xff);
-        ((back * (255 - u32::from(alpha)) + front * u32::from(alpha)) / 255) << shift
+        let light = |colour: u32| u32::from(linear[(colour >> shift & 0xff) as usize]);
+        let mixed = (light(background) * (255 - alpha) + light(foreground) * alpha + 127) / 255;
+        u32::from(srgb[mixed as usize]) << shift
     };
     mix(16) | mix(8) | mix(0)
 }
@@ -115,7 +150,7 @@ impl Painter {
             if cell.character == ' ' {
                 continue;
             }
-            let Some(glyph) = self.cache.get(cell.character) else {
+            let Some(glyph) = self.cache.get(cell.character, cell.style()) else {
                 continue;
             };
             let left =
@@ -141,6 +176,8 @@ impl Painter {
 
 #[cfg(test)]
 mod tests {
+    use pinfold_proto::{BOLD, ITALIC};
+
     use super::*;
     use crate::font::fixture::{File, KANJI, kanji_font};
 
@@ -256,14 +293,14 @@ mod tests {
     fn a_glyph_bigger_than_the_cache_is_skipped() {
         assert!(
             GlyphCache::new(Font::bundled().unwrap(), 16.0, 0)
-                .get('M')
+                .get('M', 0)
                 .is_none()
         );
     }
 
     fn cost(character: char) -> usize {
         let mut cache = GlyphCache::new(Font::bundled().unwrap(), 16.0, CACHE_LIMIT);
-        cache.get(character);
+        cache.get(character, 0);
         cache.used()
     }
 
@@ -272,10 +309,10 @@ mod tests {
         // One byte too small for all three, so exactly one glyph has to leave.
         let limit = cost('H') + cost('I') + cost('O') - 1;
         let mut cache = GlyphCache::new(Font::bundled().unwrap(), 16.0, limit);
-        cache.get('H');
-        cache.get('I');
-        cache.get('H');
-        cache.get('O');
+        cache.get('H', 0);
+        cache.get('I', 0);
+        cache.get('H', 0);
+        cache.get('O', 0);
         assert!(cache.contains('H') && cache.contains('O'));
         assert!(!cache.contains('I'));
     }
@@ -313,5 +350,50 @@ mod tests {
     fn blending_reaches_both_ends() {
         assert_eq!(blend(PAPER, INK, 0), PAPER);
         assert_eq!(blend(PAPER, INK, 255), INK);
+    }
+
+    #[test]
+    fn half_coverage_is_half_the_light() {
+        // Mixing the bytes gives 0x80 both ways, so light text gains and dark text thins.
+        assert_eq!(blend(0, INK, 128), 0x00bc_bcbc);
+        assert_eq!(blend(INK, 0, 128), 0x00bb_bbbb);
+        // `shaded_pixels_are_mixed_in_linear_light` in `pinfold_sys::metal` expects this too.
+        assert_eq!(blend(PAPER, INK, 128), 0x00bc_bdbe);
+    }
+
+    #[test]
+    fn every_byte_survives_the_trip_through_linear_light() {
+        for byte in 0..=255_u32 {
+            let colour = byte << 16 | byte << 8 | byte;
+            // Text hidden by giving it the background's colour stays hidden at any coverage.
+            assert_eq!(blend(colour, colour, 77), colour);
+        }
+    }
+
+    #[test]
+    fn a_style_in_the_foreground_is_not_a_colour() {
+        assert_eq!(blend(PAPER, INK | BOLD | ITALIC, 255), INK);
+    }
+
+    fn drawn(style: u32) -> Vec<u32> {
+        let mut painter = painter();
+        let (mut buffer, width, height) = pixels(&painter, 3, 1);
+        let mut canvas = Canvas::new(&mut buffer, width, height).unwrap();
+        let styled = Cell {
+            foreground: INK | style,
+            ..cell('H')
+        };
+        painter.draw_row(&mut canvas, 0, &[cell(' '), styled, cell(' ')]);
+        buffer
+    }
+
+    #[test]
+    fn styles_draw_differently() {
+        let regular = drawn(0);
+        for style in [BOLD, ITALIC, BOLD | ITALIC] {
+            assert_ne!(drawn(style), regular, "{style:#x}");
+        }
+        let ink = |buffer: &[u32]| buffer.iter().filter(|&&pixel| pixel != PAPER).count();
+        assert!(ink(&drawn(BOLD)) > ink(&regular));
     }
 }

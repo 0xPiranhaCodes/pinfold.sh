@@ -68,7 +68,7 @@ fn instances(
     columns: usize,
     metrics: Metrics,
     clear: u32,
-    mut slot: impl FnMut(char) -> Option<Slot>,
+    mut slot: impl FnMut(char, u32) -> Option<Slot>,
     out: &mut Vec<Instance>,
 ) {
     out.clear();
@@ -94,7 +94,7 @@ fn instances(
         if cell.character == ' ' {
             continue;
         }
-        let Some(glyph) = slot(cell.character).filter(|glyph| glyph.width > 0) else {
+        let Some(glyph) = slot(cell.character, cell.style()).filter(|glyph| glyph.width > 0) else {
             continue;
         };
         let (x, y) = position(index);
@@ -119,7 +119,7 @@ pub struct MetalRenderer {
     metrics: Metrics,
     context: ScaleContext,
     shelves: Shelves,
-    slots: HashMap<char, Slot>,
+    slots: HashMap<(char, u32), Slot>,
     cells: Vec<Cell>,
     instances: Vec<Instance>,
 }
@@ -128,10 +128,14 @@ impl MetalRenderer {
     /// Creates a renderer. `size` is the font size in physical pixels. Returns nothing if
     /// Metal is unavailable.
     pub fn new(window: &impl HasWindowHandle, font: Font, size: f32) -> Option<Self> {
+        Some(Self::with_gpu(Gpu::new(window, ATLAS_SIZE)?, font, size))
+    }
+
+    fn with_gpu(gpu: Gpu, font: Font, size: f32) -> Self {
         let size = clamp_size(size);
         let metrics = Metrics::new(&font, size);
-        Some(Self {
-            gpu: Gpu::new(window, ATLAS_SIZE)?,
+        Self {
+            gpu,
             fonts: font.into(),
             size,
             metrics,
@@ -140,7 +144,7 @@ impl MetalRenderer {
             slots: HashMap::new(),
             cells: Vec::new(),
             instances: Vec::new(),
-        })
+        }
     }
 }
 
@@ -174,11 +178,12 @@ impl Renderer for MetalRenderer {
             slots,
             ..
         } = self;
-        let slot = |character: char| {
-            if let Some(slot) = slots.get(&character) {
+        let slot = |character: char, style: u32| {
+            let key = (character, style);
+            if let Some(slot) = slots.get(&key) {
                 return Some(*slot);
             }
-            let glyph = rasterize(context, fonts, *size, metrics, character);
+            let glyph = rasterize(context, fonts, *size, metrics, key);
             let height = glyph.mask.len().checked_div(glyph.width).unwrap_or(0);
             let (x, y) = shelves.place(glyph.width, height).or_else(|| {
                 // shortcut: a full atlas restarts, so a frame over its capacity glitches: 2,000
@@ -196,7 +201,7 @@ impl Renderer for MetalRenderer {
                 left: glyph.left,
                 top: glyph.top,
             };
-            slots.insert(character, slot);
+            slots.insert(key, slot);
             Some(slot)
         };
         let columns = usize::from(frame.columns);
@@ -215,6 +220,8 @@ impl Renderer for MetalRenderer {
 
 #[cfg(test)]
 mod tests {
+    use pinfold_proto::{BOLD, ITALIC};
+
     use super::*;
 
     const PAPER: u32 = 0x0010_2030;
@@ -232,7 +239,7 @@ mod tests {
         }
     }
 
-    fn slot(_: char) -> Option<Slot> {
+    fn slot(_: char, _: u32) -> Option<Slot> {
         Some(Slot {
             x: 5,
             y: 6,
@@ -286,7 +293,7 @@ mod tests {
     #[test]
     fn empty_glyphs_are_skipped() {
         let mut out = Vec::new();
-        let none = |_| {
+        let none = |_, _| {
             Some(Slot {
                 x: 0,
                 y: 0,
@@ -298,6 +305,106 @@ mod tests {
         };
         instances(&[cell('x', PAPER)], 1, METRICS, PAPER, none, &mut out);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn a_quad_asks_for_its_cells_style() {
+        let mut asked = Vec::new();
+        let mut out = Vec::new();
+        let bold = Cell {
+            foreground: 0x00ff_ffff | BOLD,
+            ..cell('x', PAPER)
+        };
+        let record = |character, style| {
+            asked.push((character, style));
+            slot(character, style)
+        };
+        let cells = [cell('x', PAPER), bold];
+        instances(&cells, 2, METRICS, PAPER, record, &mut out);
+        assert_eq!(asked, [('x', 0), ('x', BOLD)]);
+    }
+
+    fn renderer() -> Option<MetalRenderer> {
+        let gpu = Gpu::offscreen(ATLAS_SIZE)?;
+        Some(MetalRenderer::with_gpu(gpu, Font::bundled().ok()?, 26.0))
+    }
+
+    fn frame(columns: u16, rows: u16, cells: Vec<Cell>) -> Frame {
+        Frame {
+            columns,
+            rows,
+            cells,
+            ..Frame::default()
+        }
+    }
+
+    #[test]
+    fn each_style_takes_its_own_slot() {
+        let Some(mut renderer) = renderer() else {
+            eprintln!("skipped: no Metal device");
+            return;
+        };
+        renderer.resize(100, 100);
+        let styled = |style| Cell {
+            foreground: 0x00ff_ffff | style,
+            ..cell('x', PAPER)
+        };
+        let cells = [0, BOLD, ITALIC, BOLD | ITALIC].map(styled).to_vec();
+        renderer.draw(&frame(4, 1, cells)).unwrap();
+        assert_eq!(renderer.slots.len(), 4);
+        let places: Vec<_> = renderer
+            .slots
+            .values()
+            .map(|slot| (slot.x, slot.y))
+            .collect();
+        assert!((1..4).all(|index| !places[index..].contains(&places[index - 1])));
+    }
+
+    fn draw_for_a_while(renderer: &mut MetalRenderer, frame: &Frame) {
+        // Enough frames to touch every drawable and let in-flight buffers go.
+        for _ in 0..30 {
+            renderer.draw(frame).unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(16));
+        }
+    }
+
+    /// What bold and italic cost on top of regular text at the budget's window size, through
+    /// real drawables and a real atlas. Run alone, with `cargo test -p pinfold-render
+    /// --release style_cost -- --ignored --nocapture --test-threads 1`.
+    #[test]
+    #[ignore = "measures this process, so it must run alone"]
+    fn metal_style_cost() {
+        let footprint = || pinfold_sys::footprint(std::process::id()).unwrap();
+        let megabytes = |bytes: u64| bytes as f64 / 1e6;
+        let mut renderer = renderer().unwrap();
+        renderer.resize(1512, 1890);
+        let (cell_width, cell_height) = renderer.cell_size();
+        let (columns, rows) = (1512 / cell_width as u16, 1890 / cell_height as u16);
+        let screen = |styles: &[u32]| {
+            let area = usize::from(columns) * usize::from(rows);
+            // Each run of ASCII takes the next style, so every pairing is on screen.
+            let styled = styles
+                .iter()
+                .flat_map(|style| ('!'..='~').map(|c| (c, *style)));
+            let cells = styled.cycle().take(area).map(|(character, style)| Cell {
+                foreground: 0x00ff_ffff | style,
+                ..cell(character, PAPER)
+            });
+            frame(columns, rows, cells.collect())
+        };
+        draw_for_a_while(&mut renderer, &screen(&[0]));
+        let (regular, regular_slots) = (footprint(), renderer.slots.len());
+        let regular_atlas = renderer.shelves.y + renderer.shelves.row_height;
+        draw_for_a_while(&mut renderer, &screen(&[0, BOLD, ITALIC, BOLD | ITALIC]));
+        println!(
+            "Metal at 1512x1890, {columns}x{rows} cells: regular {:.2} MB, {regular_slots} \
+             glyphs, {regular_atlas} atlas rows; all four styles +{:.3} MB, {} glyphs, {} \
+             atlas rows of {ATLAS_SIZE}",
+            megabytes(regular),
+            megabytes(footprint().saturating_sub(regular)),
+            renderer.slots.len(),
+            renderer.shelves.y + renderer.shelves.row_height,
+        );
     }
 
     #[test]

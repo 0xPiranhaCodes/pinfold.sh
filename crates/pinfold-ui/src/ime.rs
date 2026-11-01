@@ -28,7 +28,7 @@ pub fn overlay(frame: &mut Frame, text: &str, caret: usize) {
         }
         for offset in 0..width {
             if let Some(cell) = frame.cells.get_mut(start + usize::from(column) + offset) {
-                std::mem::swap(&mut cell.foreground, &mut cell.background);
+                cell.invert();
                 cell.character = if offset == 0 { character } else { ' ' };
             }
         }

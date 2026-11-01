@@ -26,6 +26,10 @@ pub struct Config {
     /// In points, where one point is one logical pixel.
     #[serde(deserialize_with = "font_size")]
     pub font_size: f32,
+    /// A font file to use instead of the bundled font. It is checked when it is opened, and
+    /// a bad one means the bundled font.
+    #[serde(deserialize_with = "font_path")]
+    pub font_path: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -33,6 +37,7 @@ impl Default for Config {
         Self {
             macos_option_as_alt: false,
             font_size: 13.0,
+            font_path: None,
         }
     }
 }
@@ -45,6 +50,18 @@ fn font_size<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error
     } else {
         Err(de::Error::custom(format!(
             "font_size must be from {MIN_FONT_SIZE} to {MAX_FONT_SIZE} points, not {size}"
+        )))
+    }
+}
+
+fn font_path<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<PathBuf>, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    // The path may reach the terminal Pinfold started from in a message.
+    if Path::new(&text).is_absolute() && !text.contains(char::is_control) {
+        Ok(Some(PathBuf::from(text)))
+    } else {
+        Err(de::Error::custom(format!(
+            "font_path must be an absolute path with no control characters, not {text:?}"
         )))
     }
 }
@@ -209,6 +226,24 @@ mod tests {
         assert!(message(b"font_size = \"big\"").contains("font_size"));
         assert_eq!(parse(b"font_size = 6").unwrap().font_size, 6.0);
         assert_eq!(parse(b"font_size = 72").unwrap().font_size, 72.0);
+    }
+
+    #[test]
+    fn a_font_path_is_read() {
+        assert_eq!(parse(b"").unwrap().font_path, None);
+        let config = parse(b"font_path = \"/fonts/Mono.ttf\"").unwrap();
+        assert_eq!(config.font_path, Some(PathBuf::from("/fonts/Mono.ttf")));
+    }
+
+    #[test]
+    fn bad_font_paths_are_named_with_their_line() {
+        for value in ["\"\"", "\"Mono.ttf\"", "\"~/Mono.ttf\"", "\"/a\\u001bb\""] {
+            let text = message(format!("\nfont_path = {value}\n").as_bytes());
+            assert!(text.contains("line 2"), "{value}: {text}");
+            assert!(text.contains("absolute path"), "{value}: {text}");
+            assert!(!text.chars().any(|c| c.is_control() && c != '\n'), "{text}");
+        }
+        assert!(message(b"font_path = 1").contains("font_path"));
     }
 
     #[test]
