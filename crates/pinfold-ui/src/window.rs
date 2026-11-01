@@ -13,18 +13,18 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 use pinfold_core::io::{Reactor, Waker};
-use pinfold_proto::Frame;
+use pinfold_proto::{Frame, MouseMode};
 use pinfold_render::cpu::{CpuRenderer, Renderer};
 use pinfold_render::font::{Font, FontError};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::error::{EventLoopError, OsError};
-use winit::event::{ElementState, Ime, WindowEvent};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
-use winit::keyboard::ModifiersState;
+use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::window::{Window, WindowId};
 
-use crate::{ime, input};
+use crate::{ime, input, mouse};
 
 /// In logical pixels.
 const FONT_SIZE: f32 = 13.0;
@@ -137,6 +137,12 @@ struct App {
     composed: Frame,
     /// Where the input method's window was last told to go.
     ime_cursor: Option<(u16, u16)>,
+    /// The cell under the pointer, as `(row, column)`.
+    pointer: (u16, u16),
+    /// The buttons held, by their number in reports, lowest first.
+    buttons: [bool; 3],
+    /// Wheel movement not yet worth a whole line.
+    wheel: f32,
     result: Result<(), Error>,
 }
 
@@ -203,6 +209,78 @@ impl App {
         Ok(())
     }
 
+    fn report(&self, event: mouse::Event) {
+        let frame = &self.frame;
+        let report = mouse::encode(
+            event,
+            self.pointer,
+            self.modifiers,
+            frame.mouse,
+            frame.mouse_encoding,
+        );
+        if !report.is_empty() {
+            self.request(Request::Input(report));
+        }
+    }
+
+    fn pointer_moved(&mut self, x: f64, y: f64) {
+        let Some(open) = &self.open else { return };
+        let (width, height) = open.renderer.cell_size();
+        let cell = |pixels: f64, size: usize, cells: u16| {
+            ((pixels.max(0.0) as usize / size) as u32).min(u32::from(cells.max(1)) - 1) as u16
+        };
+        let row = cell(y, height, self.frame.rows);
+        let column = cell(x, width, self.frame.columns);
+        if self.pointer != (row, column) {
+            self.pointer = (row, column);
+            let held = self.buttons.iter().position(|&held| held);
+            self.report(mouse::Event::Motion(held.map(|button| button as u8)));
+        }
+    }
+
+    fn pressed(&mut self, button: MouseButton, state: ElementState) {
+        let number = match button {
+            MouseButton::Left => 0,
+            MouseButton::Middle => 1,
+            MouseButton::Right => 2,
+            _ => return,
+        };
+        let down = state == ElementState::Pressed;
+        self.buttons[usize::from(number)] = down;
+        self.report(if down {
+            mouse::Event::Press(number)
+        } else {
+            mouse::Event::Release(number)
+        });
+    }
+
+    fn wheel(&mut self, delta: MouseScrollDelta) {
+        let Some(open) = &self.open else { return };
+        self.wheel += match delta {
+            MouseScrollDelta::LineDelta(_, lines) => lines,
+            MouseScrollDelta::PixelDelta(position) => {
+                position.y as f32 / open.renderer.cell_size().1 as f32
+            }
+        };
+        let lines = self.wheel.trunc();
+        self.wheel -= lines;
+        // shortcut: on the primary screen the wheel does nothing until panes can show history.
+        let key = Key::Named(if lines > 0.0 {
+            NamedKey::ArrowUp
+        } else {
+            NamedKey::ArrowDown
+        });
+        for _ in 0..lines.abs() as u32 {
+            if self.frame.mouse != MouseMode::Off {
+                self.report(mouse::Event::Wheel(lines > 0.0));
+            } else if self.frame.alternate_scroll {
+                let empty = ModifiersState::empty();
+                let arrow = input::encode(&key, None, empty, self.frame.app_cursor);
+                self.request(Request::Input(arrow));
+            }
+        }
+    }
+
     fn ime(&mut self, event: Ime) {
         match event {
             Ime::Preedit(text, caret) => {
@@ -253,6 +331,11 @@ impl ApplicationHandler<Notice> for App {
             WindowEvent::Resized(size) => self.resized(size),
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::Ime(event) => self.ime(event),
+            WindowEvent::CursorMoved { position, .. } => {
+                self.pointer_moved(position.x, position.y);
+            }
+            WindowEvent::MouseInput { state, button, .. } => self.pressed(button, state),
+            WindowEvent::MouseWheel { delta, .. } => self.wheel(delta),
             // A key pressed while composing belongs to the input method.
             WindowEvent::KeyboardInput { event, .. }
                 if event.state == ElementState::Pressed && self.preedit.0.is_empty() =>
@@ -310,6 +393,9 @@ pub fn run(size: Option<(u32, u32)>) -> Result<(), Error> {
         preedit: (String::new(), 0),
         composed: Frame::default(),
         ime_cursor: None,
+        pointer: (0, 0),
+        buttons: [false; 3],
+        wheel: 0.0,
         result: Ok(()),
     };
     event_loop.run_app(&mut app)?;

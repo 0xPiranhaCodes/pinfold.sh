@@ -9,7 +9,7 @@ use alacritty_terminal::term::cell::{Cell as GridCell, Flags};
 use alacritty_terminal::term::color;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, Processor};
-use pinfold_proto::{Cell, Frame};
+use pinfold_proto::{Cell, Frame, MouseEncoding, MouseMode};
 
 use crate::scrollback::Scrollback;
 
@@ -245,7 +245,25 @@ impl VtEngine for AlacrittyEngine {
             .ok()
             .zip(u16::try_from(point.column.0).ok());
         frame.cursor = position.filter(|_| visible);
-        frame.app_cursor = self.term.mode().contains(TermMode::APP_CURSOR);
+        let mode = self.term.mode();
+        frame.app_cursor = mode.contains(TermMode::APP_CURSOR);
+        frame.mouse = if mode.contains(TermMode::MOUSE_MOTION) {
+            MouseMode::Motion
+        } else if mode.contains(TermMode::MOUSE_DRAG) {
+            MouseMode::Drag
+        } else if mode.contains(TermMode::MOUSE_REPORT_CLICK) {
+            MouseMode::Click
+        } else {
+            MouseMode::Off
+        };
+        frame.mouse_encoding = if mode.contains(TermMode::SGR_MOUSE) {
+            MouseEncoding::Sgr
+        } else if mode.contains(TermMode::UTF8_MOUSE) {
+            MouseEncoding::Utf8
+        } else {
+            MouseEncoding::Legacy
+        };
+        frame.alternate_scroll = mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL);
     }
 }
 
@@ -392,6 +410,25 @@ mod tests {
         assert!(!screen(b"").app_cursor);
         assert!(screen(b"\x1b[?1h").app_cursor);
         assert!(!screen(b"\x1b[?1h\x1b[?1l").app_cursor);
+    }
+
+    #[test]
+    fn frames_carry_the_mouse_modes() {
+        assert_eq!(screen(b"").mouse, MouseMode::Off);
+        assert_eq!(screen(b"\x1b[?1000h").mouse, MouseMode::Click);
+        assert_eq!(screen(b"\x1b[?1002h").mouse, MouseMode::Drag);
+        assert_eq!(screen(b"\x1b[?1003h").mouse, MouseMode::Motion);
+        assert_eq!(screen(b"\x1b[?1003h\x1b[?1003l").mouse, MouseMode::Off);
+        assert_eq!(screen(b"").mouse_encoding, MouseEncoding::Legacy);
+        assert_eq!(screen(b"\x1b[?1005h").mouse_encoding, MouseEncoding::Utf8);
+        assert_eq!(screen(b"\x1b[?1006h").mouse_encoding, MouseEncoding::Sgr);
+    }
+
+    #[test]
+    fn the_wheel_sends_arrows_only_on_the_alternate_screen() {
+        assert!(!screen(b"").alternate_scroll);
+        assert!(screen(b"\x1b[?1049h").alternate_scroll);
+        assert!(!screen(b"\x1b[?1049h\x1b[?1007l").alternate_scroll);
     }
 
     #[test]

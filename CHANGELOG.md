@@ -23,6 +23,7 @@ Entries are generated from Conventional Commits with git-cliff
 - Fuzzing of the terminal input path, on each PR and nightly.
 - Function keys, modifier combinations and application cursor mode, as xterm sends them.
 - Input method composition, drawn at the cursor.
+- Mouse reporting, and the wheel as arrow keys on the alternate screen.
 - A fork of `alacritty_terminal` that hands rows leaving the screen to their owner.
 - Metal renderer on macOS, with CPU drawing as its fallback.
 - macOS window budget raised to 30 MB plus pixels.

@@ -2,6 +2,7 @@
 
 mod ime;
 mod input;
+mod mouse;
 mod window;
 
 pub use window::{Error, run};
