@@ -57,7 +57,10 @@ impl<T: GridCell + Default + PartialEq> Grid<T> {
         // Move existing lines up for every line that couldn't be pulled from history.
         if from_history != lines_added {
             let delta = lines_added - from_history;
+            // These rows are the blank ones just added, so they are not history.
+            let sink = self.history_sink.take();
             self.scroll_up(&(Line(0)..Line(target as i32)), delta);
+            self.history_sink = sink;
         }
 
         // Move cursor down for every line pulled from history.

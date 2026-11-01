@@ -1,6 +1,7 @@
 //! Scrollback size, feed speed and read latency on the M0 spike's corpora.
 //!
-//! Run with `cargo run --release -p pinfold-benches --bin scrollback`.
+//! Run with `cargo run --release -p pinfold-benches --bin scrollback`. Adding
+//! `-- --write <dir>` saves the corpora instead, which is how `cargo xtask mem-gate` gets them.
 
 #![allow(clippy::print_stdout, reason = "command-line output")]
 
@@ -183,6 +184,15 @@ fn feed(bytes: &[u8], sink: Option<&Arc<Mutex<Scrollback>>>) -> f64 {
 }
 
 fn main() -> std::io::Result<()> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let [flag, dir] = args.as_slice()
+        && flag == "--write"
+    {
+        for name in CORPORA {
+            std::fs::write(std::path::Path::new(dir).join(name), corpus(name)?)?;
+        }
+        return Ok(());
+    }
     println!("{COLUMNS} columns, {SCREEN}-row screen, {FED_LINES} lines fed.\n");
     println!(
         "| Corpus | Rows held | Store MB | MB/s, no store | MB/s, store | Read 50 rows p99 ms |"

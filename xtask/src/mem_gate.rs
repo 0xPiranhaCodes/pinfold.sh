@@ -1,6 +1,6 @@
 //! Measures real processes against the ADR-0021 budgets.
 
-use std::io;
+use std::io::{self, BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -13,6 +13,14 @@ pub const PANE_LIMIT: u64 = 250_000;
 pub const WINDOW_LIMIT_FULL_HD: u64 = 8_000_000 + 2 * 4 * 1920 * 1080;
 /// The window budget on macOS for half a Retina screen, the size M0 measured.
 pub const WINDOW_LIMIT_HALF_RETINA: u64 = 30_000_000 + 2 * 4 * 1512 * 1890;
+/// 10k lines of typical text, on top of an idle pane of the same size.
+pub const TYPICAL_TEXT_LIMIT: u64 = if cfg!(target_os = "macos") {
+    1_500_000
+} else {
+    1_000_000
+};
+/// The cap on a pane's scrollback, with output that fills it.
+pub const SCROLLBACK_CAP: u64 = 2_000_000;
 
 const RUNS: usize = 3;
 /// Long enough for a process to finish starting.
@@ -21,11 +29,7 @@ pub const SETTLE: Duration = Duration::from_secs(1);
 pub const WINDOW_SETTLE: Duration = Duration::from_secs(7);
 
 /// ADR-0021 budgets with nothing to measure yet, and the issue that makes them measurable.
-const NOT_MEASURED: [(&str, &str); 3] = [
-    ("Window on Wayland", "a compositor in CI"),
-    ("10k lines of typical text", "#24"),
-    ("Cold scrollback per pane", "#24"),
-];
+const NOT_MEASURED: [(&str, &str); 1] = [("Window on Wayland", "a compositor in CI")];
 
 pub struct Budget<'a> {
     pub metric: &'a str,
@@ -35,14 +39,26 @@ pub struct Budget<'a> {
     /// Measures the growth per pane instead: `args`, minus these arguments, over this many panes.
     pub per_pane_over: Option<(&'a [&'a str], u64)>,
     pub settle: Duration,
+    /// Starts the settle time when the process prints a line, not when it starts.
+    pub wait_for_line: bool,
 }
 
-fn measure_once(program: &Path, args: &[&str], settle: Duration) -> io::Result<u64> {
-    let mut child = Command::new(program)
+fn measure_once(budget: &Budget, args: &[&str]) -> io::Result<u64> {
+    let stdout = if budget.wait_for_line {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    };
+    let mut child = Command::new(budget.program)
         .args(args)
-        .stdout(Stdio::null())
+        .stdout(stdout)
         .spawn()?;
-    thread::sleep(settle);
+    // A process that dies closes the pipe, so this read cannot outlive it.
+    let piped = child.stdout.take();
+    if let Some(stdout) = piped {
+        BufReader::new(stdout).read_line(&mut String::new())?;
+    }
+    thread::sleep(budget.settle);
     let exited = child.try_wait()?.is_some();
     let bytes = if exited {
         Err(io::Error::other("exited before it could be measured"))
@@ -57,20 +73,20 @@ fn measure_once(program: &Path, args: &[&str], settle: Duration) -> io::Result<u
     }
 }
 
-fn median(program: &Path, args: &[&str], settle: Duration) -> io::Result<u64> {
+fn median(budget: &Budget, args: &[&str]) -> io::Result<u64> {
     let mut samples = (0..RUNS)
-        .map(|_| measure_once(program, args, settle))
+        .map(|_| measure_once(budget, args))
         .collect::<io::Result<Vec<u64>>>()?;
     samples.sort_unstable();
     Ok(samples[RUNS / 2])
 }
 
 fn measure(budget: &Budget) -> io::Result<u64> {
-    let bytes = median(budget.program, budget.args, budget.settle)?;
+    let bytes = median(budget, budget.args)?;
     match budget.per_pane_over {
         None => Ok(bytes),
         Some((baseline, panes)) => {
-            let growth = bytes.saturating_sub(median(budget.program, baseline, budget.settle)?);
+            let growth = bytes.saturating_sub(median(budget, baseline)?);
             Ok(growth / panes)
         }
     }
@@ -134,6 +150,7 @@ mod tests {
             args: seconds,
             per_pane_over: None,
             settle: SETTLE,
+            wait_for_line: false,
         }
     }
 
@@ -161,6 +178,31 @@ mod tests {
             args: &[],
             per_pane_over: None,
             settle: SETTLE,
+            wait_for_line: false,
+        };
+        assert!(!run(&[budget]));
+    }
+
+    #[test]
+    fn the_settle_time_can_start_from_a_line_of_output() {
+        let budget = Budget {
+            program: Path::new("/bin/sh"),
+            args: &["-c", "sleep 2; echo ready; exec sleep 30"],
+            wait_for_line: true,
+            ..sleep(u64::MAX, &[])
+        };
+        let start = std::time::Instant::now();
+        measure_once(&budget, budget.args).unwrap();
+        assert!(start.elapsed() >= SETTLE + Duration::from_secs(2));
+    }
+
+    #[test]
+    fn a_process_that_dies_before_its_line_fails() {
+        let budget = Budget {
+            program: Path::new("/bin/sh"),
+            args: &["-c", "exit 0"],
+            wait_for_line: true,
+            ..sleep(u64::MAX, &[])
         };
         assert!(!run(&[budget]));
     }

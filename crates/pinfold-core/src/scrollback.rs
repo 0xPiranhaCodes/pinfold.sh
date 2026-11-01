@@ -9,17 +9,30 @@ use alacritty_terminal::grid::{HistorySink, Row};
 use alacritty_terminal::index::Column;
 use alacritty_terminal::term::cell::{Cell, Flags, Hyperlink};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
+use lz4_flex::block::{CompressTable, compress_into_with_table, get_maximum_output_size};
 
 /// The hard cap on one pane's scrollback.
 pub const BYTE_CAP: usize = 2_000_000;
+/// Kept out of the store's share of the cap, for the heap around it that it cannot count.
+/// `cargo xtask mem-gate` holds a pane to the cap. The same allocations cost up to 0.9 MB more
+/// from run to run on macOS, whose heap adds regions as the thread moves between cores.
+const HEAP_RESERVE: usize = if cfg!(target_os = "macos") {
+    1_000_000
+} else {
+    400_000
+};
 /// Scrollback keeps fewer rows than this, so a quiet pane stays far under the byte cap.
 pub const LINE_CAP: usize = 10_000;
 
 const BLOCK_ROWS: usize = 64;
 /// An open block is compressed at this many bytes, however few rows it holds.
 const BLOCK_BYTES: usize = 64 * 1024;
-/// Counted for each block: its queue entry and the allocator's overhead.
-const BLOCK_OVERHEAD: usize = 64;
+/// Counted for each block: its queue entry.
+const BLOCK_OVERHEAD: usize = size_of::<Block>();
+/// The size of LZ4's hash table, once a block has been compressed.
+const TABLE_BYTES: usize = 16 * 1024;
+/// The size of each chunk of compressed bytes.
+const CHUNK_BYTES: usize = 64 * 1024;
 /// Longer links are dropped from history, so one cell cannot hold megabytes.
 const MAX_LINK: usize = 2048;
 /// Combining marks kept per cell.
@@ -204,7 +217,7 @@ struct Open {
 
 impl Open {
     fn bytes(&self) -> usize {
-        self.runs.capacity() + self.text.capacity()
+        self.runs.len() + self.text.len()
     }
 
     fn push(&mut self, row: &Row<Cell>) {
@@ -239,22 +252,110 @@ impl Open {
         put_style(&mut self.runs, first, links);
     }
 
-    fn seal(self) -> Block {
-        let mut raw = Vec::with_capacity(self.bytes() + 8);
-        put_varint(&mut raw, self.runs.len());
-        raw.extend_from_slice(&self.runs);
-        raw.extend_from_slice(self.text.as_bytes());
-        Block {
-            rows: self.rows,
-            data: lz4_flex::block::compress_prepend_size(&raw).into_boxed_slice(),
-        }
+    /// Compresses this block into `spare.packed` and empties it. These buffers live as long
+    /// as the store, because allocating them per seal leaves freed pages behind.
+    fn seal(&mut self, spare: &mut Spare) -> Option<usize> {
+        spare.raw.clear();
+        spare.raw.reserve_exact(self.bytes() + 8);
+        put_varint(&mut spare.raw, self.runs.len());
+        spare.raw.extend_from_slice(&self.runs);
+        spare.raw.extend_from_slice(self.text.as_bytes());
+        let (raw, packed) = (&spare.raw, &mut spare.packed);
+        let table = spare.table.get_or_insert_with(CompressTable::large);
+        let packed_size = 4 + get_maximum_output_size(raw.len());
+        packed.clear();
+        packed.reserve_exact(packed_size);
+        packed.extend_from_slice(&(raw.len() as u32).to_le_bytes());
+        packed.resize(packed_size, 0);
+        let size = compress_into_with_table(raw, &mut packed[4..], table);
+        self.runs.clear();
+        self.text.clear();
+        self.rows = 0;
+        size.ok().map(|size| 4 + size)
+    }
+}
+
+/// Working buffers kept between seals.
+#[derive(Default)]
+struct Spare {
+    raw: Vec<u8>,
+    packed: Vec<u8>,
+    table: Option<CompressTable>,
+}
+
+impl std::fmt::Debug for Spare {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Spare")
     }
 }
 
 #[derive(Debug)]
 struct Block {
     rows: usize,
-    data: Box<[u8]>,
+    size: usize,
+}
+
+/// Compressed blocks, oldest first, in chunks of one size.
+///
+/// Blocks of their own sizes, freed oldest first, leave holes that cost half of what they
+/// held. A single growing buffer leaves its old copies behind in the same way.
+#[derive(Debug, Default)]
+struct Ring {
+    chunks: VecDeque<Box<[u8]>>,
+    /// The last chunk emptied. Reusing it means a full ring never touches the allocator.
+    spare: Option<Box<[u8]>>,
+    /// Where the oldest byte sits in the first chunk.
+    start: usize,
+    len: usize,
+}
+
+impl Ring {
+    fn push(&mut self, mut data: &[u8]) {
+        while !data.is_empty() {
+            let end = self.start + self.len;
+            if end == self.chunks.len() * CHUNK_BYTES {
+                let chunk = self.spare.take();
+                self.chunks
+                    .push_back(chunk.unwrap_or_else(|| vec![0; CHUNK_BYTES].into()));
+            }
+            let Some(chunk) = self.chunks.get_mut(end / CHUNK_BYTES) else {
+                return;
+            };
+            let at = end % CHUNK_BYTES;
+            let (now, rest) = data.split_at(data.len().min(CHUNK_BYTES - at));
+            chunk[at..at + now.len()].copy_from_slice(now);
+            self.len += now.len();
+            data = rest;
+        }
+    }
+
+    fn drop_oldest(&mut self, size: usize) {
+        self.start += size;
+        self.len -= size;
+        while self.start >= CHUNK_BYTES {
+            self.spare = self.chunks.pop_front();
+            self.start -= CHUNK_BYTES;
+        }
+    }
+
+    fn read(&self, offset: usize, size: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(size);
+        let mut at = self.start + offset;
+        while out.len() < size {
+            let Some(chunk) = self.chunks.get(at / CHUNK_BYTES) else {
+                break;
+            };
+            let begin = at % CHUNK_BYTES;
+            let end = CHUNK_BYTES.min(begin + size - out.len());
+            out.extend_from_slice(&chunk[begin..end]);
+            at += end - begin;
+        }
+        out
+    }
+
+    fn bytes(&self) -> usize {
+        (self.chunks.len() + usize::from(self.spare.is_some())) * CHUNK_BYTES
+    }
 }
 
 /// Decodes `count` rows. Returns nothing if the data is not what `Open` wrote.
@@ -302,16 +403,17 @@ fn decode_block(count: usize, data: &[u8]) -> Option<Vec<Vec<Cell>>> {
 #[derive(Debug)]
 pub struct Scrollback {
     open: Open,
+    spare: Spare,
+    ring: Ring,
     blocks: VecDeque<Block>,
     block_rows: usize,
-    block_bytes: usize,
     byte_cap: usize,
     line_cap: usize,
 }
 
 impl Default for Scrollback {
     fn default() -> Self {
-        Self::with_caps(BYTE_CAP, LINE_CAP)
+        Self::with_caps(BYTE_CAP - HEAP_RESERVE, LINE_CAP)
     }
 }
 
@@ -325,9 +427,10 @@ impl Scrollback {
     fn with_caps(byte_cap: usize, line_cap: usize) -> Self {
         Self {
             open: Open::default(),
+            spare: Spare::default(),
+            ring: Ring::default(),
             blocks: VecDeque::new(),
             block_rows: 0,
-            block_bytes: 0,
             byte_cap,
             line_cap,
         }
@@ -348,7 +451,12 @@ impl Scrollback {
     /// Returns the bytes held, which never exceed the cap once a row has been pushed.
     #[must_use]
     pub fn bytes(&self) -> usize {
-        self.block_bytes + self.blocks.len() * BLOCK_OVERHEAD + self.open.bytes()
+        let working = self.open.runs.capacity()
+            + self.open.text.capacity()
+            + self.spare.raw.capacity()
+            + self.spare.packed.capacity()
+            + self.spare.table.as_ref().map_or(0, |_| TABLE_BYTES);
+        self.ring.bytes() + self.blocks.len() * BLOCK_OVERHEAD + working
     }
 
     /// Returns up to `count` rows from `first`, where 0 is the oldest row held. Rows are
@@ -356,16 +464,19 @@ impl Scrollback {
     #[must_use]
     pub fn rows(&self, first: usize, count: usize) -> Vec<Vec<Cell>> {
         let mut out = Vec::new();
-        let mut skip = first;
+        let (mut skip, mut offset) = (first, 0);
         for block in &self.blocks {
             if out.len() == count {
                 return out;
             }
+            let start = offset;
+            offset += block.size;
             if skip >= block.rows {
                 skip -= block.rows;
                 continue;
             }
-            let rows = decode_block(block.rows, &block.data).unwrap_or_default();
+            let data = self.ring.read(start, block.size);
+            let rows = decode_block(block.rows, &data).unwrap_or_default();
             let wanted = count - out.len();
             out.extend(rows.into_iter().skip(skip).take(wanted));
             skip = 0;
@@ -377,10 +488,13 @@ impl Scrollback {
     }
 
     fn seal(&mut self) {
-        let block = std::mem::take(&mut self.open).seal();
-        self.block_rows += block.rows;
-        self.block_bytes += block.data.len();
-        self.blocks.push_back(block);
+        let rows = self.open.rows;
+        let Some(size) = self.open.seal(&mut self.spare) else {
+            return;
+        };
+        self.ring.push(&self.spare.packed[..size]);
+        self.block_rows += rows;
+        self.blocks.push_back(Block { rows, size });
     }
 
     fn drop_oldest(&mut self) -> bool {
@@ -388,7 +502,7 @@ impl Scrollback {
             return false;
         };
         self.block_rows -= block.rows;
-        self.block_bytes -= block.data.len();
+        self.ring.drop_oldest(block.size);
         true
     }
 }
@@ -414,6 +528,46 @@ impl HistorySink<Cell> for Scrollback {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_ring_returns_what_it_was_given_across_chunks() {
+        let mut ring = Ring::default();
+        let block = |seed: usize, size: usize| -> Vec<u8> {
+            (0..size).map(|index| (seed + index * 7) as u8).collect()
+        };
+        let sizes = [10, CHUNK_BYTES, 3, 2 * CHUNK_BYTES + 5, CHUNK_BYTES - 1, 1];
+        let (mut offset, mut oldest) = (0, 0);
+        for (seed, &size) in sizes.iter().enumerate() {
+            ring.push(&block(seed, size));
+            assert_eq!(ring.read(offset, size), block(seed, size));
+            offset += size;
+        }
+        for (seed, &size) in sizes.iter().enumerate() {
+            assert_eq!(ring.read(oldest, size), block(seed, size));
+            oldest += size;
+        }
+        let mut live = offset;
+        for (seed, &size) in sizes.iter().enumerate() {
+            ring.drop_oldest(size);
+            live -= size;
+            assert_eq!(ring.len, live);
+            assert!(ring.bytes() <= live + 2 * CHUNK_BYTES, "after block {seed}");
+        }
+    }
+
+    #[test]
+    fn a_full_ring_is_recycled_rather_than_grown() {
+        let mut store = Scrollback::with_caps(256 * 1024, 100_000);
+        for number in 0..20_000 {
+            store.push(&row(&format!(
+                "{number:x} {:x}",
+                number * 2_654_435_761_usize
+            )));
+            assert!(store.bytes() <= 256 * 1024);
+        }
+        let newest = store.rows(store.len() - 1, 1);
+        assert_eq!(newest[0][0].c, '4');
+    }
 
     fn row(text: &str) -> Row<Cell> {
         let mut row: Row<Cell> = Row::new(text.chars().count());

@@ -131,6 +131,14 @@ fn rows_pushed_off_by_a_shorter_window_are_kept() {
 }
 
 #[test]
+fn a_taller_window_adds_nothing_to_history() {
+    let mut pane = Pane::new(2, 10);
+    pane.feed(b"one\r\ntwo\r\nthree");
+    pane.term.resize(Size(5, 10));
+    assert_eq!(pane.history(), ["one"]);
+}
+
+#[test]
 fn rows_reflowed_off_a_narrower_window_are_kept() {
     let mut pane = Pane::new(2, 6);
     pane.feed(b"abcdef\r\nghijkl");

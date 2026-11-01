@@ -34,4 +34,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: cargo xtask mem-gate
+      - run: sudo apt-get install -y libxkbcommon-x11-0 xvfb
+      - run: xvfb-run -a -s "-screen 0 1920x1080x24" cargo xtask mem-gate
