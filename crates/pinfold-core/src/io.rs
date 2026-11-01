@@ -234,6 +234,7 @@ impl Reactor {
             return false;
         }
         pane.input.extend_from_slice(bytes);
+        pane.dirty |= pane.engine.snap_to_live();
         pane.flush();
         true
     }
@@ -261,6 +262,13 @@ impl Reactor {
         let (rows, columns) = pane.engine.size();
         pane.dirty = true;
         pane.pty.resize(rows, columns)
+    }
+
+    /// Moves a pane's view through history. See [`VtEngine::scroll`].
+    pub fn scroll(&mut self, pane: usize, lines: i32) {
+        if let Some(pane) = self.panes.get_mut(pane) {
+            pane.dirty |= pane.engine.scroll(lines);
+        }
     }
 
     /// Returns whether a pane changed since the last call, and clears that.
@@ -450,6 +458,38 @@ mod tests {
         assert_eq!(reactor.engine(pane).unwrap().size(), (30, 100));
         reactor.write(pane, b"\n");
         assert!(turn_until(&mut reactor, |r| on_screen(r, pane, "30 100")));
+    }
+
+    #[test]
+    fn scrolling_redraws_and_input_returns_to_the_screen() {
+        let mut reactor = Reactor::new().unwrap();
+        let script = "seq 1 40; read line; sleep 30";
+        let pane = reactor.spawn(shell(script), 4, 20).unwrap();
+        assert!(turn_until(&mut reactor, |r| {
+            (0..4).any(|line| r.engine(pane).unwrap().line_text(line) == "40")
+        }));
+        let top = |reactor: &Reactor| {
+            let mut frame = pinfold_proto::Frame::default();
+            reactor.engine(pane).unwrap().frame(&mut frame);
+            frame.cells[..2]
+                .iter()
+                .map(|cell| cell.character)
+                .collect::<String>()
+        };
+        let live = top(&reactor);
+        reactor.take_dirty(pane);
+        reactor.scroll(pane, 1);
+        assert!(reactor.take_dirty(pane));
+        assert_ne!(top(&reactor), live);
+        reactor.scroll(pane, -2);
+        assert!(reactor.take_dirty(pane), "one row of that was real");
+        reactor.scroll(pane, -1);
+        assert!(!reactor.take_dirty(pane), "past the end nothing moves");
+        reactor.scroll(pane, 3);
+        reactor.take_dirty(pane);
+        reactor.write(pane, b"x");
+        assert!(reactor.take_dirty(pane));
+        assert_eq!(top(&reactor), live);
     }
 
     #[test]

@@ -27,6 +27,9 @@ pub const MAX_HELD: usize = 256 * 1024;
 /// A wide character cannot fit in fewer columns: reflowing one wraps forever.
 pub const MIN_COLUMNS: u16 = 2;
 
+/// The modes that show the program's screen whatever the view, and keep the wheel from it.
+const NO_HISTORY: TermMode = TermMode::ALT_SCREEN.union(TermMode::MOUSE_MODE);
+
 /// A terminal state machine that turns program output into a grid.
 ///
 /// The trait grows with its callers. The design also lists scrolling, search and damage,
@@ -46,8 +49,17 @@ pub trait VtEngine {
     /// Returns a visible line without trailing spaces, or nothing if `line` is off screen.
     fn line_text(&self, line: u16) -> String;
 
-    /// Copies the visible screen into `frame`, reusing its allocation.
+    /// Copies the view into `frame`, reusing its allocation. That is the visible screen, or
+    /// history above it while scrolled back, when no cursor is shown.
     fn frame(&self, frame: &mut Frame);
+
+    /// Moves the view `lines` rows into history, or back toward the screen if negative, and
+    /// returns whether it moved. It stops at both ends. The alternate screen has no history
+    /// and a program with mouse reporting owns the wheel, so neither scrolls.
+    fn scroll(&mut self, lines: i32) -> bool;
+
+    /// Returns the view to the live screen, and returns whether it was scrolled back.
+    fn snap_to_live(&mut self) -> bool;
 
     /// Returns whether the program has asked for pastes wrapped in brackets.
     fn bracketed_paste(&self) -> bool;
@@ -236,6 +248,9 @@ pub struct AlacrittyEngine {
     scan: Scan,
     replies: Replies,
     scrollback: Arc<Mutex<Scrollback>>,
+    /// The store's number for the view's top row, or nothing at the live screen. A number
+    /// stays on its row as output arrives, so the view holds still without being told.
+    view: Option<usize>,
 }
 
 impl AlacrittyEngine {
@@ -256,6 +271,7 @@ impl AlacrittyEngine {
             scan: Scan::default(),
             replies,
             scrollback,
+            view: None,
         }
     }
 
@@ -263,6 +279,33 @@ impl AlacrittyEngine {
     #[must_use]
     pub fn scrollback(&self) -> &Mutex<Scrollback> {
         &self.scrollback
+    }
+
+    /// Returns how many rows above the live screen the view starts.
+    fn rows_back(&self, store: &Scrollback) -> usize {
+        self.view
+            .filter(|_| !self.term.mode().intersects(NO_HISTORY))
+            .and_then(|number| store.index(number))
+            .map_or(0, |index| store.len() - index)
+    }
+
+    /// Copies the view's rows of history into `frame`, and returns how many there are.
+    fn frame_history(&self, frame: &mut Frame) -> usize {
+        let Ok(mut store) = self.scrollback.lock() else {
+            return 0;
+        };
+        let back = self.rows_back(&store);
+        let first = store.len() - back;
+        let blank = self.cell(&GridCell::default());
+        let columns = usize::from(frame.columns);
+        // shortcut: history keeps the width it was written at, until cold reflow in M2.
+        store.read_rows(first, back.min(usize::from(frame.rows)), |row| {
+            let end = frame.cells.len() + columns;
+            let cells = row.iter().take(columns);
+            frame.cells.extend(cells.map(|cell| self.cell(cell)));
+            frame.cells.resize(end, blank);
+        });
+        frame.cells.len() / columns.max(1)
     }
 
     fn take_replies(&self, replies: &mut Vec<u8>) {
@@ -344,14 +387,16 @@ impl VtEngine for AlacrittyEngine {
         let grid = self.term.grid();
         (frame.rows, frame.columns) = self.size();
         frame.cells.clear();
-        for line in 0..frame.rows {
+        let history = self.frame_history(frame);
+        for line in 0..frame.rows.saturating_sub(history as u16) {
             let row = &grid[Line(i32::from(line))];
             frame
                 .cells
                 .extend((0..grid.columns()).map(|column| self.cell(&row[Column(column)])));
         }
         let point = grid.cursor.point;
-        let visible = self.term.mode().contains(TermMode::SHOW_CURSOR);
+        // Input lands at the live cursor, so none is shown over history.
+        let visible = self.term.mode().contains(TermMode::SHOW_CURSOR) && history == 0;
         let position = u16::try_from(point.line.0)
             .ok()
             .zip(u16::try_from(point.column.0).ok());
@@ -375,6 +420,23 @@ impl VtEngine for AlacrittyEngine {
             MouseEncoding::Legacy
         };
         frame.alternate_scroll = mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL);
+    }
+
+    fn scroll(&mut self, lines: i32) -> bool {
+        let Ok(store) = self.scrollback.lock() else {
+            return false;
+        };
+        if self.term.mode().intersects(NO_HISTORY) {
+            return false;
+        }
+        let back = self.rows_back(&store);
+        let target = back.saturating_add_signed(lines as isize).min(store.len());
+        self.view = (target > 0).then(|| store.end() - target);
+        target != back
+    }
+
+    fn snap_to_live(&mut self) -> bool {
+        self.view.take().is_some()
     }
 
     fn bracketed_paste(&self) -> bool {

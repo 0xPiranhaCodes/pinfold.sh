@@ -62,6 +62,8 @@ enum Request {
     Input(Vec<u8>),
     Paste(String),
     Resize(u16, u16),
+    /// Rows to move the view into history, or back if negative.
+    Scroll(i32),
 }
 
 enum Notice {
@@ -94,6 +96,7 @@ fn run_io(
                     reactor.paste(PANE, &text);
                 }
                 Request::Resize(rows, columns) => reactor.resize(PANE, rows, columns)?,
+                Request::Scroll(lines) => reactor.scroll(PANE, lines),
             }
         }
         if !latest.pending.load(Ordering::Acquire) && reactor.take_dirty(PANE) {
@@ -323,7 +326,6 @@ impl App {
         };
         let lines = self.wheel.trunc();
         self.wheel -= lines;
-        // shortcut: on the primary screen the wheel does nothing until panes can show history.
         let key = Key::Named(if lines > 0.0 {
             NamedKey::ArrowUp
         } else {
@@ -336,6 +338,8 @@ impl App {
                 let empty = ModifiersState::empty();
                 let arrow = input::encode(&key, None, empty, self.frame.app_cursor, false);
                 self.request(Request::Input(arrow));
+            } else {
+                self.request(Request::Scroll(if lines > 0.0 { 1 } else { -1 }));
             }
         }
     }
@@ -343,6 +347,10 @@ impl App {
     fn ime(&mut self, event: Ime) {
         match event {
             Ime::Preedit(text, caret) => {
+                // Composing is typing, and it draws at a cursor that history hides.
+                if !text.is_empty() {
+                    self.request(Request::Scroll(i32::MIN));
+                }
                 self.preedit.1 = caret.map_or(text.len(), |(start, _)| start);
                 self.preedit.0 = text;
             }

@@ -29,6 +29,7 @@ Entries are generated from Conventional Commits with git-cliff
 - Synchronized updates end on their own after 150 ms and hold at most 256 KiB per pane.
 - Limits on OSC strings, titles and hyperlinks, and replies only in fixed formats.
 - Mouse reporting, and the wheel as arrow keys on the alternate screen.
+- The wheel scrolls through history on the primary screen, and input returns to the live screen.
 - A fork of `alacritty_terminal` that hands rows leaving the screen to their owner.
 - Metal renderer on macOS, with CPU drawing as its fallback.
 - macOS window budget raised to 30 MB plus pixels.

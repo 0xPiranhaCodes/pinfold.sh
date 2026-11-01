@@ -1225,6 +1225,8 @@ version = "0.0.0"
 dependencies = [
  "alacritty_terminal",
  "pinfold-core",
+ "pinfold-proto",
+ "pinfold-sys",
 ]
 
 [[package]]
