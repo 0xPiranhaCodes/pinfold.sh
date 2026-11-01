@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use alacritty_terminal::event::VoidListener;
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::term::cell::Cell;
+use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::Processor;
 use pinfold_core::scrollback::{LINE_CAP, Scrollback};
@@ -75,11 +75,18 @@ fn assert_matches_stock(bytes: &[u8]) {
     tiered.grid_mut().set_history_sink(scrollback.clone());
     Processor::<alacritty_terminal::vte::ansi::StdSyncHandler>::new().advance(&mut tiered, bytes);
 
-    let expected = stock_history(&stock);
-    let actual = scrollback
+    let mut expected = stock_history(&stock);
+    let mut actual = scrollback
         .lock()
         .map(|rows| rows.rows(0, usize::MAX))
         .unwrap_or_default();
+    // Stock clears this flag on a row in history when the next line changes. The store is
+    // append-only (ADR-0027), so its row keeps a flag that only marks a blank cell.
+    for row in expected.iter_mut().chain(&mut actual) {
+        if let Some(cell) = row.last_mut() {
+            cell.flags.remove(Flags::LEADING_WIDE_CHAR_SPACER);
+        }
+    }
     assert_eq!(actual.len(), expected.len());
     for (index, (actual, expected)) in actual.iter().zip(&expected).enumerate() {
         assert_eq!(actual, expected, "row {index}");
@@ -102,6 +109,15 @@ fn styled_output_matches_stock() {
         );
     }
     assert_matches_stock(&bytes);
+}
+
+#[test]
+fn a_wide_character_that_wrapped_early_matches_stock() {
+    let long = "a much longer line that wraps past the width";
+    let bytes = format!(
+        "\x1b[2;4r{long}e\u{301}texttexttext漢字\r\n\x1b[T\x1b[2;4r\x1b[T\x1b[2J漢字\x1b[2;4rtext\r\n\r\n"
+    );
+    assert_matches_stock(bytes.as_bytes());
 }
 
 /// Fragments that scroll, style and move the cursor, so random mixes reach deep states.
