@@ -28,3 +28,7 @@ Entries are generated from Conventional Commits with git-cliff
 - PTY spawning, and the `VtEngine` trait over `alacritty_terminal`.
 - Cargo workspace with empty crates, `cargo xtask`, CI and a dry-run release workflow.
 - M0 spike results for caller identity, tiered scrollback, the process split and window memory, with the M0 report.
+
+### Fixed
+
+- Closing a pane with unread output can no longer hang on macOS.
