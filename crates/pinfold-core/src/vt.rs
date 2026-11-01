@@ -49,6 +49,9 @@ pub trait VtEngine {
     /// Copies the visible screen into `frame`, reusing its allocation.
     fn frame(&self, frame: &mut Frame);
 
+    /// Returns whether the program has asked for pastes wrapped in brackets.
+    fn bracketed_paste(&self) -> bool;
+
     /// Returns when output held back by a synchronized update must be shown, if any is.
     fn sync_deadline(&self) -> Option<Instant>;
 
@@ -374,6 +377,10 @@ impl VtEngine for AlacrittyEngine {
         frame.alternate_scroll = mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL);
     }
 
+    fn bracketed_paste(&self) -> bool {
+        self.term.mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
     fn sync_deadline(&self) -> Option<Instant> {
         self.parser.sync_timeout().sync_timeout()
     }
@@ -656,6 +663,14 @@ mod tests {
         assert!(!screen(b"").app_cursor);
         assert!(screen(b"\x1b[?1h").app_cursor);
         assert!(!screen(b"\x1b[?1h\x1b[?1l").app_cursor);
+    }
+
+    #[test]
+    fn the_program_chooses_bracketed_paste() {
+        let mut engine = AlacrittyEngine::new(4, 20);
+        assert!(!engine.bracketed_paste());
+        feed(&mut engine, b"\x1b[?2004h");
+        assert!(engine.bracketed_paste());
     }
 
     #[test]

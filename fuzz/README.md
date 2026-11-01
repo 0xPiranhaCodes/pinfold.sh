@@ -7,5 +7,8 @@ This folder stays outside the workspace because fuzzing needs a nightly toolchai
 panic, an out-of-memory or a hang, if the scrollback passes its cap, or if a stored block
 stops decoding.
 
+`paste` runs any text through the paste sanitizer. It fails if a control character other
+than tab or a line end comes out, or if the brackets are not exactly at the two ends.
+
 `vt.dict` holds the escape sequences a mutator rarely writes by chance. It uses libFuzzer's
 format, which only knows the escapes `\\`, `\"` and `\xNN`.
