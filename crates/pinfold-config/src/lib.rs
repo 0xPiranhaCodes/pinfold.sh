@@ -140,7 +140,7 @@ fn check(metadata: &Metadata) -> Result<(), Error> {
 /// ```
 /// let config = pinfold_config::parse(b"font_size = 15")?;
 /// assert_eq!(config.font_size, 15.0);
-/// assert!(pinfold_config::parse(b"font_sise = 15").is_err());
+/// assert!(pinfold_config::parse(b"unknown_key = 15").is_err());
 /// # Ok::<(), pinfold_config::Error>(())
 /// ```
 pub fn parse(bytes: &[u8]) -> Result<Config, Error> {
