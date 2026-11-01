@@ -18,6 +18,8 @@ const BACKGROUND_SLOT: usize = 257;
 
 /// Larger sizes are clamped, so a bad resize cannot allocate gigabytes of cells.
 pub const MAX_DIMENSION: u16 = 1024;
+/// Longest OSC string that reaches the parser, whose own buffer has no limit.
+pub const MAX_SEQUENCE: usize = 4096;
 /// A wide character cannot fit in fewer columns: reflowing one wraps forever.
 pub const MIN_COLUMNS: u16 = 2;
 
@@ -111,16 +113,36 @@ impl Dimensions for Size {
     }
 }
 
+/// Whether `reply` is a CSI sequence of numbers, with nothing a program could have chosen.
+///
+/// Replies are written into the shell's input, so one that echoed program text would run
+/// it (T3 in the threat model).
+fn is_fixed_format(reply: &str) -> bool {
+    let Some(body) = reply.strip_prefix("\x1b[") else {
+        return false;
+    };
+    let Some(end) = body.chars().last().filter(char::is_ascii_alphabetic) else {
+        return false;
+    };
+    let parameters = &body[..body.len() - end.len_utf8()];
+    let parameters = parameters.strip_suffix('$').unwrap_or(parameters);
+    reply.len() <= 32
+        && parameters
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b';' | b'?' | b'>'))
+}
+
 /// Collects what the terminal wants to send back to the program.
 ///
-/// Alacritty's other events are dropped for now. They include clipboard writes, which
-/// must stay off until the escape-sequence policy in #27 decides them.
+/// Every other event is dropped, which keeps OSC 52 clipboard reads and writes and colour
+/// queries unanswered. Clipboard writes need the status-bar flash from the threat model.
 #[derive(Clone, Default)]
 struct Replies(Arc<Mutex<Vec<u8>>>);
 
 impl EventListener for Replies {
     fn send_event(&self, event: Event) {
         if let Event::PtyWrite(text) = event
+            && is_fixed_format(&text)
             && let Ok(mut pending) = self.0.lock()
         {
             pending.extend_from_slice(text.as_bytes());
@@ -128,10 +150,77 @@ impl EventListener for Replies {
     }
 }
 
+/// Where a read left the scan for OSC strings.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Scan {
+    #[default]
+    Ground,
+    Escape,
+    /// Inside an OSC string, this many bytes in.
+    Osc(usize),
+}
+
+impl Scan {
+    /// Calls `pass` with `bytes`, minus OSC string bytes past `MAX_SEQUENCE`.
+    ///
+    /// This follows the parser exactly: only `ESC ]` opens a string, and BEL, CAN, SUB or
+    /// ESC ends one. A string cut short is still dispatched when it ends.
+    fn filter(&mut self, bytes: &[u8], mut pass: impl FnMut(&[u8])) {
+        let ends = |byte: &u8| matches!(byte, 0x07 | 0x18 | 0x1a | 0x1b);
+        let (mut start, mut index) = (0, 0);
+        while index < bytes.len() {
+            match *self {
+                Self::Ground => match bytes[index..].iter().position(|&byte| byte == 0x1b) {
+                    Some(offset) => {
+                        index += offset + 1;
+                        *self = Self::Escape;
+                    }
+                    None => index = bytes.len(),
+                },
+                Self::Escape => {
+                    *self = match bytes[index] {
+                        b']' => Self::Osc(0),
+                        0x1b => Self::Escape,
+                        _ => Self::Ground,
+                    };
+                    index += 1;
+                }
+                Self::Osc(length) if length >= MAX_SEQUENCE => {
+                    pass(&bytes[start..index]);
+                    index += bytes[index..]
+                        .iter()
+                        .position(ends)
+                        .unwrap_or(bytes.len() - index);
+                    start = index;
+                    if let Some(byte) = bytes.get(index) {
+                        *self = if *byte == 0x1b {
+                            Self::Escape
+                        } else {
+                            Self::Ground
+                        };
+                        index += 1;
+                    }
+                }
+                Self::Osc(length) => {
+                    let byte = bytes[index];
+                    *self = match byte {
+                        0x1b => Self::Escape,
+                        _ if ends(&byte) => Self::Ground,
+                        _ => Self::Osc(length + 1),
+                    };
+                    index += 1;
+                }
+            }
+        }
+        pass(&bytes[start..]);
+    }
+}
+
 /// [`VtEngine`] over `alacritty_terminal`.
 pub struct AlacrittyEngine {
     term: Term<Replies>,
     parser: Processor,
+    scan: Scan,
     replies: Replies,
     scrollback: Arc<Mutex<Scrollback>>,
 }
@@ -151,6 +240,7 @@ impl AlacrittyEngine {
         Self {
             term,
             parser: Processor::new(),
+            scan: Scan::default(),
             replies,
             scrollback,
         }
@@ -198,7 +288,8 @@ impl AlacrittyEngine {
 
 impl VtEngine for AlacrittyEngine {
     fn feed(&mut self, bytes: &[u8], replies: &mut Vec<u8>) {
-        self.parser.advance(&mut self.term, bytes);
+        let (parser, term) = (&mut self.parser, &mut self.term);
+        self.scan.filter(bytes, |bytes| parser.advance(term, bytes));
         if let Ok(mut pending) = self.replies.0.lock() {
             replies.append(&mut pending);
         }
@@ -316,9 +407,104 @@ mod tests {
     }
 
     #[test]
-    fn clipboard_writes_are_ignored() {
+    fn sequences_that_echo_strings_get_no_reply() {
+        let hostile: [&[u8]; 9] = [
+            b"\x1b]2;rm -rf\x07\x1b[21t",
+            b"\x1b]1;rm -rf\x07\x1b[20t",
+            b"\x1bP$qm\x1b\\",
+            b"\x1bP+q544e\x1b\\",
+            b"\x1b]52;c;?\x07",
+            b"\x1b]52;c;aGVsbG8=\x07",
+            b"\x1b]4;1;?\x07",
+            b"\x1b]10;?\x07",
+            b"\x1b[14t",
+        ];
+        for bytes in hostile {
+            let mut engine = AlacrittyEngine::new(4, 20);
+            assert!(feed(&mut engine, bytes).is_empty(), "{bytes:?}");
+        }
+    }
+
+    #[test]
+    fn replies_are_only_fixed_format_csi() {
+        for reply in [
+            "\x1b[1;3R",
+            "\x1b[0n",
+            "\x1b[?6c",
+            "\x1b[>0;3400;1c",
+            "\x1b[?1;2$y",
+            "\x1b[?0u",
+            "\x1b[8;24;80t",
+        ] {
+            assert!(is_fixed_format(reply), "{reply:?}");
+        }
+        for reply in [
+            "",
+            "\x1b[",
+            "\x1b]l$(reboot)\x1b\\",
+            "\x1bPtext",
+            "\x1b[rm -rf /\rt",
+            "\x1b[1;\r1R",
+            "\x1b[1é",
+            "\x1b[$$y",
+            "text",
+        ] {
+            assert!(!is_fixed_format(reply), "{reply:?}");
+        }
+        assert!(!is_fixed_format(&format!("\x1b[{}R", "1".repeat(64))));
+    }
+
+    fn filtered(scan: &mut Scan, bytes: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        scan.filter(bytes, |bytes| out.extend_from_slice(bytes));
+        out
+    }
+
+    #[test]
+    fn an_unending_osc_string_stops_at_the_limit() {
+        let mut scan = Scan::default();
+        let mut passed = filtered(&mut scan, b"\x1b]2;").len();
+        let chunk = vec![b'a'; 64 * 1024];
+        for _ in 0..1024 {
+            passed += filtered(&mut scan, &chunk).len();
+        }
+        assert_eq!(passed, 2 + MAX_SEQUENCE);
+        assert_eq!(filtered(&mut scan, b"\x07after"), b"\x07after");
+        assert_eq!(scan, Scan::Ground);
+    }
+
+    #[test]
+    fn output_outside_osc_strings_is_untouched() {
+        let bytes = [b"\x1b[31mred\x1b(B".as_slice(), &[b'x'; 10_000]].concat();
+        assert_eq!(filtered(&mut Scan::default(), &bytes), bytes);
+    }
+
+    #[test]
+    fn every_terminator_ends_a_string() {
+        for end in [0x07, 0x18, 0x1a, 0x1b] {
+            let mut scan = Scan::Osc(MAX_SEQUENCE);
+            let bytes = [b"cut".as_slice(), &[end, b'x']].concat();
+            assert_eq!(filtered(&mut scan, &bytes), [end, b'x']);
+            assert_eq!(scan, Scan::Ground);
+        }
+    }
+
+    #[test]
+    fn an_escape_split_across_reads_still_counts() {
+        let mut scan = Scan::default();
+        filtered(&mut scan, b"\x1b");
+        filtered(&mut scan, b"]");
+        assert_eq!(scan, Scan::Osc(0));
+    }
+
+    #[test]
+    fn text_after_a_long_string_still_reaches_the_screen() {
         let mut engine = AlacrittyEngine::new(4, 20);
-        assert!(feed(&mut engine, b"\x1b]52;c;aGVsbG8=\x07").is_empty());
+        let mut replies = Vec::new();
+        engine.feed(b"\x1b]2;", &mut replies);
+        engine.feed(&vec![b'a'; 1_000_000], &mut replies);
+        engine.feed(b"\x07ok", &mut replies);
+        assert_eq!(engine.line_text(0), "ok");
     }
 
     #[test]
