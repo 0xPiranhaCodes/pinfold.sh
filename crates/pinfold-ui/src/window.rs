@@ -4,7 +4,7 @@
 //! That thread hands the window copies of the panes the active tab shows, so a window that dies
 //! leaves them running, and a hidden tab costs nothing here.
 
-use std::io;
+use std::io::{self, Write};
 use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::rc::Rc;
@@ -479,7 +479,9 @@ impl App {
         if self.config.font_path != old.font_path {
             match Font::chosen(self.config.font_path.as_deref()) {
                 Ok(font) => open.renderer.set_font(font),
-                Err(error) => eprintln!("pinfold: keeping the current font: {error}"),
+                Err(error) => {
+                    let _ = writeln!(io::stderr(), "pinfold: keeping the current font: {error}");
+                }
             }
         }
         let scale = open.window.scale_factor();
@@ -1216,7 +1218,8 @@ fn config() -> Config {
     };
     pinfold_config::load(&path).unwrap_or_else(|error| {
         // shortcut: only the log hears this, so no one sees it, draw it in the chrome.
-        eprintln!(
+        let _ = writeln!(
+            io::stderr(),
             "pinfold: using the defaults, not {}: {error}",
             path.display()
         );
