@@ -2,10 +2,13 @@
 
 #![allow(unsafe_code, reason = "this crate is the FFI boundary")]
 
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 
 #[cfg(feature = "clipboard")]
@@ -73,8 +76,8 @@ pub fn peer_uid(socket: BorrowedFd<'_>) -> io::Result<u32> {
     platform::peer_uid(socket.as_raw_fd())
 }
 
-/// Starts `command` in a session of its own, with nothing on stdin, stdout or stderr, so it
-/// outlives the caller and the caller's terminal.
+/// Starts `command` in a session of its own, with nothing on stdin or stdout and `stderr` as its
+/// stderr, so it outlives the caller and the caller's terminal.
 ///
 /// The caller exits soon after, and the system reaps the child from then on.
 ///
@@ -85,17 +88,17 @@ pub fn peer_uid(socket: BorrowedFd<'_>) -> io::Result<u32> {
 /// # Examples
 ///
 /// ```
-/// use std::process::Command;
+/// use std::process::{Command, Stdio};
 ///
-/// let mut child = pinfold_sys::spawn_detached(Command::new("/usr/bin/true"))?;
+/// let mut child = pinfold_sys::spawn_detached(Command::new("/usr/bin/true"), Stdio::null())?;
 /// assert!(child.wait()?.success());
 /// # Ok::<(), std::io::Error>(())
 /// ```
-pub fn spawn_detached(mut command: Command) -> io::Result<Child> {
+pub fn spawn_detached(mut command: Command, stderr: Stdio) -> io::Result<Child> {
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(stderr);
     // SAFETY: setsid is async-signal-safe, and the closure touches nothing else.
     unsafe {
         command.pre_exec(|| match libc::setsid() {
@@ -104,6 +107,37 @@ pub fn spawn_detached(mut command: Command) -> io::Result<Child> {
         });
     }
     command.spawn()
+}
+
+/// Opens the log at `path` empty, for appending: mode 0600 if it is new, and refused if it is a
+/// symlink. Appending means that a file emptied under a running writer stays free of holes.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened.
+///
+/// # Examples
+///
+/// ```
+/// use std::io::Write;
+///
+/// let path = std::env::temp_dir().join(format!("pinfold-log-{}", std::process::id()));
+/// writeln!(pinfold_sys::open_log(&path)?, "first")?;
+/// assert_eq!(pinfold_sys::open_log(&path)?.metadata()?.len(), 0);
+/// std::fs::remove_file(&path)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn open_log(path: &Path) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        // O_NONBLOCK, so that a FIFO put here fails at once and cannot hang a launcher.
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    // Not O_TRUNC, which the standard library refuses beside append.
+    file.set_len(0)?;
+    Ok(file)
 }
 
 /// A moment on the local clock.
@@ -255,7 +289,7 @@ mod tests {
     fn a_detached_child_leads_its_own_session() {
         let mut command = Command::new("/bin/sleep");
         command.arg("30");
-        let mut child = spawn_detached(command).unwrap();
+        let mut child = spawn_detached(command, Stdio::null()).unwrap();
         let pid = child.id() as libc::pid_t;
         // The session is set before exec, so it holds from the moment spawn returns.
         // SAFETY: getsid takes an integer and touches no memory.
@@ -266,6 +300,30 @@ mod tests {
         child.wait().unwrap();
         assert_eq!(session, pid);
         assert_ne!(session, ours);
+    }
+
+    #[test]
+    fn a_log_is_private_and_starts_empty_and_a_symlink_is_refused() {
+        use std::fs;
+        use std::io::Write;
+        use std::os::unix::fs::{MetadataExt, symlink};
+
+        let path = std::env::temp_dir().join(format!("pinfold-log-test-{}", std::process::id()));
+        let link = path.with_extension("link");
+        let (_, _) = (fs::remove_file(&path), fs::remove_file(&link));
+        let mut log = open_log(&path).unwrap();
+        log.write_all(b"old").unwrap();
+        assert_eq!(log.metadata().unwrap().mode() & 0o777, 0o600);
+        assert_eq!(open_log(&path).unwrap().metadata().unwrap().len(), 0);
+
+        fs::write(&path, b"keep").unwrap();
+        symlink(&path, &link).unwrap();
+        assert_eq!(
+            open_log(&link).unwrap_err().raw_os_error(),
+            Some(libc::ELOOP)
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"keep");
+        let (_, _) = (fs::remove_file(&path), fs::remove_file(&link));
     }
 
     #[test]

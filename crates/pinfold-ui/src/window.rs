@@ -1215,7 +1215,7 @@ fn config() -> Config {
         return Config::default();
     };
     pinfold_config::load(&path).unwrap_or_else(|error| {
-        // shortcut: stderr only, so a launch from the Dock shows nothing, draw it in the chrome.
+        // shortcut: only the log hears this, so no one sees it, draw it in the chrome.
         eprintln!(
             "pinfold: using the defaults, not {}: {error}",
             path.display()

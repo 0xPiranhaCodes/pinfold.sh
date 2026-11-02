@@ -45,8 +45,15 @@ const MAX_CONNECTION: u64 = 2 * MAX_LINE as u64;
 /// Longest stay of one peer, however it spaces its bytes, as this thread serves them one at a
 /// time.
 const TIMEOUT: Duration = Duration::from_secs(2);
-/// Longest a launcher waits for each answer, which includes a core that is still starting.
-const REPLY_WAIT: Duration = Duration::from_secs(5);
+/// How long the core waits for a window to say hello. Past it a launcher reports the window as
+/// not ready, so a hung one is heard of, and the window may still open.
+pub const OPEN_WAIT: Duration = Duration::from_secs(2);
+/// [`OPEN_WAIT`] for the first window of a core, which starts with nothing warm, so that a slow
+/// Mac does not report failure for a window that opens (`docs/spikes/m2-cold-start`).
+pub const FIRST_OPEN_WAIT: Duration = Duration::from_secs(10);
+/// Longest a launcher waits for each answer. It can queue behind one peer's first window, then
+/// have its own.
+const REPLY_WAIT: Duration = Duration::from_secs(FIRST_OPEN_WAIT.as_secs() + OPEN_WAIT.as_secs());
 
 const PARSE_ERROR: i64 = -32700;
 const NOT_A_REQUEST: i64 = -32600;
@@ -101,6 +108,23 @@ pub fn runtime_dir() -> PathBuf {
 #[must_use]
 pub fn socket_path(directory: &Path) -> PathBuf {
     directory.join(SESSION).with_extension("sock")
+}
+
+/// Returns the session's log in `directory`.
+#[must_use]
+pub fn log_path(directory: &Path) -> PathBuf {
+    directory.join(SESSION).with_extension("log")
+}
+
+/// Opens an empty log for a core that is about to start, which is all that bounds its size.
+///
+/// # Errors
+///
+/// [`Error::Unsafe`] for a directory others can reach, and [`Error::Io`] if the system refuses,
+/// as it does for a symlink at the log's path.
+pub fn start_log(directory: &Path) -> Result<File, Error> {
+    checked(directory)?;
+    Ok(pinfold_sys::open_log(&log_path(directory))?)
 }
 
 /// Makes `directory` if it is missing, and refuses it unless only this user can reach it.
