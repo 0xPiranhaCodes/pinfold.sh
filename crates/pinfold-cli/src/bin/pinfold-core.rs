@@ -15,9 +15,12 @@ use pinfold_core::shell;
 
 const ROWS: u16 = 24;
 const COLUMNS: u16 = 80;
-/// How long the API thread waits on the reactor, which only blocks on a spawn.
+/// How long the API thread waits for a window to say hello. A launcher waits longer for the reply.
 const OPEN_WAIT: Duration = Duration::from_secs(2);
 const IDLE: Duration = Duration::from_secs(3600);
+
+/// The answer to `window.open`: why no window came, in words that are safe to hand a caller.
+type Opened = Result<(), String>;
 
 /// Returns the window binary beside this one. It is resolved once, so nothing later can name
 /// another program.
@@ -30,14 +33,17 @@ fn window_binary() -> io::Result<PathBuf> {
 /// Binds the control socket and answers it on the API thread (ADR-0007). The reactor's thread
 /// makes every spawn (see `pinfold_sys::socket::pair`), so `window.open` crosses to it. The
 /// channel holds one, as the API thread serves one peer at a time.
-fn listen(waker: Arc<Waker>) -> io::Result<Receiver<SyncSender<bool>>> {
+fn listen(waker: Arc<Waker>) -> io::Result<Receiver<SyncSender<Opened>>> {
     let control = Control::bind(&control::runtime_dir()).map_err(io::Error::other)?;
     let (ask, asked) = mpsc::sync_channel(1);
     let open = move || {
         let (reply, answer) = mpsc::sync_channel(1);
-        ask.try_send(reply).is_ok()
-            && waker.wake().is_ok()
-            && answer.recv_timeout(OPEN_WAIT).unwrap_or(false)
+        if ask.try_send(reply).is_err() || waker.wake().is_err() {
+            return Err("the core is busy".to_owned());
+        }
+        answer
+            .recv_timeout(OPEN_WAIT)
+            .unwrap_or_else(|_| Err("the window is not ready and may still open".to_owned()))
     };
     let serve = move || control.serve(open);
     thread::Builder::new()
@@ -65,11 +71,29 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
         let pid = reactor.window_pid().unwrap_or_default();
         writeln!(io::stdout(), "{pid}")?;
     }
+    // Who asked for the window, until it says hello or ends. A caller that timed out has gone,
+    // so a reply can fail, and a new caller takes the place of one like that.
+    let mut waiting = None;
     loop {
         reactor.turn(Some(IDLE))?;
         while let Ok(reply) = asked.try_recv() {
-            // A timed out caller has gone, and the window it asked for still opens.
-            let _ = reply.try_send(reactor.spawn_window(&binary).is_ok());
+            match reactor.spawn_window(&binary) {
+                Ok(_) => waiting = Some(reply),
+                // The system's words alone, which name no pane, secret or variable.
+                Err(error) => {
+                    let reason = format!("cannot start pinfold-window: {error}");
+                    let _ = reply.try_send(Err(reason));
+                }
+            }
+        }
+        let ended = !reactor.has_window();
+        if let Some(reply) = waiting.take_if(|_| ended || reactor.is_window_ready()) {
+            let reason = "the window ended before it was ready";
+            let _ = reply.try_send(if ended {
+                Err(reason.to_owned())
+            } else {
+                Ok(())
+            });
         }
         if reactor.pane_count() == 0 && !reactor.has_window() {
             return Ok(());

@@ -11,7 +11,7 @@ use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
-use pinfold_proto::link::Request;
+use pinfold_proto::link::{Request, VERSION};
 use pinfold_sys::socket;
 use pinfold_ui::link::{Disconnect, Link};
 
@@ -198,10 +198,34 @@ fn a_session_outlives_its_client_and_says_when_the_core_dies() {
     );
 }
 
+/// Shell that writes the link's hello to descriptor 3.
+fn say_hello() -> Result<String> {
+    let mut wire = Vec::new();
+    let hello = Request::Hello { version: VERSION };
+    hello.encode(&mut wire)?;
+    let octal: String = wire.iter().map(|byte| format!("\\{byte:03o}")).collect();
+    Ok(format!("printf '{octal}' >&3"))
+}
+
+/// Shell that notes the core, so a [`Session`] can end it.
+const NOTE_CORE: &str = "echo $PPID > \"$PINFOLD_TEST_CLIENT/core\"";
+/// Shell that stays until the core has gone.
+const STAY: &str = "exec cat <&3 >/dev/null";
+
+/// Launches once, expects that to fail, and returns what the launcher said.
+fn launch_failure(session: &Session) -> Result<String> {
+    let launched = session.launch()?;
+    assert!(!launched.status.success(), "the launcher reported a window");
+    Ok(String::from_utf8_lossy(&launched.stderr).into_owned())
+}
+
 #[test]
 fn two_launchers_at_once_share_one_core_and_one_window() {
-    let window = "cd \"$PINFOLD_TEST_CLIENT\"\necho start >> starts\necho $PPID > core\nexec cat <&3 >/dev/null";
-    let session = Session::new("b", Some(window)).unwrap();
+    let say_hello = say_hello().unwrap();
+    let window = format!(
+        "cd \"$PINFOLD_TEST_CLIENT\"\necho start >> starts\n{NOTE_CORE}\n{say_hello}\n{STAY}"
+    );
+    let session = Session::new("b", Some(&window)).unwrap();
     let (mut first, mut second) = (
         session.start_launcher().unwrap(),
         session.start_launcher().unwrap(),
@@ -210,6 +234,32 @@ fn two_launchers_at_once_share_one_core_and_one_window() {
     assert!(second.wait().unwrap().success());
     assert!(session.wait_for("core"));
     assert_eq!(session.read("starts").lines().count(), 1);
+}
+
+#[test]
+fn a_window_that_exits_during_start_fails_the_launcher() {
+    let session = Session::new("d", Some(&format!("{NOTE_CORE}\nexit 3"))).unwrap();
+    let error = launch_failure(&session).unwrap();
+    assert!(
+        error.contains("the window ended before it was ready"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_window_that_never_says_hello_fails_the_launcher() {
+    let session = Session::new("e", Some(&format!("{NOTE_CORE}\n{STAY}"))).unwrap();
+    let error = launch_failure(&session).unwrap();
+    assert!(error.contains("the window is not ready"), "{error}");
+}
+
+#[test]
+fn a_window_that_says_hello_is_a_success() {
+    let window = format!("{NOTE_CORE}\n{}\n{STAY}", say_hello().unwrap());
+    let session = Session::new("f", Some(&window)).unwrap();
+    let launched = session.launch().unwrap();
+    let error = String::from_utf8_lossy(&launched.stderr);
+    assert!(launched.status.success(), "{error}");
 }
 
 #[test]
@@ -224,6 +274,7 @@ fn a_launcher_reports_a_core_with_no_window_and_that_core_exits_with_its_shell()
     assert!(!launched.status.success());
     let error = String::from_utf8_lossy(&launched.stderr);
     assert!(error.contains("no window can open"), "{error}");
+    assert!(error.contains("cannot start pinfold-window"), "{error}");
 
     let path = pinfold_api::control::socket_path(&session.directory.join("run/pinfold"));
     let start = Instant::now();

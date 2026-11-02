@@ -242,13 +242,24 @@ pub struct Link {
 }
 
 impl Link {
-    /// Takes over a connected socket, and sends the version check. The core says what to show
-    /// once [`Link::resize`] says how much room there is.
+    /// Takes over a connected socket, and says hello at once. The core says what to show once
+    /// [`Link::resize`] says how much room there is.
     ///
     /// # Errors
     ///
     /// Returns an error if the socket cannot be set up or polled.
     pub fn new(fd: OwnedFd) -> io::Result<Self> {
+        let mut link = Self::silent(fd)?;
+        link.greet();
+        Ok(link)
+    }
+
+    /// Takes over a connected socket, and sends nothing until [`Link::greet`].
+    ///
+    /// # Errors
+    ///
+    /// Returns what [`Link::new`] returns.
+    pub fn silent(fd: OwnedFd) -> io::Result<Self> {
         // The copy is close-on-exec, as ADR-0028 asks of an inherited descriptor.
         let stream = UnixStream::from(fd.try_clone()?);
         drop(fd);
@@ -258,9 +269,8 @@ impl Link {
         let interest = Interest::READABLE | Interest::WRITABLE;
         poll.registry()
             .register(&mut SourceFd(&stream.as_raw_fd()), LINK, interest)?;
-        let mut state = State::default();
-        state.queue(Request::Hello { version: VERSION });
-        let mut link = Self {
+        let state = State::default();
+        Ok(Self {
             stream: Some(stream),
             poll,
             waker,
@@ -271,9 +281,13 @@ impl Link {
             partial: false,
             ended: None,
             state,
-        };
-        link.flush();
-        Ok(link)
+        })
+    }
+
+    /// Sends the version check. The core tells a launcher a window has opened on this.
+    pub fn greet(&mut self) {
+        self.state.queue(Request::Hello { version: VERSION });
+        self.flush();
     }
 
     /// Waits for the core for up to `timeout`, reads up to one budget and sends what it can.
@@ -664,6 +678,23 @@ mod tests {
         peer.greet().unwrap();
         assert!(turn_until(&mut link, |link| link.is_greeted()));
         assert_eq!(link.disconnected(), None);
+    }
+
+    #[test]
+    fn a_silent_link_says_hello_only_when_told() {
+        let (ours, stream) = UnixStream::pair().unwrap();
+        stream.set_nonblocking(true).unwrap();
+        let mut link = Link::silent(ours.into()).unwrap();
+        link.turn(Some(Duration::ZERO)).unwrap();
+        let quiet = (&stream).read(&mut [0; 8]).unwrap_err();
+        assert_eq!(quiet.kind(), ErrorKind::WouldBlock);
+        stream.set_nonblocking(false).unwrap();
+        stream.set_read_timeout(Some(PATIENCE)).unwrap();
+        link.greet();
+        let decoder = Decoder::default();
+        let hello = Request::Hello { version: VERSION };
+        let mut peer = Peer { stream, decoder };
+        assert_eq!(peer.requests(1), [shown(hello)]);
     }
 
     #[test]

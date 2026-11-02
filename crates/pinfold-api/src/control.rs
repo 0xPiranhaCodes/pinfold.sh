@@ -12,7 +12,7 @@
 //!
 //! let directory = control::runtime_dir();
 //! let core = Control::bind(&directory)?;
-//! std::thread::spawn(move || core.serve(|| true));
+//! std::thread::spawn(move || core.serve(|| Ok(())));
 //!
 //! let mut launcher = UnixStream::connect(control::socket_path(&directory))?;
 //! launcher.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"hello\",\"params\":{\"version\":1}}\n")?;
@@ -178,8 +178,9 @@ impl Control {
     }
 
     /// Answers peers one at a time, for as long as the process lives. `open` asks for a window
-    /// and says if one is on its way. A peer that fails costs only its own connection.
-    pub fn serve(&self, mut open: impl FnMut() -> bool) {
+    /// and returns once one is ready, or a short reason for the caller, which must carry no
+    /// pane contents, tokens or environment. A peer that fails costs only its own connection.
+    pub fn serve(&self, mut open: impl FnMut() -> Result<(), String>) {
         for stream in self.listener.incoming().flatten() {
             let _ = serve_peer(&stream, &mut open);
         }
@@ -251,7 +252,10 @@ impl Read for Deadline<'_> {
 }
 
 /// Takes one connection from a peer of this user, until it fails or ends.
-fn serve_peer(stream: &UnixStream, open: &mut impl FnMut() -> bool) -> io::Result<()> {
+fn serve_peer(
+    stream: &UnixStream,
+    open: &mut impl FnMut() -> Result<(), String>,
+) -> io::Result<()> {
     if pinfold_sys::peer_uid(stream.as_fd())? != pinfold_sys::effective_uid() {
         return Ok(());
     }
@@ -282,7 +286,11 @@ fn serve_peer(stream: &UnixStream, open: &mut impl FnMut() -> bool) -> io::Resul
 
 /// Returns the reply to one request, and whether the connection goes on. A null reply means a
 /// notification: JSON-RPC gives it no answer, and no method here is one, so it does nothing.
-fn answer(line: &[u8], greeted: &mut bool, open: &mut impl FnMut() -> bool) -> (Value, bool) {
+fn answer(
+    line: &[u8],
+    greeted: &mut bool,
+    open: &mut impl FnMut() -> Result<(), String>,
+) -> (Value, bool) {
     let refuse = |id: Option<&Value>, code, message: &str| {
         let id = id.cloned().unwrap_or(Value::Null);
         let error = json!({"code": code, "message": message});
@@ -315,8 +323,10 @@ fn answer(line: &[u8], greeted: &mut bool, open: &mut impl FnMut() -> bool) -> (
             done(json!({"version": VERSION, "capabilities": ["window.open"]}))
         }
         _ if !*greeted => refuse(id, NO_HELLO, "hello comes first"),
-        Some("window.open") if open() => done(json!({})),
-        Some("window.open") => refuse(id, NO_WINDOW, "no window can open"),
+        Some("window.open") => match open() {
+            Ok(()) => done(json!({})),
+            Err(reason) => refuse(id, NO_WINDOW, &format!("no window can open: {reason}")),
+        },
         _ => refuse(id, NO_METHOD, "unknown method"),
     }
 }
@@ -351,7 +361,7 @@ mod tests {
 
     #[test]
     fn hello_comes_first_and_once() {
-        let mut open = || true;
+        let mut open = || Ok(());
         let mut greeted = false;
         let (reply, go_on) = answer(OPEN, &mut greeted, &mut open);
         assert_eq!((code(&reply), go_on), (Some(NO_HELLO), false));
@@ -368,7 +378,7 @@ mod tests {
     fn a_wrong_version_is_refused() {
         let line = br#"{"jsonrpc":"2.0","id":1,"method":"hello","params":{"version":2}}"#;
         let mut greeted = false;
-        let (reply, go_on) = answer(line, &mut greeted, &mut || true);
+        let (reply, go_on) = answer(line, &mut greeted, &mut || Ok(()));
         assert_eq!(
             (code(&reply), go_on, greeted),
             (Some(BAD_VERSION), false, false)
@@ -380,7 +390,7 @@ mod tests {
         for method in ["pane.read", "pane.write", "window.close", "", "HELLO"] {
             let line = json!({"jsonrpc": "2.0", "id": 1, "method": method}).to_string();
             let mut greeted = true;
-            let (reply, go_on) = answer(line.as_bytes(), &mut greeted, &mut || true);
+            let (reply, go_on) = answer(line.as_bytes(), &mut greeted, &mut || Ok(()));
             assert_eq!((code(&reply), go_on), (Some(NO_METHOD), false), "{method}");
         }
     }
@@ -393,11 +403,12 @@ mod tests {
         let mut greeted = true;
         let (reply, go_on) = answer(line, &mut greeted, &mut || {
             asked += 1;
-            true
+            Ok(())
         });
         assert_eq!((reply["result"].clone(), go_on), (json!({}), true));
-        let (reply, _) = answer(line, &mut greeted, &mut || false);
+        let (reply, _) = answer(line, &mut greeted, &mut || Err("why".to_owned()));
         assert_eq!(code(&reply), Some(NO_WINDOW));
+        assert_eq!(reply["error"]["message"], "no window can open: why");
         assert_eq!(asked, 1);
     }
 
@@ -412,7 +423,7 @@ mod tests {
         ] {
             let mut open = || {
                 asked += 1;
-                true
+                Ok(())
             };
             let line = line.to_string();
             let (reply, go_on) = answer(line.as_bytes(), &mut true, &mut open);
@@ -431,7 +442,7 @@ mod tests {
         let mut opened = false;
         let (reply, go_on) = answer(line, &mut true, &mut || {
             opened = true;
-            true
+            Ok(())
         });
         assert_eq!((reply, go_on, opened), (Value::Null, false, false));
     }
@@ -449,7 +460,7 @@ mod tests {
         ];
         let worker = thread::Builder::new().stack_size(STACK).spawn(move || {
             for line in lines.into_iter().chain([nested.as_slice()]) {
-                let (reply, go_on) = answer(line, &mut false, &mut || true);
+                let (reply, go_on) = answer(line, &mut false, &mut || Ok(()));
                 assert!(code(&reply).is_some() && !go_on);
             }
         });
@@ -508,7 +519,7 @@ mod tests {
     fn a_slow_peer_cannot_hold_the_socket() {
         let directory = fresh();
         let control = Control::bind(&directory).unwrap();
-        thread::spawn(move || control.serve(|| true));
+        thread::spawn(move || control.serve(|| Ok(())));
 
         let path = socket_path(&directory);
         let mut slow = UnixStream::connect(&path).unwrap();
@@ -536,13 +547,15 @@ mod tests {
         for (window, opened) in [(true, true), (false, false)] {
             let directory = fresh();
             let control = Control::bind(&directory).unwrap();
-            thread::spawn(move || control.serve(|| window));
+            let open = move || window.then_some(()).ok_or_else(|| "why".to_owned());
+            thread::spawn(move || control.serve(open));
             let stream = UnixStream::connect(socket_path(&directory)).unwrap();
             match open_window(&stream) {
                 Ok(()) => assert!(opened),
                 Err(error) => {
                     assert!(!opened);
-                    assert_eq!(error.to_string(), "the core refused: no window can open");
+                    let refused = "the core refused: no window can open: why";
+                    assert_eq!(error.to_string(), refused);
                 }
             }
         }
@@ -564,7 +577,7 @@ mod tests {
     fn a_connection_gets_answers_and_cannot_stay_for_ever() {
         let directory = fresh();
         let control = Control::bind(&directory).unwrap();
-        thread::spawn(move || control.serve(|| true));
+        thread::spawn(move || control.serve(|| Ok(())));
 
         let mut stream = UnixStream::connect(socket_path(&directory)).unwrap();
         stream.write_all(HELLO).unwrap();
