@@ -25,3 +25,6 @@ signing moves ahead of the rest of M5's packaging work, and needs the maintainer
 
 This does not say which milestone the beta follows or when it ships. Tags and releases stay with
 the maintainer.
+
+Revisit this if Linux users become the larger audience before the beta ships, or if signing with
+a Developer ID proves out of reach.
