@@ -19,7 +19,7 @@ use objc2_quartz_core::{CAMetalDrawable, CAMetalLayer};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 
 /// The drawable's format. The GPU blends in linear light and stores sRGB, so the shader and
-/// the clear colour hand it linear values.
+/// the clear colour hand it linear values, premultiplied there.
 const DRAWABLE: MTLPixelFormat = MTLPixelFormat::BGRA8Unorm_sRGB;
 
 const SHADER: &str = r"
@@ -59,7 +59,7 @@ vertex Out cell(uint corner_id [[vertex_id]], uint id [[instance_id]],
 fragment float4 shade(Out in [[stage_in]], texture2d<float> atlas [[texture(0)]]) {
     constexpr sampler nearest(filter::nearest);
     float alpha = in.textured ? atlas.sample(nearest, in.atlas).r : 1;
-    return float4(in.colour.rgb, alpha);
+    return float4(in.colour.rgb * alpha, alpha);
 }
 ";
 
@@ -88,6 +88,8 @@ pub struct Gpu {
     atlas: Retained<ProtocolObject<dyn MTLTexture>>,
     atlas_size: usize,
     viewport: [f32; 2],
+    /// How much of what is behind the window the clear colour hides, from 0 to 1.
+    opacity: f32,
 }
 
 impl Gpu {
@@ -125,8 +127,10 @@ impl Gpu {
         let attachment = unsafe { descriptor.colorAttachments().objectAtIndexedSubscript(0) };
         attachment.setPixelFormat(DRAWABLE);
         attachment.setBlendingEnabled(true);
-        attachment.setSourceRGBBlendFactor(MTLBlendFactor::SourceAlpha);
+        attachment.setSourceRGBBlendFactor(MTLBlendFactor::One);
         attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+        attachment.setSourceAlphaBlendFactor(MTLBlendFactor::One);
+        attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
         let pipeline = device
             .newRenderPipelineStateWithDescriptor_error(&descriptor)
             .ok()?;
@@ -156,6 +160,7 @@ impl Gpu {
             atlas,
             atlas_size,
             viewport: [1.0, 1.0],
+            opacity: 1.0,
         })
     }
 
@@ -164,6 +169,15 @@ impl Gpu {
         let (width, height) = (f64::from(width.max(1)), f64::from(height.max(1)));
         self.layer.setDrawableSize(NSSize::new(width, height));
         self.viewport = [width as f32, height as f32];
+    }
+
+    /// Sets the opacity of the clear colour, from 0 to 1, and returns whether the layer is now
+    /// translucent. Quads stay opaque.
+    pub fn set_opacity(&mut self, opacity: f32) -> bool {
+        self.opacity = opacity;
+        let translucent = opacity < 1.0;
+        self.layer.setOpaque(!translucent);
+        translucent
     }
 
     /// Copies an 8-bit mask into the atlas. Masks that do not fit are ignored.
@@ -223,19 +237,21 @@ impl Gpu {
         colour.setTexture(Some(target));
         colour.setLoadAction(MTLLoadAction::Clear);
         colour.setStoreAction(MTLStoreAction::Store);
+        let opacity = f64::from(self.opacity);
         let channel = |shift: u32| {
             let value = f64::from((background >> shift) & 0xff) / 255.0;
-            if value <= 0.04045 {
+            let light = if value <= 0.04045 {
                 value / 12.92
             } else {
                 ((value + 0.055) / 1.055).powf(2.4)
-            }
+            };
+            light * opacity
         };
         colour.setClearColor(MTLClearColor {
             red: channel(16),
             green: channel(8),
             blue: channel(0),
-            alpha: 1.0,
+            alpha: opacity,
         });
         let encoder = commands.renderCommandEncoderWithDescriptor(&pass)?;
         encoder.setRenderPipelineState(&self.pipeline);
@@ -285,19 +301,40 @@ mod tests {
     use super::*;
 
     const SIDE: usize = 2;
+    /// The atlas holds half coverage at x = 0 and full coverage at x = 1.
+    const HALF: f32 = 0.0;
+    const FULL: f32 = 1.0;
+    const PAPER: u32 = 0x0010_80c0;
+    const SOLID: u32 = 0x00a0_b0c0;
+    const INK: u32 = 0x00ff_ffff;
 
-    #[test]
-    fn shaded_pixels_are_mixed_in_linear_light() {
-        let Some(mut gpu) = Gpu::offscreen(4) else {
-            eprintln!("skipped: no Metal device");
-            return;
-        };
-        if !gpu.device.hasUnifiedMemory() {
-            eprintln!("skipped: the pixels cannot be read back directly");
-            return;
-        }
+    fn gpu() -> Option<Gpu> {
+        let mut gpu = Gpu::offscreen(4)?;
         gpu.resize(SIDE as u32, SIDE as u32);
-        gpu.upload(0, 0, 1, &[128]);
+        gpu.upload(0, 0, 2, &[128, 255]);
+        gpu.device.hasUnifiedMemory().then_some(gpu)
+    }
+
+    fn solid(x: f32, y: f32, colour: u32) -> Instance {
+        Instance {
+            position: [x, y],
+            size: [1.0, 1.0],
+            atlas: [0.0, 0.0],
+            colour,
+            textured: 0,
+        }
+    }
+
+    fn glyph(x: f32, y: f32, coverage: f32) -> Instance {
+        Instance {
+            atlas: [coverage, 0.0],
+            textured: 1,
+            ..solid(x, y, 0x03ff_ffff)
+        }
+    }
+
+    /// Draws a frame, and returns its pixels as `0xAARRGGBB` in reading order.
+    fn pixels(gpu: &Gpu, background: u32, quads: &[Instance]) -> Option<[u32; SIDE * SIDE]> {
         // SAFETY: the sizes describe a plain 2D texture with no mipmaps.
         let descriptor = unsafe {
             MTLTextureDescriptor::texture2DDescriptorWithPixelFormat_width_height_mipmapped(
@@ -305,17 +342,9 @@ mod tests {
             )
         };
         descriptor.setUsage(MTLTextureUsage::RenderTarget);
-        let target = gpu.device.newTextureWithDescriptor(&descriptor).unwrap();
-        let quad = |x, colour, textured| Instance {
-            position: [x, 0.0],
-            size: [1.0, 1.0],
-            atlas: [0.0, 0.0],
-            colour,
-            textured,
-        };
-        let quads = [quad(0.0, 0x03ff_ffff, 1), quad(1.0, 0x00a0_b0c0, 0)];
-        let commands = gpu.queue.commandBuffer().unwrap();
-        gpu.encode(&commands, &target, 0x0010_2030, &quads).unwrap();
+        let target = gpu.device.newTextureWithDescriptor(&descriptor)?;
+        let commands = gpu.queue.commandBuffer()?;
+        gpu.encode(&commands, &target, background, quads)?;
         commands.commit();
         commands.waitUntilCompleted();
         let mut pixels = [0_u32; SIDE * SIDE];
@@ -332,8 +361,124 @@ mod tests {
             let bytes = NonNull::from(&mut pixels).cast::<c_void>();
             target.getBytes_bytesPerRow_fromRegion_mipmapLevel(bytes, SIDE * 4, region, 0);
         }
-        let rgb = pixels.map(|pixel| pixel & 0x00ff_ffff);
+        Some(pixels)
+    }
+
+    fn light(byte: u32) -> f64 {
+        let value = f64::from(byte & 0xff) / 255.0;
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    }
+
+    fn srgb(light: f64) -> f64 {
+        let value = if light <= 0.003_130_8 {
+            light * 12.92
+        } else {
+            1.055 * light.powf(1.0 / 2.4) - 0.055
+        };
+        value * 255.0
+    }
+
+    /// `coverage` of white over `colour` at `opacity`, premultiplied in linear light.
+    fn expected(colour: u32, opacity: f64, coverage: f64) -> [f64; 4] {
+        let channel = |byte| srgb(coverage + (1.0 - coverage) * opacity * light(byte));
+        [
+            (coverage + (1.0 - coverage) * opacity) * 255.0,
+            channel(colour >> 16),
+            channel(colour >> 8),
+            channel(colour),
+        ]
+    }
+
+    #[track_caller]
+    fn assert_near(pixel: u32, expected: [f64; 4]) {
+        let bytes = pixel.to_be_bytes();
+        for (byte, want) in bytes.iter().zip(expected) {
+            assert!(
+                (f64::from(*byte) - want).abs() <= 1.0,
+                "{pixel:#010x} is not {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn shaded_pixels_are_mixed_in_linear_light() {
+        let Some(gpu) = gpu() else {
+            eprintln!("skipped: no Metal device with readable pixels");
+            return;
+        };
+        let quads = [glyph(0.0, 0.0, HALF), solid(1.0, 0.0, SOLID)];
+        let pixels = pixels(&gpu, 0x0010_2030, &quads).unwrap();
         // Solid colours pass through unchanged, and the first pixel is `blend` in `pinfold-render`.
-        assert_eq!(rgb, [0x00bc_bdbe, 0x00a0_b0c0, 0x0010_2030, 0x0010_2030]);
+        assert_eq!(pixels, [0xffbc_bdbe, 0xffa0_b0c0, 0xff10_2030, 0xff10_2030]);
+    }
+
+    #[test]
+    fn the_default_background_alone_is_translucent() {
+        let Some(mut gpu) = gpu() else {
+            eprintln!("skipped: no Metal device with readable pixels");
+            return;
+        };
+        assert!(gpu.set_opacity(0.85));
+        let quads = [solid(1.0, 0.0, SOLID)];
+        let [paper, solid, ..] = pixels(&gpu, PAPER, &quads).unwrap();
+        // Scaling the sRGB bytes would give about 0xd9_0e_6d_a3, too dark in linear light.
+        assert_near(paper, expected(PAPER, 0.85, 0.0));
+        assert_eq!(paper >> 24, 217);
+        assert_eq!(solid, 0xff00_0000 | SOLID);
+    }
+
+    #[test]
+    fn full_coverage_text_is_opaque_on_any_background() {
+        let Some(mut gpu) = gpu() else {
+            eprintln!("skipped: no Metal device with readable pixels");
+            return;
+        };
+        gpu.set_opacity(0.85);
+        let quads = [
+            glyph(0.0, 0.0, FULL),
+            solid(1.0, 0.0, SOLID),
+            glyph(1.0, 0.0, FULL),
+        ];
+        let [on_paper, on_cell, ..] = pixels(&gpu, PAPER, &quads).unwrap();
+        assert_eq!(on_paper, 0xff00_0000 | INK);
+        assert_eq!(on_cell, 0xff00_0000 | INK);
+    }
+
+    #[test]
+    fn text_edges_mix_with_what_is_under_them() {
+        let Some(mut gpu) = gpu() else {
+            eprintln!("skipped: no Metal device with readable pixels");
+            return;
+        };
+        gpu.set_opacity(0.85);
+        let quads = [
+            glyph(0.0, 0.0, HALF),
+            solid(1.0, 0.0, SOLID),
+            glyph(1.0, 0.0, HALF),
+        ];
+        let [on_paper, on_cell, ..] = pixels(&gpu, PAPER, &quads).unwrap();
+        let coverage = 128.0 / 255.0;
+        // Over the translucent background the pixel stays partly see-through.
+        assert_near(on_paper, expected(PAPER, 0.85, coverage));
+        assert_near(on_cell, expected(SOLID, 1.0, coverage));
+    }
+
+    #[test]
+    fn opacity_can_change_at_runtime_and_back() {
+        let Some(mut gpu) = gpu() else {
+            eprintln!("skipped: no Metal device with readable pixels");
+            return;
+        };
+        assert!(gpu.layer.isOpaque());
+        assert!(gpu.set_opacity(0.0));
+        assert!(!gpu.layer.isOpaque());
+        assert_eq!(pixels(&gpu, PAPER, &[]).unwrap()[0], 0);
+        assert!(!gpu.set_opacity(1.0));
+        assert!(gpu.layer.isOpaque());
+        assert_eq!(pixels(&gpu, PAPER, &[]).unwrap()[0], 0xff00_0000 | PAPER);
     }
 }

@@ -9,11 +9,15 @@ variable is unset. Saving the file applies it to the running window within about
 | `font_size`           | number | `13`    | In points, from 6 to 72                                  |
 | `font_path`           | string | none    | Absolute path to a monospace font file to use            |
 | `macos_option_as_alt` | bool   | `false` | Option sends Alt instead of composing text. macOS only   |
+| `background_opacity`  | number | `1`     | Default background opacity, from 0 to 1. macOS only      |
+| `background_blur`     | bool   | `false` | Blur what shows through the background. macOS only       |
 
 ```toml
 font_size = 14
 font_path = "/System/Library/Fonts/Menlo.ttc"
 macos_option_as_alt = true
+background_opacity = 0.85
+background_blur = true
 ```
 
 `font_path` takes a TrueType or OpenType file, or the first font in a collection. Pinfold
@@ -21,6 +25,16 @@ draws bold and italic by thickening and slanting that one font, not from separat
 without `font_path` it uses the bundled JetBrains Mono. A font file is treated as untrusted:
 if it cannot be read, is damaged, or cannot draw all of ASCII, Pinfold prints why to stderr
 and uses the bundled font. `~` is not expanded.
+
+`background_opacity` applies only to the default background and the padding around the grid.
+Text and cells a program coloured stay opaque, so a program that paints its own background,
+such as an editor with a colour scheme, covers the glass. A program that changes the default
+background with OSC 11 gets that colour as an opaque cell colour. `background_blur` does nothing
+at opacity 1. Its radius is fixed at 80, because winit sets it through a private CoreGraphics
+call that takes no radius from callers, and macOS may change that call.
+
+On Linux, and on a Mac with no Metal device, the window draws with the CPU and stays opaque:
+Pinfold accepts both keys and ignores them.
 
 Every key is optional. Pinfold always opens: if the file has a problem, it prints why to
 stderr and uses the defaults for every key. That covers an unknown key or a bad value

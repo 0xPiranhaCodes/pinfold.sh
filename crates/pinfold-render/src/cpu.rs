@@ -2,11 +2,12 @@
 
 use std::num::NonZeroU32;
 
-use pinfold_proto::{Cell, Frame};
+use pinfold_proto::{Cell, DEFAULT_BACKGROUND, Frame};
 use softbuffer::{Context, Rect, Surface};
 
 use crate::font::Font;
 use crate::glyphs::cell_span;
+use crate::padding::Padding;
 use crate::paint::{Canvas, Painter};
 
 pub use softbuffer::SoftBufferError as RenderError;
@@ -16,8 +17,8 @@ pub trait Renderer {
     /// Returns the size of a cell in physical pixels, as `(width, height)`.
     fn cell_size(&self) -> (usize, usize);
 
-    /// Sets the surface size in physical pixels.
-    fn resize(&mut self, width: u32, height: u32);
+    /// Sets the surface size in physical pixels, and the padding around the grid.
+    fn resize(&mut self, width: u32, height: u32, padding: Padding);
 
     /// Sets the font size in physical pixels, dropping every glyph drawn at the old one.
     /// `cell_size` changes with it, so the grid needs resizing afterwards.
@@ -26,6 +27,15 @@ pub trait Renderer {
     /// Replaces the font, dropping every glyph drawn with the old one. `cell_size` changes
     /// with it, so the grid needs resizing afterwards.
     fn set_font(&mut self, font: Font);
+
+    /// Sets how opaque the default background is, from 0 to 1, and returns whether the
+    /// surface is now translucent. Text and cells with their own colour stay opaque.
+    ///
+    /// shortcut: only Metal has alpha, as a `softbuffer` pixel's top byte must stay 0, so
+    /// other renderers stay opaque, add Linux support when a renderer there can output alpha.
+    fn set_background_opacity(&mut self, _opacity: f32) -> bool {
+        false
+    }
 
     /// Draws `frame`, redrawing only rows that changed where the surface allows it.
     ///
@@ -55,6 +65,7 @@ pub struct CpuRenderer<D, W> {
     painter: Painter,
     width: u32,
     height: u32,
+    padding: Padding,
     /// What the visible buffer holds, so unchanged rows can be skipped.
     drawn: Vec<Cell>,
     next: Vec<Cell>,
@@ -77,6 +88,7 @@ where
             painter: Painter::new(font, size),
             width: 0,
             height: 0,
+            padding: Padding::default(),
             drawn: Vec::new(),
             next: Vec::new(),
         })
@@ -92,8 +104,10 @@ where
         self.painter.cell_size()
     }
 
-    fn resize(&mut self, width: u32, height: u32) {
-        (self.width, self.height) = (width, height);
+    fn resize(&mut self, width: u32, height: u32, padding: Padding) {
+        (self.width, self.height, self.padding) = (width, height, padding);
+        // Equal cells no longer mean equal pixels.
+        self.drawn.clear();
     }
 
     fn set_font_size(&mut self, size: f32) {
@@ -119,12 +133,13 @@ where
         let mut buffer = self.surface.buffer_mut()?;
         // Only a buffer that holds the previous frame can keep its unchanged rows.
         let full = buffer.age() != 1 || self.drawn.len() != self.next.len();
-        let Some(mut canvas) = Canvas::new(&mut buffer, self.width as usize, self.height as usize)
+        let Some(canvas) = Canvas::new(&mut buffer, self.width as usize, self.height as usize)
         else {
             return Ok(());
         };
+        let mut canvas = canvas.inset(self.padding);
         if full {
-            canvas.clear(frame.cells.first().map_or(0, |cell| cell.background));
+            canvas.clear(DEFAULT_BACKGROUND);
         }
         let (_, cell_height) = self.painter.cell_size();
         let mut damage = Vec::new();
@@ -134,7 +149,7 @@ where
                 continue;
             }
             self.painter.draw_row(&mut canvas, row, cells);
-            let top = u32::try_from(row * cell_height).unwrap_or(u32::MAX);
+            let top = u32::try_from(self.padding.top + row * cell_height).unwrap_or(u32::MAX);
             if top < self.height {
                 let rows = (self.height - top).min(u32::try_from(cell_height).unwrap_or(u32::MAX));
                 if let Some(rows) = NonZeroU32::new(rows) {

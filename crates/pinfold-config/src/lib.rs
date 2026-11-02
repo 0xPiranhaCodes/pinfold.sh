@@ -30,6 +30,12 @@ pub struct Config {
     /// a bad one means the bundled font.
     #[serde(deserialize_with = "font_path")]
     pub font_path: Option<PathBuf>,
+    /// How opaque the default background is on macOS, from 0 to 1. Text and coloured cells
+    /// stay opaque. Ignored elsewhere.
+    #[serde(deserialize_with = "background_opacity")]
+    pub background_opacity: f32,
+    /// Whether to blur what shows through a translucent background on macOS. Ignored elsewhere.
+    pub background_blur: bool,
 }
 
 impl Default for Config {
@@ -38,6 +44,9 @@ impl Default for Config {
             macos_option_as_alt: false,
             font_size: 13.0,
             font_path: None,
+            // Opaque, because memory is the first goal.
+            background_opacity: 1.0,
+            background_blur: false,
         }
     }
 }
@@ -50,6 +59,18 @@ fn font_size<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error
     } else {
         Err(de::Error::custom(format!(
             "font_size must be from {MIN_FONT_SIZE} to {MAX_FONT_SIZE} points, not {size}"
+        )))
+    }
+}
+
+fn background_opacity<'de, D: Deserializer<'de>>(deserializer: D) -> Result<f32, D::Error> {
+    let opacity = f32::deserialize(deserializer)?;
+    // Written so that NaN is refused too.
+    if (0.0..=1.0).contains(&opacity) {
+        Ok(opacity)
+    } else {
+        Err(de::Error::custom(format!(
+            "background_opacity must be from 0 to 1, not {opacity}"
         )))
     }
 }
@@ -295,8 +316,33 @@ mod tests {
     }
 
     #[test]
+    fn the_background_keys_are_read() {
+        let config = parse(b"").unwrap();
+        assert_eq!(config.background_opacity, 1.0);
+        assert!(!config.background_blur);
+        let config = parse(b"background_opacity = 0.85\nbackground_blur = true").unwrap();
+        assert_eq!(config.background_opacity, 0.85);
+        assert!(config.background_blur);
+        for (value, opacity) in [("0", 0.0), ("1", 1.0)] {
+            let text = format!("background_opacity = {value}");
+            assert_eq!(parse(text.as_bytes()).unwrap().background_opacity, opacity);
+        }
+    }
+
+    #[test]
+    fn bad_opacities_are_named_with_their_line() {
+        for value in ["1.01", "-0.1", "2", "nan", "inf"] {
+            let text = message(format!("\nbackground_opacity = {value}\n").as_bytes());
+            assert!(text.contains("line 2"), "{value}: {text}");
+            assert!(text.contains("from 0 to 1"), "{value}: {text}");
+        }
+        assert!(message(b"background_opacity = \"glass\"").contains("background_opacity"));
+    }
+
+    #[test]
     fn wrong_types_are_errors() {
         assert!(message(b"macos_option_as_alt = 1").contains("line 1"));
+        assert!(message(b"background_blur = 30").contains("line 1"));
     }
 
     #[test]

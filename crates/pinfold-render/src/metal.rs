@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use pinfold_proto::{Cell, Frame};
+use pinfold_proto::{Cell, DEFAULT_BACKGROUND, Frame};
 use pinfold_sys::metal::{Gpu, Instance};
 use raw_window_handle::HasWindowHandle;
 use swash::scale::ScaleContext;
@@ -10,6 +10,7 @@ use swash::scale::ScaleContext;
 use crate::cpu::{RenderError, Renderer, cells_with_cursor};
 use crate::font::{Font, Fonts};
 use crate::glyphs::{Metrics, clamp_size, rasterize};
+use crate::padding::Padding;
 
 /// The atlas is 1 MB of 8-bit coverage, the same cap as the CPU renderer's glyph cache.
 const ATLAS_SIZE: usize = 1000;
@@ -61,12 +62,13 @@ impl Shelves {
     }
 }
 
-/// Turns cells into quads. `slot` finds each glyph, and `clear` is the frame's background,
-/// which needs no quad.
+/// Turns cells into quads inside `padding`. `slot` finds each glyph, and `clear` is the
+/// frame's background, which needs no quad.
 fn instances(
     cells: &[Cell],
     columns: usize,
     metrics: Metrics,
+    padding: Padding,
     clear: u32,
     mut slot: impl FnMut(char, u32) -> Option<Slot>,
     out: &mut Vec<Instance>,
@@ -75,7 +77,10 @@ fn instances(
     let (width, height) = (metrics.cell_width as f32, metrics.cell_height as f32);
     let position = |index: usize| {
         let (row, column) = (index / columns.max(1), index % columns.max(1));
-        (column as f32 * width, row as f32 * height)
+        (
+            padding.left as f32 + column as f32 * width,
+            padding.top as f32 + row as f32 * height,
+        )
     };
     // Backgrounds go first, so a wide glyph is not covered by the cell after it.
     for (index, cell) in cells.iter().enumerate() {
@@ -117,6 +122,7 @@ pub struct MetalRenderer {
     fonts: Fonts,
     size: f32,
     metrics: Metrics,
+    padding: Padding,
     context: ScaleContext,
     shelves: Shelves,
     slots: HashMap<(char, u32), Slot>,
@@ -139,6 +145,7 @@ impl MetalRenderer {
             fonts: font.into(),
             size,
             metrics,
+            padding: Padding::default(),
             context: ScaleContext::new(),
             shelves: Shelves::new(ATLAS_SIZE),
             slots: HashMap::new(),
@@ -153,8 +160,9 @@ impl Renderer for MetalRenderer {
         (self.metrics.cell_width, self.metrics.cell_height)
     }
 
-    fn resize(&mut self, width: u32, height: u32) {
+    fn resize(&mut self, width: u32, height: u32, padding: Padding) {
         self.gpu.resize(width, height);
+        self.padding = padding;
     }
 
     fn set_font_size(&mut self, size: f32) {
@@ -170,9 +178,12 @@ impl Renderer for MetalRenderer {
         self.set_font_size(self.size);
     }
 
+    fn set_background_opacity(&mut self, opacity: f32) -> bool {
+        self.gpu.set_opacity(opacity)
+    }
+
     fn draw(&mut self, frame: &Frame) -> Result<(), RenderError> {
         cells_with_cursor(frame, &mut self.cells);
-        let clear = frame.cells.first().map_or(0, |cell| cell.background);
         let metrics = self.metrics;
         let Self {
             gpu,
@@ -214,12 +225,13 @@ impl Renderer for MetalRenderer {
             &self.cells,
             columns,
             metrics,
-            clear,
+            self.padding,
+            DEFAULT_BACKGROUND,
             slot,
             &mut self.instances,
         );
         self.fonts.release_pages();
-        self.gpu.draw(clear, &self.instances);
+        self.gpu.draw(DEFAULT_BACKGROUND, &self.instances);
         Ok(())
     }
 }
@@ -258,7 +270,8 @@ mod tests {
 
     fn quads(cells: &[Cell], columns: usize) -> Vec<Instance> {
         let mut out = Vec::new();
-        instances(cells, columns, METRICS, PAPER, slot, &mut out);
+        let padding = Padding::default();
+        instances(cells, columns, METRICS, padding, PAPER, slot, &mut out);
         out
     }
 
@@ -297,6 +310,34 @@ mod tests {
     }
 
     #[test]
+    fn padding_moves_every_quad() {
+        let mut out = Vec::new();
+        let padding = Padding {
+            left: 14,
+            top: 12,
+            right: 14,
+            bottom: 10,
+        };
+        let cells = [cell(' ', PAPER), cell('x', 0x00ff_0000)];
+        instances(&cells, 2, METRICS, padding, PAPER, slot, &mut out);
+        assert_eq!(out[0].position, [24.0, 12.0]);
+        assert_eq!(out[1].position, [25.0, 18.0]);
+    }
+
+    #[test]
+    fn a_coloured_first_cell_does_not_become_the_background() {
+        let Some(mut renderer) = renderer() else {
+            eprintln!("skipped: no Metal device");
+            return;
+        };
+        renderer.resize(100, 100, Padding::default());
+        let cells = vec![cell(' ', 0x00ff_0000), cell(' ', DEFAULT_BACKGROUND)];
+        renderer.draw(&frame(2, 1, cells)).unwrap();
+        let colours: Vec<u32> = renderer.instances.iter().map(|quad| quad.colour).collect();
+        assert_eq!(colours, [0x00ff_0000]);
+    }
+
+    #[test]
     fn empty_glyphs_are_skipped() {
         let mut out = Vec::new();
         let none = |_, _| {
@@ -309,7 +350,16 @@ mod tests {
                 top: 0,
             })
         };
-        instances(&[cell('x', PAPER)], 1, METRICS, PAPER, none, &mut out);
+        let padding = Padding::default();
+        instances(
+            &[cell('x', PAPER)],
+            1,
+            METRICS,
+            padding,
+            PAPER,
+            none,
+            &mut out,
+        );
         assert!(out.is_empty());
     }
 
@@ -326,7 +376,8 @@ mod tests {
             slot(character, style)
         };
         let cells = [cell('x', PAPER), bold];
-        instances(&cells, 2, METRICS, PAPER, record, &mut out);
+        let padding = Padding::default();
+        instances(&cells, 2, METRICS, padding, PAPER, record, &mut out);
         assert_eq!(asked, [('x', 0), ('x', BOLD)]);
     }
 
@@ -350,7 +401,7 @@ mod tests {
             eprintln!("skipped: no Metal device");
             return;
         };
-        renderer.resize(100, 100);
+        renderer.resize(100, 100, Padding::default());
         let styled = |style| Cell {
             foreground: 0x00ff_ffff | style,
             ..cell('x', PAPER)
@@ -383,7 +434,7 @@ mod tests {
         let footprint = || pinfold_sys::footprint(std::process::id()).unwrap();
         let megabytes = |bytes: u64| bytes as f64 / 1e6;
         let mut renderer = renderer().unwrap();
-        renderer.resize(1512, 1890);
+        renderer.resize(1512, 1890, Padding::default());
         let (cell_width, cell_height) = renderer.cell_size();
         let (columns, rows) = (1512 / cell_width as u16, 1890 / cell_height as u16);
         let screen = |styles: &[u32]| {
@@ -411,6 +462,29 @@ mod tests {
             renderer.slots.len(),
             renderer.shelves.y + renderer.shelves.row_height,
         );
+    }
+
+    /// What a translucent background costs at the budget's window size, through real drawables.
+    /// The blur is the window server's, so this cannot see it. Run alone, with `cargo test -p
+    /// pinfold-render --release glass_cost -- --ignored --nocapture --test-threads 1`.
+    #[test]
+    #[ignore = "measures this process, so it must run alone"]
+    fn metal_glass_cost() {
+        let footprint = || pinfold_sys::footprint(std::process::id()).unwrap() as f64 / 1e6;
+        let mut renderer = renderer().unwrap();
+        renderer.resize(1512, 1890, Padding::scaled(2.0));
+        let (cell_width, cell_height) = renderer.cell_size();
+        let padding = Padding::scaled(2.0);
+        let (rows, columns) = padding.grid(1512, 1890, (cell_width, cell_height));
+        let text = ('!'..='~').cycle().map(|c| cell(c, DEFAULT_BACKGROUND));
+        let area = usize::from(rows) * usize::from(columns);
+        let screen = frame(columns, rows, text.take(area).collect());
+        draw_for_a_while(&mut renderer, &screen);
+        let opaque = footprint();
+        renderer.set_background_opacity(0.85);
+        draw_for_a_while(&mut renderer, &screen);
+        let glass = footprint();
+        println!("Metal at 1512x1890: opaque {opaque:.2} MB, opacity 0.85 {glass:.2} MB");
     }
 
     #[test]
