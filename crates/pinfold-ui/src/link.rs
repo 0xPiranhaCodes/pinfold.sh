@@ -119,8 +119,10 @@ struct State {
     active: usize,
     focused: u32,
     total: usize,
-    /// Whether the session's shape or a tab's name changed since it was last read.
+    /// Whether the session's shape, a tab's name or its news changed since it was last read.
     laid: bool,
+    /// Which tabs have news, one bit each.
+    activity: u32,
     greeted: bool,
     /// Whether the core said no tab is left.
     over: bool,
@@ -191,6 +193,10 @@ impl State {
                 self.copied = Some(text.to_owned());
             }
             Notice::Raise => self.raised = true,
+            Notice::Activity { tabs } => {
+                self.activity = tabs;
+                self.laid = true;
+            }
             Notice::Refused { reason } => self.refused = Some(reason),
             Notice::Copied { .. } => {}
         }
@@ -449,6 +455,12 @@ impl Link {
     #[must_use]
     pub fn total(&self) -> usize {
         self.state.total
+    }
+
+    /// Returns which tabs printed something since they were shown, one bit each.
+    #[must_use]
+    pub fn activity(&self) -> u32 {
+        self.state.activity
     }
 
     /// Returns whether the tabs or the panes shown changed since the last call, and clears that.

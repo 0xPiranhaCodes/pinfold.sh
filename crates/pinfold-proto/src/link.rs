@@ -127,6 +127,7 @@ const COPIED: u8 = 4;
 const LAYOUT: u8 = 5;
 const RAISE: u8 = 6;
 const REFUSED: u8 = 7;
+const ACTIVITY: u8 = 8;
 
 const FLAG_FULL: u8 = 1;
 const FLAG_CURSOR: u8 = 1 << 1;
@@ -466,6 +467,12 @@ pub enum Notice<'a> {
     Layout(Layout<'a>),
     /// Someone asked for a window while this one is open, so it comes to the front (ADR-0028).
     Raise,
+    /// Which tabs printed something since they were last shown.
+    Activity {
+        /// One bit per tab, lowest first, by the order of the last [`Notice::Layout`]. Thirty-two
+        /// bits hold [`MAX_TABS`].
+        tabs: u32,
+    },
     /// A command was not carried out.
     Refused {
         /// Why.
@@ -875,6 +882,10 @@ impl Notice<'_> {
                 LAYOUT
             }
             Self::Raise => RAISE,
+            Self::Activity { tabs } => {
+                out.extend_from_slice(&tabs.to_le_bytes());
+                ACTIVITY
+            }
             Self::Refused { reason } => {
                 out.push(*reason as u8);
                 REFUSED
@@ -908,6 +919,7 @@ impl Notice<'_> {
             },
             LAYOUT => Notice::Layout(read_layout(&mut body)?),
             RAISE => Notice::Raise,
+            ACTIVITY => Notice::Activity { tabs: body.u32()? },
             REFUSED => Notice::Refused {
                 reason: body.tag(
                     "refusal",

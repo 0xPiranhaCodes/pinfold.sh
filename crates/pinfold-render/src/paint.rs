@@ -273,6 +273,7 @@ mod tests {
             right: 1,
             bottom: 1,
             gap: 0,
+            ..Padding::default()
         };
         let (width, height) = (cell_width + 4, cell_height + 3);
         let mut buffer = vec![0; width * height];

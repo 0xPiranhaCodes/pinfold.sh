@@ -59,7 +59,7 @@ xdotool type --delay 15 'stty -echo -icanon; printf "\033[?1000h\033[?1006h"; he
 xdotool key Return
 sleep 0.5
 # Below the top bar, in the pane's first row.
-xdotool mousemove --window "$ID" 3 60 click 1 click 4
+xdotool mousemove --window "$ID" 21 70 click 1 click 4
 sleep 0.5
 mouse=$(tr -d ' \n' < /tmp/mouse)
 # Two wheel reports: winit counts a synthetic wheel button's press and its release.
@@ -174,7 +174,7 @@ fi
 import -window root /out/splits.png
 echo "a split and a tab opened with real keys, each with its own shell"
 # The + button, a shell that exits, a tab's box, and a pane, with the window at 1000x640.
-xdotool mousemove --window "$ID" 970 34 click 1
+xdotool mousemove --window "$ID" 240 45 click 1
 sleep 1
 PLUS=$(shell_in plus)
 if [ "$PLUS" = "$TAB" ] || [ "$PLUS" = "$RIGHT" ]; then
@@ -188,7 +188,7 @@ if ! gone "$PLUS"; then
   echo "FAIL: a shell did not exit"
   exit 1
 fi
-xdotool mousemove --window "$ID" 100 34 click 1
+xdotool mousemove --window "$ID" 100 45 click 1
 sleep 1
 xdotool mousemove --window "$ID" 100 300 click 1
 sleep 1
@@ -203,6 +203,18 @@ if [ "$(shell_in up)" != "$RIGHT" ]; then
   exit 1
 fi
 echo "clicks open a tab, pick a tab and focus a pane"
+# A hidden tab that prints gets its mark, with the pointer resting on it.
+xdotool key ctrl+a 2
+sleep 0.5
+xdotool type --delay 15 '(sleep 2; echo news) &'
+xdotool key Return
+sleep 0.5
+xdotool key ctrl+a 1
+xdotool mousemove --window "$ID" 150 45
+sleep 3
+import -window root /out/states.png
+xdotool mousemove --window "$ID" 700 100
+sleep 0.5
 xdotool windowsize "$ID" 800 500
 sleep 1
 shell_in small >/dev/null
