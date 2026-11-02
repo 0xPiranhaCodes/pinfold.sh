@@ -12,7 +12,7 @@ pss() { awk '/^Pss:/ { printf "%.2f", $2 * 1024 / 1000000 }' "/proc/$1/smaps_rol
 # The X11 window and its process, once it shows. A hardened process still gives its parent.
 window_id() {
   tries=0
-  until ID=$(xdotool search --name '^Pinfold$' | head -1) && [ -n "$ID" ]; do
+  until ID=$(xdotool search --name '^PinFold$' | head -1) && [ -n "$ID" ]; do
     tries=$((tries + 1))
     [ "$tries" -lt 50 ] || { echo "FAIL: no window"; exit 1; }
     sleep 0.1
@@ -89,7 +89,7 @@ fi
 echo "the paste reached the program as text, after confirmation"
 "$PINFOLD"
 sleep 0.5
-if [ "$(xdotool search --name '^Pinfold$' | wc -l)" != 1 ] || gone "$WINDOW"; then
+if [ "$(xdotool search --name '^PinFold$' | wc -l)" != 1 ] || gone "$WINDOW"; then
   echo "FAIL: a second pinfold did not keep to one window"
   exit 1
 fi
