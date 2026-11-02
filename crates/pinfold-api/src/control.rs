@@ -111,6 +111,15 @@ pub fn socket_path(directory: &Path) -> PathBuf {
 }
 
 /// Returns the session's log in `directory`.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::Path;
+///
+/// let path = pinfold_api::control::log_path(Path::new("/run/user/1000/pinfold"));
+/// assert_eq!(path, Path::new("/run/user/1000/pinfold/default.log"));
+/// ```
 #[must_use]
 pub fn log_path(directory: &Path) -> PathBuf {
     directory.join(SESSION).with_extension("log")
@@ -122,6 +131,16 @@ pub fn log_path(directory: &Path) -> PathBuf {
 ///
 /// [`Error::Unsafe`] for a directory others can reach, and [`Error::Io`] if the system refuses,
 /// as it does for a symlink at the log's path.
+///
+/// # Examples
+///
+/// ```
+/// let directory = std::env::temp_dir().join(format!("pinfold-doc-{}", std::process::id()));
+/// let _log = pinfold_api::control::start_log(&directory)?;
+/// assert!(pinfold_api::control::log_path(&directory).exists());
+/// std::fs::remove_dir_all(directory)?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 pub fn start_log(directory: &Path) -> Result<File, Error> {
     checked(directory)?;
     Ok(pinfold_sys::open_log(&log_path(directory))?)

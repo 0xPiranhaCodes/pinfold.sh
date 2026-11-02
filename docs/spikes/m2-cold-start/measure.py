@@ -29,6 +29,8 @@ def stop(directory, name):
 
 def launch(directory, environment):
     start = time.monotonic()
+    # An argument list with no shell, naming a binary from this script's own build directory.
+    # nosemgrep: python.lang.security.audit.dangerous-subprocess-use-audit
     done = subprocess.run([f"{directory}/pinfold"], env=environment, capture_output=True, text=True)
     return f"{time.monotonic() - start:.3f} s, exit {done.returncode} {done.stderr.strip()}"
 
