@@ -158,7 +158,7 @@ BELOW=$(shell_in below)
 xdotool key ctrl+a c
 sleep 1
 TAB=$(shell_in tab)
-xdotool key ctrl+a 0
+xdotool key ctrl+a 1
 sleep 1
 AGAIN=$(shell_in again)
 if [ "$AGAIN" != "$BELOW" ] || [ "$TAB" = "$BELOW" ]; then

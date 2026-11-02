@@ -7,7 +7,7 @@ use pinfold_proto::link::Rect;
 use pinfold_proto::{Cell, DEFAULT_BACKGROUND, Frame};
 
 /// `Focus accent` in Foundations.
-const FOCUS: u32 = 0x007a_a7ff;
+const FOCUS: u32 = 0x005f_d4d0;
 /// `Rule, quiet fill` in Foundations.
 const RULE: u32 = 0x0026_2b33;
 

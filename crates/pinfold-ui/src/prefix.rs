@@ -8,7 +8,7 @@
 //! | `c`                 | New tab                 | tmux                       |
 //! | `x`                 | Close the pane, asked first | tmux                   |
 //! | `n`, `p`            | Next, previous tab      | tmux                       |
-//! | `0` to `9`          | Tab at that index       | tmux, so `0` is the first  |
+//! | `1` to `9`, `0`     | That tab, `0` the tenth | the tab strip's numbers    |
 //! | <code>&#124;</code> or `%` | Split right      | the design doc, then tmux  |
 //! | `-` or `"`          | Split down              | the design doc, then tmux  |
 //! | Arrows              | Move focus              | tmux                       |
@@ -129,7 +129,8 @@ fn command(key: &Key, modifiers: ModifiersState) -> Option<Command> {
         // Shift and Alt are not checked: some layouts need Option to type `|`, as a German
         // Mac does, and winit has already applied both to the text.
         Key::Character(text) => match text.as_bytes() {
-            [digit @ b'0'..=b'9'] => Some(Command::Tab(usize::from(digit - b'0'))),
+            // As the strip numbers them, and in keyboard order, so `0` follows `9`.
+            [digit @ b'0'..=b'9'] => Some(Command::Tab((usize::from(digit - b'0') + 9) % 10)),
             b"c" => Some(Command::NewTab),
             b"x" => Some(Command::ClosePane),
             b"n" => Some(Command::NextTab),
@@ -288,9 +289,12 @@ mod tests {
 
     #[test]
     fn digits_pick_a_tab_by_index() {
-        for digit in 0..10 {
-            let command = Command::Tab(digit);
-            assert_after_prefix(&text(&digit.to_string()), NONE, Step::Run(command));
+        for (digit, tab) in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
+            .into_iter()
+            .enumerate()
+            .map(|(tab, digit)| (digit, tab))
+        {
+            assert_after_prefix(&text(digit), NONE, Step::Run(Command::Tab(tab)));
         }
     }
 
