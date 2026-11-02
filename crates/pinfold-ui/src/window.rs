@@ -263,12 +263,12 @@ struct App {
     composed: Frame,
     /// The top bar's label, made safe to draw.
     label: String,
-    /// The window columns the top bar's tab takes.
-    tab: Range<usize>,
     /// When the clock in the top bar next changes.
     minute: Instant,
     /// Whether the pointer is over the top bar.
     on_bar: bool,
+    /// Whether the pointer is on the top bar's title row, which moves the window.
+    on_title: bool,
     clicks: Clicks,
     /// Where the input method's window was last told to go.
     ime_cursor: Option<(u16, u16)>,
@@ -439,7 +439,7 @@ impl App {
             let cell_width = open.renderer.cell_size().0;
             let left = open.padding().left;
             let inset = top_bar::inset(top_bar::LEFT_POINTS, scale, left, cell_width);
-            self.tab = top_bar::draw(&mut self.composed, &self.label, time, inset);
+            top_bar::draw(&mut self.composed, &[&self.label], 0, time, inset);
             open.renderer.draw(&self.composed)?;
         }
         Ok(())
@@ -644,6 +644,7 @@ impl App {
         let cell_size = open.renderer.cell_size();
         let (on_bar, pointer) = top_bar::locate(open.padding(), x, y, cell_size, grid);
         self.on_bar = on_bar;
+        self.on_title = top_bar::on_title(open.padding(), y, cell_size.1);
         if self.pointer != pointer {
             self.pointer = pointer;
             if self.selecting.drag(self.pointer_position()) {
@@ -684,10 +685,10 @@ impl App {
         });
     }
 
-    /// Moves or zooms the window from a left press on the empty part of the top bar.
+    /// Moves or zooms the window from a left press on the top bar's title row.
     fn bar_pressed(&mut self) {
         let Some(open) = &self.open else { return };
-        if self.tab.contains(&usize::from(self.pointer.1)) {
+        if !self.on_title {
             return;
         }
         // shortcut: always zooms in a fixed time, read the macOS double-click settings if asked.
@@ -918,7 +919,7 @@ pub fn run(size: Option<(u32, u32)>) -> Result<(), Error> {
         held: 0..0,
         composed: Frame::default(),
         label: String::new(),
-        tab: 0..0,
+        on_title: false,
         minute: Instant::now(),
         on_bar: false,
         clicks: Clicks::default(),
