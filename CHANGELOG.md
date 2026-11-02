@@ -33,6 +33,7 @@ Entries are generated from Conventional Commits with git-cliff
 - `Pinfold.app` for macOS, with its icon, and a login shell in the home folder when opened from the Dock.
 - A top bar: one tab named after the working directory, and the local date and time. Dragging it moves the window.
 - Drag to select across history and the screen, Shift-drag past mouse reporting, a copy key, and a search bar.
+- Vi mode: keyboard motions, selection and copying across history and the screen.
 - A paste sanitizer in the core, and an input queue of 1 MiB so a large write is not cut.
 - A two-second flash in the row under the pane when a program's OSC 52 clipboard write is blocked.
 - Input method composition, drawn at the cursor.

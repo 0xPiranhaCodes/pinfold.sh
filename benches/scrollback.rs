@@ -1,5 +1,5 @@
-//! Scrollback size, feed speed, read, wheel, search and selection latency on the M0 spike's
-//! corpora.
+//! Scrollback size, feed speed, read, wheel, vi, search and selection latency on the M0
+//! spike's corpora.
 //!
 //! Run with `cargo run --release -p pinfold-benches --bin scrollback`. Adding
 //! `-- --write <dir>` saves the corpora instead, which is how `cargo xtask mem-gate` gets them.
@@ -415,6 +415,46 @@ fn notches(name: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Prints a table row for vi mode over a pane's whole store and back: a step past the view's
+/// edge, which is what `Request::Reveal` does for `j` and `k`, then the jumps of `gg` and `G`.
+fn motions(name: &str) -> std::io::Result<()> {
+    let (mut engine, held) = filled(name)?;
+    let mut frame = Frame::default();
+    engine.frame(&mut frame);
+    // Written before the first reading, so these pages do not count as growth.
+    let mut times = vec![0.0; held * 2];
+    let before = pinfold_sys::footprint(std::process::id())?;
+    times.clear();
+    for lines in [1, -1] {
+        loop {
+            let start = Instant::now();
+            std::hint::black_box(engine.position(0, 0));
+            let moved = engine.scroll(lines);
+            engine.frame(&mut frame);
+            std::hint::black_box((&frame, engine.view_rows()));
+            if !moved {
+                break;
+            }
+            times.push(start.elapsed().as_secs_f64() * 1e3);
+        }
+    }
+    let grown = pinfold_sys::footprint(std::process::id())?.saturating_sub(before);
+    let mut jump = |lines| {
+        let start = Instant::now();
+        engine.scroll(lines);
+        engine.frame(&mut frame);
+        std::hint::black_box(&frame);
+        start.elapsed().as_secs_f64() * 1e3
+    };
+    let (top, bottom) = (jump(i32::MAX), jump(i32::MIN));
+    let (p50, p99, most) = percentiles(&mut times);
+    let grown = grown as f64 / 1e6;
+    println!(
+        "| {name} | {held} | {p50:.3} | {p99:.3} | {most:.3} | {top:.3} | {bottom:.3} | {grown:.3} |"
+    );
+    Ok(())
+}
+
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let [flag, dir] = args.as_slice()
@@ -429,6 +469,11 @@ fn main() -> std::io::Result<()> {
         && flag == "--notches"
     {
         return notches(name);
+    }
+    if let [flag, name] = args.as_slice()
+        && flag == "--motions"
+    {
+        return motions(name);
     }
     if let [flag] = args.as_slice()
         && flag == "--worst-query"
@@ -473,6 +518,15 @@ fn main() -> std::io::Result<()> {
     for name in CORPORA {
         std::process::Command::new(std::env::current_exe()?)
             .args(["--notches", name])
+            .status()?;
+    }
+    println!(
+        "\n| Corpus | Rows held | Vi step p50 ms | p99 ms | Max ms | gg ms | G ms | Footprint growth MB |"
+    );
+    println!("| --- | --- | --- | --- | --- | --- | --- | --- |");
+    for name in CORPORA {
+        std::process::Command::new(std::env::current_exe()?)
+            .args(["--motions", name])
             .status()?;
     }
     println!(
