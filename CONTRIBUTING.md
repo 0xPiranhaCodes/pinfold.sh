@@ -29,6 +29,7 @@ cargo install --locked cargo-deny cargo-audit cargo-vet cargo-fuzz typos-cli
 | ---------------- | ------------------------------------------------------------- |
 | `pinfold-core`   | Daemon library: PTY, `VtEngine`, mux, sessions, status engine |
 | `pinfold-proto`  | API types, JSON Schemas, version negotiation (no I/O)         |
+| `pinfold-mux`    | Layout model: session, tab, split tree, pane (no I/O)         |
 | `pinfold-api`    | Socket server, scopes and approvals, audit log                |
 | `pinfold-render` | `Renderer` trait, CPU renderer, glyph cache, optional GL      |
 | `pinfold-ui`     | Window process: winit, chrome as cells, input, IME            |

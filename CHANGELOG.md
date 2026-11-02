@@ -34,6 +34,7 @@ Entries are generated from Conventional Commits with git-cliff
 - A top bar: one tab named after the working directory, and the local date and time. Dragging it moves the window.
 - Drag to select across history and the screen, Shift-drag past mouse reporting, a copy key, and a search bar.
 - Vi mode: keyboard motions, selection and copying across history and the screen.
+- `pinfold-mux`, the layout model of sessions, tabs and split panes, which runs nothing yet.
 - A paste sanitizer in the core, and an input queue of 1 MiB so a large write is not cut.
 - A two-second flash in the row under the pane when a program's OSC 52 clipboard write is blocked.
 - Input method composition, drawn at the cursor.
