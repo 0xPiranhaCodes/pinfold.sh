@@ -59,7 +59,7 @@ xdotool type --delay 15 'stty -echo -icanon; printf "\033[?1000h\033[?1006h"; he
 xdotool key Return
 sleep 0.5
 # Below the top bar, in the pane's first row.
-xdotool mousemove --window "$ID" 21 70 click 1 click 4
+xdotool mousemove --window "$ID" 9 70 click 1 click 4
 sleep 0.5
 mouse=$(tr -d ' \n' < /tmp/mouse)
 # Two wheel reports: winit counts a synthetic wheel button's press and its release.
@@ -174,7 +174,7 @@ fi
 import -window root /out/splits.png
 echo "a split and a tab opened with real keys, each with its own shell"
 # The + button, a shell that exits, a tab's box, and a pane, with the window at 1000x640.
-xdotool mousemove --window "$ID" 240 45 click 1
+xdotool mousemove --window "$ID" 228 45 click 1
 sleep 1
 PLUS=$(shell_in plus)
 if [ "$PLUS" = "$TAB" ] || [ "$PLUS" = "$RIGHT" ]; then

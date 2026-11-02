@@ -1,8 +1,8 @@
 //! The empty pixels between the window's edge and the grid.
 
 /// Padding on each side in logical pixels, as `(left, top, right, bottom)`. The top puts the
-/// first row level with the macOS traffic lights.
-const LOGICAL: (f64, f64, f64, f64) = (20.0, 8.0, 20.0, 10.0);
+/// first row level with the macOS traffic lights, and the sides match the red one's inset.
+const LOGICAL: (f64, f64, f64, f64) = (8.0, 8.0, 8.0, 10.0);
 /// Logical pixels under the top bar, so it stands clear of the pane.
 const BAR_GAP: f64 = 10.0;
 /// Logical pixels between the title and the tabs.
@@ -40,7 +40,7 @@ impl Padding {
     /// use pinfold_render::padding::Padding;
     ///
     /// let padding = Padding::scaled(2.0);
-    /// assert_eq!((padding.left, padding.top), (40, 16));
+    /// assert_eq!((padding.left, padding.top), (16, 16));
     /// ```
     #[must_use]
     pub fn scaled(scale: f64) -> Self {
@@ -157,9 +157,9 @@ mod tests {
     #[test]
     fn padding_follows_the_scale_factor() {
         let expected = Padding {
-            left: 20,
+            left: 8,
             top: 8,
-            right: 20,
+            right: 8,
             gap: 10,
             title_gap: 10,
             ..padding()
@@ -168,7 +168,7 @@ mod tests {
         let scaled = Padding::scaled(1.5);
         assert_eq!(
             (scaled.left, scaled.top, scaled.right, scaled.bottom),
-            (30, 12, 30, 15)
+            (12, 12, 12, 15)
         );
     }
 
