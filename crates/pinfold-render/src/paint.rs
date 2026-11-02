@@ -6,6 +6,7 @@ use pinfold_proto::Cell;
 
 use crate::font::{Font, Fonts};
 use crate::glyphs::{CACHE_LIMIT, GlyphCache, Metrics, clamp_size};
+use crate::padding::Padding;
 
 /// A pixel buffer of `0x00RRGGBB` values.
 #[derive(Debug)]
@@ -13,6 +14,9 @@ pub struct Canvas<'a> {
     pixels: &'a mut [u32],
     width: usize,
     height: usize,
+    /// The first cell's top-left corner.
+    left: usize,
+    top: usize,
 }
 
 impl<'a> Canvas<'a> {
@@ -23,7 +27,19 @@ impl<'a> Canvas<'a> {
             pixels,
             width,
             height,
+            left: 0,
+            top: 0,
         })
+    }
+
+    /// Moves the grid inside `padding`.
+    #[must_use]
+    pub fn inset(self, padding: Padding) -> Self {
+        Self {
+            left: padding.left,
+            top: padding.top,
+            ..self
+        }
     }
 
     /// Fills every pixel.
@@ -137,14 +153,14 @@ impl Painter {
             cell_height,
             baseline,
         } = self.cache.metrics();
-        let top = row.saturating_mul(cell_height);
+        let top = row.saturating_mul(cell_height).saturating_add(canvas.top);
         if top >= canvas.height {
             return;
         }
         let bottom = (top + cell_height).min(canvas.height);
         // Backgrounds go first, so a wide glyph is not erased by the cell after it.
         for (column, cell) in cells.iter().enumerate() {
-            let left = column.saturating_mul(cell_width);
+            let left = column.saturating_mul(cell_width) + canvas.left;
             canvas.fill(
                 left,
                 top,
@@ -163,8 +179,8 @@ impl Painter {
             let Some(glyph) = self.cache.get(cell.character, cell.style()) else {
                 continue;
             };
-            let left =
-                i64::try_from(column * cell_width).unwrap_or(i64::MAX) + i64::from(glyph.left);
+            let left = i64::try_from(column * cell_width + canvas.left).unwrap_or(i64::MAX)
+                + i64::from(glyph.left);
             let first = i64::from(pen_y) - i64::from(glyph.top);
             for (line, mask) in glyph.mask.chunks(glyph.width.max(1)).enumerate() {
                 let y = first + line as i64;
@@ -251,6 +267,27 @@ mod tests {
         let row = height / 3;
         assert!(buffer[..row * width].iter().all(|&pixel| pixel == 0));
         assert!(buffer[2 * row * width..].iter().all(|&pixel| pixel == 0));
+    }
+
+    #[test]
+    fn padding_moves_the_grid_and_stays_untouched() {
+        let mut painter = painter();
+        let (cell_width, cell_height) = painter.cell_size();
+        let padding = Padding {
+            left: 3,
+            top: 2,
+            right: 1,
+            bottom: 1,
+        };
+        let (width, height) = (cell_width + 4, cell_height + 3);
+        let mut buffer = vec![0; width * height];
+        let canvas = Canvas::new(&mut buffer, width, height).unwrap();
+        painter.draw_row(&mut canvas.inset(padding), 0, &[cell('M')]);
+        for (index, &pixel) in buffer.iter().enumerate() {
+            let (x, y) = (index % width, index / width);
+            let inside = (3..3 + cell_width).contains(&x) && (2..2 + cell_height).contains(&y);
+            assert_eq!(pixel != 0, inside, "({x}, {y})");
+        }
     }
 
     #[test]

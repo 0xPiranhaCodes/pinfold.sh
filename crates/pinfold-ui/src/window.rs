@@ -20,6 +20,7 @@ use pinfold_core::search::{Direction, Position, Selection};
 use pinfold_proto::{Frame, MouseMode};
 use pinfold_render::cpu::{CpuRenderer, Renderer};
 use pinfold_render::font::{Font, FontError};
+use pinfold_render::padding::Padding;
 use pinfold_sys::clipboard::Clipboard;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -173,6 +174,24 @@ struct Open {
     renderer: Box<dyn Renderer>,
 }
 
+impl Open {
+    fn padding(&self) -> Padding {
+        Padding::scaled(self.window.scale_factor())
+    }
+
+    /// Applies the background settings. Winit can change a window's transparency at any time
+    /// on macOS, so it stays off until the renderer says it can draw that way.
+    fn apply_background(&mut self, config: &Config) {
+        let translucent = self
+            .renderer
+            .set_background_opacity(config.background_opacity);
+        self.window.set_transparent(translucent);
+        // shortcut: winit fixes the radius at 80 through a private CoreGraphics call, take over
+        // that call if a user needs another radius, as WezTerm's 30 is out of reach here.
+        self.window.set_blur(translucent && config.background_blur);
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn option_as_alt(config: &Config) -> OptionAsAlt {
     if config.macos_option_as_alt {
@@ -257,22 +276,30 @@ impl App {
             None => attributes.with_inner_size(DEFAULT_SIZE),
         };
         // Without this macOS hands over the composed character, such as ƒ for Option+f.
+        // shortcut: the first row's left cells sit under the traffic lights, which padding of 12
+        // does not clear, the top bar must take that row.
         #[cfg(target_os = "macos")]
-        let attributes = attributes.with_option_as_alt(option_as_alt(&self.config));
+        let attributes = attributes
+            .with_option_as_alt(option_as_alt(&self.config))
+            .with_fullsize_content_view(true)
+            .with_titlebar_transparent(true)
+            .with_title_hidden(true);
         let window = Rc::new(event_loop.create_window(attributes)?);
         window.set_ime_allowed(true);
         let size = self.config.font_size * window.scale_factor() as f32;
         let renderer = renderer(&window, size, self.config.font_path.as_deref())?;
-        self.open = Some(Open { window, renderer });
+        let mut open = Open { window, renderer };
+        open.apply_background(&self.config);
+        self.open = Some(open);
         Ok(())
     }
 
     fn resized(&mut self, size: PhysicalSize<u32>) {
         let Some(open) = &mut self.open else { return };
-        open.renderer.resize(size.width, size.height);
-        let (width, height) = open.renderer.cell_size();
-        let columns = u16::try_from(size.width as usize / width).unwrap_or(u16::MAX);
-        let rows = u16::try_from(size.height as usize / height).unwrap_or(u16::MAX);
+        let padding = open.padding();
+        open.renderer.resize(size.width, size.height, padding);
+        let cell = open.renderer.cell_size();
+        let (rows, columns) = padding.grid(size.width, size.height, cell);
         open.window.request_redraw();
         let rows = rows.saturating_sub(CHROME_ROWS).max(1);
         self.request(Request::Resize(rows, columns.max(1)));
@@ -297,6 +324,7 @@ impl App {
         let Some(open) = &mut self.open else { return };
         #[cfg(target_os = "macos")]
         open.window.set_option_as_alt(option_as_alt(&self.config));
+        open.apply_background(&self.config);
         if self.config.font_path != old.font_path {
             match Font::chosen(self.config.font_path.as_deref()) {
                 Ok(font) => open.renderer.set_font(font),
@@ -326,10 +354,12 @@ impl App {
                 self.ime_cursor = self.frame.cursor;
                 if let Some((row, column)) = self.frame.cursor {
                     let (width, height) = open.renderer.cell_size();
-                    let (width, height) = (width as u32, height as u32);
+                    let padding = open.padding();
+                    let x = padding.left + usize::from(column) * width;
+                    let y = padding.top + usize::from(row) * height;
                     open.window.set_ime_cursor_area(
-                        PhysicalPosition::new(u32::from(column) * width, u32::from(row) * height),
-                        PhysicalSize::new(width, height),
+                        PhysicalPosition::new(x as u32, y as u32),
+                        PhysicalSize::new(width as u32, height as u32),
                     );
                 }
             }
@@ -484,14 +514,12 @@ impl App {
 
     fn pointer_moved(&mut self, x: f64, y: f64) {
         let Some(open) = &self.open else { return };
-        let (width, height) = open.renderer.cell_size();
-        let cell = |pixels: f64, size: usize, cells: u16| {
-            ((pixels.max(0.0) as usize / size) as u32).min(u32::from(cells.max(1)) - 1) as u16
-        };
-        let row = cell(y, height, self.frame.rows);
-        let column = cell(x, width, self.frame.columns);
-        if self.pointer != (row, column) {
-            self.pointer = (row, column);
+        let grid = (self.frame.rows, self.frame.columns);
+        let pointer = open
+            .padding()
+            .cell_at(x, y, open.renderer.cell_size(), grid);
+        if self.pointer != pointer {
+            self.pointer = pointer;
             if self.selecting.drag(self.pointer_position()) {
                 self.redraw_soon();
                 return;

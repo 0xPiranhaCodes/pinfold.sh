@@ -5,4 +5,5 @@ pub mod font;
 pub mod glyphs;
 #[cfg(target_os = "macos")]
 pub mod metal;
+pub mod padding;
 pub mod paint;

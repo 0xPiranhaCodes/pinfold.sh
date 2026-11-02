@@ -4,6 +4,11 @@
 pub const BOLD: u32 = 1 << 24;
 /// Italic text, set in the top byte of [`Cell::foreground`].
 pub const ITALIC: u32 = 1 << 25;
+/// The colour of a cell no program has coloured, and of the window around the grid.
+///
+/// shortcut: a copy of the core's own default, so after OSC 11 a program's new default counts
+/// as a cell colour and stays opaque, carry the live colour in `Frame` when the core next changes.
+pub const DEFAULT_BACKGROUND: u32 = 0x000e_1014;
 
 /// One character with its colours, as `0x00RRGGBB`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
