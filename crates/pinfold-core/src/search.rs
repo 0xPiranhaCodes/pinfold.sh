@@ -1,7 +1,8 @@
 //! Finding and copying text across a pane's history and screen.
 //!
-//! Both name cells by [`Position`]. A row's number is the store's number for it, and a screen
-//! row counts on from the store's end, so a row keeps its number as it leaves the screen.
+//! Both name cells by [`Position`]. A row's number is the store's number for it at the pane's
+//! width, and a screen row counts on from the store's end, so a row keeps its number as it
+//! leaves the screen. Both run on what the view shows, so a match reads as the user sees it.
 
 use std::ops::Range;
 
@@ -19,12 +20,13 @@ const TAB_STOP: usize = 8;
 
 const SPACERS: Flags = Flags::WIDE_CHAR_SPACER.union(Flags::LEADING_WIDE_CHAR_SPACER);
 
-/// A cell, in numbers that survive output and eviction.
+/// A cell, in numbers that survive output and eviction, though not a change of width.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Position {
-    /// The row's number.
+    /// The row's number at the pane's width. A new width reflows rows and numbers them back from
+    /// the same end, so a position taken before it names other text afterwards (ADR-0029).
     pub row: usize,
-    /// The column it was written at. History is not reflowed.
+    /// The column at that width.
     pub column: u16,
 }
 
