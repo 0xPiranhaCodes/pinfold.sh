@@ -3,6 +3,7 @@
 mod flash;
 mod ime;
 mod input;
+pub mod link;
 mod mouse;
 mod paste;
 mod reload;
