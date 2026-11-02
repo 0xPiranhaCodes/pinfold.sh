@@ -4,8 +4,9 @@ This document is the source of truth for Pinfold's security design. It restates 
 Security design section of [`architecture.md`](architecture.md) as amended by review
 finding B1 in [`architecture-review.md`](architecture-review.md) and by
 [ADR-0004](../adr/0004-agent-identity-from-pty.md),
-[ADR-0010](../adr/0010-security-model.md) and
-[ADR-0020](../adr/0020-identity-hardening.md). Bearer tokens, `PINFOLD_TOKEN` and the
+[ADR-0010](../adr/0010-security-model.md),
+[ADR-0020](../adr/0020-identity-hardening.md) and
+[ADR-0028](../adr/0028-windows-are-spawned-by-the-core.md). Bearer tokens, `PINFOLD_TOKEN` and the
 owner token no longer exist, whatever older text says.
 
 **Status: design.** None of these controls is implemented yet. The milestone table at
@@ -64,12 +65,13 @@ Each threat needs at least one test proving its control works.
 ## Trust boundaries
 
 `pinfold-core` is the trusted code. The window process hosts rendering and the built-in
-tools, and it can crash or restart without touching a PTY. Three kinds of input cross
+tools, and it can crash or restart without touching a PTY. Four kinds of input cross
 into the core:
 
 - **API callers** are identified from their PTY, never from something they present.
 - **Program output** passes the escape-sequence filter, and only changes what is drawn.
 - **Pastes and files** pass sanitizers, and never become keystrokes on their own.
+- **Window messages** come only over a link the core made, and cannot panic it.
 
 ## Caller identity
 
@@ -86,7 +88,12 @@ into the core:
 4. **Outside a pane.** No token exists on disk. An owner-level action from outside a
    pane needs a one-time confirmation drawn in the Pinfold window.
 
-5. **Core hardening.** Before opening any PTY, the core sets `PR_SET_DUMPABLE(0)` on Linux
+5. **Window link.** A window can read and write every pane, so it never connects by name.
+   The core makes a socketpair and starts the window itself, and that inherited descriptor
+   is the only way in ([ADR-0028](../adr/0028-windows-are-spawned-by-the-core.md)). A caller
+   on the control socket can ask for a window to open, with no arguments, and gets no channel
+   into a pane. The window sets the same hardening as the core.
+6. **Core hardening.** Before opening any PTY, the core sets `PR_SET_DUMPABLE(0)` on Linux
    and `PT_DENY_ATTACH` on macOS, so that a same-user process cannot copy a PTY master out
    of it.
 
@@ -198,7 +205,7 @@ snapshot and spill-file rules are in the Security design section of
 | Phase 0    | `unsafe` lint policy, `cargo-deny` and `cargo-audit` in CI, this document                          |
 | M0         | Caller-identity proof on Linux and macOS (done)                                                    |
 | M1         | Escape-sequence policy, paste sanitizer, scrollback byte cap, fuzzing of the VT input path         |
-| M2         | Core hardening, socket directory checks, peer UID check                                            |
+| M2         | Core hardening, socket directory checks, peer UID check, window link                               |
 | M3         | Scopes, approvals, protected panes, newline splitting, redaction, audit log, sandbox, API fuzzing  |
 | M4         | Filename and markdown sanitizing, hardened git invocation, tool size and time caps                 |
 | M5         | Workspace trust, encrypted spill files, snapshot redaction, signed and notarized releases          |

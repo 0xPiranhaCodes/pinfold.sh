@@ -18,7 +18,7 @@ Entries are generated from Conventional Commits with git-cliff
 - Bold and italic drawing, a `font_path` config key, and text blended in linear light.
 - Text stays sharp across displays: the font size follows the window's scale factor.
 - Project governance, security policy, contribution guide and license files.
-- Architecture decision records ADR-0001 to ADR-0027.
+- Architecture decision records ADR-0001 to ADR-0028.
 - Threat model with the PTY-based identity design.
 - Roadmap, and memory targets updated from the M0 measurements.
 - `cargo xtask mem-gate` now measures the core on Linux and macOS.
