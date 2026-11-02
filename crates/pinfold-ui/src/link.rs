@@ -1,27 +1,26 @@
 //! The window's end of the link to the core (ADR-0028), with the operations of `Reactor`.
 //!
-//! [`Link`] sends requests, and applies what the core sends to a copy of the screen. Bytes from
-//! the core are untrusted: anything wrong ends the link, and [`Link::turn`] says why as a value.
-//! The last screen stays readable after that.
+//! [`Link`] sends requests, and keeps a copy of the tabs and of each pane the active tab shows,
+//! so a hidden pane costs nothing here. Bytes from the core are untrusted: anything wrong ends
+//! the link, and [`Link::turn`] says why as a value. The last screen stays readable after that.
 //!
 //! ```
 //! use std::io::Write;
 //! use std::os::unix::net::UnixStream;
 //! use std::time::Duration;
 //!
-//! use pinfold_proto::Frame;
 //! use pinfold_proto::link::{Notice, VERSION};
 //! use pinfold_ui::link::Link;
 //!
 //! let (ours, mut core) = UnixStream::pair()?;
-//! let mut link = Link::new(ours.into(), 0)?;
+//! let mut link = Link::new(ours.into())?;
 //!
 //! let mut wire = Vec::new();
 //! Notice::Hello { version: VERSION }.encode(&mut wire)?;
 //! core.write_all(&wire)?;
 //! link.turn(Some(Duration::from_secs(1)))?;
 //! assert!(link.is_greeted());
-//! assert_eq!(link.frame(), &Frame::default());
+//! assert!(link.screens().is_empty());
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -36,7 +35,7 @@ use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
 use pinfold_proto::Frame;
 use pinfold_proto::link::{
-    Decoder, Direction, Error, MAX_DIMENSION, MAX_REQUEST, Notice, Position, Request, Selection,
+    Decoder, Error, Layout, MAX_DIMENSION, MAX_REQUEST, Notice, Rect, Refusal, Request, Selection,
     VERSION,
 };
 
@@ -65,26 +64,74 @@ pub enum Disconnect {
     Io(ErrorKind),
 }
 
-/// What the window knows of its pane, and what it has to say.
-#[derive(Default)]
-struct State {
-    pane: u32,
-    /// Encoded requests the socket has not taken yet.
-    out: Vec<u8>,
-    frame: Frame,
-    top: usize,
-    held: Range<usize>,
-    cwd: String,
-    dirty: bool,
-    greeted: bool,
-    exited: bool,
+/// A pane the active tab shows.
+#[derive(Debug, Default)]
+pub struct Screen {
+    /// The pane.
+    pub pane: u32,
+    /// Where it goes in the space for panes.
+    pub rect: Rect,
+    /// The last screen received, which is empty until the first frame.
+    pub frame: Frame,
+    /// The core's number for the first row of `frame`.
+    pub top: usize,
+    /// The rows the view can reach.
+    pub held: Range<usize>,
+    /// Whether `frame` changed since this was last cleared.
+    pub dirty: bool,
     /// Whether a full frame is on its way, so a burst of changes asks once.
     asked_full: bool,
-    searched: Option<Option<Selection>>,
+}
+
+/// Makes `screens` hold the panes of `shown`, in new rectangles. A pane that stays keeps what it
+/// holds, one that went is freed, and a new one starts empty.
+pub fn follow(screens: &mut Vec<Screen>, shown: impl Iterator<Item = (u32, Rect)>) {
+    let shown: Vec<_> = shown.collect();
+    screens.retain(|screen| shown.iter().any(|(pane, _)| *pane == screen.pane));
+    for (pane, rect) in shown {
+        match screens.iter_mut().find(|screen| screen.pane == pane) {
+            Some(screen) => screen.rect = rect,
+            None => screens.push(Screen {
+                pane,
+                rect,
+                ..Screen::default()
+            }),
+        }
+    }
+}
+
+/// A tab, as the tab strip shows it.
+#[derive(Debug, Default)]
+pub struct Tab {
+    /// The pane with the tab's focus.
+    pub pane: u32,
+    /// That pane's last reported directory, as program output wrote it. Empty if none.
+    pub cwd: String,
+}
+
+/// What the window knows of the session, and what it has to say.
+#[derive(Default)]
+struct State {
+    /// Encoded requests the socket has not taken yet.
+    out: Vec<u8>,
+    screens: Vec<Screen>,
+    tabs: Vec<Tab>,
+    active: usize,
+    focused: u32,
+    total: usize,
+    /// Whether the session's shape, a tab's name or its news changed since it was last read.
+    laid: bool,
+    /// Which tabs have news, one bit each.
+    activity: u32,
+    greeted: bool,
+    /// Whether the core said no tab is left.
+    over: bool,
+    searched: Option<(u32, Option<Selection>)>,
     copied: Option<String>,
     /// Copies asked for and not answered.
     copying: u32,
     raised: bool,
+    refused: Option<Refusal>,
 }
 
 impl State {
@@ -104,7 +151,7 @@ impl State {
     fn apply(&mut self, notice: Notice<'_>) -> Result<(), Error> {
         match notice {
             Notice::Hello { .. } => self.greeted = true,
-            Notice::Frame(update) if update.pane == self.pane => {
+            Notice::Frame(update) => {
                 // The window adds screen rows to this without checking.
                 if update.top.checked_add(u16::MAX.into()).is_none() {
                     return Err(Error::OutOfBounds {
@@ -112,36 +159,72 @@ impl State {
                         value: update.top as u64,
                     });
                 }
-                if update.apply(&mut self.frame) {
-                    self.asked_full &= !update.full;
-                    self.top = update.top;
-                    self.held = update.held;
-                    self.dirty = true;
-                } else if !self.asked_full {
-                    let pane = self.pane;
-                    self.asked_full = self.queue(Request::FullFrame { pane });
+                let mut shown = self.screens.iter_mut();
+                let Some(screen) = shown.find(|screen| screen.pane == update.pane) else {
+                    return Ok(());
+                };
+                if update.apply(&mut screen.frame) {
+                    screen.asked_full &= !update.full;
+                    screen.top = update.top;
+                    screen.held = update.held;
+                    screen.dirty = true;
+                } else if !screen.asked_full {
+                    // A message this small only misses a queue that is full, and then asks again.
+                    screen.asked_full = true;
+                    let pane = screen.pane;
+                    let queued = self.queue(Request::FullFrame { pane });
+                    if let Some(screen) = self.screens.iter_mut().find(|s| s.pane == pane) {
+                        screen.asked_full = queued;
+                    }
                 }
             }
-            Notice::Cwd { pane, path } if pane == self.pane && path != self.cwd => {
-                path.clone_into(&mut self.cwd);
-                self.dirty = true;
+            Notice::Layout(layout) => self.follow(&layout),
+            Notice::Cwd { pane, path } => {
+                let mut tabs = self.tabs.iter_mut();
+                if let Some(tab) = tabs.find(|tab| tab.pane == pane && tab.cwd != path) {
+                    path.clone_into(&mut tab.cwd);
+                    self.laid = true;
+                }
             }
-            Notice::Searched { pane, found } if pane == self.pane => self.searched = Some(found),
+            Notice::Searched { pane, found } => self.searched = Some((pane, found)),
             // Only a key copies, so a core cannot fill the clipboard on its own.
-            Notice::Copied { pane, text } if pane == self.pane && self.copying > 0 => {
+            Notice::Copied { text, .. } if self.copying > 0 => {
                 self.copying -= 1;
                 self.copied = Some(text.to_owned());
             }
-            Notice::Exited { pane } if pane == self.pane => self.exited = true,
             Notice::Raise => self.raised = true,
-            _ => {}
+            Notice::Activity { tabs } => {
+                self.activity = tabs;
+                self.laid = true;
+            }
+            Notice::Refused { reason } => self.refused = Some(reason),
+            Notice::Copied { .. } => {}
         }
         Ok(())
     }
+
+    fn follow(&mut self, layout: &Layout<'_>) {
+        self.active = layout.active.into();
+        self.focused = layout.focused;
+        self.total = layout.total.into();
+        self.over = layout.is_empty();
+        self.laid = true;
+        follow(&mut self.screens, layout.panes());
+        let mut known = std::mem::take(&mut self.tabs);
+        self.tabs.extend(layout.tabs().map(|pane| {
+            let same = known.iter_mut().find(|tab| tab.pane == pane);
+            same.map_or(
+                Tab {
+                    pane,
+                    cwd: String::new(),
+                },
+                std::mem::take,
+            )
+        }));
+    }
 }
 
-/// One pane of the core, seen through the link. A single thread drives it, as with `Reactor`.
-// shortcut: one pane per link, key `State` by pane when the window gets splits.
+/// A session of the core, seen through the link. A single thread drives it, as with `Reactor`.
 pub struct Link {
     /// Gone once the link ends, so the core sees it close.
     stream: Option<UnixStream>,
@@ -159,23 +242,24 @@ pub struct Link {
 }
 
 impl Link {
-    /// Takes over a connected socket for `pane`, and says hello at once.
+    /// Takes over a connected socket, and says hello at once. The core says what to show once
+    /// [`Link::resize`] says how much room there is.
     ///
     /// # Errors
     ///
     /// Returns an error if the socket cannot be set up or polled.
-    pub fn new(fd: OwnedFd, pane: u32) -> io::Result<Self> {
-        let mut link = Self::silent(fd, pane)?;
+    pub fn new(fd: OwnedFd) -> io::Result<Self> {
+        let mut link = Self::silent(fd)?;
         link.greet();
         Ok(link)
     }
 
-    /// Takes over a connected socket for `pane`, and sends nothing until [`Link::greet`].
+    /// Takes over a connected socket, and sends nothing until [`Link::greet`].
     ///
     /// # Errors
     ///
     /// Returns what [`Link::new`] returns.
-    pub fn silent(fd: OwnedFd, pane: u32) -> io::Result<Self> {
+    pub fn silent(fd: OwnedFd) -> io::Result<Self> {
         // The copy is close-on-exec, as ADR-0028 asks of an inherited descriptor.
         let stream = UnixStream::from(fd.try_clone()?);
         drop(fd);
@@ -185,10 +269,7 @@ impl Link {
         let interest = Interest::READABLE | Interest::WRITABLE;
         poll.registry()
             .register(&mut SourceFd(&stream.as_raw_fd()), LINK, interest)?;
-        let state = State {
-            pane,
-            ..State::default()
-        };
+        let state = State::default();
         Ok(Self {
             stream: Some(stream),
             poll,
@@ -203,12 +284,9 @@ impl Link {
         })
     }
 
-    /// Sends the version check and then a request for a full frame, as this window has no
-    /// screen to apply changes to. The core tells a launcher a window has opened on this.
+    /// Sends the version check. The core tells a launcher a window has opened on this.
     pub fn greet(&mut self) {
-        let pane = self.state.pane;
         self.state.queue(Request::Hello { version: VERSION });
-        self.state.asked_full = self.state.queue(Request::FullFrame { pane });
         self.flush();
     }
 
@@ -327,8 +405,9 @@ impl Link {
         }
     }
 
-    /// Queues a request and sends what it can. Returns false if it was refused whole.
-    fn send(&mut self, request: Request<'_>) -> bool {
+    /// Queues a request and sends what it can. Returns false if it is over the limit of one
+    /// message, the core is too far behind, or the link has ended, and then queues none.
+    pub fn send(&mut self, request: Request<'_>) -> bool {
         let queued = self.stream.is_some() && self.state.queue(request);
         self.flush();
         queued
@@ -340,100 +419,78 @@ impl Link {
         Arc::clone(&self.waker)
     }
 
-    /// Queues bytes for the pane's program. Returns false if they are over the limit of one
-    /// message, the core is too far behind, or the link has ended, and then queues none.
-    pub fn write(&mut self, bytes: &[u8]) -> bool {
-        let pane = self.state.pane;
-        self.send(Request::Input { pane, bytes })
-    }
-
-    /// Queues text to paste, which the core sanitizes. Returns what [`Link::write`] returns.
-    pub fn paste(&mut self, text: &str) -> bool {
-        let pane = self.state.pane;
-        self.send(Request::Paste { pane, text })
-    }
-
-    /// Asks for a new size, clamped to what the core accepts. Returns what [`Link::write`]
+    /// Gives the space for panes, clamped to what the core accepts. Returns what [`Link::send`]
     /// returns.
     pub fn resize(&mut self, rows: u16, columns: u16) -> bool {
         self.send(Request::Resize {
-            pane: self.state.pane,
             rows: rows.clamp(1, MAX_DIMENSION),
             columns: columns.clamp(1, MAX_DIMENSION),
         })
     }
 
-    /// Moves the view into history, or back if negative. Returns what [`Link::write`] returns.
-    pub fn scroll(&mut self, lines: i32) -> bool {
-        let pane = self.state.pane;
-        self.send(Request::Scroll { pane, lines })
-    }
-
-    /// Scrolls just far enough to show `row`. Returns what [`Link::write`] returns.
-    pub fn reveal(&mut self, row: usize) -> bool {
-        let pane = self.state.pane;
-        self.send(Request::Reveal { pane, row })
-    }
-
-    /// Replaces any search running. Returns what [`Link::write`] returns.
-    pub fn search(&mut self, query: &str, from: Position, direction: Direction) -> bool {
-        let pane = self.state.pane;
-        self.send(Request::Search {
-            pane,
-            from,
-            direction,
-            query,
-        })
-    }
-
-    /// Asks for a selection's text, for [`Link::take_copied`]. Returns what [`Link::write`]
+    /// Asks for a selection's text, for [`Link::take_copied`]. Returns what [`Link::send`]
     /// returns.
-    pub fn copy(&mut self, selection: Selection) -> bool {
-        let pane = self.state.pane;
+    pub fn copy(&mut self, pane: u32, selection: Selection) -> bool {
         let queued = self.send(Request::Copy { pane, selection });
         self.state.copying = self.state.copying.saturating_add(queued.into());
         queued
     }
 
-    /// Tells the core this window is closing. Returns what [`Link::write`] returns.
-    pub fn quit(&mut self) -> bool {
-        self.send(Request::Quit)
-    }
-
-    /// Returns whether the screen, its position or the directory changed since the last call,
-    /// and clears that.
-    pub fn take_dirty(&mut self) -> bool {
-        std::mem::take(&mut self.state.dirty)
-    }
-
-    /// Returns the last screen received, which is empty until the first frame.
+    /// Returns the panes the active tab shows.
     #[must_use]
-    pub fn frame(&self) -> &Frame {
-        &self.state.frame
+    pub fn screens(&self) -> &[Screen] {
+        &self.state.screens
     }
 
-    /// Returns the core's number for the first row of [`Link::frame`].
+    /// Returns the panes the active tab shows, to clear what has been read.
+    pub fn screens_mut(&mut self) -> &mut [Screen] {
+        &mut self.state.screens
+    }
+
+    /// Returns the tabs, in order.
     #[must_use]
-    pub fn top(&self) -> usize {
-        self.state.top
+    pub fn tabs(&self) -> &[Tab] {
+        &self.state.tabs
     }
 
-    /// Returns the rows the view can reach.
+    /// Returns the index of the active tab.
     #[must_use]
-    pub fn held(&self) -> Range<usize> {
-        self.state.held.clone()
+    pub fn active(&self) -> usize {
+        self.state.active
     }
 
-    /// Returns the last directory the pane reported, as program output wrote it. Empty if none.
+    /// Returns the pane keys go to, which is 0 until the first layout.
     #[must_use]
-    pub fn cwd(&self) -> &str {
-        &self.state.cwd
+    pub fn focused(&self) -> u32 {
+        self.state.focused
     }
 
-    /// Returns how the last search ended, once, and nothing while none has. Its match is in view
-    /// if it had one.
-    pub fn take_searched(&mut self) -> Option<Option<Selection>> {
+    /// Returns how many panes the session holds, shown or not.
+    #[must_use]
+    pub fn total(&self) -> usize {
+        self.state.total
+    }
+
+    /// Returns which tabs printed something since they were shown, one bit each.
+    #[must_use]
+    pub fn activity(&self) -> u32 {
+        self.state.activity
+    }
+
+    /// Returns whether the tabs or the panes shown changed since the last call, and clears that.
+    pub fn take_laid(&mut self) -> bool {
+        std::mem::take(&mut self.state.laid)
+    }
+
+    /// Returns which pane the last search ran in and how it ended, once, and nothing while none
+    /// has. Its match is in view if it had one.
+    pub fn take_searched(&mut self) -> Option<(u32, Option<Selection>)> {
         self.state.searched.take()
+    }
+
+    /// Returns the last command the core refused, once.
+    pub fn take_refused(&mut self) -> Option<Refusal> {
+        self.state.refused.take()
     }
 
     /// Returns the text of the last copy asked for, once.
@@ -452,14 +509,14 @@ impl Link {
         self.state.greeted
     }
 
-    /// Returns whether the pane's program exited or the link ended.
+    /// Returns whether the session ended, with no tab left, or the link did.
     #[must_use]
     pub fn is_closed(&self) -> bool {
-        self.state.exited || self.ended.is_some()
+        self.state.over || self.ended.is_some()
     }
 
-    /// Returns why the link ended, if it has. [`Link::is_closed`] alone cannot tell a program
-    /// that exited from a core to reconnect to.
+    /// Returns why the link ended, if it has. [`Link::is_closed`] alone cannot tell a session
+    /// that ended from a core to reconnect to.
     #[must_use]
     pub fn disconnected(&self) -> Option<Disconnect> {
         self.ended
@@ -472,7 +529,9 @@ mod tests {
     use std::time::Instant;
 
     use pinfold_proto::Cell;
-    use pinfold_proto::link::{MAX_MESSAGE, MAX_PASTE, encode_frame};
+    use pinfold_proto::link::{
+        Direction, MAX_MESSAGE, MAX_PASTE, Position, encode_frame, encode_layout,
+    };
 
     use super::*;
 
@@ -500,8 +559,30 @@ mod tests {
             self.stream.write_all(&wire)
         }
 
+        fn no_tabs(&mut self) -> io::Result<()> {
+            let mut wire = Vec::new();
+            encode_layout(&mut wire, 0, 0, 0, &[], &[]).map_err(io::Error::other)?;
+            self.stream.write_all(&wire)
+        }
+
+        /// Says hello, and that one tab shows `PANE`.
         fn greet(&mut self) -> io::Result<()> {
-            self.notices(&[Notice::Hello { version: VERSION }])
+            self.notices(&[Notice::Hello { version: VERSION }])?;
+            self.layout(0, PANE, 1, &[PANE], &[(PANE, whole())])
+        }
+
+        fn layout(
+            &mut self,
+            active: u16,
+            focused: u32,
+            total: u16,
+            tabs: &[u32],
+            panes: &[(u32, Rect)],
+        ) -> io::Result<()> {
+            let mut wire = Vec::new();
+            encode_layout(&mut wire, active, focused, total, tabs, panes)
+                .map_err(io::Error::other)?;
+            self.stream.write_all(&wire)
         }
 
         /// Reads until `count` requests have arrived, and shows them for comparing.
@@ -525,11 +606,32 @@ mod tests {
         }
     }
 
+    fn whole() -> Rect {
+        Rect {
+            x: 0,
+            y: 0,
+            columns: 3,
+            rows: 2,
+        }
+    }
+
+    /// Whether the screen of `PANE` changed, which clears that.
+    fn take_dirty(link: &mut Link) -> bool {
+        let mut screens = link.screens_mut().iter_mut();
+        screens
+            .find(|screen| screen.pane == PANE)
+            .is_some_and(|screen| std::mem::take(&mut screen.dirty))
+    }
+
+    fn pane(link: &Link) -> &Screen {
+        &link.screens()[0]
+    }
+
     fn linked() -> io::Result<(Link, Peer)> {
         let (ours, stream) = UnixStream::pair()?;
         stream.set_read_timeout(Some(PATIENCE))?;
         let decoder = Decoder::default();
-        Ok((Link::new(ours.into(), PANE)?, Peer { stream, decoder }))
+        Ok((Link::new(ours.into())?, Peer { stream, decoder }))
     }
 
     fn turn_until(link: &mut Link, mut done: impl FnMut(&mut Link) -> bool) -> bool {
@@ -571,8 +673,7 @@ mod tests {
     fn the_version_check_goes_first_each_way() {
         let (mut link, mut peer) = linked().unwrap();
         let hello = Request::Hello { version: VERSION };
-        let full = Request::FullFrame { pane: PANE };
-        assert_eq!(peer.requests(2), [shown(hello), shown(full)]);
+        assert_eq!(peer.requests(1), [shown(hello)]);
         assert!(!link.is_greeted());
         peer.greet().unwrap();
         assert!(turn_until(&mut link, |link| link.is_greeted()));
@@ -583,7 +684,7 @@ mod tests {
     fn a_silent_link_says_hello_only_when_told() {
         let (ours, stream) = UnixStream::pair().unwrap();
         stream.set_nonblocking(true).unwrap();
-        let mut link = Link::silent(ours.into(), PANE).unwrap();
+        let mut link = Link::silent(ours.into()).unwrap();
         link.turn(Some(Duration::ZERO)).unwrap();
         let quiet = (&stream).read(&mut [0; 8]).unwrap_err();
         assert_eq!(quiet.kind(), ErrorKind::WouldBlock);
@@ -592,9 +693,8 @@ mod tests {
         link.greet();
         let decoder = Decoder::default();
         let hello = Request::Hello { version: VERSION };
-        let full = Request::FullFrame { pane: PANE };
         let mut peer = Peer { stream, decoder };
-        assert_eq!(peer.requests(2), [shown(hello), shown(full)]);
+        assert_eq!(peer.requests(1), [shown(hello)]);
     }
 
     #[test]
@@ -609,17 +709,17 @@ mod tests {
         peer.greet().unwrap();
         let first = screen('a');
         peer.frame(&first, 5, None).unwrap();
-        assert!(turn_until(&mut link, Link::take_dirty));
-        assert_eq!(link.frame(), &first);
-        assert_eq!((link.top(), link.held()), (5, 1..9));
-        assert!(!link.take_dirty());
+        assert!(turn_until(&mut link, take_dirty));
+        assert_eq!(pane(&link).frame, first);
+        assert_eq!((pane(&link).top, pane(&link).held.clone()), (5, 1..9));
+        assert!(!take_dirty(&mut link));
 
         let mut second = first.clone();
         second.cells[4].character = 'b';
         peer.frame(&second, 6, Some(&first)).unwrap();
-        assert!(turn_until(&mut link, Link::take_dirty));
-        assert_eq!(link.frame(), &second);
-        assert_eq!(link.top(), 6);
+        assert!(turn_until(&mut link, take_dirty));
+        assert_eq!(pane(&link).frame, second);
+        assert_eq!(pane(&link).top, 6);
     }
 
     #[test]
@@ -629,7 +729,7 @@ mod tests {
         link.buffer.truncate(8);
         peer.greet().unwrap();
         peer.frame(&screen('a'), 0, None).unwrap();
-        assert!(turn_until(&mut link, Link::take_dirty));
+        assert!(turn_until(&mut link, take_dirty));
     }
 
     #[test]
@@ -646,24 +746,16 @@ mod tests {
             peer.frame(&sent, 0, None).unwrap();
             peer
         });
-        assert!(turn_until(&mut link, Link::take_dirty));
-        assert_eq!(link.frame(), &frame);
+        assert!(turn_until(&mut link, take_dirty));
+        assert_eq!(pane(&link).frame, frame);
         writer.join().unwrap();
     }
 
     #[test]
     fn requests_reach_the_core_in_order() {
         let (mut link, mut peer) = linked().unwrap();
-        peer.requests(2);
+        peer.requests(1);
         let (from, selection) = (Position::default(), Selection::default());
-        assert!(link.write(b"ls\n"));
-        assert!(link.paste("a\nb"));
-        assert!(link.resize(24, 80));
-        assert!(link.scroll(i32::MIN));
-        assert!(link.reveal(7));
-        assert!(link.search("x", from, Direction::Backward));
-        assert!(link.copy(selection));
-        assert!(link.quit());
         let pane = PANE;
         let expected = [
             Request::Input {
@@ -671,11 +763,6 @@ mod tests {
                 bytes: b"ls\n",
             },
             Request::Paste { pane, text: "a\nb" },
-            Request::Resize {
-                pane,
-                rows: 24,
-                columns: 80,
-            },
             Request::Scroll {
                 pane,
                 lines: i32::MIN,
@@ -687,20 +774,32 @@ mod tests {
                 direction: Direction::Backward,
                 query: "x",
             },
-            Request::Copy { pane, selection },
             Request::Quit,
         ];
-        assert_eq!(peer.requests(8), expected.map(shown));
+        for request in expected {
+            assert!(link.send(request));
+        }
+        assert!(link.resize(24, 80));
+        assert!(link.copy(pane, selection));
+        let mut sent = expected.map(shown).to_vec();
+        sent.push(shown(Request::Resize {
+            rows: 24,
+            columns: 80,
+        }));
+        sent.push(shown(Request::Copy { pane, selection }));
+        assert_eq!(peer.requests(8), sent);
     }
 
     #[test]
     fn a_resize_is_clamped_and_an_oversized_paste_refused() {
         let (mut link, mut peer) = linked().unwrap();
-        peer.requests(2);
-        assert!(!link.paste(&"x".repeat(MAX_PASTE + 1)));
+        peer.requests(1);
+        assert!(!link.send(Request::Paste {
+            pane: PANE,
+            text: &"x".repeat(MAX_PASTE + 1),
+        }));
         assert!(link.resize(0, u16::MAX));
         let clamped = Request::Resize {
-            pane: PANE,
             rows: 1,
             columns: MAX_DIMENSION,
         };
@@ -712,16 +811,20 @@ mod tests {
         let (mut link, mut peer) = linked().unwrap();
         let text = "x".repeat(MAX_PASTE);
         let mut accepted = 0;
-        while link.paste(&text) {
+        let paste = Request::Paste {
+            pane: PANE,
+            text: &text,
+        };
+        while link.send(paste) {
             accepted += 1;
             assert!(accepted < 16, "the queue has no limit");
         }
         assert!(accepted >= 2);
-        let reader = thread::spawn(move || peer.requests(accepted + 2));
+        let reader = thread::spawn(move || peer.requests(accepted + 1));
         turn_until(&mut link, |_| reader.is_finished());
         let requests = reader.join().unwrap();
-        assert_eq!(requests.len(), accepted + 2);
-        assert!(requests[2..].iter().all(|paste| paste.len() > MAX_PASTE));
+        assert_eq!(requests.len(), accepted + 1);
+        assert!(requests[1..].iter().all(|paste| paste.len() > MAX_PASTE));
     }
 
     #[test]
@@ -739,7 +842,7 @@ mod tests {
         peer.greet().unwrap();
         let frame = screen('a');
         peer.frame(&frame, 0, None).unwrap();
-        assert!(turn_until(&mut link, Link::take_dirty));
+        assert!(turn_until(&mut link, take_dirty));
 
         let mut wire = Vec::new();
         encode_frame(&mut wire, PANE, &screen('b'), 0, 1..9, None).unwrap();
@@ -747,9 +850,9 @@ mod tests {
         drop(peer);
         let error = Some(Disconnect::Protocol(Error::Truncated));
         assert_eq!(ended(&mut link), error);
-        assert_eq!(link.frame(), &frame);
+        assert_eq!(pane(&link).frame, frame);
         assert_eq!(link.turn(None), Err(Disconnect::Protocol(Error::Truncated)));
-        assert!(!link.write(b"x"));
+        assert!(!link.send(Request::Quit));
     }
 
     #[test]
@@ -785,8 +888,8 @@ mod tests {
         let theirs = VERSION + 1;
         peer.notices(&[Notice::Hello { version: theirs }]).unwrap();
         drop(peer);
-        link.write(b"x");
-        link.write(b"x");
+        link.send(Request::Quit);
+        link.send(Request::Quit);
         let error = Error::Version {
             ours: VERSION,
             theirs,
@@ -806,20 +909,20 @@ mod tests {
                 ..
             }))
         ));
-        assert_eq!(link.frame(), &Frame::default());
+        assert_eq!(pane(&link).frame, Frame::default());
     }
 
     #[test]
     fn changes_to_a_screen_of_another_size_ask_for_a_full_frame_once() {
         let (mut link, mut peer) = linked().unwrap();
-        peer.requests(2);
+        peer.requests(1);
         peer.greet().unwrap();
         let first = screen('a');
         peer.frame(&first, 0, None).unwrap();
-        assert!(turn_until(&mut link, Link::take_dirty));
+        assert!(turn_until(&mut link, take_dirty));
 
         // A window that lost track: this one's screen was another size.
-        link.state.frame.rows = 3;
+        link.screens_mut()[0].frame.rows = 3;
         let mut second = first.clone();
         second.cells[0].character = 'b';
         for _ in 0..2 {
@@ -830,54 +933,128 @@ mod tests {
             path: "/marker",
         }])
         .unwrap();
-        assert!(turn_until(&mut link, Link::take_dirty));
-        assert!(link.write(b"after"));
-        let (pane, bytes) = (PANE, b"after".as_slice());
-        let (full, input) = (Request::FullFrame { pane }, Request::Input { pane, bytes });
-        assert_eq!(peer.requests(2), [shown(full), shown(input)]);
+        assert!(turn_until(&mut link, |link| link.take_laid()
+            && link.tabs()[0].cwd == "/marker"));
+        let quit = Request::Quit;
+        assert!(link.send(quit));
+        let full = Request::FullFrame { pane: PANE };
+        assert_eq!(peer.requests(2), [shown(full), shown(quit)]);
 
         peer.frame(&second, 0, None).unwrap();
-        assert!(turn_until(&mut link, Link::take_dirty));
-        assert_eq!(link.frame(), &second);
-        assert!(!link.state.asked_full);
+        assert!(turn_until(&mut link, take_dirty));
+        assert_eq!(pane(&link).frame, second);
+        assert!(!pane(&link).asked_full);
     }
 
     #[test]
-    fn notices_for_another_pane_change_nothing() {
+    fn notices_for_a_pane_not_shown_change_nothing() {
         let (mut link, mut peer) = linked().unwrap();
         peer.greet().unwrap();
-        let (pane, path) = (PANE + 1, "/other");
+        let (other, path) = (PANE + 1, "/other");
         let mut wire = Vec::new();
-        encode_frame(&mut wire, pane, &screen('a'), 0, 1..9, None).unwrap();
+        encode_frame(&mut wire, other, &screen('a'), 0, 1..9, None).unwrap();
         peer.stream.write_all(&wire).unwrap();
-        peer.notices(&[Notice::Cwd { pane, path }, Notice::Exited { pane }])
-            .unwrap();
-        let (pane, path) = (PANE, "/ours");
-        peer.notices(&[Notice::Cwd { pane, path }]).unwrap();
-        assert!(turn_until(&mut link, Link::take_dirty));
-        assert_eq!(link.cwd(), path);
-        assert_eq!(link.frame(), &Frame::default());
+        peer.notices(&[Notice::Cwd { pane: other, path }]).unwrap();
+        let (pane_of_tab, path) = (PANE, "/ours");
+        let cwd = Notice::Cwd {
+            pane: pane_of_tab,
+            path,
+        };
+        peer.notices(&[cwd]).unwrap();
+        assert!(turn_until(&mut link, |link| link
+            .tabs()
+            .first()
+            .is_some_and(|tab| tab.cwd == path)));
+        assert_eq!(pane(&link).frame, Frame::default());
         assert!(!link.is_closed());
+    }
+
+    #[test]
+    fn a_layout_keeps_panes_that_stay_and_frees_the_rest() {
+        let (mut link, mut peer) = linked().unwrap();
+        peer.greet().unwrap();
+        peer.frame(&screen('a'), 0, None).unwrap();
+        assert!(turn_until(&mut link, take_dirty));
+        assert!(link.take_laid());
+
+        let (left, right) = (
+            Rect {
+                columns: 1,
+                ..whole()
+            },
+            Rect {
+                x: 2,
+                columns: 1,
+                ..whole()
+            },
+        );
+        let tabs = [PANE, PANE + 2];
+        let shown = [(PANE, left), (PANE + 1, right)];
+        peer.layout(0, PANE + 1, 3, &tabs, &shown).unwrap();
+        assert!(turn_until(&mut link, Link::take_laid));
+        assert_eq!(link.screens().len(), 2);
+        assert_eq!(pane(&link).rect, left);
+        assert_eq!(pane(&link).frame, screen('a'), "what it holds stays");
+        assert_eq!(link.screens()[1].frame, Frame::default());
+        assert_eq!((link.focused(), link.active()), (PANE + 1, 0));
+        assert_eq!((link.tabs().len(), link.total()), (2, 3));
+
+        peer.layout(1, PANE + 2, 3, &tabs, &[(PANE + 2, whole())])
+            .unwrap();
+        assert!(turn_until(&mut link, Link::take_laid));
+        assert_eq!(link.screens().len(), 1);
+        assert_eq!(pane(&link).pane, PANE + 2);
+        assert_eq!(link.active(), 1);
+    }
+
+    #[test]
+    fn a_tab_keeps_its_directory_across_a_layout_until_its_pane_changes() {
+        let (mut link, mut peer) = linked().unwrap();
+        peer.greet().unwrap();
+        let (pane, path) = (PANE, "/home");
+        peer.notices(&[Notice::Cwd { pane, path }]).unwrap();
+        assert!(turn_until(&mut link, |link| link
+            .tabs()
+            .first()
+            .is_some_and(|tab| !tab.cwd.is_empty())));
+
+        peer.layout(0, PANE, 2, &[PANE, PANE + 1], &[(PANE, whole())])
+            .unwrap();
+        assert!(turn_until(&mut link, |link| link.tabs().len() == 2));
+        assert_eq!(link.tabs()[0].cwd, path);
+        assert_eq!(link.tabs()[1].cwd, "");
+
+        peer.layout(
+            0,
+            PANE + 2,
+            2,
+            &[PANE + 2, PANE + 1],
+            &[(PANE + 2, whole())],
+        )
+        .unwrap();
+        assert!(turn_until(&mut link, |link| link.tabs()[0].pane == PANE + 2));
+        assert_eq!(link.tabs()[0].cwd, "");
     }
 
     #[test]
     fn the_rest_of_the_state_is_kept_for_the_window() {
         let (mut link, mut peer) = linked().unwrap();
         peer.greet().unwrap();
-        let (pane, path) = (PANE, "/home");
+        let pane = PANE;
         let found = Some(Selection::default());
-        peer.notices(&[Notice::Cwd { pane, path }, Notice::Searched { pane, found }])
-            .unwrap();
-        assert!(turn_until(&mut link, |link| link.state.searched.is_some()));
-        assert!(link.take_dirty());
-        assert_eq!(link.cwd(), path);
-        assert_eq!(link.take_searched(), Some(found));
+        peer.notices(&[Notice::Searched { pane, found }]).unwrap();
+        peer.notices(&[Notice::Refused {
+            reason: Refusal::Tabs,
+        }])
+        .unwrap();
+        assert!(turn_until(&mut link, |link| link.state.refused.is_some()));
+        assert_eq!(link.take_searched(), Some((pane, found)));
         assert_eq!(link.take_searched(), None);
+        assert_eq!(link.take_refused(), Some(Refusal::Tabs));
+        assert_eq!(link.take_refused(), None);
 
-        peer.notices(&[Notice::Cwd { pane, path }, Notice::Exited { pane }])
-            .unwrap();
+        peer.no_tabs().unwrap();
         assert!(turn_until(&mut link, |link| link.is_closed()));
-        assert!(!link.take_dirty(), "the same directory changes nothing");
         assert_eq!(link.disconnected(), None, "an exit is not a disconnect");
     }
 
@@ -895,29 +1072,29 @@ mod tests {
     fn only_a_copy_asked_for_can_reach_the_clipboard() {
         let (mut link, mut peer) = linked().unwrap();
         peer.greet().unwrap();
-        let (pane, path) = (PANE, "/first");
+        let pane = PANE;
         let (asked, unasked) = ("asked", "unasked");
         peer.notices(&[
             Notice::Copied {
                 pane,
                 text: unasked,
             },
-            Notice::Cwd { pane, path },
+            Notice::Raise,
         ])
         .unwrap();
-        assert!(turn_until(&mut link, Link::take_dirty));
+        assert!(turn_until(&mut link, Link::take_raised));
         assert_eq!(link.take_copied(), None);
 
-        assert!(link.copy(Selection::default()));
+        assert!(link.copy(pane, Selection::default()));
         peer.notices(&[
             Notice::Copied { pane, text: asked },
             Notice::Copied {
                 pane,
                 text: unasked,
             },
-            Notice::Exited { pane },
         ])
         .unwrap();
+        peer.no_tabs().unwrap();
         assert!(turn_until(&mut link, |link| link.is_closed()));
         assert_eq!(link.take_copied().as_deref(), Some(asked));
         assert_eq!(link.take_copied(), None);

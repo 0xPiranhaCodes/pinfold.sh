@@ -1,10 +1,14 @@
 //! The empty pixels between the window's edge and the grid.
 
 /// Padding on each side in logical pixels, as `(left, top, right, bottom)`. The top puts the
-/// first row level with the macOS traffic lights.
-const LOGICAL: (f64, f64, f64, f64) = (14.0, 8.0, 14.0, 10.0);
+/// first row level with the macOS traffic lights, and the sides match the red one's inset.
+const LOGICAL: (f64, f64, f64, f64) = (8.0, 8.0, 8.0, 10.0);
 /// Logical pixels under the top bar, so it stands clear of the pane.
-const BAR_GAP: f64 = 6.0;
+const BAR_GAP: f64 = 10.0;
+/// Logical pixels between the title and the tabs.
+const TITLE_GAP: f64 = 10.0;
+/// Logical pixels above the tabs in fullscreen, where there is no title.
+const FULLSCREEN_TOP: f64 = 14.0;
 
 /// Rows of the top bar: a title, then the tab strip. The gap comes after them.
 pub const BAR_ROWS: usize = 2;
@@ -23,6 +27,10 @@ pub struct Padding {
     pub bottom: usize,
     /// Pixels between the top bar and the rows below it.
     pub gap: usize,
+    /// Pixels between the top bar's title and its tabs.
+    pub title_gap: usize,
+    /// Whether the top bar has lost its title row, as a fullscreen window does.
+    pub fullscreen: bool,
 }
 
 impl Padding {
@@ -32,7 +40,7 @@ impl Padding {
     /// use pinfold_render::padding::Padding;
     ///
     /// let padding = Padding::scaled(2.0);
-    /// assert_eq!((padding.left, padding.top), (28, 16));
+    /// assert_eq!((padding.left, padding.top), (16, 16));
     /// ```
     #[must_use]
     pub fn scaled(scale: f64) -> Self {
@@ -43,16 +51,40 @@ impl Padding {
             right: pixels(LOGICAL.2),
             bottom: pixels(LOGICAL.3),
             gap: pixels(BAR_GAP),
+            title_gap: pixels(TITLE_GAP),
+            fullscreen: false,
         }
+    }
+
+    /// Returns this padding for a fullscreen window at the same `scale`.
+    #[must_use]
+    pub fn in_fullscreen(self, scale: f64) -> Self {
+        Self {
+            top: (FULLSCREEN_TOP * scale).round() as usize,
+            fullscreen: true,
+            ..self
+        }
+    }
+
+    /// Returns how many rows the top bar takes.
+    #[must_use]
+    pub fn bar_rows(self) -> usize {
+        if self.fullscreen { 1 } else { BAR_ROWS }
+    }
+
+    fn title_gap(self) -> usize {
+        if self.fullscreen { 0 } else { self.title_gap }
     }
 
     /// Returns the pixel a row starts at, for cells `cell_height` tall.
     #[must_use]
     pub fn row_top(self, row: usize, cell_height: usize) -> usize {
-        let gap = if row < BAR_ROWS { 0 } else { self.gap };
+        let gap = if row < self.bar_rows() { 0 } else { self.gap };
+        let title = if row == 0 { 0 } else { self.title_gap() };
         self.top
             .saturating_add(row.saturating_mul(cell_height))
             .saturating_add(gap)
+            .saturating_add(title)
     }
 
     /// Returns how many whole `(width, height)` cells fit in a surface, as `(rows, columns)`.
@@ -68,7 +100,8 @@ impl Padding {
                 height,
                 self.top
                     .saturating_add(self.bottom)
-                    .saturating_add(self.gap),
+                    .saturating_add(self.gap)
+                    .saturating_add(self.title_gap()),
                 cell.1,
             ),
             fit(width, self.left.saturating_add(self.right), cell.0),
@@ -103,21 +136,39 @@ mod tests {
             right: 14,
             bottom: 10,
             gap: 0,
+            ..Padding::default()
         }
+    }
+
+    #[test]
+    fn a_fullscreen_window_has_no_title_row() {
+        let padding = Padding::scaled(1.0);
+        assert_eq!(padding.row_top(1, 20), 8 + 20 + 10);
+        assert_eq!(padding.row_top(2, 20), 8 + 40 + 10 + 10);
+        let full = padding.in_fullscreen(1.0);
+        assert_eq!(full.bar_rows(), 1);
+        assert_eq!(full.row_top(0, 20), 14);
+        assert_eq!(full.row_top(1, 20), 14 + 20 + 10);
+        let rows = |padding: Padding| padding.grid(100, 200, (10, 20)).0;
+        assert_eq!(rows(padding), (200 - 8 - 10 - 10 - 10) / 20);
+        assert_eq!(rows(full), (200 - 14 - 10 - 10) / 20);
     }
 
     #[test]
     fn padding_follows_the_scale_factor() {
         let expected = Padding {
+            left: 8,
             top: 8,
-            gap: 6,
+            right: 8,
+            gap: 10,
+            title_gap: 10,
             ..padding()
         };
         assert_eq!(Padding::scaled(1.0), expected);
         let scaled = Padding::scaled(1.5);
         assert_eq!(
             (scaled.left, scaled.top, scaled.right, scaled.bottom),
-            (21, 12, 21, 15)
+            (12, 12, 12, 15)
         );
     }
 

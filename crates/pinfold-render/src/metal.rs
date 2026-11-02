@@ -318,6 +318,7 @@ mod tests {
             right: 14,
             bottom: 10,
             gap: 0,
+            ..Padding::default()
         };
         let cells = [cell(' ', PAPER), cell('x', 0x00ff_0000)];
         instances(&cells, 2, METRICS, padding, PAPER, slot, &mut out);

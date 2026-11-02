@@ -53,14 +53,16 @@ fn listen(waker: Arc<Waker>) -> io::Result<Receiver<SyncSender<Opened>>> {
     Ok(asked)
 }
 
-/// Runs `panes` shells until they have all exited and no window is left to tell, or until
-/// killed. With a size, it opens a window for `cargo xtask mem-gate` and prints its pid.
+/// Runs `panes` shells, a tab each, until every pane has gone and no window is left to tell, or
+/// until killed. With a size, it opens a window for `cargo xtask mem-gate` and prints its pid.
 fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
     let binary = window_binary()?;
     let mut reactor = Reactor::new()?;
     let asked = listen(reactor.waker())?;
     for _ in 0..panes {
-        reactor.spawn(shell::command(), ROWS, COLUMNS)?;
+        reactor
+            .open_tab(shell::command(), ROWS, COLUMNS)
+            .map_err(io::Error::other)?;
     }
     if let Some(size) = measured {
         let mut command = Command::new(&binary);
@@ -93,8 +95,7 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
                 Ok(())
             });
         }
-        let exited = (0..reactor.pane_count()).all(|pane| reactor.is_closed(pane));
-        if exited && !reactor.has_window() {
+        if reactor.pane_count() == 0 && !reactor.has_window() {
             return Ok(());
         }
     }

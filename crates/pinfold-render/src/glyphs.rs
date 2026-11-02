@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use pinfold_proto::{BOLD, ITALIC};
+use pinfold_proto::{BOLD, ITALIC, LEFT_CAP, RIGHT_CAP};
 use swash::scale::{Render, ScaleContext, Scaler, Source};
 use swash::zeno::{Format, Transform};
 use unicode_width::UnicodeWidthChar;
@@ -204,6 +204,33 @@ pub(crate) fn can_draw_text(font: &Font) -> bool {
         })
 }
 
+/// Samples per pixel along each side of a pill's end.
+const CAP_SAMPLES: usize = 4;
+
+/// Draws the end of a pill: half an ellipse filling the cell, flat edge against the pill.
+fn cap(right: bool, metrics: Metrics) -> Glyph {
+    let (width, height) = (metrics.cell_width, metrics.cell_height);
+    let samples = CAP_SAMPLES * CAP_SAMPLES;
+    let part = |at: usize| (at as f32 + 0.5) / CAP_SAMPLES as f32;
+    let mask = (0..width * height).map(|pixel| {
+        let (y, x) = (pixel / width, pixel % width);
+        let inside = (0..samples).filter(|sample| {
+            let across = (x as f32 + part(sample % CAP_SAMPLES)) / width as f32;
+            let across = if right { across } else { 1.0 - across };
+            let down = (y as f32 + part(sample / CAP_SAMPLES)) / height as f32 * 2.0 - 1.0;
+            across * across + down * down <= 1.0
+        });
+        (inside.count() * 255 / samples) as u8
+    });
+    Glyph {
+        left: 0,
+        top: metrics.baseline,
+        width,
+        mask: mask.collect(),
+        last_used: 0,
+    }
+}
+
 /// Rasterizes one character. A character with no outline, like a space, gives an empty mask,
 /// and one that no usable font has gives the primary font's box.
 pub(crate) fn rasterize(
@@ -213,6 +240,9 @@ pub(crate) fn rasterize(
     metrics: Metrics,
     (character, style): (char, u32),
 ) -> Glyph {
+    if matches!(character, LEFT_CAP | RIGHT_CAP) {
+        return cap(character == RIGHT_CAP, metrics);
+    }
     fonts.touched = true;
     let span = cell_span(character);
     let id = contained(|| Some(fonts.primary().glyph(character))).unwrap_or(0);
@@ -386,6 +416,35 @@ mod tests {
     fn the_box() -> Box<[u8]> {
         let mut cache = GlyphCache::new(Fonts::with_fallbacks(bundled(), &[]), SIZE, CACHE_LIMIT);
         cache.get(KANJI, 0).unwrap().mask.clone()
+    }
+
+    #[test]
+    fn a_pills_ends_fill_their_cell_and_mirror_each_other() {
+        let mut cache = with_fallback(&[]);
+        let metrics = cache.metrics();
+        let left = cache.get(LEFT_CAP, 0).unwrap().mask.clone();
+        let right = cache.get(RIGHT_CAP, 0).unwrap().mask.clone();
+        assert_eq!(left.len(), metrics.cell_width * metrics.cell_height);
+        let row =
+            |mask: &[u8], y: usize| mask[y * metrics.cell_width..][..metrics.cell_width].to_vec();
+        let middle = metrics.cell_height / 2;
+        assert_eq!(
+            row(&left, middle).last(),
+            Some(&255),
+            "flat against the pill"
+        );
+        assert_eq!(row(&right, middle)[0], 255);
+        assert_eq!(row(&left, 0)[0], 0, "round at the corner");
+        for y in 0..metrics.cell_height {
+            let mut flipped = row(&right, y);
+            flipped.reverse();
+            let gap = row(&left, y)
+                .iter()
+                .zip(&flipped)
+                .map(|(a, b)| a.abs_diff(*b))
+                .max();
+            assert!(gap <= Some(1));
+        }
     }
 
     #[test]

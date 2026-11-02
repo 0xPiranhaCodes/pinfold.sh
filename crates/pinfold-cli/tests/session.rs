@@ -11,7 +11,6 @@ use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
-use pinfold_proto::Frame;
 use pinfold_proto::link::{Request, VERSION};
 use pinfold_sys::socket;
 use pinfold_ui::link::{Disconnect, Link};
@@ -33,10 +32,10 @@ impl Session {
         let directory = env::temp_dir().join(format!("ps{}{name}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(directory.join("run"))?;
-        fs::copy(env!("CARGO_BIN_EXE_pinfold"), directory.join("pinfold"))?;
-        fs::copy(
+        place(env!("CARGO_BIN_EXE_pinfold"), &directory.join("pinfold"))?;
+        place(
             env!("CARGO_BIN_EXE_pinfold-core"),
-            directory.join("pinfold-core"),
+            &directory.join("pinfold-core"),
         )?;
         if let Some(window) = window {
             let script = directory.join("pinfold-window");
@@ -90,6 +89,12 @@ impl Drop for Session {
     }
 }
 
+/// Links a binary in. A copy's descriptor, open for writing, leaks into any child another test
+/// is forking, and Linux then refuses to run the copy with ETXTBSY.
+fn place(binary: &str, to: &Path) -> std::io::Result<()> {
+    fs::hard_link(binary, to).or_else(|_| fs::copy(binary, to).map(drop))
+}
+
 /// The shell's builtin, as a slim image has no `kill` program.
 fn kill(pid: &str) -> Command {
     let mut command = Command::new("/bin/sh");
@@ -97,9 +102,16 @@ fn kill(pid: &str) -> Command {
     command
 }
 
-fn shows(frame: &Frame, text: &str) -> bool {
-    let cells: String = frame.cells.iter().map(|cell| cell.character).collect();
+fn shows(link: &Link, text: &str) -> bool {
+    let frame = link.screens().first().map(|screen| &screen.frame);
+    let cells = frame.iter().flat_map(|frame| &frame.cells);
+    let cells: String = cells.map(|cell| cell.character).collect();
     cells.contains(text)
+}
+
+fn type_in(link: &mut Link, text: &str) -> bool {
+    let (pane, bytes) = (link.focused(), text.as_bytes());
+    link.send(Request::Input { pane, bytes })
 }
 
 /// Turns `link` until `done`. A link that ends only runs out the clock, as `done` may want that.
@@ -121,24 +133,28 @@ fn client(directory: &Path) -> Result {
     writeln!(starts, "start")?;
     note("starts", &starts)?;
     note("core", &std::os::unix::process::parent_id().to_string())?;
-    let mut link = Link::new(socket::take_link()?, 0)?;
+    let mut link = Link::new(socket::take_link()?)?;
+    assert!(link.resize(24, 80));
+    until(&mut link, |link| !link.screens().is_empty())?;
     if starts.lines().count() == 1 {
-        assert!(link.write(b"echo mark-$((40+2)); seq 1 100\n"));
-        until(&mut link, |link| shows(link.frame(), "100"))?;
+        assert!(type_in(&mut link, "echo mark-$((40+2)); seq 1 100\n"));
+        until(&mut link, |link| shows(link, "100"))?;
         note("typed", "yes")?;
         until(&mut link, Link::take_raised)?;
         note("raised", "yes")?;
         return Ok(());
     }
-    until(&mut link, |link| shows(link.frame(), "100"))?;
-    assert!(link.write(b"echo again-$((1+1))\n"));
-    until(&mut link, |link| shows(link.frame(), "again-2"))?;
-    assert!(link.scroll(10_000));
-    until(&mut link, |link| shows(link.frame(), "mark-42"))?;
+    until(&mut link, |link| shows(link, "100"))?;
+    assert!(type_in(&mut link, "echo again-$((1+1))\n"));
+    until(&mut link, |link| shows(link, "again-2"))?;
+    let pane = link.focused();
+    let lines = 10_000;
+    assert!(link.send(Request::Scroll { pane, lines }));
+    until(&mut link, |link| shows(link, "mark-42"))?;
     note("reattached", "yes")?;
     until(&mut link, |link| link.disconnected().is_some())?;
     assert_eq!(link.disconnected(), Some(Disconnect::Closed));
-    assert!(shows(link.frame(), "mark-42"), "the last screen stays");
+    assert!(shows(&link, "mark-42"), "the last screen stays");
     note("ended", "yes")?;
     Ok(())
 }

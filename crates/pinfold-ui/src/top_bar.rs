@@ -1,4 +1,5 @@
-//! The rows above the pane: a title with the date and time, then a row of square tabs, each its own box.
+//! The rows above the pane: a title with the date and time, then a row of pill tabs. Fullscreen
+//! has no title row, as the system hides the title bar it lines up with.
 //!
 //! A tab's label is the last name in a path that program output wrote (OSC 7), so a
 //! program chooses it. It keeps only letters, digits, ASCII punctuation and spaces, which
@@ -10,8 +11,8 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use pinfold_proto::{BOLD, Cell, DEFAULT_BACKGROUND, Frame};
-use pinfold_render::padding::{BAR_ROWS, Padding};
+use pinfold_proto::{BOLD, Cell, DEFAULT_BACKGROUND, Frame, LEFT_CAP, RIGHT_CAP};
+use pinfold_render::padding::Padding;
 use pinfold_sys::LocalTime;
 use unicode_width::UnicodeWidthChar;
 
@@ -19,38 +20,47 @@ use crate::mouse;
 use crate::paste::TEXT;
 use crate::search_bar::write;
 
-/// Rows above the pane that belong to Pinfold, so program output cannot reach them.
-pub const ROWS: u16 = BAR_ROWS as u16;
 /// Points to leave on the left. On macOS the real traffic lights sit there, and elsewhere
 /// the system draws its buttons outside the window.
-// shortcut: stays in fullscreen, where macOS hides the lights, until the window tells us.
-pub const LEFT_POINTS: f64 = if cfg!(target_os = "macos") { 78.0 } else { 0.0 };
+pub const LEFT_POINTS: f64 = if cfg!(target_os = "macos") { 86.0 } else { 0.0 };
 
 /// The padding's colour, so the bar has no edge and a translucent window shows through it.
 const CHROME: u32 = DEFAULT_BACKGROUND;
-/// `Rule, quiet fill` in Foundations, for a tab that is not active and the new tab button.
-const BOX: u32 = 0x0026_2b33;
-/// The teal among the Main board's accents. The default blue is a running agent's colour, and
-/// a state is glyph, colour and word, so a tab must not look like one.
-const ACTIVE: u32 = 0x005f_d4d0;
-/// The Main board's quiet label text. Foundations' secondary text is the idle state's grey.
-const MUTED: u32 = 0x0085_8d98;
+/// The active tab. The default blue is a running agent's colour, and a state is glyph, colour
+/// and word, so a tab must not look like one.
+const ACTIVE: u32 = 0x005c_d6cb;
+/// A tab that is not active, the new tab button, and the active tab of an unfocused window.
+const QUIET: u32 = 0x002b_2b2b;
+const HOVER: u32 = 0x003a_3a3a;
+const QUIET_TEXT: u32 = 0x009a_9a9a;
+const HOVER_TEXT: u32 = 0x00e8_e8e8;
+/// The number on a tab that is not active.
+const KEY_TEXT: u32 = 0x006a_6a6a;
+const NEW_TAB_TEXT: u32 = 0x00c8_c8c8;
+const TITLE: u32 = 0x008a_8a8a;
+const CLOCK_TEXT: u32 = 0x00e8_e8e8;
+/// The title and date of an unfocused window.
+const UNFOCUSED_TITLE: u32 = 0x005a_5a5a;
+/// The time and the cursor of an unfocused window.
+const UNFOCUSED: u32 = 0x008a_8a8a;
 
 const FALLBACK: &str = "shell";
 /// Widest label in cells, so it stays a tab and cannot crowd out the clock.
 const MAX_LABEL: usize = 24;
 /// Empty cells kept between the title and the clock.
 const GAP: usize = 2;
-/// The new tab button.
-const NEW_TAB: &str = " + ";
-/// `Pane` in Foundations, behind a tab's key so it reads as a keycap.
-const KEYCAP: u32 = 0x0012_151a;
-/// Cells a tab keeps for its padding and its key: a space, the key, a space, the gap after it.
-const TAB_CHROME: usize = 5;
-/// Widest tab in cells, so that a lone tab stays a box and does not become the whole row.
-const MAX_TAB: usize = 32;
+/// The new tab button's cells: an end, the plus, an end.
+const NEW_TAB: usize = 3;
+/// Cells before a tab's label: its end and a space.
+const LEADING: usize = 2;
+/// The mark on a tab with news, with the space after it. It is not a state's glyph, and
+/// [`label`] keeps it out of labels.
+const ACTIVITY_MARK: char = '•';
+const ACTIVITY: usize = 2;
 /// What a tab's number is pressed with.
 const KEY: &str = if cfg!(target_os = "macos") { "⌘" } else { "" };
+/// How many tabs have a number.
+const KEYED: usize = 9;
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
 
 const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
@@ -87,81 +97,229 @@ pub fn inset(points: f64, scale: f64, padding: usize, cell_width: usize) -> usiz
     ((pixels / cell_width.max(1) as f64).ceil() as usize).max(1)
 }
 
-/// Adds the bar above the pane in `frame`. The title starts `inset` cells in and is the active
-/// tab's label. `tabs` hold labels from [`label`]. No time means no clock.
-// shortcut: the window has one tab and + and the keys do nothing, until M2's multiplexer.
-pub fn draw(
-    frame: &mut Frame,
-    tabs: &[&str],
-    active: usize,
-    time: Option<LocalTime>,
-    inset: usize,
-) {
-    let bar = usize::from(ROWS) * usize::from(frame.columns);
+/// What the bar shows.
+pub struct Bar<'a, L> {
+    /// Labels from [`label`].
+    pub tabs: &'a [L],
+    /// The index of the active tab.
+    pub active: usize,
+    /// Which tabs have news, one bit each, lowest first.
+    pub activity: u32,
+    /// The tab under the pointer.
+    pub hovered: Option<usize>,
+    /// Whether the window has the keyboard.
+    pub focused: bool,
+    /// Whether the title row shows.
+    pub title: bool,
+    /// The clock. No time means no clock.
+    pub time: Option<LocalTime>,
+    /// Cells left of the title.
+    pub inset: usize,
+}
+
+/// Adds the bar above the pane in `frame`. The title is the active tab's label.
+pub fn draw(frame: &mut Frame, bar: &Bar<'_, impl AsRef<str>>) {
+    if !bar.focused
+        && let Some((row, column)) = frame.cursor
+    {
+        let at = usize::from(row) * usize::from(frame.columns) + usize::from(column);
+        if let Some(cell) = frame.cells.get_mut(at) {
+            cell.foreground = UNFOCUSED;
+        }
+    }
+    let rows = if bar.title { 2 } else { 1 };
+    let cells = usize::from(rows) * usize::from(frame.columns);
     frame.cells.resize(
-        frame.cells.len() + bar,
+        frame.cells.len() + cells,
         Cell {
             character: ' ',
             foreground: TEXT,
             background: CHROME,
         },
     );
-    frame.cells.rotate_right(bar);
-    frame.rows += ROWS;
-    frame.cursor = frame.cursor.map(|(row, column)| (row + ROWS, column));
-    let title = tabs.get(active).copied().unwrap_or_default();
-    let end = write(frame, 0, inset, title, MUTED);
-    if let Some(time) = time {
-        clock(frame, time, end);
+    frame.cells.rotate_right(cells);
+    frame.rows += rows;
+    frame.cursor = frame.cursor.map(|(row, column)| (row + rows, column));
+    if bar.title {
+        let title = bar.tabs.get(bar.active).map_or("", AsRef::as_ref);
+        let colour = if bar.focused { TITLE } else { UNFOCUSED_TITLE };
+        let end = write(frame, 0, bar.inset, title, colour);
+        if let Some(time) = bar.time {
+            clock(frame, time, end, bar.focused);
+        }
     }
-    strip(frame, tabs, active);
+    strip(frame, bar, cells - usize::from(frame.columns));
 }
 
-/// Writes the second row: boxes of equal width from the left, a cell apart, then the new tab button at the right end.
-fn strip(frame: &mut Frame, tabs: &[&str], active: usize) {
+/// Returns how many cells `text` takes.
+fn width(text: &str) -> usize {
+    text.chars().filter_map(UnicodeWidthChar::width).sum()
+}
+
+/// Returns whether `activity` holds the tab at `index`.
+fn has_news(activity: u32, index: usize) -> bool {
+    u32::try_from(index)
+        .ok()
+        .and_then(|index| activity.checked_shr(index))
+        .is_some_and(|bits| bits & 1 == 1)
+}
+
+/// Returns the cells of a tab's number: a space, then a small pill. Past [`KEYED`], just a space.
+fn key_cells(index: usize) -> usize {
+    if index < KEYED { width(KEY) + 4 } else { 1 }
+}
+
+/// Returns the cells a tab takes with `label` cut to `room`.
+fn tab_cells(label: &str, room: usize, index: usize, activity: u32) -> usize {
+    let mark = if has_news(activity, index) {
+        ACTIVITY
+    } else {
+        0
+    };
+    LEADING + mark + width(label).min(room) + key_cells(index) + 1
+}
+
+/// Where one tab sits on the tabs' row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Span {
+    index: usize,
+    start: usize,
+    end: usize,
+    /// Cells its label may take, or nothing for a tab with no room for its ends and number.
+    room: Option<usize>,
+}
+
+/// Returns where the tabs go: from the left at their own widths, a cell apart, with the longest
+/// labels cut first. Tabs that do not fit even so share the row equally.
+fn spans<'a>(
+    tabs: &'a [impl AsRef<str>],
+    activity: u32,
+    columns: usize,
+) -> impl Iterator<Item = Span> + 'a {
+    let row = |room: usize| {
+        let each = tabs.iter().enumerate();
+        each.map(|(index, label)| tab_cells(label.as_ref(), room, index, activity) + 1)
+            .sum::<usize>()
+    };
+    let room = (1..=MAX_LABEL)
+        .rev()
+        .find(|&room| row(room) + NEW_TAB <= columns);
+    let equal = columns.saturating_sub(NEW_TAB + 1) / tabs.len().max(1);
+    let mut start = 0;
+    tabs.iter()
+        .enumerate()
+        .map(move |(index, label)| {
+            let cells = room.map_or(equal.saturating_sub(1), |room| {
+                tab_cells(label.as_ref(), room, index, activity)
+            });
+            let span = Span {
+                index,
+                start,
+                end: start + cells,
+                room,
+            };
+            start = span.end + 1;
+            span
+        })
+        .filter(|span| span.end > span.start)
+}
+
+/// What a press on the tabs' row landed on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hit {
+    /// The tab at this index.
+    Tab(usize),
+    /// The new tab button.
+    NewTab,
+}
+
+/// Returns what `column` of the tabs' row holds, in a window `columns` wide.
+pub fn hit(column: u16, tabs: &[impl AsRef<str>], activity: u32, columns: u16) -> Option<Hit> {
+    let column = usize::from(column);
+    let mut button = 0;
+    for span in spans(tabs, activity, usize::from(columns)) {
+        if (span.start..span.end).contains(&column) {
+            return Some(Hit::Tab(span.index));
+        }
+        button = span.end + 1;
+    }
+    (button..button + NEW_TAB)
+        .contains(&column)
+        .then_some(Hit::NewTab)
+}
+
+/// Returns a tab's fill, label colour and number colour.
+fn look<L>(index: usize, bar: &Bar<'_, L>) -> (u32, u32, u32) {
+    match (index == bar.active, bar.focused) {
+        (true, true) => (ACTIVE, CHROME | BOLD, QUIET_TEXT),
+        (true, false) => (QUIET, CHROME | BOLD, KEY_TEXT),
+        _ if bar.hovered == Some(index) => (HOVER, HOVER_TEXT, QUIET_TEXT),
+        _ => (QUIET, QUIET_TEXT, KEY_TEXT),
+    }
+}
+
+/// Writes the tabs' row, which starts at cell `row`: pills from the left, then the button.
+fn strip(frame: &mut Frame, bar: &Bar<'_, impl AsRef<str>>, row: usize) {
     let columns = usize::from(frame.columns);
-    let button = NEW_TAB.len();
-    let room = columns.saturating_sub(button + 1);
-    let width = (room / tabs.len().max(1)).min(MAX_TAB);
-    fill(frame, columns.saturating_sub(button)..columns, BOX);
-    write(
-        frame,
-        columns,
-        columns.saturating_sub(button),
-        NEW_TAB,
-        TEXT,
-    );
-    for (index, label) in tabs.iter().enumerate() {
-        let (start, end) = (index * width, (index + 1) * width);
-        let is_active = index == active;
-        let (colour, key_colour) = if is_active {
-            (CHROME | BOLD, ACTIVE)
-        } else {
-            (MUTED, MUTED)
+    let mut button = 0;
+    for span in spans(bar.tabs, bar.activity, columns) {
+        button = span.end + 1;
+        let (fill, text, key) = look(span.index, bar);
+        pill(frame, row, span.start..span.end, fill, CHROME);
+        let label = bar.tabs.get(span.index).map_or("", AsRef::as_ref);
+        let Some(room) = span.room else {
+            let shown = fit(label, (span.end - span.start).saturating_sub(2));
+            write(frame, row, span.start + 1, &shown, text);
+            continue;
         };
-        if width == 0 {
-            break;
+        let mut at = span.start + LEADING;
+        if has_news(bar.activity, span.index) {
+            put(frame, row, at, ACTIVITY_MARK, ACTIVE, fill);
+            at += ACTIVITY;
         }
-        fill(frame, start..end - 1, if is_active { ACTIVE } else { BOX });
-        let shown = fit(label, width.saturating_sub(TAB_CHROME + 1));
-        let used: usize = shown.chars().filter_map(UnicodeWidthChar::width).sum();
-        let left = width.saturating_sub(TAB_CHROME - 1 + used) / 2;
-        write(frame, columns, start + left, &shown, colour);
-        if width > TAB_CHROME && index < 9 {
-            let key = format!("{KEY}{}", index + 1);
-            fill(frame, end - 5..end - 1, KEYCAP);
-            write(frame, columns, end - 4, &key, key_colour);
+        write(frame, row, at, &fit(label, room), text);
+        if span.index < KEYED {
+            let left = span.end - key_cells(span.index);
+            pill(frame, row, left..span.end - 1, CHROME, fill);
+            let number = format!("{KEY}{}", span.index + 1);
+            write(frame, row, left + 1, &number, key);
         }
+    }
+    pill(frame, row, button..button + NEW_TAB, QUIET, CHROME);
+    write(frame, row, button + 1, "+", NEW_TAB_TEXT);
+}
+
+/// Draws a pill over a span of the tabs' row, on `outside`.
+fn pill(frame: &mut Frame, row: usize, span: std::ops::Range<usize>, inside: u32, outside: u32) {
+    fill(frame, row, span.clone(), inside);
+    put(frame, row, span.start, LEFT_CAP, inside, outside);
+    put(frame, row, span.end - 1, RIGHT_CAP, inside, outside);
+}
+
+/// Sets one cell of a row, unless it is past the edge.
+fn put(
+    frame: &mut Frame,
+    row: usize,
+    column: usize,
+    character: char,
+    foreground: u32,
+    background: u32,
+) {
+    if column < usize::from(frame.columns)
+        && let Some(cell) = frame.cells.get_mut(row + column)
+    {
+        *cell = Cell {
+            character,
+            foreground,
+            background,
+        };
     }
 }
 
-/// Paints a span of the tabs' row.
-fn fill(frame: &mut Frame, span: std::ops::Range<usize>, background: u32) {
-    let columns = usize::from(frame.columns);
-    let row = columns..columns * 2;
-    let span = columns + span.start..columns + span.end;
-    let span = span.start.max(row.start)..span.end.min(row.end);
-    if let Some(cells) = frame.cells.get_mut(span) {
+/// Paints a span of a row.
+fn fill(frame: &mut Frame, row: usize, span: std::ops::Range<usize>, background: u32) {
+    let end = span.end.min(usize::from(frame.columns));
+    if let Some(cells) = frame.cells.get_mut(row + span.start.min(end)..row + end) {
         cells
             .iter_mut()
             .for_each(|cell| cell.background = background);
@@ -170,11 +328,6 @@ fn fill(frame: &mut Frame, span: std::ops::Range<usize>, background: u32) {
 
 /// Returns `label` cut to `room` cells, marked by an ellipsis if anything went.
 fn fit(label: &str, room: usize) -> String {
-    let width = |text: &str| {
-        text.chars()
-            .filter_map(UnicodeWidthChar::width)
-            .sum::<usize>()
-    };
     if width(label) <= room {
         return label.to_owned();
     }
@@ -199,17 +352,22 @@ fn name(names: &[&'static str], index: u8) -> &'static str {
 }
 
 /// Writes the date and time at the row's right end, each only if it clears the title.
-fn clock(frame: &mut Frame, time: LocalTime, title_end: usize) {
+fn clock(frame: &mut Frame, time: LocalTime, title_end: usize, focused: bool) {
     let (weekday, month) = (name(&WEEKDAYS, time.weekday), name(&MONTHS, time.month));
     let date = format!("{weekday} {:02} {month}  ", time.day);
-    let clock = format!("{:02}:{:02}  ", time.hour, time.minute);
+    let clock = format!("{:02}:{:02}", time.hour, time.minute);
     let clock_at = usize::from(frame.columns).saturating_sub(clock.len());
     let date_at = clock_at.saturating_sub(date.len());
+    let (date_colour, clock_colour) = if focused {
+        (TITLE, CLOCK_TEXT)
+    } else {
+        (UNFOCUSED_TITLE, UNFOCUSED)
+    };
     if date_at >= title_end + GAP {
-        write(frame, 0, date_at, &date, MUTED);
+        write(frame, 0, date_at, &date, date_colour);
     }
     if clock_at >= title_end + GAP {
-        write(frame, 0, clock_at, &clock, TEXT);
+        write(frame, 0, clock_at, &clock, clock_colour);
     }
 }
 
@@ -243,7 +401,7 @@ pub fn locate(
     cell: (usize, usize),
     grid: (u16, u16),
 ) -> (bool, (u16, u16)) {
-    let top = padding.row_top(usize::from(ROWS), cell.1);
+    let top = padding.row_top(padding.bar_rows(), cell.1);
     let pane = Padding {
         top,
         gap: 0,
@@ -254,7 +412,7 @@ pub fn locate(
 
 /// Whether a pointer at pixel `y` is on the title row, which moves the window.
 pub fn on_title(padding: Padding, y: f64, cell_height: usize) -> bool {
-    y < padding.row_top(1, cell_height) as f64
+    !padding.fullscreen && y < padding.row_top(1, cell_height) as f64
 }
 
 /// Whether the program hears of `event`. The window keeps every press on the bar, so a
@@ -285,6 +443,7 @@ mod tests {
     use super::*;
     use crate::selection;
     use pinfold_core::search::{Position, Selection};
+    use pinfold_proto::link::MAX_TABS;
     use pinfold_proto::{MouseEncoding, MouseMode};
     use winit::keyboard::ModifiersState;
 
@@ -300,6 +459,7 @@ mod tests {
             right: 14,
             bottom: 10,
             gap: 6,
+            ..Padding::default()
         };
         assert_eq!(super::locate(padding, 0.0, 5.0, CELL, GRID), (true, (0, 0)));
         let (on_bar, cell) = super::locate(padding, 34.0, 58.0, CELL, GRID);
@@ -350,17 +510,48 @@ mod tests {
             .collect()
     }
 
+    fn shown<'a>(names: &'a [&'a str], active: usize) -> Bar<'a, &'a str> {
+        Bar {
+            tabs: names,
+            active,
+            activity: 0,
+            hovered: None,
+            focused: true,
+            title: true,
+            time: None,
+            inset: 1,
+        }
+    }
+
     fn bar(columns: u16, name: &str, time: Option<LocalTime>) -> (Frame, String) {
         let mut frame = pane(2, columns);
-        draw(&mut frame, &[name], 0, time, 1);
+        draw(
+            &mut frame,
+            &Bar {
+                time,
+                ..shown(&[name], 0)
+            },
+        );
         let title = text(&frame, 0);
         (frame, title)
     }
 
     fn tabs(columns: u16, names: &[&str], active: usize) -> Frame {
         let mut frame = pane(2, columns);
-        draw(&mut frame, names, active, None, 1);
+        draw(&mut frame, &shown(names, active));
         frame
+    }
+
+    /// Returns the cells of the tabs' row of `frame`.
+    fn strip_of(frame: &Frame) -> &[Cell] {
+        let columns = usize::from(frame.columns);
+        &frame.cells[columns..columns * 2]
+    }
+
+    /// Returns where the tab named `name` starts on the row, and its cell count.
+    fn tab_of(names: &[&str], index: usize, columns: usize) -> (usize, usize) {
+        let span = spans(names, 0, columns).nth(index).unwrap();
+        (span.start, span.end - span.start)
     }
 
     /// Where a tab's number sits, whichever key this system uses.
@@ -377,8 +568,10 @@ mod tests {
     #[test]
     fn the_title_is_the_active_tab_then_the_date_and_time() {
         let (frame, text) = bar(40, "folder", Some(TIME));
-        assert_eq!(text, " folder              Mon 02 Nov  09:41  ");
-        assert_eq!(frame.cells[1].foreground, MUTED);
+        assert_eq!(text, " folder                Mon 02 Nov  09:41");
+        assert_eq!(frame.cells[1].foreground, TITLE);
+        assert_eq!(frame.cells[37].foreground, CLOCK_TEXT);
+        assert_eq!(frame.cells[23].foreground, TITLE);
         assert!(
             frame.cells[..40]
                 .iter()
@@ -387,48 +580,201 @@ mod tests {
     }
 
     #[test]
-    fn each_tab_is_a_box_with_a_gap_after_it() {
-        let frame = tabs(40, &["a", "b", "c"], 1);
-        let row = &frame.cells[40..80];
-        let background = |span: std::ops::Range<usize>| {
-            let cells = &row[span];
-            let first = cells[0].background;
-            assert!(cells.iter().all(|cell| cell.background == first));
-            first
-        };
-        assert_eq!(background(0..7), BOX);
-        assert_eq!(background(7..11), KEYCAP);
-        assert_eq!(background(11..12), CHROME);
-        assert_eq!(background(12..19), ACTIVE);
-        assert_eq!(background(19..23), KEYCAP);
-        assert_eq!(background(23..24), CHROME);
-        assert_eq!(background(24..31), BOX);
-        assert_eq!(background(31..35), KEYCAP);
-        assert_eq!(background(35..37), CHROME);
-        assert_eq!(background(37..40), BOX);
-        assert_eq!(row[38].character, '+');
+    fn one_focused_tab_is_a_teal_pill_with_its_key_then_the_button() {
+        let frame = tabs(60, &["agent"], 0);
+        let row = strip_of(&frame);
+        let cells = LEADING + "agent".len() + key_cells(0) + 1;
+        assert_eq!(row[0].character, LEFT_CAP);
+        assert_eq!((row[0].foreground, row[0].background), (ACTIVE, CHROME));
+        assert_eq!(row[2].character, 'a');
+        assert_eq!(
+            (row[2].foreground, row[2].background),
+            (CHROME | BOLD, ACTIVE)
+        );
+        assert_eq!(row[cells - 1].character, RIGHT_CAP);
+        assert_eq!(row[cells - 1].foreground, ACTIVE);
+        let key_at = cells - key_cells(0);
+        assert_eq!(row[key_at].character, LEFT_CAP);
+        assert_eq!(
+            (row[key_at].foreground, row[key_at].background),
+            (CHROME, ACTIVE)
+        );
+        assert_eq!(row[key_at + 1].background, CHROME);
+        let digit = key_at + 1 + width(KEY);
+        assert_eq!(row[digit].character, '1');
+        assert_eq!(row[digit].foreground, QUIET_TEXT);
+        assert_eq!(row[cells].background, CHROME, "a gap before the button");
+        assert_eq!(row[cells + 1].character, LEFT_CAP);
+        assert_eq!(row[cells + 2].character, '+');
+        assert_eq!(row[cells + 2].foreground, NEW_TAB_TEXT);
+        assert_eq!(row[cells + 3].character, RIGHT_CAP);
+        assert_eq!(row[cells + 3].foreground, QUIET);
+        assert_eq!(
+            row[cells + 4].background,
+            CHROME,
+            "the button is not at the far end"
+        );
     }
 
     #[test]
-    fn a_lone_tab_stays_a_box() {
-        let frame = tabs(100, &["a"], 0);
-        assert_eq!(frame.cells[100 + MAX_TAB - 6].background, ACTIVE);
-        assert_eq!(frame.cells[100 + MAX_TAB - 2].background, KEYCAP);
-        assert_eq!(frame.cells[100 + MAX_TAB - 1].background, CHROME);
+    fn a_tab_that_is_not_active_is_quiet() {
+        let frame = tabs(60, &["a", "b"], 0);
+        let row = strip_of(&frame);
+        let (start, cells) = tab_of(&["a", "b"], 1, 60);
+        assert_eq!(row[start].foreground, QUIET);
+        assert_eq!(row[start + 2].character, 'b');
+        assert_eq!(
+            (row[start + 2].foreground, row[start + 2].background),
+            (QUIET_TEXT, QUIET)
+        );
+        let digit = start + cells - 3;
+        assert_eq!(row[digit].character, '2');
+        assert_eq!(row[digit].foreground, KEY_TEXT);
     }
 
     #[test]
-    fn tabs_show_their_labels_and_keys() {
-        let frame = tabs(44, &["one", "two", "three", "four"], 0);
-        let strip = text(&frame, 1);
-        assert!(strip.contains("one"), "{strip}");
-        assert!(strip.contains(&key(4)), "{strip}");
-        assert_eq!(frame.cells[44 + 1].background, ACTIVE);
-        let label = frame.cells[44..49].iter();
-        let drawn = label.filter(|cell| cell.character != ' ');
-        assert!(drawn.clone().count() > 0);
-        assert!(drawn.clone().all(|cell| cell.foreground == CHROME | BOLD));
-        assert!(drawn.into_iter().all(|cell| cell.background == ACTIVE));
+    fn hovering_lights_a_quiet_tab_and_not_the_active_one() {
+        let names = ["a", "b"];
+        let mut frame = pane(2, 60);
+        draw(
+            &mut frame,
+            &Bar {
+                hovered: Some(1),
+                ..shown(&names, 0)
+            },
+        );
+        let row = strip_of(&frame);
+        let (start, cells) = tab_of(&names, 1, 60);
+        assert_eq!(row[start + 2].background, HOVER);
+        assert_eq!(row[start + 2].foreground, HOVER_TEXT);
+        assert_eq!(row[start + cells - 3].foreground, QUIET_TEXT);
+        let mut frame = pane(2, 60);
+        draw(
+            &mut frame,
+            &Bar {
+                hovered: Some(0),
+                ..shown(&names, 0)
+            },
+        );
+        assert_eq!(strip_of(&frame)[2].background, ACTIVE);
+    }
+
+    #[test]
+    fn a_tab_with_news_has_a_teal_mark_before_its_label() {
+        let names = ["a", "b"];
+        let mut frame = pane(2, 60);
+        draw(
+            &mut frame,
+            &Bar {
+                activity: 0b10,
+                ..shown(&names, 0)
+            },
+        );
+        let row = strip_of(&frame);
+        let start = spans(&names, 0b10, 60).nth(1).unwrap().start;
+        assert_eq!(row[start + 2].character, ACTIVITY_MARK);
+        assert_eq!(row[start + 2].foreground, ACTIVE);
+        assert_eq!(row[start + 4].character, 'b');
+        assert!(
+            spans(&names, 0b10, 60).nth(1).unwrap().end > spans(&names, 0, 60).nth(1).unwrap().end
+        );
+        assert!(!has_news(u32::MAX, 32), "past the last bit");
+        assert!(!named("/a/•b").contains(ACTIVITY_MARK));
+    }
+
+    #[test]
+    fn fullscreen_has_only_the_tabs() {
+        let names = ["a", "b"];
+        let mut frame = pane(2, 60);
+        draw(
+            &mut frame,
+            &Bar {
+                title: false,
+                time: Some(TIME),
+                ..shown(&names, 0)
+            },
+        );
+        assert_eq!(frame.rows, 3);
+        assert_eq!(frame.cells[0].character, LEFT_CAP);
+        assert_eq!(frame.cursor, Some((2, 2)));
+        assert!(!text(&frame, 0).contains("Mon"));
+    }
+
+    #[test]
+    fn an_unfocused_window_goes_quiet() {
+        let names = ["a", "b"];
+        let mut frame = pane(2, 60);
+        let (at, _) = (60 * 3 + 2, 0);
+        draw(
+            &mut frame,
+            &Bar {
+                focused: false,
+                time: Some(TIME),
+                ..shown(&names, 0)
+            },
+        );
+        assert_eq!(frame.cells[1].foreground, UNFOCUSED_TITLE);
+        assert_eq!(frame.cells[43].foreground, UNFOCUSED_TITLE);
+        assert_eq!(frame.cells[57].foreground, UNFOCUSED);
+        let row = strip_of(&frame);
+        assert_eq!(row[0].foreground, QUIET);
+        assert_eq!(
+            (row[2].foreground, row[2].background),
+            (CHROME | BOLD, QUIET)
+        );
+        assert_eq!(frame.cursor, Some((3, 2)));
+        assert_eq!(
+            frame.cells[at].foreground, UNFOCUSED,
+            "the cursor inverts this"
+        );
+    }
+
+    #[test]
+    fn a_press_lands_on_what_the_strip_drew() {
+        let names = ["one", "two"];
+        let (first, cells) = tab_of(&names, 0, 60);
+        let (second, _) = tab_of(&names, 1, 60);
+        let at = |column: usize| hit(column as u16, &names, 0, 60);
+        assert_eq!(at(first), Some(Hit::Tab(0)));
+        assert_eq!(at(first + cells - 1), Some(Hit::Tab(0)));
+        assert_eq!(at(first + cells), None, "the gap");
+        assert_eq!(at(second), Some(Hit::Tab(1)));
+        let button = second + cells + 1;
+        assert_eq!(at(button - 1), None, "the gap");
+        for column in button..button + NEW_TAB {
+            assert_eq!(at(column), Some(Hit::NewTab));
+        }
+        assert_eq!(at(button + NEW_TAB), None, "past the button");
+    }
+
+    #[test]
+    fn labels_shrink_before_tabs_do() {
+        let long = "a".repeat(24);
+        let names = [long.as_str(), long.as_str()];
+        let frame = tabs(40, &names, 0);
+        let drawn = text(&frame, 1);
+        assert!(drawn.contains('…'), "{drawn}");
+        assert!(drawn.contains('+'), "{drawn}");
+        let button = (0..40).any(|column| hit(column, &names, 0, 40) == Some(Hit::NewTab));
+        assert!(button);
+    }
+
+    #[test]
+    fn a_strip_too_narrow_for_its_tabs_still_has_a_button() {
+        let names = vec!["a"; MAX_TABS];
+        assert_eq!(hit(18, &names, 0, 70), Some(Hit::Tab(9)));
+        let button = (0..70).find(|&column| hit(column, &names, 0, 70) == Some(Hit::NewTab));
+        assert!(button.is_some());
+        assert_eq!(hit(0, &names, 0, 20), Some(Hit::NewTab));
+    }
+
+    #[test]
+    fn only_nine_tabs_have_a_key() {
+        let names = vec!["a"; 10];
+        let frame = tabs(200, &names, 0);
+        let drawn = text(&frame, 1);
+        assert!(drawn.contains(&key(9)), "{drawn}");
+        assert!(!drawn.contains(&key(10)), "{drawn}");
     }
 
     #[test]
@@ -460,20 +806,20 @@ mod tests {
             minute: 5,
             ..TIME
         };
-        assert!(bar(40, "x", Some(time)).1.ends_with("Sun 31 Dec  00:05  "));
+        assert!(bar(40, "x", Some(time)).1.ends_with("Sun 31 Dec  00:05"));
         let bad = LocalTime {
             weekday: 9,
             month: 99,
             ..TIME
         };
-        assert!(bar(40, "x", Some(bad)).1.ends_with(" 02   09:41  "));
+        assert!(bar(40, "x", Some(bad)).1.ends_with(" 02   09:41"));
     }
 
     #[test]
     fn the_pane_moves_down_under_the_bar() {
         let mut frame = pane(2, 10);
         frame.cells[0].character = 'a';
-        draw(&mut frame, &["b"], 0, None, 1);
+        draw(&mut frame, &shown(&["b"], 0));
         assert_eq!(frame.rows, 4);
         assert_eq!(frame.cells.len(), 40);
         assert_eq!(frame.cells[20].character, 'a');
@@ -483,21 +829,32 @@ mod tests {
     #[test]
     fn a_frame_with_nothing_yet_is_safe() {
         let mut frame = Frame::default();
-        draw(&mut frame, &["shell"], 0, Some(TIME), 8);
+        draw(
+            &mut frame,
+            &Bar {
+                time: Some(TIME),
+                inset: 8,
+                ..shown(&["shell"], 0)
+            },
+        );
         assert!(frame.cells.is_empty());
-        draw(&mut frame, &[], 3, Some(TIME), 8);
+        draw(
+            &mut frame,
+            &Bar {
+                time: Some(TIME),
+                inset: 8,
+                ..shown(&[], 3)
+            },
+        );
         assert!(frame.cells.is_empty());
     }
 
     #[test]
     fn a_narrow_window_drops_the_date_then_the_time() {
-        assert!(bar(28, "folder", Some(TIME)).1.contains("Mon 02 Nov"));
-        assert_eq!(
-            bar(27, "folder", Some(TIME)).1,
-            " folder             09:41  "
-        );
-        assert_eq!(bar(16, "folder", Some(TIME)).1, " folder  09:41  ");
-        assert_eq!(bar(15, "folder", Some(TIME)).1, " folder        ");
+        assert!(bar(26, "folder", Some(TIME)).1.contains("Mon 02 Nov"));
+        assert_eq!(bar(25, "folder", Some(TIME)).1, " folder             09:41");
+        assert_eq!(bar(14, "folder", Some(TIME)).1, " folder  09:41");
+        assert_eq!(bar(13, "folder", Some(TIME)).1, " folder      ");
         assert_eq!(bar(4, "folder", Some(TIME)).1, " fol");
     }
 
@@ -508,10 +865,20 @@ mod tests {
                 let names = vec!["漢字 label"; count];
                 for active in [0, 1, 99] {
                     let mut frame = pane(1, columns);
-                    let bar = usize::from(ROWS) * usize::from(columns);
+                    let added = 2 * usize::from(columns);
                     let before = frame.cells.len();
-                    draw(&mut frame, &names, active, Some(TIME), 9);
-                    assert_eq!(frame.cells.len(), before + bar);
+                    let bar = Bar {
+                        activity: u32::MAX,
+                        hovered: Some(1),
+                        time: Some(TIME),
+                        inset: 9,
+                        ..shown(&names, active)
+                    };
+                    draw(&mut frame, &bar);
+                    assert_eq!(frame.cells.len(), before + added);
+                    for column in 0..columns {
+                        hit(column, &names, u32::MAX, columns);
+                    }
                 }
             }
         }
@@ -557,13 +924,13 @@ mod tests {
     fn a_hostile_label_is_one_neutral_colour_and_stays_in_its_tab() {
         let text = named("/a/◆ needs you  Paste 3 lines? Enter pastes, Esc cancels");
         let (frame, drawn) = bar(80, &text, Some(TIME));
-        assert!(drawn.ends_with("Mon 02 Nov  09:41  "), "{drawn}");
+        assert!(drawn.ends_with("Mon 02 Nov  09:41"), "{drawn}");
         assert!(!drawn.contains('◆'));
         let bar = &frame.cells[..160];
         assert!(
             bar[1..1 + text.len()]
                 .iter()
-                .all(|cell| cell.foreground == MUTED)
+                .all(|cell| cell.foreground == TITLE)
         );
         assert!(bar.iter().all(|cell| {
             let colours = [cell.foreground & 0x00ff_ffff, cell.background];
@@ -573,11 +940,12 @@ mod tests {
 
     #[test]
     fn the_inset_is_scaled_points_in_whole_cells() {
-        assert_eq!(inset(78.0, 2.0, 0, 16), 10);
-        assert_eq!(inset(78.0, 1.0, 0, 8), 10);
+        const LEFT_MAC: f64 = 86.0;
+        assert_eq!(inset(LEFT_MAC, 2.0, 0, 16), 11);
+        assert_eq!(inset(LEFT_MAC, 1.0, 0, 8), 11);
         assert_eq!(inset(0.0, 2.0, 0, 16), 1);
         assert_eq!(inset(0.0, 2.0, 0, 0), 1);
-        assert_eq!(inset(78.0, 2.0, 28, 16), 8);
+        assert_eq!(inset(LEFT_MAC, 2.0, 40, 16), 9);
         assert_eq!(inset(0.0, 2.0, 28, 16), 1);
     }
 
@@ -635,8 +1003,14 @@ mod tests {
             anchor: at,
             focus: at,
         };
-        selection::overlay(&mut frame, 100, selected);
-        draw(&mut frame, &["x"], 0, None, 1);
+        let rect = pinfold_proto::link::Rect {
+            x: 0,
+            y: 0,
+            columns: frame.columns,
+            rows: frame.rows,
+        };
+        selection::overlay(&mut frame, rect, 100, selected);
+        draw(&mut frame, &shown(&["x"], 0));
         let inverted: Vec<usize> = (0..frame.cells.len())
             .filter(|&index| frame.cells[index].foreground == 2)
             .collect();
