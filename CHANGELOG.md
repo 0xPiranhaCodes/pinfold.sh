@@ -31,13 +31,14 @@ Entries are generated from Conventional Commits with git-cliff
 - Function keys, modifier combinations and application cursor mode, as xterm sends them.
 - Paste from the clipboard, with a confirmation for anything that ends a line.
 - `Pinfold.app` for macOS, with its icon, and a login shell in the home folder when opened from the Dock.
-- A top bar: one tab named after the working directory, and the local date and time. Dragging it moves the window.
+- A top bar: a title row with the local date and time, which moves the window when dragged, and a row of square tabs named after the working directory, with a new tab button that does nothing yet.
 - Drag to select across history and the screen, Shift-drag past mouse reporting, a copy key, and a search bar.
 - Vi mode: keyboard motions, selection and copying across history and the screen.
 - `pinfold-mux`, the layout model of sessions, tabs and split panes, which runs nothing yet.
 - A paste sanitizer in the core, and an input queue of 1 MiB so a large write is not cut.
 - A two-second flash in the row under the pane when a program's OSC 52 clipboard write is blocked.
 - Input method composition, drawn at the cursor.
+- History reflows with the window: a wrapped line reads at the new width, and a view in history stays on its text (ADR-0029).
 - Synchronized updates end on their own after 150 ms and hold at most 256 KiB per pane.
 - Limits on OSC strings, titles and hyperlinks, and replies only in fixed formats.
 - OSC 133 command marks and the OSC 7 working directory, tracked per pane as hints.
