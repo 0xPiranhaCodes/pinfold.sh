@@ -23,6 +23,12 @@ pub enum Prompt {
     },
     /// Text that cannot fit in the input queue.
     TooLarge,
+    /// A pane to close, which ends its program.
+    Close {
+        pane: u32,
+        /// Whether it is the session's last pane, so the session ends with it.
+        last: bool,
+    },
 }
 
 fn lines(text: &str) -> usize {
@@ -88,6 +94,16 @@ pub fn banner(frame: &mut Frame, prompt: &Prompt) {
             (" ✕ error  ".to_owned(), RED),
             ("Paste refused: over 1 MiB".to_owned(), TEXT),
             ("  Esc dismisses".to_owned(), TEXT),
+        ],
+        Prompt::Close { last: false, .. } => [
+            (" ◆ needs you  ".to_owned(), AMBER),
+            ("Close this pane?".to_owned(), TEXT),
+            ("  Enter closes, Esc cancels".to_owned(), TEXT),
+        ],
+        Prompt::Close { last: true, .. } => [
+            (" ◆ needs you  ".to_owned(), AMBER),
+            ("Close the last pane and end the session?".to_owned(), RED),
+            ("  Enter closes, Esc cancels".to_owned(), TEXT),
         ],
     };
     row(frame, &spans);
@@ -199,6 +215,33 @@ mod tests {
         assert_eq!(frame.cells[0].character, 'x');
         assert!(text.starts_with(" ◆ needs you  Paste 3 lines with sudo?  Enter pastes"));
         assert_eq!(frame.cells[81].foreground, AMBER);
+    }
+
+    #[test]
+    fn closing_the_last_pane_says_it_ends_the_session() {
+        let (_, one) = drawn(
+            &Prompt::Close {
+                pane: 1,
+                last: false,
+            },
+            80,
+        );
+        assert!(
+            one.contains("◆ needs you  Close this pane?  Enter closes"),
+            "{one}"
+        );
+        let last = Prompt::Close {
+            pane: 1,
+            last: true,
+        };
+        let (frame, text) = drawn(&last, 80);
+        assert!(
+            text.contains("Close the last pane and end the session?"),
+            "{text}"
+        );
+        let start = text.chars().position(|c| c == 'C').unwrap_or_default();
+        let at = frame.cells.len() - usize::from(frame.columns) + start;
+        assert_eq!(frame.cells[at].foreground, RED);
     }
 
     #[test]

@@ -37,6 +37,7 @@ use winit::window::{Window, WindowId};
 use crate::flash::{self, Flash};
 use crate::link::{self, Link, Screen, Tab};
 use crate::paste::Prompt;
+use crate::prefix::{self, Command, Prefix};
 use crate::search_bar::{Bar, Step};
 use crate::selection::Selecting;
 use crate::top_bar::{Clicks, Hit};
@@ -320,6 +321,8 @@ struct App {
     rects: Vec<Rect>,
     /// The pane keys go to. It is missing from `panes` in a window too small for it.
     focused: u32,
+    /// How many panes the session holds, shown or not.
+    total: usize,
     /// The space for panes, as `(rows, columns)`.
     area: (u16, u16),
     modifiers: ModifiersState,
@@ -347,8 +350,9 @@ struct App {
     wheel: f32,
     /// Connected on first use, so a window that never pastes or copies does not pay for it.
     clipboard: Option<Clipboard>,
-    /// A paste waiting for the user. Every key goes to this until it is answered.
+    /// A question for the user. Every key goes to this until it is answered.
     prompt: Option<Prompt>,
+    prefix: Prefix,
     flash: Flash,
     selecting: Selecting,
     /// The search bar, while open. Keys go to this before the program.
@@ -428,6 +432,9 @@ impl App {
             return;
         }
         let old = std::mem::replace(&mut self.config, config);
+        if self.config.keys.prefix != old.keys.prefix {
+            self.prefix = Prefix::new(self.config.keys.prefix);
+        }
         let Some(open) = &mut self.open else { return };
         #[cfg(target_os = "macos")]
         open.window.set_option_as_alt(option_as_alt(&self.config));
@@ -456,6 +463,11 @@ impl App {
             top_bar::label(&tab.cwd, label);
         }
         self.active = shown.active;
+        self.total = shown.total;
+        // Another pane may have closed under the question.
+        if let Some(Prompt::Close { last, .. }) = &mut self.prompt {
+            *last = self.total == 1;
+        }
         if self.focused != shown.focused {
             let old = std::mem::replace(&mut self.focused, shown.focused);
             self.focus_moved(old);
@@ -474,6 +486,7 @@ impl App {
             }
         }
         self.bar = None;
+        self.prompt = None;
         self.selecting = Selecting::default();
         self.preedit.0.clear();
         self.ime_cursor = None;
@@ -602,9 +615,49 @@ impl App {
         }
     }
 
-    /// Handles a key that is the window's, and returns whether it was.
-    fn shortcut(&mut self, event: &KeyEvent) -> bool {
+    /// Carries out what a prefix key or a Command key asked for.
+    fn command(&mut self, event_loop: &ActiveEventLoop, command: Command) {
+        let pane = self.focused;
+        let request = match command {
+            Command::NewTab => proto::Request::NewTab,
+            Command::NextTab => proto::Request::StepTab { forward: true },
+            Command::PreviousTab => proto::Request::StepTab { forward: false },
+            Command::Tab(index) => proto::Request::SwitchTab {
+                index: index as u16,
+            },
+            Command::SplitRight => proto::Request::Split {
+                pane,
+                way: proto::SplitWay::Right,
+            },
+            Command::SplitDown => proto::Request::Split {
+                pane,
+                way: proto::SplitWay::Down,
+            },
+            Command::Focus(side) => proto::Request::MoveFocus { side },
+            Command::Resize(side, cells) => proto::Request::MoveBorder { side, cells },
+            Command::Zoom => proto::Request::Zoom,
+            // The session stays in the core for the next window.
+            Command::Detach => return event_loop.exit(),
+            // A program dies with its pane, so this asks first as tmux does.
+            Command::ClosePane => {
+                let last = self.total == 1;
+                self.prompt = Some(Prompt::Close { pane, last });
+                return self.redraw_soon();
+            }
+        };
+        self.core(request);
+    }
+
+    /// Handles a key that belongs to the window whatever else is going on, and returns whether
+    /// it did. These come before the prefix, so that an armed prefix cannot swallow a paste.
+    fn window_key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) -> bool {
         let key = &event.logical_key;
+        if input::is_paste(key, self.modifiers) {
+            if !event.repeat {
+                self.paste();
+            }
+            return true;
+        }
         // Only this key copies, so output alone can never reach the clipboard.
         if input::is_copy(key, self.modifiers) {
             if let Some(selection) = self.selecting.current.filter(|_| !event.repeat) {
@@ -623,6 +676,19 @@ impl App {
             }
             return true;
         }
+        let tab = input::tab_key(key, self.modifiers).filter(|_| cfg!(target_os = "macos"));
+        if let Some(command) = tab {
+            if !event.repeat {
+                self.command(event_loop, command);
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Hands a key to the search bar or vi mode, and returns whether either took it.
+    fn shortcut(&mut self, event: &KeyEvent) -> bool {
+        let key = &event.logical_key;
         let text = event.text.as_ref().map(|text| text.as_str());
         let bar = self.bar.as_mut().filter(|_| self.preedit.0.is_empty());
         match bar.and_then(|bar| bar.key(key, text, self.modifiers)) {
@@ -633,6 +699,39 @@ impl App {
         }
         self.redraw_soon();
         true
+    }
+
+    /// Sends a key press where it goes: the window, then the prefix, then the search bar and vi
+    /// mode, then the pane. A key pressed while composing belongs to the input method, so it
+    /// neither reaches a program nor counts as the prefix.
+    fn key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) {
+        if self.window_key(event, event_loop) {
+            self.prefix.cancel();
+            return;
+        }
+        let composing = !self.preedit.0.is_empty();
+        if !composing {
+            match self
+                .prefix
+                .key(&event.logical_key, self.modifiers, event.repeat)
+            {
+                prefix::Step::Pass => {}
+                prefix::Step::Swallow => return,
+                prefix::Step::Run(command) => return self.command(event_loop, command),
+            }
+        }
+        if self.shortcut(event) || composing {
+            return;
+        }
+        let Some(pane) = find(&self.panes, self.focused) else {
+            return;
+        };
+        let text = event.text.as_ref().map(|text| text.as_str());
+        let (app_cursor, alt) = (pane.frame.app_cursor, self.config.macos_option_as_alt);
+        let bytes = input::encode(&event.logical_key, text, self.modifiers, app_cursor, alt);
+        if !bytes.is_empty() {
+            self.request(Request::Input(self.focused, bytes));
+        }
     }
 
     /// Turns vi mode on at the program's cursor, or off and back to the live screen. An input
@@ -750,11 +849,15 @@ impl App {
 
     fn answer(&mut self, key: &Key) {
         match key {
-            Key::Named(NamedKey::Enter) => {
-                if let Some(Prompt::Confirm { text, .. }) = self.prompt.take() {
+            Key::Named(NamedKey::Enter) => match self.prompt.take() {
+                Some(Prompt::Confirm { text, .. }) => {
                     self.request(Request::Paste(self.focused, text));
                 }
-            }
+                Some(Prompt::Close { pane, .. }) => {
+                    self.core(proto::Request::ClosePane { pane });
+                }
+                _ => {}
+            },
             Key::Named(NamedKey::Escape) => self.prompt = None,
             _ => {}
         }
@@ -1005,6 +1108,7 @@ impl ApplicationHandler<Notice> for App {
                 self.scale_changed(scale_factor);
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            WindowEvent::Focused(false) => self.prefix.cancel(),
             WindowEvent::Ime(event) => self.ime(event),
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer_moved(position.x, position.y);
@@ -1017,30 +1121,8 @@ impl ApplicationHandler<Notice> for App {
                     self.answer(&event.logical_key);
                 }
             }
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed
-                    && input::is_paste(&event.logical_key, self.modifiers) =>
-            {
-                if !event.repeat {
-                    self.paste();
-                }
-            }
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed && self.shortcut(&event) => {}
-            // A key pressed while composing belongs to the input method.
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed && self.preedit.0.is_empty() =>
-            {
-                let text = event.text.as_ref().map(|text| text.as_str());
-                let Some(pane) = find(&self.panes, self.focused) else {
-                    return;
-                };
-                let (app_cursor, alt) = (pane.frame.app_cursor, self.config.macos_option_as_alt);
-                let bytes =
-                    input::encode(&event.logical_key, text, self.modifiers, app_cursor, alt);
-                if !bytes.is_empty() {
-                    self.request(Request::Input(self.focused, bytes));
-                }
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                self.key(&event, event_loop);
             }
             WindowEvent::RedrawRequested => {
                 if let Err(error) = self.redraw() {
@@ -1095,8 +1177,10 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
     // Before the file is first read, so a save between the two is not missed.
     let proxy = event_loop.create_proxy();
     reload::watch(move |config| proxy.send_event(Notice::Config(config)).is_ok())?;
+    let config = config();
     let mut app = App {
-        config: config(),
+        prefix: Prefix::new(config.keys.prefix),
+        config,
         size,
         requests,
         latest,
@@ -1105,6 +1189,7 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
         panes: Vec::new(),
         rects: Vec::new(),
         focused: 0,
+        total: 0,
         area: (0, 0),
         modifiers: ModifiersState::empty(),
         preedit: (String::new(), 0),

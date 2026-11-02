@@ -11,6 +11,8 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Added
 
+- Tabs and splits for real. The core owns the session, so a new window finds the same tabs and panes, and only the panes of the active tab are sent to the window, so a hidden tab costs no frame copies. A session holds at most 32 tabs and 64 panes, and past that a command is refused with a note under the pane. Panes are drawn in cells with cell-drawn borders, the focused pane's in the focus accent.
+- Prefix keys work: `Ctrl+a`, or `keys.prefix`, then `c`, `n`, `p`, `0` to `9`, `|`, `-`, the arrows, `z`, `d` and `x`. `x` asks first, and says so in red when it would end the session. On macOS Command+T opens a tab and Command+1 to Command+9 go to one. A click focuses a pane or picks a tab, and the `+` button opens one. Bindings are in [docs/configuration.md](docs/configuration.md).
 - `pinfold-core` runs as a hardened daemon with a private control socket that takes `hello` and `window.open`.
 - `pinfold` is now a launcher: it starts the core if none answers, checks that the socket's owner is you, asks for a window and exits. The window is its own `pinfold-window` process on the link (ADR-0028), so a window that crashes or closes leaves every pane running and `pinfold` reattaches. A second `pinfold` brings the window to the front, and a window whose core dies says the session ended. `pinfold --size` is gone.
 - `cargo xtask mem-gate` measures the window and the core as separate processes, and the core beside a window.
@@ -35,7 +37,7 @@ Entries are generated from Conventional Commits with git-cliff
 - Function keys, modifier combinations and application cursor mode, as xterm sends them.
 - Paste from the clipboard, with a confirmation for anything that ends a line.
 - `Pinfold.app` for macOS, with its icon, and a login shell in the home folder when opened from the Dock.
-- A top bar: a title row with the local date and time, which moves the window when dragged, and a row of square tabs named after the working directory, with a new tab button that does nothing yet.
+- A top bar: a title row with the local date and time, which moves the window when dragged, and a row of square tabs named after the working directory, with a new tab button.
 - Drag to select across history and the screen, Shift-drag past mouse reporting, a copy key, and a search bar.
 - Vi mode: keyboard motions, selection and copying across history and the screen.
 - `pinfold-mux`, the layout model of sessions, tabs and split panes, which runs nothing yet.
@@ -61,7 +63,7 @@ Entries are generated from Conventional Commits with git-cliff
 - M0 spike results for caller identity, tiered scrollback, the process split and window memory, with the M0 report.
 - The binary protocol between the core and the window, as pure encoding and decoding with a streaming decoder and a fuzz target.
 - The window's end of that link, a client that keeps a local copy of the screen and reports a disconnect as a value.
-- Prefix keys as pure logic, with tmux-style tab and split bindings and a `keys.prefix` config key, not yet wired into the window.
+- Prefix keys as pure logic, with tmux-style tab and split bindings and a `keys.prefix` config key.
 
 ### Fixed
 

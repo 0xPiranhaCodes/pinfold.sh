@@ -126,6 +126,108 @@ if ! gone "$WINDOW" || ! gone "$DAEMON"; then
   exit 1
 fi
 echo "window and core exited with the shell"
+# Tabs and splits, with real keys.
+"$PINFOLD"
+window_id
+sleep 2
+DAEMON=$(parent "$WINDOW")
+xdotool windowfocus "$ID"
+sleep 0.3
+shell_in() {
+  # shellcheck disable=SC2016
+  xdotool type --delay 15 "echo \$\$ > /tmp/$1; stty size > /tmp/$1.size; clear; echo $1"
+  xdotool key Return
+  sleep 0.5
+  cat "/tmp/$1"
+}
+LEFT=$(shell_in left)
+xdotool key ctrl+a bar
+sleep 1
+RIGHT=$(shell_in right)
+if [ -z "$LEFT" ] || [ -z "$RIGHT" ] || [ "$LEFT" = "$RIGHT" ]; then
+  echo "FAIL: a split did not start its own shell: $LEFT $RIGHT"
+  exit 1
+fi
+if cmp -s /tmp/left.size /tmp/right.size; then
+  echo "FAIL: a split did not resize its pane: $(cat /tmp/right.size)"
+  exit 1
+fi
+xdotool key ctrl+a minus
+sleep 1
+BELOW=$(shell_in below)
+xdotool key ctrl+a c
+sleep 1
+TAB=$(shell_in tab)
+xdotool key ctrl+a 0
+sleep 1
+AGAIN=$(shell_in again)
+if [ "$AGAIN" != "$BELOW" ] || [ "$TAB" = "$BELOW" ]; then
+  echo "FAIL: going back to the first tab did not reach its focused pane: $AGAIN $BELOW $TAB"
+  exit 1
+fi
+xdotool key ctrl+a Up
+sleep 0.5
+if [ "$(shell_in up)" != "$RIGHT" ]; then
+  echo "FAIL: focus did not move up"
+  exit 1
+fi
+import -window root /out/splits.png
+echo "a split and a tab opened with real keys, each with its own shell"
+xdotool windowsize "$ID" 800 500
+sleep 1
+shell_in small >/dev/null
+if cmp -s /tmp/up.size /tmp/small.size; then
+  echo "FAIL: a window resize did not reach the pane: $(cat /tmp/small.size)"
+  exit 1
+fi
+echo "a window resize reached the panes: $(cat /tmp/up.size) to $(cat /tmp/small.size)"
+# shellcheck disable=SC2016
+xdotool type --delay 15 'stty -echo -icanon; head -c 1 | od -An -c > /tmp/doubled; stty sane'
+xdotool key Return
+sleep 0.5
+xdotool key ctrl+a ctrl+a
+sleep 0.5
+if [ "$(tr -d ' \n' < /tmp/doubled)" != '001' ]; then
+  echo "FAIL: the prefix twice reached the program as: $(cat /tmp/doubled)"
+  exit 1
+fi
+echo "the prefix twice reached the program"
+xdotool key ctrl+a x
+sleep 0.5
+xdotool key Escape
+sleep 0.5
+if gone "$RIGHT"; then
+  echo "FAIL: a cancelled prompt closed the pane"
+  exit 1
+fi
+xdotool key ctrl+a x
+sleep 0.5
+xdotool key Return
+sleep 1
+if ! gone "$RIGHT"; then
+  echo "FAIL: closing a pane left its shell"
+  exit 1
+fi
+echo "x asks first, and closing a pane ends its shell"
+# Close what is left, the last by the prompt that says it ends the session.
+xdotool key ctrl+a x Return
+sleep 1
+xdotool key ctrl+a x Return
+sleep 1
+xdotool key ctrl+a x
+sleep 0.5
+import -window root /out/last.png
+if gone "$TAB" || gone "$DAEMON"; then
+  echo "FAIL: the session ended before the last pane closed"
+  exit 1
+fi
+xdotool key Return
+sleep 1
+if ! gone "$TAB" || ! gone "$WINDOW" || ! gone "$DAEMON"; then
+  echo "FAIL: closing the last pane left the session running"
+  exit 1
+fi
+echo "closing the last pane ended the session"
 "$PINFOLD"
 window_id
 sleep 2

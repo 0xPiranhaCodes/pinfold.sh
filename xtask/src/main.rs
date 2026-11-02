@@ -222,7 +222,7 @@ fn mem_gate_task() -> ExitCode {
             window: Some(Side::Window),
         });
         budgets.push(mem_gate::Budget {
-            metric: "Core beside that window, 8 idle panes",
+            metric: "Core beside that window, 8 idle tabs",
             limit: mem_gate::CORE_LIMIT,
             program: &core,
             args: &["--window", "8", "1512x1890"],
@@ -257,7 +257,7 @@ fn mem_gate_task() -> ExitCode {
             window: Some(Side::Window),
         });
         budgets.push(mem_gate::Budget {
-            metric: "Core beside that window, 8 idle panes",
+            metric: "Core beside that window, 8 idle tabs",
             limit: mem_gate::CORE_LIMIT,
             program: &core,
             args: &["--window", "8", "1920x1080"],

@@ -11,7 +11,7 @@ variable is unset. Saving the file applies it to the running window within about
 | `macos_option_as_alt` | bool   | `false` | Option sends Alt instead of composing text. macOS only   |
 | `background_opacity`  | number | `1`     | Default background opacity, from 0 to 1. macOS only      |
 | `background_blur`     | bool   | `false` | Blur what shows through the background. macOS only       |
-| `keys.prefix`         | string | `"C-a"` | Prefix, `C-` and a lowercase letter. Not used yet        |
+| `keys.prefix`         | string | `"C-a"` | Prefix, `C-` and a lowercase letter                      |
 
 ```toml
 font_size = 14
@@ -47,8 +47,29 @@ file's place, a file it cannot read, and a file that another user owns or that g
 others can write (the rule from the threat model). A symlink is followed, and those
 checks apply to its target.
 
-`keys.prefix` is read and checked, but the window does not act on prefix keys yet. Their
-bindings are listed in `crates/pinfold-ui/src/prefix.rs`.
+## Keys
+
+Press the prefix, then one of these. The prefix pressed twice sends it to the program.
+
+| Keys               | Does                                                         |
+| ------------------ | ------------------------------------------------------------ |
+| `c`                | New tab                                                      |
+| `x`                | Close the pane, after Enter. Esc cancels                     |
+| `n`, `p`           | Next or previous tab, wrapping                               |
+| `0` to `9`         | Tab at that index, from `0`                                  |
+| <code>&#124;</code> or `%` | Split right                                          |
+| `-` or `"`         | Split down                                                   |
+| Arrows             | Move focus                                                   |
+| Ctrl+arrows        | Move a border 1 cell                                         |
+| Alt+arrows         | Move a border 5 cells                                        |
+| `z`                | Zoom the pane                                                |
+| `d`                | Close the window. The session stays, and `pinfold` reopens it |
+
+On macOS, Command+T opens a tab and Command+1 to Command+9 go to tabs from the first. A tab
+closes with its last pane, and the session ends with its last tab.
+
+Paste, copy, find and vi mode keys always work, and they cancel a pressed prefix. A key
+that composes text in an input method never counts as the prefix.
 
 ## Reload
 
