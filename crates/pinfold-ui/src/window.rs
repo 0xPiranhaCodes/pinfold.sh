@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Instant;
 
 use pinfold_config::Config;
 use pinfold_core::io::{Reactor, Waker};
@@ -22,13 +23,14 @@ use pinfold_sys::clipboard::Clipboard;
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::error::{EventLoopError, OsError};
-use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, StartCause, WindowEvent};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 #[cfg(target_os = "macos")]
 use winit::platform::macos::{OptionAsAlt, WindowAttributesExtMacOS};
 use winit::window::{Window, WindowId};
 
+use crate::flash::Flash;
 use crate::paste::Prompt;
 use crate::{ime, input, mouse, paste};
 
@@ -167,6 +169,7 @@ struct App {
     clipboard: Option<Clipboard>,
     /// A paste waiting for the user. Every key goes to this until it is answered.
     prompt: Option<Prompt>,
+    flash: Flash,
     result: Result<(), Error>,
 }
 
@@ -227,6 +230,8 @@ impl App {
             self.latest.pending.store(false, Ordering::Release);
             let _ = self.waker.wake();
         }
+        self.flash
+            .observe(self.frame.clipboard_writes, Instant::now());
         if let Some(open) = &mut self.open {
             if self.ime_cursor != self.frame.cursor {
                 self.ime_cursor = self.frame.cursor;
@@ -239,13 +244,16 @@ impl App {
                     );
                 }
             }
-            if self.preedit.0.is_empty() && self.prompt.is_none() {
+            let plain = self.prompt.is_none() && self.flash.until().is_none();
+            if self.preedit.0.is_empty() && plain {
                 open.renderer.draw(&self.frame)?;
             } else {
                 self.composed.clone_from(&self.frame);
                 ime::overlay(&mut self.composed, &self.preedit.0, self.preedit.1);
                 if let Some(prompt) = &self.prompt {
                     paste::banner(&mut self.composed, prompt);
+                } else {
+                    self.flash.banner(&mut self.composed);
                 }
                 open.renderer.draw(&self.composed)?;
             }
@@ -384,6 +392,15 @@ impl App {
 }
 
 impl ApplicationHandler<Notice> for App {
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
+        if let StartCause::ResumeTimeReached { .. } = cause {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            if let Some(open) = &self.open {
+                open.window.request_redraw();
+            }
+        }
+    }
+
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.open.is_some() {
             return;
@@ -453,6 +470,11 @@ impl ApplicationHandler<Notice> for App {
                     self.result = Err(error);
                     event_loop.exit();
                 }
+                event_loop.set_control_flow(
+                    self.flash
+                        .until()
+                        .map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
+                );
             }
             _ => {}
         }
@@ -516,6 +538,7 @@ pub fn run(size: Option<(u32, u32)>) -> Result<(), Error> {
         wheel: 0.0,
         clipboard: None,
         prompt: None,
+        flash: Flash::default(),
         result: Ok(()),
     };
     event_loop.run_app(&mut app)?;

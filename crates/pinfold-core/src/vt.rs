@@ -1,6 +1,7 @@
 //! The terminal engine behind a trait, with `alacritty_terminal` as its implementation.
 
 use std::ops::Range;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -182,17 +183,26 @@ fn is_fixed_format(reply: &str) -> bool {
 /// Collects what the terminal wants to send back to the program.
 ///
 /// Every other event is dropped, which keeps OSC 52 clipboard reads and writes and colour
-/// queries unanswered. Clipboard writes need the status-bar flash from the threat model.
+/// queries unanswered. A clipboard write is only counted, for the window to show, and its
+/// text goes no further.
 #[derive(Clone, Default)]
-struct Replies(Arc<Mutex<Vec<u8>>>);
+struct Replies {
+    pending: Arc<Mutex<Vec<u8>>>,
+    clipboard_writes: Arc<AtomicU32>,
+}
 
 impl EventListener for Replies {
     fn send_event(&self, event: Event) {
-        if let Event::PtyWrite(text) = event
-            && is_fixed_format(&text)
-            && let Ok(mut pending) = self.0.lock()
-        {
-            pending.extend_from_slice(text.as_bytes());
+        match event {
+            Event::PtyWrite(text) if is_fixed_format(&text) => {
+                if let Ok(mut pending) = self.pending.lock() {
+                    pending.extend_from_slice(text.as_bytes());
+                }
+            }
+            Event::ClipboardStore(..) => {
+                self.clipboard_writes.fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
         }
     }
 }
@@ -377,7 +387,7 @@ impl AlacrittyEngine {
     }
 
     fn take_replies(&self, replies: &mut Vec<u8>) {
-        if let Ok(mut pending) = self.replies.0.lock() {
+        if let Ok(mut pending) = self.replies.pending.lock() {
             replies.append(&mut pending);
         }
     }
@@ -495,6 +505,7 @@ impl VtEngine for AlacrittyEngine {
             MouseEncoding::Legacy
         };
         frame.alternate_scroll = mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL);
+        frame.clipboard_writes = self.replies.clipboard_writes.load(Ordering::Relaxed);
     }
 
     fn scroll(&mut self, lines: i32) -> bool {
@@ -591,6 +602,40 @@ mod tests {
         let mut replies = Vec::new();
         engine.feed(bytes, &mut replies);
         replies
+    }
+
+    fn clipboard_writes(engine: &AlacrittyEngine) -> u32 {
+        let mut frame = Frame::default();
+        engine.frame(&mut frame);
+        frame.clipboard_writes
+    }
+
+    #[test]
+    fn a_clipboard_write_is_counted_and_never_answered() {
+        let mut engine = AlacrittyEngine::new(4, 20);
+        assert_eq!(clipboard_writes(&engine), 0);
+        assert!(feed(&mut engine, b"\x1b]52;c;aGk=\x07").is_empty());
+        assert_eq!(clipboard_writes(&engine), 1);
+        feed(&mut engine, b"\x1b]52;c;aG");
+        feed(&mut engine, b"k=\x1b\\");
+        assert_eq!(clipboard_writes(&engine), 2);
+    }
+
+    #[test]
+    fn what_writes_nothing_is_not_counted() {
+        let mut engine = AlacrittyEngine::new(4, 20);
+        assert!(feed(&mut engine, b"\x1b]52;c;?\x07").is_empty());
+        feed(&mut engine, b"\x1b]52;c;not base64!\x07");
+        feed(&mut engine, b"\x1b]52;x;aGk=\x07");
+        assert_eq!(clipboard_writes(&engine), 0);
+    }
+
+    #[test]
+    fn a_flood_of_clipboard_writes_only_moves_a_counter() {
+        let mut engine = AlacrittyEngine::new(4, 20);
+        let flood = b"\x1b]52;c;aGk=\x07".repeat(10_000);
+        assert!(feed(&mut engine, &flood).is_empty());
+        assert_eq!(clipboard_writes(&engine), 10_000);
     }
 
     #[test]

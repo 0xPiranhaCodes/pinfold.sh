@@ -6,8 +6,8 @@ use pinfold_core::io::MAX_INPUT;
 use pinfold_proto::{Cell, Frame};
 
 const GROUND: u32 = 0x0012_151a;
-const TEXT: u32 = 0x00e2_e5ea;
-const AMBER: u32 = 0x00f5_b544;
+pub(crate) const TEXT: u32 = 0x00e2_e5ea;
+pub(crate) const AMBER: u32 = 0x00f5_b544;
 const RED: u32 = 0x00ff_8a8a;
 
 const SHELLS: [&str; 6] = ["sh", "bash", "zsh", "dash", "fish", "ksh"];
@@ -55,7 +55,8 @@ fn risk(text: &str) -> Option<&'static str> {
 /// # Errors
 ///
 /// Returns the prompt to show if `text` must not be sent as it is.
-// shortcut: asks for every program, not only a shell at a prompt, until OSC 133 tells them apart (#26).
+// This asks for every program. OSC 133 cannot narrow that: marks are program output, so a
+// fake "running" over a shell at its prompt would let these lines run unasked (T4, T7).
 pub fn check(text: String) -> Result<String, Prompt> {
     if text.len() > MAX_INPUT {
         return Err(Prompt::TooLarge);
@@ -89,6 +90,11 @@ pub fn banner(frame: &mut Frame, prompt: &Prompt) {
             ("  Esc dismisses".to_owned(), TEXT),
         ],
     };
+    row(frame, &spans);
+}
+
+/// Adds a row of coloured `spans` under the pane in `frame`, cut to the window.
+pub(crate) fn row(frame: &mut Frame, spans: &[(String, u32)]) {
     let columns = usize::from(frame.columns);
     let start = frame.cells.len();
     let characters = spans
@@ -158,7 +164,7 @@ mod tests {
         assert_eq!(check("x".repeat(MAX_INPUT + 1)), Err(Prompt::TooLarge));
     }
 
-    fn row(prompt: &Prompt, columns: u16) -> (Frame, String) {
+    fn drawn(prompt: &Prompt, columns: u16) -> (Frame, String) {
         let mut frame = Frame {
             rows: 1,
             columns,
@@ -187,7 +193,7 @@ mod tests {
             lines: 3,
             risk: Some("sudo"),
         };
-        let (frame, text) = row(&prompt, 80);
+        let (frame, text) = drawn(&prompt, 80);
         assert_eq!(frame.rows, 2);
         assert_eq!(frame.cells.len(), 160);
         assert_eq!(frame.cells[0].character, 'x');
@@ -197,7 +203,7 @@ mod tests {
 
     #[test]
     fn the_banner_is_cut_to_the_window() {
-        let (frame, text) = row(&Prompt::TooLarge, 5);
+        let (frame, text) = drawn(&Prompt::TooLarge, 5);
         assert_eq!(frame.cells.len(), 10);
         assert_eq!(text, " ✕ er");
     }

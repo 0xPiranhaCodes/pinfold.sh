@@ -85,4 +85,6 @@ pub struct Frame {
     pub mouse_encoding: MouseEncoding,
     /// Whether the wheel should send arrow keys, on the alternate screen.
     pub alternate_scroll: bool,
+    /// How many OSC 52 clipboard writes the program has asked for, wrapping.
+    pub clipboard_writes: u32,
 }
