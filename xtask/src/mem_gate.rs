@@ -115,7 +115,9 @@ fn measure_once(budget: &Budget, args: &[&str]) -> io::Result<Reading> {
     let _ = child.wait();
     // Nothing tells a window that its core was killed to exit, as it stays to say so.
     if let Some(pid) = window {
-        Command::new("kill").arg(pid.to_string()).status()?;
+        // The shell's builtin, as a slim image has no `kill` program.
+        let kill = format!("kill {pid}");
+        Command::new("/bin/sh").args(["-c", &kill]).status()?;
     }
     let bytes = measured.map(|(bytes, _)| bytes);
     match bytes {

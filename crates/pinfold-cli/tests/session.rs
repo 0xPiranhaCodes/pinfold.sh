@@ -83,13 +83,17 @@ impl Drop for Session {
     fn drop(&mut self) {
         let core = self.read("core");
         if !core.trim().is_empty() {
-            let _ = Command::new("kill")
-                .args(["-9", core.trim()])
-                .stderr(Stdio::null())
-                .status();
+            let _ = kill(core.trim()).stderr(Stdio::null()).status();
         }
         let _ = fs::remove_dir_all(&self.directory);
     }
+}
+
+/// The shell's builtin, as a slim image has no `kill` program.
+fn kill(pid: &str) -> Command {
+    let mut command = Command::new("/bin/sh");
+    command.args(["-c", &format!("kill -9 {pid}")]);
+    command
 }
 
 fn shows(frame: &Frame, text: &str) -> bool {
@@ -170,8 +174,7 @@ fn a_session_outlives_its_client_and_says_when_the_core_dies() {
     assert!(session.wait_for("reattached"), "the screen did not survive");
 
     let core = session.read("core");
-    let killed = Command::new("kill").args(["-9", core.trim()]).status();
-    assert!(killed.unwrap().success());
+    assert!(kill(core.trim()).status().unwrap().success());
     assert!(
         session.wait_for("ended"),
         "the client missed the core dying"
