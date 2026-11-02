@@ -236,6 +236,7 @@ impl Reader {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alacritty_terminal::term::cell::Hyperlink;
 
     fn cell(c: char, flags: Flags) -> Cell {
         Cell {
@@ -346,11 +347,15 @@ mod tests {
     fn marks_and_links_stay_on_their_cells() {
         let mut rows = stored(&["ab>", "c"]);
         rows[1][0].push_zerowidth('\u{301}');
+        let link = Hyperlink::new(Some("a"), "https://pinfold.sh".to_owned());
+        rows[1][0].set_hyperlink(Some(link.clone()));
         let mut out = Vec::new();
         let mut visit = |row: &[Cell]| out.push(row.to_vec());
         let mut reader = Reader::new(Flow::new(9), 0, usize::MAX, 0);
         rows.iter().for_each(|row| reader.row(row, &mut visit));
         assert_eq!(out[0][2].zerowidth(), Some(&['\u{301}'][..]));
+        assert_eq!(out[0][2].hyperlink(), Some(link));
+        assert_eq!(out[0][1].hyperlink(), None);
     }
 
     #[test]
