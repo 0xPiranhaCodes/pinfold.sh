@@ -350,8 +350,6 @@ impl Window {
 #[derive(Default)]
 pub(crate) struct Host {
     window: Option<Window>,
-    /// shortcut: reaped only when a link ends or a window opens, so one stays a zombie until
-    /// then. Reap each turn if windows ever end often.
     dying: Vec<Child>,
 }
 
@@ -504,6 +502,7 @@ impl Reactor {
 
     /// Runs a pass of the link, and ends it if that says to. Called at the end of each turn.
     pub(crate) fn serve_window(&mut self) {
+        self.host.reap();
         let Some(mut window) = self.host.window.take() else {
             return;
         };
@@ -727,6 +726,24 @@ mod tests {
         peer.raw(&[100, 0, 0, 0, 1, 0]);
         drop(peer);
         assert_link_ends_and_pty_lives(&mut reactor, pane);
+    }
+
+    #[test]
+    fn a_killed_window_is_reaped_on_a_later_turn() {
+        let mut reactor = Reactor::new().unwrap();
+        let mut pane = Command::new("/bin/sh");
+        pane.args(["-c", ALIVE]);
+        reactor.spawn(pane, 24, 80).unwrap();
+        reactor.spawn_window(Path::new("/bin/cat")).unwrap();
+        let window = reactor.host.window.as_ref().unwrap();
+        window
+            .session
+            .socket
+            .shutdown(std::net::Shutdown::Both)
+            .unwrap();
+        assert!(turn_until(&mut reactor, |r| {
+            !r.has_window() && r.host.dying.is_empty()
+        }));
     }
 
     #[test]
