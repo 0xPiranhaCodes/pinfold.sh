@@ -25,6 +25,7 @@ Entries are generated from Conventional Commits with git-cliff
 - Glyph cache capped at 1 MB, and CPU drawing of cell rows.
 - A scrollback store with a 2 MB cap per pane, holding what leaves a pane's screen.
 - `cargo xtask mem-gate` measures 10k lines of typical text and a pane at its scrollback cap.
+- `cargo xtask mem-gate` measures the window with a full screen of bold, italic and CJK text.
 - Fuzzing of the terminal input path, on each PR and nightly.
 - Function keys, modifier combinations and application cursor mode, as xterm sends them.
 - Paste from the clipboard, with a confirmation for anything that ends a line.

@@ -22,6 +22,8 @@ Commands:
 const FUZZ_SMOKE_SECONDS: u32 = 30;
 /// Pinned here and in the workflows, so a broken nightly cannot fail every PR.
 const FUZZ_TOOLCHAIN: &str = "+nightly-2026-10-15";
+/// Runs as the window's shell, from the workspace root like the other paths here.
+const HEAVY_SCREEN: &str = "tests/window/heavy-screen.sh";
 
 #[derive(Debug, PartialEq)]
 enum Task {
@@ -148,6 +150,7 @@ fn mem_gate_task() -> ExitCode {
             per_pane_over: None,
             settle: mem_gate::SETTLE,
             wait_for_line: false,
+            screen: None,
         },
         mem_gate::Budget {
             metric: "10k lines of typical text",
@@ -157,6 +160,7 @@ fn mem_gate_task() -> ExitCode {
             per_pane_over: Some((replay_baseline, 1)),
             settle: mem_gate::SETTLE,
             wait_for_line: true,
+            screen: None,
         },
         mem_gate::Budget {
             metric: "Scrollback at its cap",
@@ -166,6 +170,7 @@ fn mem_gate_task() -> ExitCode {
             per_pane_over: Some((replay_baseline, 1)),
             settle: mem_gate::SETTLE,
             wait_for_line: true,
+            screen: None,
         },
         mem_gate::Budget {
             metric: "Each idle pane",
@@ -175,6 +180,7 @@ fn mem_gate_task() -> ExitCode {
             per_pane_over: Some((&["--idle", "1"], 7)),
             settle: mem_gate::SETTLE,
             wait_for_line: false,
+            screen: None,
         },
     ];
     if cfg!(target_os = "macos") {
@@ -186,6 +192,17 @@ fn mem_gate_task() -> ExitCode {
             per_pane_over: None,
             settle: mem_gate::WINDOW_SETTLE,
             wait_for_line: false,
+            screen: None,
+        });
+        budgets.push(mem_gate::Budget {
+            metric: "Window on macOS with text, 1512x1890",
+            limit: mem_gate::WINDOW_LIMIT_HALF_RETINA,
+            program: &window,
+            args: &["--size", "1512x1890"],
+            per_pane_over: None,
+            settle: mem_gate::WINDOW_SETTLE,
+            wait_for_line: false,
+            screen: Some(Path::new(HEAVY_SCREEN)),
         });
     }
     if cfg!(target_os = "linux") {
@@ -197,6 +214,17 @@ fn mem_gate_task() -> ExitCode {
             per_pane_over: None,
             settle: mem_gate::WINDOW_SETTLE,
             wait_for_line: false,
+            screen: None,
+        });
+        budgets.push(mem_gate::Budget {
+            metric: "Window on X11 with text, 1920x1080",
+            limit: mem_gate::WINDOW_LIMIT_FULL_HD,
+            program: &window,
+            args: &["--size", "1920x1080"],
+            per_pane_over: None,
+            settle: mem_gate::WINDOW_SETTLE,
+            wait_for_line: false,
+            screen: Some(Path::new(HEAVY_SCREEN)),
         });
     }
     if mem_gate::run(&budgets) {
