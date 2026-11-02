@@ -4,14 +4,14 @@ The Homebrew formula, AppImage and .deb recipes, and the macOS Developer ID sign
 entitlements arrive in M5. The core and window are ad-hoc signed with the hardened runtime
 until then, which a same-user process needs to be refused a task port (ADR-0020).
 
-`macos/bundle.sh` builds `Pinfold.app` from built binaries. `macos/AppIcon.icns` holds the
-Pinfold logo, which [TRADEMARK.md](../TRADEMARK.md) covers.
+`macos/bundle.sh` builds `PinFold.app` from built binaries. `macos/AppIcon.icns` holds the
+PinFold logo, which [TRADEMARK.md](../TRADEMARK.md) covers.
 
 ```sh
 cargo build --release -p pinfold-cli
 sh packaging/macos/bundle.sh target/release/pinfold target/release/pinfold-core \
   target/release/pinfold-window target/release
-open target/release/Pinfold.app
+open target/release/PinFold.app
 ```
 
 `pinfold`, `pinfold-core` and `pinfold-window` must sit in one directory: the launcher and the

@@ -1,12 +1,12 @@
 #!/bin/sh
-# Builds Pinfold.app from binaries already built. Run from the repository root:
+# Builds PinFold.app from binaries already built. Run from the repository root:
 #   sh packaging/macos/bundle.sh <pinfold> <pinfold-core> <pinfold-window> <output directory>
 set -eu
 
 pinfold=$1
 core=$2
 window=$3
-app=$4/Pinfold.app
+app=$4/PinFold.app
 version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
 
 rm -rf "$app"

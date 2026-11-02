@@ -156,7 +156,7 @@ EOF
   echo "== the bundle, with a real window"
   mkdir "$WORK/bundle"
   sh packaging/macos/bundle.sh "$BIN/pinfold" "$BIN/pinfold-core" "$BIN/pinfold-window" "$WORK/bundle" >/dev/null
-  local macos=$WORK/bundle/Pinfold.app/Contents/MacOS window
+  local macos=$WORK/bundle/PinFold.app/Contents/MacOS window
   mkdir "$WORK/config"
   export XDG_CONFIG_HOME=$WORK/config
   for mode in launched adopted; do

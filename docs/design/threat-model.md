@@ -108,7 +108,7 @@ into the core:
 
    A plain macOS build is therefore not safe from a same-user process that can ad-hoc sign a
    program, which needs no admin rights and no Developer Mode. That task port reads the core's
-   memory, and a task port normally allows writes too, which was not tried. `Pinfold.app` is
+   memory, and a task port normally allows writes too, which was not tried. `PinFold.app` is
    signed with the hardened runtime for this reason. A `cargo` build is not.
 
    These stay open on purpose. `pinfold-core --idle <panes>` and `--window` skip hardening so
@@ -126,7 +126,7 @@ environment.
 ### Still open
 
 - Whether a build without the hardened runtime, such as Homebrew building from source, should
-  refuse to run a session or warn about it. Only the core and window of `Pinfold.app` have it.
+  refuse to run a session or warn about it. Only the core and window of `PinFold.app` have it.
 - How macOS closes the pid-reuse race. `LOCAL_PEERTOKEN` is the likely answer and is
   untested.
 - How sandboxed agents block TIOCSTI while staying in their pane's session, tested with

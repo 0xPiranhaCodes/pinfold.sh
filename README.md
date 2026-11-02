@@ -1,11 +1,11 @@
-# Pinfold
+# PinFold
 
 ![status: pre-alpha](https://img.shields.io/badge/status-pre--alpha-orange)
 ![license: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)
 
 A memory-first terminal for agentic coding, written in Rust.
 
-> **Pre-alpha.** Pinfold does not run yet. This repository holds the design, the
+> **Pre-alpha.** PinFold does not run yet. This repository holds the design, the
 > decisions and the project scaffolding. Everything below describes what we are
 > building, not what exists today.
 
@@ -15,7 +15,7 @@ _Screenshot to come. The design direction, "Graphite Grid", is in
 
 ## What it is
 
-Pinfold is a standalone desktop terminal for Linux (X11 and Wayland) and macOS.
+PinFold is a standalone desktop terminal for Linux (X11 and Wayland) and macOS.
 It has a built-in multiplexer (tabs, splits, detach and attach, so no tmux is
 needed). A markdown reader, a ranger-style file manager and a git diff viewer are
 planned for v0.2.
@@ -27,7 +27,7 @@ reboot.
 
 1. **The smallest memory footprint in its class.** Every subsystem has a budget,
    and CI will fail any change that exceeds one.
-2. **Security.** Pinfold gives agents a programmable channel into your shells, so
+2. **Security.** PinFold gives agents a programmable channel into your shells, so
    that channel is scoped, audited and gated by prompts that programs cannot fake.
    See the [threat model](docs/design/threat-model.md), including what these
    controls do not do.

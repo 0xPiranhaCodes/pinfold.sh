@@ -40,7 +40,7 @@ Mode off) and Linux 7.2 (arm64, `ptrace_scope` 0), and the threat model holds th
 - On macOS `PT_DENY_ATTACH` stops `ptrace` only, and the attacker gets `SIGSEGV`. It does not
   stop `task_for_pid`: an ad-hoc signed process with the debugger entitlement read a hardened
   core's memory. Point 1 alone does not meet its aim on macOS. The hardened runtime refused
-  that process, so `Pinfold.app` now has it. Builds from `cargo` do not.
+  that process, so `PinFold.app` now has it. Builds from `cargo` do not.
 - Neither state reaches a pane, on either system, and calling `harden` twice is harmless.
 - Under a debugger a macOS core or window exits with status 45 at `harden`, not with a signal.
   The startup option this ADR calls for is `pinfold-core --idle <panes>`. It ran under a tracer,
