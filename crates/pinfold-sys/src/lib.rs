@@ -4,6 +4,7 @@
 
 use std::io;
 use std::mem::MaybeUninit;
+use std::os::fd::{AsRawFd, BorrowedFd};
 
 #[cfg(feature = "clipboard")]
 pub mod clipboard;
@@ -34,6 +35,39 @@ pub fn footprint(pid: u32) -> io::Result<u64> {
 pub fn effective_uid() -> u32 {
     // SAFETY: geteuid takes no arguments, cannot fail and touches no memory.
     unsafe { libc::geteuid() }
+}
+
+/// Stops a same-user process from copying a PTY master out of this one (ADR-0020). Call this
+/// before opening any PTY. It lasts for the process and ends at `exec`.
+///
+/// On macOS a process with a debugger attached dies here, and on Linux this also stops other
+/// processes reading its `/proc` entries, which is why `cargo xtask mem-gate` measures a core
+/// that has not called it.
+///
+/// # Errors
+///
+/// Returns an error if the system refuses. A core must not go on without this.
+pub fn harden() -> io::Result<()> {
+    platform::harden()
+}
+
+/// Returns the user at the other end of a connected Unix socket.
+///
+/// # Errors
+///
+/// Returns an error if `socket` is not a connected Unix socket.
+///
+/// # Examples
+///
+/// ```
+/// use std::os::fd::AsFd;
+///
+/// let (ours, _theirs) = std::os::unix::net::UnixStream::pair()?;
+/// assert_eq!(pinfold_sys::peer_uid(ours.as_fd())?, pinfold_sys::effective_uid());
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn peer_uid(socket: BorrowedFd<'_>) -> io::Result<u32> {
+    platform::peer_uid(socket.as_raw_fd())
 }
 
 /// A moment on the local clock.
@@ -86,6 +120,37 @@ pub fn local_time(seconds: i64) -> Option<LocalTime> {
 #[cfg(target_os = "linux")]
 mod platform {
     use std::io;
+    use std::mem::MaybeUninit;
+    use std::os::fd::RawFd;
+
+    pub fn harden() -> io::Result<()> {
+        // SAFETY: PR_SET_DUMPABLE reads only its integer argument and touches no memory.
+        match unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) } {
+            0 => Ok(()),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
+    pub fn peer_uid(socket: RawFd) -> io::Result<u32> {
+        let mut peer = MaybeUninit::<libc::ucred>::uninit();
+        let mut length = size_of::<libc::ucred>() as libc::socklen_t;
+        // SAFETY: `peer` and `length` are valid for writes for the call, and `length` holds
+        // the size of `peer`.
+        let result = unsafe {
+            libc::getsockopt(
+                socket,
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                peer.as_mut_ptr().cast(),
+                &raw mut length,
+            )
+        };
+        if result != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: getsockopt succeeded, so it wrote a whole `ucred`.
+        Ok(unsafe { peer.assume_init() }.uid)
+    }
 
     pub fn footprint(pid: u32) -> io::Result<u64> {
         let text = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup"))?;
@@ -102,6 +167,25 @@ mod platform {
 mod platform {
     use std::io;
     use std::mem::MaybeUninit;
+    use std::os::fd::RawFd;
+    use std::ptr;
+
+    pub fn harden() -> io::Result<()> {
+        // SAFETY: PT_DENY_ATTACH takes no address or data and touches no memory.
+        match unsafe { libc::ptrace(libc::PT_DENY_ATTACH, 0, ptr::null_mut(), 0) } {
+            0 => Ok(()),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
+    pub fn peer_uid(socket: RawFd) -> io::Result<u32> {
+        let (mut user, mut group) = (0, 0);
+        // SAFETY: `user` and `group` are valid for writes for the call.
+        match unsafe { libc::getpeereid(socket, &raw mut user, &raw mut group) } {
+            0 => Ok(user),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
 
     pub fn footprint(pid: u32) -> io::Result<u64> {
         let pid = libc::c_int::try_from(pid).map_err(io::Error::other)?;
