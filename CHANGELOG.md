@@ -55,6 +55,7 @@ Entries are generated from Conventional Commits with git-cliff
 - Cargo workspace with empty crates, `cargo xtask`, CI and a dry-run release workflow.
 - M0 spike results for caller identity, tiered scrollback, the process split and window memory, with the M0 report.
 - The binary protocol between the core and the window, as pure encoding and decoding with a streaming decoder and a fuzz target.
+- Prefix keys as pure logic, with tmux-style tab and split bindings and a `keys.prefix` config key, not yet wired into the window.
 
 ### Fixed
 

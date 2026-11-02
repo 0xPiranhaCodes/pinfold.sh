@@ -5,6 +5,7 @@ mod ime;
 mod input;
 mod mouse;
 mod paste;
+pub mod prefix;
 mod reload;
 mod search_bar;
 mod selection;

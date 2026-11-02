@@ -11,6 +11,7 @@ variable is unset. Saving the file applies it to the running window within about
 | `macos_option_as_alt` | bool   | `false` | Option sends Alt instead of composing text. macOS only   |
 | `background_opacity`  | number | `1`     | Default background opacity, from 0 to 1. macOS only      |
 | `background_blur`     | bool   | `false` | Blur what shows through the background. macOS only       |
+| `keys.prefix`         | string | `"C-a"` | Prefix, `C-` and a lowercase letter. Not used yet        |
 
 ```toml
 font_size = 14
@@ -18,6 +19,9 @@ font_path = "/System/Library/Fonts/Menlo.ttc"
 macos_option_as_alt = true
 background_opacity = 0.85
 background_blur = true
+
+[keys]
+prefix = "C-b"
 ```
 
 `font_path` takes a TrueType or OpenType file, or the first font in a collection. Pinfold
@@ -42,6 +46,9 @@ stderr and uses the defaults for every key. That covers an unknown key or a bad 
 file's place, a file it cannot read, and a file that another user owns or that group or
 others can write (the rule from the threat model). A symlink is followed, and those
 checks apply to its target.
+
+`keys.prefix` is read and checked, but the window does not act on prefix keys yet. Their
+bindings are listed in `crates/pinfold-ui/src/prefix.rs`.
 
 ## Reload
 
