@@ -1,6 +1,6 @@
 //! Watches the config file from a thread of its own, so a slow disk cannot stall the window.
 
-use std::io;
+use std::io::{self, Write};
 use std::thread;
 use std::time::Duration;
 
@@ -15,8 +15,11 @@ fn check(watch: &mut Watch, send: &impl Fn(Config) -> bool) -> bool {
         None => true,
         Some(Ok(config)) => send(config),
         Some(Err(error)) => {
-            // shortcut: stderr only, so a launch from the Dock shows nothing, draw it in the chrome.
-            eprintln!("pinfold: keeping the current settings: {error}");
+            // shortcut: only the log hears this, so no one sees it, draw it in the chrome.
+            let _ = writeln!(
+                io::stderr(),
+                "pinfold: keeping the current settings: {error}"
+            );
             true
         }
     }

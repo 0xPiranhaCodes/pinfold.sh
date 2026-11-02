@@ -12,6 +12,7 @@ fn parse_size(text: &str) -> Option<(u32, u32)> {
 }
 
 fn main() -> ExitCode {
+    pinfold_cli::panics_name_no_text();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     let size = match args[..] {
