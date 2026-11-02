@@ -2,10 +2,12 @@
 //! (ADR-0028).
 
 use std::io;
+use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The descriptor a program started by [`spawn_with_link`] finds its end of the link on.
 pub const LINK_FD: RawFd = 3;
@@ -105,6 +107,30 @@ pub fn spawn_with_link(mut command: Command, link: UnixStream) -> io::Result<Chi
         });
     }
     command.spawn()
+}
+
+/// Takes the end of the link this process was started with, on [`LINK_FD`].
+///
+/// The descriptor is still inheritable, so call this before starting anything, and take a
+/// close-on-exec copy, as ADR-0028 asks.
+///
+/// # Errors
+///
+/// Returns an error if [`LINK_FD`] is closed or not a socket, so this process has no link, or
+/// if it was taken before.
+pub fn take_link() -> io::Result<OwnedFd> {
+    static TAKEN: AtomicBool = AtomicBool::new(false);
+    let mut found = MaybeUninit::<libc::stat>::zeroed();
+    // SAFETY: `found` is valid for writes of a whole stat for the call.
+    check(unsafe { libc::fstat(LINK_FD, found.as_mut_ptr()) })?;
+    // SAFETY: fstat succeeded, and all-zero bytes are valid for this integer struct.
+    let mode = unsafe { found.assume_init() }.st_mode;
+    if mode & libc::S_IFMT != libc::S_IFSOCK || TAKEN.swap(true, Ordering::Relaxed) {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    // SAFETY: LINK_FD is open, `TAKEN` makes this the only owner this function hands out, and
+    // nothing else in the process names this number.
+    Ok(unsafe { OwnedFd::from_raw_fd(LINK_FD) })
 }
 
 #[cfg(test)]
