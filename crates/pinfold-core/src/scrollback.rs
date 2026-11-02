@@ -2,15 +2,20 @@
 //!
 //! Rows are encoded into one open block, which is compressed once it is full. Styles are
 //! written inline per run, because LZ4 removes their repeats within a block.
+//!
+//! Stored rows never change. Each block also keeps how its rows lay out at the pane's width
+//! (ADR-0029), and a new width costs nothing until something reads history.
 
 use std::collections::VecDeque;
-use std::ops::Range;
 
 use alacritty_terminal::grid::{HistorySink, Row};
 use alacritty_terminal::index::Column;
 use alacritty_terminal::term::cell::{Cell, Flags, Hyperlink};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Rgb};
 use lz4_flex::block::{CompressTable, compress_into_with_table, get_maximum_output_size};
+
+use crate::reflow::{Flow, Reader};
+use crate::vt::MAX_DIMENSION;
 
 /// The hard cap on one pane's scrollback.
 pub const BYTE_CAP: usize = 2_000_000;
@@ -40,6 +45,9 @@ const MAX_LINK: usize = 2048;
 const MAX_ZEROWIDTH: usize = 16;
 /// The most a block can inflate to. Anything claiming more is not a block.
 const MAX_INFLATED: usize = 16 * 1024 * 1024;
+/// The most a store's blocks can inflate to in all, which bounds what a new width reads. Bytes
+/// that compress this well are hostile, so only they lose history to it.
+const INFLATED_CAP: usize = 64 * 1024 * 1024;
 
 const NAMED: [NamedColor; 29] = {
     use NamedColor::*;
@@ -196,6 +204,39 @@ fn get_style(input: &mut &[u8]) -> Option<Style> {
     Some(Style { template })
 }
 
+fn skip_color(input: &mut &[u8]) -> Option<()> {
+    let size = match get_byte(input)? {
+        0 | 1 => 1,
+        2 => 3,
+        _ => return None,
+    };
+    *input = input.get(size..)?;
+    Some(())
+}
+
+fn skip_str(input: &mut &[u8]) -> Option<()> {
+    let length = get_varint(input)?;
+    *input = input.get(length..)?;
+    Some(())
+}
+
+/// Reads past a style for its flags alone, which is all a layout needs, so that linked history
+/// does not cost an allocation per run.
+fn skip_style(input: &mut &[u8]) -> Option<Flags> {
+    skip_color(input)?;
+    skip_color(input)?;
+    let flags = Flags::from_bits_truncate(u16::try_from(get_varint(input)?).ok()?);
+    if get_byte(input)? == 1 {
+        skip_color(input)?;
+    }
+    if get_byte(input)? == 1 {
+        skip_str(input)?;
+        skip_str(input)?;
+    }
+    skip_str(input)?;
+    Some(flags)
+}
+
 impl Style {
     fn cell(&self, c: char) -> Cell {
         let mut cell = self.template.clone();
@@ -214,6 +255,12 @@ struct Open {
     rows: usize,
     runs: Vec<u8>,
     text: String,
+    /// The layout as this block starts.
+    entry: Flow,
+    /// The layout after the last row.
+    flow: Flow,
+    /// The shown rows that start in this block.
+    shown: usize,
 }
 
 impl Open {
@@ -228,6 +275,7 @@ impl Open {
             .rposition(|cell| *cell != default)
             .map_or(0, |at| at + 1);
         put_varint(&mut self.runs, used);
+        self.shown += usize::from(self.flow.enter(used));
         let mut run: Option<(&Cell, usize)> = None;
         for cell in cells().take(used) {
             self.text.push(cell.c);
@@ -243,6 +291,8 @@ impl Open {
         if let Some((first, count)) = run {
             self.put_run(first, count);
         }
+        let last = used.checked_sub(1).map(|at| row[Column(at)].flags);
+        self.flow.leave(last.unwrap_or(Flags::empty()));
         self.rows += 1;
     }
 
@@ -251,11 +301,13 @@ impl Open {
         // A wide row of long links would otherwise pass the cap before the block is sealed.
         let links = self.runs.len() < 2 * BLOCK_BYTES;
         put_style(&mut self.runs, first, links);
+        let shown = &mut self.shown;
+        self.flow.place(first.flags, count, |_| *shown += 1);
     }
 
     /// Compresses this block into `spare.packed` and empties it. These buffers live as long
     /// as the store, because allocating them per seal leaves freed pages behind.
-    fn seal(&mut self, spare: &mut Spare) -> Option<usize> {
+    fn seal(&mut self, spare: &mut Spare) -> Option<(usize, usize)> {
         spare.raw.clear();
         spare.raw.reserve_exact(self.bytes() + 8);
         put_varint(&mut spare.raw, self.runs.len());
@@ -272,7 +324,9 @@ impl Open {
         self.runs.clear();
         self.text.clear();
         self.rows = 0;
-        size.ok().map(|size| 4 + size)
+        self.shown = 0;
+        self.entry = self.flow;
+        size.ok().map(|size| (4 + size, raw.len()))
     }
 }
 
@@ -294,6 +348,12 @@ impl std::fmt::Debug for Spare {
 struct Block {
     rows: usize,
     size: usize,
+    /// The shown rows that start here. Rows of a line that began earlier need no look back,
+    /// because `entry` says where that line had got to.
+    shown: usize,
+    entry: Flow,
+    /// The bytes this block inflates to.
+    inflated: usize,
 }
 
 /// Compressed blocks, oldest first, in chunks of one size.
@@ -358,38 +418,49 @@ impl Ring {
     }
 }
 
-/// Calls `visit` with the `wanted` rows of `count`, which are the only ones built. Returns
-/// nothing if the data is not what `Open` wrote.
+/// Gives `reader` the first `count` rows, stopping when it is done. Only rows it wants are built.
+/// Returns nothing if the data is not what `Open` wrote.
 fn decode_rows(
     count: usize,
     mut runs: &[u8],
     text: &str,
-    wanted: &Range<usize>,
+    reader: &mut Reader,
     visit: &mut impl FnMut(&[Cell]),
 ) -> Option<()> {
     let mut characters = text.chars();
     let mut row = Vec::new();
-    for index in 0..count.min(wanted.end) {
-        let keep = wanted.contains(&index);
+    for _ in 0..count {
+        if reader.done() {
+            break;
+        }
         let mut left = get_varint(&mut runs)?;
+        let keep = reader.wants(left);
+        if !keep {
+            reader.enter(left);
+        }
         row.clear();
+        let mut last = Flags::empty();
         while left > 0 {
             let length = get_varint(&mut runs)?;
             if length == 0 || length > left {
                 return None;
             }
-            let style = get_style(&mut runs)?;
             if keep {
+                let style = get_style(&mut runs)?;
                 for _ in 0..length {
                     row.push(style.cell(characters.next()?));
                 }
             } else {
+                last = skip_style(&mut runs)?;
                 characters.nth(length - 1)?;
+                reader.skip_cells(last, length);
             }
             left -= length;
         }
         if keep {
-            visit(&row);
+            reader.row(&row, visit);
+        } else {
+            reader.leave(last);
         }
     }
     Some(())
@@ -400,7 +471,7 @@ fn decode_block(
     count: usize,
     data: &[u8],
     raw: &mut Vec<u8>,
-    wanted: &Range<usize>,
+    reader: &mut Reader,
     visit: &mut impl FnMut(&[Cell]),
 ) -> Option<()> {
     let (size, compressed) = lz4_flex::block::uncompressed_size(data).ok()?;
@@ -413,7 +484,7 @@ fn decode_block(
     let mut input = raw.get(..size)?;
     let length = get_varint(&mut input)?;
     let (runs, text) = input.split_at_checked(length)?;
-    decode_rows(count, runs, std::str::from_utf8(text).ok()?, wanted, visit)
+    decode_rows(count, runs, std::str::from_utf8(text).ok()?, reader, visit)
 }
 
 /// One pane's scrollback.
@@ -430,9 +501,17 @@ pub struct Scrollback {
     ring: Ring,
     blocks: VecDeque<Block>,
     block_rows: usize,
+    /// The shown rows that start in `blocks`.
+    block_shown: usize,
+    /// The bytes `blocks` inflate to.
+    inflated: usize,
+    /// How many stored rows have gone, which numbers the ones held.
+    evicted: usize,
+    /// Whether `Block::shown` and `Block::entry` are for an older width.
+    stale: bool,
     byte_cap: usize,
     line_cap: usize,
-    /// The number of the oldest row held. See [`Scrollback::end`].
+    /// The number of the oldest shown row held. See [`Scrollback::end`].
     oldest: usize,
     /// Rows numbered below this were cleared, not evicted.
     floor: usize,
@@ -458,6 +537,10 @@ impl Scrollback {
             ring: Ring::default(),
             blocks: VecDeque::new(),
             block_rows: 0,
+            block_shown: 0,
+            inflated: 0,
+            evicted: 0,
+            stale: false,
             byte_cap,
             line_cap,
             oldest: 0,
@@ -465,10 +548,106 @@ impl Scrollback {
         }
     }
 
-    /// Returns the number of rows held.
+    /// Lays rows out at `columns` from now on, or as they were written if that is 0, which is
+    /// where a new store starts. This reads nothing: [`Self::sync`] does, once it is needed.
+    /// Numbers move up as far as they could need to, so that `sync` leaves [`Self::end`] alone.
+    ///
+    /// ```
+    /// let mut scrollback = pinfold_core::scrollback::Scrollback::new();
+    /// scrollback.set_width(80);
+    /// scrollback.sync();
+    /// assert!(scrollback.is_empty());
+    /// ```
+    pub fn set_width(&mut self, columns: u16) {
+        if columns == self.open.flow.width {
+            return;
+        }
+        let stored = self.block_rows + self.open.rows;
+        self.open.flow.width = columns;
+        self.open.entry.width = columns;
+        self.stale = stored > 0;
+        let shortest = usize::from(columns).saturating_sub(1).max(1);
+        let most = stored.saturating_mul(usize::from(MAX_DIMENSION) / shortest + 2);
+        self.oldest += (self.floor + most).saturating_sub(self.end());
+    }
+
+    /// Brings the layout up to the width set, inflating each block once. Until this has run,
+    /// [`Self::len`] and everything counted from it are an estimate, but [`Self::end`] is not.
+    /// `benches/scrollback.rs` measures it.
+    pub fn sync(&mut self) {
+        if !std::mem::take(&mut self.stale) {
+            return;
+        }
+        let end = self.end();
+        let mut spare = std::mem::take(&mut self.spare);
+        let flow = Flow::new(self.open.flow.width);
+        let mut reader = Reader::counting(flow);
+        let (mut offset, mut shown) = (0, 0);
+        for block in &mut self.blocks {
+            block.entry = reader.flow();
+            self.ring.read(offset, block.size, &mut spare.packed);
+            offset += block.size;
+            let (data, raw) = (&spare.packed, &mut spare.raw);
+            let decoded = decode_block(block.rows, data, raw, &mut reader, &mut |_| {});
+            block.shown = reader.take_started();
+            if decoded.is_none() {
+                block.shown = block.rows;
+                reader = Reader::counting(flow);
+            }
+            shown += block.shown;
+        }
+        self.spare = spare;
+        self.block_shown = shown;
+        self.open.entry = reader.flow();
+        let open = &self.open;
+        let decoded = decode_rows(open.rows, &open.runs, &open.text, &mut reader, &mut |_| {});
+        self.open.flow = if decoded.is_some() {
+            reader.flow()
+        } else {
+            flow
+        };
+        self.open.shown = reader.take_started();
+        self.oldest = end.saturating_sub(self.len()).max(self.floor);
+    }
+
+    /// Returns the number of the stored row that shown row `first` starts in. Unlike a shown
+    /// row's number, this holds across widths.
+    #[must_use]
+    pub(crate) fn stored_row(&self, first: usize) -> Option<usize> {
+        self.walk(first, 1, &mut Spare::default(), &mut |_| {})
+    }
+
+    /// Returns the index of the shown row that stored row `number` starts in.
+    #[must_use]
+    pub(crate) fn shown_index(&self, number: usize) -> usize {
+        let mut left = number.saturating_sub(self.evicted);
+        let (mut shown, mut offset) = (0, 0);
+        let (mut packed, mut raw) = (Vec::new(), Vec::new());
+        let mut reader = None;
+        for block in &self.blocks {
+            if left < block.rows {
+                self.ring.read(offset, block.size, &mut packed);
+                let reader = reader.insert(Reader::counting(block.entry));
+                let _ = decode_block(left, &packed, &mut raw, reader, &mut |_| {});
+                break;
+            }
+            left -= block.rows;
+            shown += block.shown;
+            offset += block.size;
+        }
+        let reader = reader.unwrap_or_else(|| {
+            let open = &self.open;
+            let mut reader = Reader::counting(open.entry);
+            let _ = decode_rows(left, &open.runs, &open.text, &mut reader, &mut |_| {});
+            reader
+        });
+        (shown + reader.started()).saturating_sub(usize::from(reader.inside_row()))
+    }
+
+    /// Returns the number of shown rows held, which is the rows stored until a width is set.
     #[must_use]
     pub fn len(&self) -> usize {
-        self.block_rows + self.open.rows
+        self.block_shown + self.open.shown
     }
 
     /// Returns whether no rows are held.
@@ -477,8 +656,9 @@ impl Scrollback {
         self.len() == 0
     }
 
-    /// Returns the number the next row will get. Numbers count every row pushed and are never
-    /// reused, so a viewer's place survives pushes and evictions.
+    /// Returns the number the next shown row will get. Numbers count every row shown and stay
+    /// on their rows through pushes and evictions, so a viewer's place survives both. They hold
+    /// for one width: a new width numbers its rows back from this same end.
     #[must_use]
     pub fn end(&self) -> usize {
         self.oldest + self.len()
@@ -504,14 +684,14 @@ impl Scrollback {
         self.ring.bytes() + self.blocks.len() * BLOCK_OVERHEAD + working
     }
 
-    /// Returns up to `count` rows from `first`, where 0 is the oldest row held. Rows are
-    /// trimmed of trailing default cells.
+    /// Returns up to `count` shown rows from `first`, where 0 is the oldest row held. Rows are
+    /// trimmed of trailing default cells. After [`Self::set_width`], call [`Self::sync`] first.
     #[must_use]
     pub fn rows(&self, first: usize, count: usize) -> Vec<Vec<Cell>> {
         let mut out = Vec::new();
         let mut spare = Spare::default();
         let mut visit = |row: &[Cell]| out.push(row.to_vec());
-        self.walk(first, count, &mut spare, &mut visit);
+        let _ = self.walk(first, count, &mut spare, &mut visit);
         out
     }
 
@@ -520,47 +700,66 @@ impl Scrollback {
     /// rows in the heap. `benches/scrollback.rs` measures what scrolling adds to footprint.
     pub fn read_rows(&mut self, first: usize, count: usize, mut visit: impl FnMut(&[Cell])) {
         let mut spare = std::mem::take(&mut self.spare);
-        self.walk(first, count, &mut spare, &mut visit);
+        let _ = self.walk(first, count, &mut spare, &mut visit);
         self.spare = spare;
     }
 
+    /// Reads shown rows from the block where the first one starts, on through as many blocks as
+    /// its line takes. Returns the number of the stored row that the first one starts in.
     fn walk(
         &self,
         first: usize,
-        mut count: usize,
+        count: usize,
         spare: &mut Spare,
         visit: &mut impl FnMut(&[Cell]),
-    ) {
-        let (mut skip, mut offset) = (first, 0);
+    ) -> Option<usize> {
+        let (mut skip, mut offset, mut stored) = (first, 0, self.evicted);
+        let mut reader: Option<Reader> = None;
         for block in &self.blocks {
-            if count == 0 {
-                return;
-            }
             let start = offset;
             offset += block.size;
-            if skip >= block.rows {
-                skip -= block.rows;
-                continue;
+            let reader = match &mut reader {
+                Some(reader) => reader,
+                None if skip >= block.shown => {
+                    skip -= block.shown;
+                    stored += block.rows;
+                    continue;
+                }
+                None => reader.insert(Reader::new(block.entry, skip, count, stored)),
+            };
+            if reader.done() {
+                return reader.first_stored();
             }
             self.ring.read(start, block.size, &mut spare.packed);
-            let wanted = skip..skip.saturating_add(count);
-            let _ = decode_block(block.rows, &spare.packed, &mut spare.raw, &wanted, visit);
-            count -= count.min(block.rows - skip);
-            skip = 0;
+            let data = &spare.packed;
+            let _ = decode_block(block.rows, data, &mut spare.raw, reader, visit);
         }
-        let wanted = skip..skip.saturating_add(count);
         let open = &self.open;
-        let _ = decode_rows(open.rows, &open.runs, &open.text, &wanted, visit);
+        if reader.is_none() && skip >= open.shown {
+            return None;
+        }
+        let mut reader = reader.unwrap_or_else(|| Reader::new(open.entry, skip, count, stored));
+        let _ = decode_rows(open.rows, &open.runs, &open.text, &mut reader, visit);
+        reader.finish(true, visit);
+        reader.first_stored()
     }
 
     fn seal(&mut self) {
-        let rows = self.open.rows;
-        let Some(size) = self.open.seal(&mut self.spare) else {
+        let (rows, shown, entry) = (self.open.rows, self.open.shown, self.open.entry);
+        let Some((size, inflated)) = self.open.seal(&mut self.spare) else {
             return;
         };
         self.ring.push(&self.spare.packed[..size]);
         self.block_rows += rows;
-        self.blocks.push_back(Block { rows, size });
+        self.block_shown += shown;
+        self.inflated += inflated;
+        self.blocks.push_back(Block {
+            rows,
+            size,
+            shown,
+            entry,
+            inflated,
+        });
     }
 
     fn drop_oldest(&mut self) -> bool {
@@ -568,7 +767,10 @@ impl Scrollback {
             return false;
         };
         self.block_rows -= block.rows;
-        self.oldest += block.rows;
+        self.block_shown -= block.shown;
+        self.inflated -= block.inflated;
+        self.evicted += block.rows;
+        self.oldest += block.shown;
         self.ring.drop_oldest(block.size);
         true
     }
@@ -580,14 +782,22 @@ impl HistorySink<Cell> for Scrollback {
         if self.open.rows >= BLOCK_ROWS || self.open.bytes() >= BLOCK_BYTES {
             self.seal();
         }
-        while (self.bytes() > self.byte_cap || self.len() > self.line_cap) && self.drop_oldest() {}
+        let over = |store: &Self| {
+            store.bytes() > store.byte_cap
+                || store.block_rows + store.open.rows > store.line_cap
+                || store.inflated > INFLATED_CAP
+        };
+        while over(self) && self.drop_oldest() {}
     }
 
     fn clear(&mut self) {
-        let end = self.end();
+        let (end, width, stored) = (self.end(), self.open.flow.width, self.evicted);
+        let stored = stored + self.block_rows + self.open.rows;
         *self = Self::with_caps(self.byte_cap, self.line_cap);
         self.oldest = end;
         self.floor = end;
+        self.evicted = stored;
+        self.set_width(width);
     }
 
     fn is_empty(&self) -> bool {
@@ -749,6 +959,27 @@ mod tests {
     }
 
     #[test]
+    fn a_block_costs_what_adr_0029_says() {
+        assert_eq!(BLOCK_OVERHEAD, 40);
+    }
+
+    #[test]
+    fn what_a_new_width_inflates_is_capped() {
+        let mut wide = row(&"x".repeat(1024));
+        let uri = "u".repeat(MAX_LINK - 1);
+        for column in 0..1024 {
+            let link = Hyperlink::new(Some("a"), uri.clone());
+            wide[Column(column)].set_hyperlink(Some(link));
+        }
+        let mut store = Scrollback::with_caps(usize::MAX, usize::MAX);
+        for _ in 0..INFLATED_CAP / (2 * BLOCK_BYTES) + 2 {
+            store.push(&wide);
+            assert!(store.inflated <= INFLATED_CAP);
+        }
+        assert!(store.evicted > 0);
+    }
+
+    #[test]
     fn clearing_forgets_everything() {
         let mut scrollback = Scrollback::new();
         for number in 0..BLOCK_ROWS + 1 {
@@ -809,8 +1040,9 @@ mod tests {
             count in 0..100_usize,
             data in proptest::collection::vec(0..=255_u8, 0..2048),
         ) {
-            let _ = decode_block(count, &data, &mut Vec::new(), &(0..count), &mut |_| {});
-            let _ = decode_rows(count, &data, "text", &(0..count), &mut |_| {});
+            let reader = || Reader::new(Flow::new(7), 0, count, 0);
+            let _ = decode_block(count, &data, &mut Vec::new(), &mut reader(), &mut |_| {});
+            let _ = decode_rows(count, &data, "text", &mut reader(), &mut |_| {});
         }
     }
 }

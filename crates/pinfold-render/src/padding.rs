@@ -3,8 +3,11 @@
 /// Padding on each side in logical pixels, as `(left, top, right, bottom)`. The top puts the
 /// first row level with the macOS traffic lights.
 const LOGICAL: (f64, f64, f64, f64) = (14.0, 8.0, 14.0, 10.0);
-/// Logical pixels under the first row, so the top bar stands clear of the pane.
-const FIRST_ROW_GAP: f64 = 6.0;
+/// Logical pixels under the top bar, so it stands clear of the pane.
+const BAR_GAP: f64 = 6.0;
+
+/// Rows of the top bar: a title, then the tab strip. The gap comes after them.
+pub const BAR_ROWS: usize = 2;
 
 /// Physical pixels around the grid. Only the default background is drawn here, and window
 /// chrome can use these numbers to place itself.
@@ -18,7 +21,7 @@ pub struct Padding {
     pub right: usize,
     /// Pixels below the last row, at least.
     pub bottom: usize,
-    /// Pixels between the first row and the second.
+    /// Pixels between the top bar and the rows below it.
     pub gap: usize,
 }
 
@@ -39,14 +42,14 @@ impl Padding {
             top: pixels(LOGICAL.1),
             right: pixels(LOGICAL.2),
             bottom: pixels(LOGICAL.3),
-            gap: pixels(FIRST_ROW_GAP),
+            gap: pixels(BAR_GAP),
         }
     }
 
     /// Returns the pixel a row starts at, for cells `cell_height` tall.
     #[must_use]
     pub fn row_top(self, row: usize, cell_height: usize) -> usize {
-        let gap = if row == 0 { 0 } else { self.gap };
+        let gap = if row < BAR_ROWS { 0 } else { self.gap };
         self.top
             .saturating_add(row.saturating_mul(cell_height))
             .saturating_add(gap)
@@ -127,13 +130,13 @@ mod tests {
     }
 
     #[test]
-    fn only_rows_after_the_first_sit_below_the_gap() {
+    fn only_rows_after_the_bar_sit_below_the_gap() {
         let padding = Padding {
             gap: 6,
             ..padding()
         };
         assert_eq!(padding.row_top(0, 20), 12);
-        assert_eq!(padding.row_top(1, 20), 38);
+        assert_eq!(padding.row_top(1, 20), 32);
         assert_eq!(padding.row_top(2, 20), 58);
         assert_eq!(padding.grid(128, 68, CELL), (2, 10));
         assert_eq!(padding.grid(128, 67, CELL), (1, 10));
