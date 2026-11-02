@@ -141,12 +141,9 @@ impl Session {
                 reactor.paste(pane as usize, text);
             }
             // A PTY that refuses a size is the pane's problem, not a reason to drop the link.
-            Request::Resize {
-                pane,
-                rows,
-                columns,
-            } => {
-                let _ = reactor.resize(pane as usize, rows, columns);
+            // The one pane of a window, until the core lays out tabs.
+            Request::Resize { rows, columns } => {
+                let _ = reactor.resize(0, rows, columns);
             }
             Request::Scroll { pane, lines } => reactor.scroll(pane as usize, lines),
             Request::Reveal { pane, row } => reveal(reactor, pane as usize, row),
@@ -182,6 +179,16 @@ impl Session {
                 }
             }
             Request::Quit => return Err(Ended),
+            // Nothing owns tabs yet.
+            Request::NewTab
+            | Request::SwitchTab { .. }
+            | Request::StepTab { .. }
+            | Request::Split { .. }
+            | Request::ClosePane { .. }
+            | Request::Focus { .. }
+            | Request::MoveFocus { .. }
+            | Request::MoveBorder { .. }
+            | Request::Zoom => {}
         }
         Ok(())
     }
@@ -617,6 +624,7 @@ mod tests {
                         Notice::Copied { text, .. } => self.copied.push(text.to_owned()),
                         Notice::Exited { pane } => self.exited.push(pane),
                         Notice::Raise => self.raises += 1,
+                        Notice::Layout(_) | Notice::Refused { .. } => {}
                     }
                 }
             }
@@ -898,11 +906,6 @@ mod tests {
                 pane: bad,
                 text: "x",
             });
-            peer.send(Request::Resize {
-                pane: bad,
-                rows: 2,
-                columns: 2,
-            });
             peer.send(Request::Scroll {
                 pane: bad,
                 lines: 1,
@@ -933,11 +936,7 @@ mod tests {
             selection,
         });
         for (rows, columns) in [(1, 1), (24, 80)] {
-            peer.send(Request::Resize {
-                pane: number,
-                rows,
-                columns,
-            });
+            peer.send(Request::Resize { rows, columns });
         }
 
         serve(&mut reactor, &mut peer, |_, p| p.copied.len() == 1);
@@ -995,7 +994,6 @@ mod tests {
         });
 
         peer.send(Request::Resize {
-            pane: number,
             rows: 6,
             columns: 30,
         });
@@ -1120,7 +1118,6 @@ mod tests {
         let number = pane as u32;
         for size in [400, 24] {
             peer.send(Request::Resize {
-                pane: number,
                 rows: size,
                 columns: 80,
             });
@@ -1164,7 +1161,7 @@ mod tests {
 
     #[test]
     fn a_second_open_starts_nothing_until_the_first_has_gone() {
-        let hello = r"printf '\003\000\000\000\000\002\000' >&3; exec cat <&3 >/dev/null";
+        let hello = r"printf '\003\000\000\000\000\003\000' >&3; exec cat <&3 >/dev/null";
         let (binary, log) = window_script("second-open", hello);
         let mut reactor = Reactor::new().unwrap();
         assert_eq!(spawn_window(&mut reactor, &binary), WindowOpen::Started);

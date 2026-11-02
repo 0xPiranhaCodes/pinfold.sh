@@ -342,7 +342,6 @@ impl Link {
     /// returns.
     pub fn resize(&mut self, rows: u16, columns: u16) -> bool {
         self.send(Request::Resize {
-            pane: self.state.pane,
             rows: rows.clamp(1, MAX_DIMENSION),
             columns: columns.clamp(1, MAX_DIMENSION),
         })
@@ -639,7 +638,6 @@ mod tests {
             },
             Request::Paste { pane, text: "a\nb" },
             Request::Resize {
-                pane,
                 rows: 24,
                 columns: 80,
             },
@@ -667,7 +665,6 @@ mod tests {
         assert!(!link.paste(&"x".repeat(MAX_PASTE + 1)));
         assert!(link.resize(0, u16::MAX));
         let clamped = Request::Resize {
-            pane: PANE,
             rows: 1,
             columns: MAX_DIMENSION,
         };
