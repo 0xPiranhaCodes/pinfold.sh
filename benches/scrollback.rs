@@ -1,4 +1,4 @@
-//! Scrollback size, feed speed, read, wheel, vi, search and selection latency on the M0
+//! Scrollback size, feed speed, read, wheel, vi, search, selection and resize latency on the M0
 //! spike's corpora.
 //!
 //! Run with `cargo run --release -p pinfold-benches --bin scrollback`. Adding
@@ -455,6 +455,71 @@ fn motions(name: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+/// A pane holding one line that wraps across every row of the store, or one of rows of long
+/// links that compress well, which is the most a store can make a new width inflate.
+fn worst_case(name: &str) -> (AlacrittyEngine, usize) {
+    let (columns, bytes) = if name == "one-line" {
+        (COLUMNS, b"x".repeat(COLUMNS * 9_000))
+    } else {
+        let link = "u".repeat(2000);
+        let cell = format!("\x1b]8;id=a;{link}\x1b\\x\x1b]8;;\x1b\\");
+        (1024, cell.repeat(1024 * 2000).into_bytes())
+    };
+    let mut engine = AlacrittyEngine::new(SCREEN as u16, columns as u16);
+    engine.feed(&bytes, &mut Vec::new());
+    let held = engine.scrollback().lock().map_or(0, |store| store.len());
+    (engine, held)
+}
+
+/// Prints a table row for changing width: a step of a window drag at the live screen, the first
+/// read of history after one, a step with the view in history, and a wheel notch once reflowed.
+fn resizes(name: &str) -> std::io::Result<()> {
+    let (mut engine, held) = if name.starts_with("worst-") {
+        worst_case(name.trim_start_matches("worst-"))
+    } else {
+        filled(name)?
+    };
+    let (rows, columns) = engine.size();
+    let mut frame = Frame::default();
+    engine.frame(&mut frame);
+    let before = pinfold_sys::footprint(std::process::id())?;
+    let width = |step: u16| columns - 1 - step % 40;
+    let drag = |engine: &mut AlacrittyEngine, frame: &mut Frame| {
+        let mut times: Vec<f64> = (0..200)
+            .map(|step| {
+                let start = Instant::now();
+                engine.resize(rows, width(step));
+                engine.frame(frame);
+                std::hint::black_box((engine.position(0, 0), engine.view_rows()));
+                start.elapsed().as_secs_f64() * 1e3
+            })
+            .collect();
+        percentiles(&mut times)
+    };
+    let (live_p50, live_p99, _) = drag(&mut engine, &mut frame);
+    let start = Instant::now();
+    engine.scroll(SCREEN as i32 * 2);
+    engine.frame(&mut frame);
+    let first = start.elapsed().as_secs_f64() * 1e3;
+    let (view_p50, view_p99, _) = drag(&mut engine, &mut frame);
+    engine.scroll(i32::MIN);
+    engine.resize(rows, columns * 2 / 3);
+    let mut times: Vec<f64> = (0..2000)
+        .map(|_| {
+            let start = Instant::now();
+            engine.scroll(1);
+            engine.frame(&mut frame);
+            start.elapsed().as_secs_f64() * 1e3
+        })
+        .collect();
+    let (notch_p50, notch_p99, _) = percentiles(&mut times);
+    let grown = pinfold_sys::footprint(std::process::id())?.saturating_sub(before) as f64 / 1e6;
+    println!(
+        "| {name} | {held} | {live_p50:.3} | {live_p99:.3} | {first:.3} | {view_p50:.3} | {view_p99:.3} | {notch_p50:.3} | {notch_p99:.3} | {grown:.3} |"
+    );
+    Ok(())
+}
+
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if let [flag, dir] = args.as_slice()
@@ -474,6 +539,11 @@ fn main() -> std::io::Result<()> {
         && flag == "--motions"
     {
         return motions(name);
+    }
+    if let [flag, name] = args.as_slice()
+        && flag == "--resizes"
+    {
+        return resizes(name);
     }
     if let [flag] = args.as_slice()
         && flag == "--worst-query"
@@ -527,6 +597,16 @@ fn main() -> std::io::Result<()> {
     for name in CORPORA {
         std::process::Command::new(std::env::current_exe()?)
             .args(["--motions", name])
+            .status()?;
+    }
+    println!(
+        "\n| Corpus | Rows held | Live step p50 ms | p99 ms | First read ms | View step p50 ms | p99 ms | Notch p50 ms | p99 ms | Footprint growth MB |"
+    );
+    println!("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+    let worst = ["worst-one-line", "worst-huge-links"];
+    for name in CORPORA.iter().chain(&worst) {
+        std::process::Command::new(std::env::current_exe()?)
+            .args(["--resizes", name])
             .status()?;
     }
     println!(

@@ -44,7 +44,9 @@ pub trait VtEngine {
     fn feed(&mut self, bytes: &[u8], replies: &mut Vec<u8>);
 
     /// Changes the grid size, clamped to at least one row and `MIN_COLUMNS` columns and at
-    /// most `MAX_DIMENSION` of each.
+    /// most `MAX_DIMENSION` of each. A new width reflows history as well as the grid, and a view
+    /// in history stays on its text. This reads nothing unless the view is in history: what
+    /// reads history next pays, once for each width.
     fn resize(&mut self, rows: u16, columns: u16);
 
     /// Returns the size as `(rows, columns)`.
@@ -69,7 +71,9 @@ pub trait VtEngine {
     /// the view's top and that row.
     fn position(&self, line: u16, column: u16) -> Position;
 
-    /// Returns the numbers of the rows the view can reach, which always include the screen.
+    /// Returns the numbers of the rows the view can reach, which always include the screen. The
+    /// first is an estimate between a new width and the first read of history at it, as this is
+    /// called for each frame and must not make a window drag read the store.
     fn view_rows(&self) -> Range<usize>;
 
     /// Runs one bounded step of `search` over history and the screen, or only the screen on the
@@ -313,7 +317,9 @@ impl AlacrittyEngine {
             ..Config::default()
         };
         let mut term = Term::new(config, &Size::clamped(rows, columns), replies.clone());
-        let scrollback = Arc::new(Mutex::new(Scrollback::new()));
+        let mut store = Scrollback::new();
+        store.set_width(Size::clamped(rows, columns).columns);
+        let scrollback = Arc::new(Mutex::new(store));
         term.grid_mut().set_history_sink(scrollback.clone());
         Self {
             term,
@@ -349,7 +355,6 @@ impl AlacrittyEngine {
         let first = store.len() - back;
         let blank = self.cell(&GridCell::default());
         let columns = usize::from(frame.columns);
-        // shortcut: history keeps the width it was written at, until cold reflow in M2.
         store.read_rows(first, back.min(usize::from(frame.rows)), |row| {
             let end = frame.cells.len() + columns;
             let cells = row.iter().take(columns);
@@ -359,7 +364,39 @@ impl AlacrittyEngine {
         frame.cells.len() / columns.max(1)
     }
 
-    /// Returns the numbers of the rows that can be read, which always include the screen.
+    /// Lays history out at this width, which only what reads history pays for.
+    fn sync(&self) {
+        if let Ok(mut store) = self.scrollback.lock() {
+            store.sync();
+        }
+    }
+
+    /// Changes the width history reads at, keeping the view on the stored row at its top, and
+    /// runs `resize` with the store unlocked, because the grid writes to it.
+    // shortcut: the view keeps a stored row, not a cell, so inside a line of many rows it moves
+    // by up to one stored row. Keep the cell too if people lose their place in long lines.
+    // shortcut: a line that crosses from history into the grid stays cut there, short of the
+    // width, as the grid cannot take cells from the store. Copying and search still join it.
+    fn with_width(&mut self, columns: u16, resize: impl FnOnce(&mut Self)) {
+        let top = self.view.and_then(|number| {
+            let mut store = self.scrollback.lock().ok()?;
+            store.sync();
+            let index = store.index(number)?;
+            store.stored_row(index)
+        });
+        if let Ok(mut store) = self.scrollback.lock() {
+            store.set_width(columns);
+        }
+        resize(self);
+        if let (Some(stored), Ok(mut store)) = (top, self.scrollback.lock()) {
+            store.sync();
+            let first = store.end() - store.len();
+            self.view = Some(first + store.shown_index(stored));
+        }
+    }
+
+    /// Returns the numbers of the rows that can be read, which always include the screen. Until
+    /// the first read at a new width, the first of them is an estimate.
     fn held_rows(&self) -> Range<usize> {
         let Ok(store) = self.scrollback.lock() else {
             return 0..0;
@@ -452,7 +489,12 @@ impl VtEngine for AlacrittyEngine {
     }
 
     fn resize(&mut self, rows: u16, columns: u16) {
-        self.term.resize(Size::clamped(rows, columns));
+        let size = Size::clamped(rows, columns);
+        if usize::from(size.columns) == self.term.grid().columns() {
+            self.term.resize(size);
+        } else {
+            self.with_width(size.columns, |engine| engine.term.resize(size));
+        }
     }
 
     fn size(&self) -> (u16, u16) {
@@ -517,12 +559,13 @@ impl VtEngine for AlacrittyEngine {
     }
 
     fn scroll(&mut self, lines: i32) -> bool {
-        let Ok(store) = self.scrollback.lock() else {
+        let Ok(mut store) = self.scrollback.lock() else {
             return false;
         };
         if self.term.mode().intersects(NO_HISTORY) {
             return false;
         }
+        store.sync();
         let back = self.rows_back(&store);
         let target = back.saturating_add_signed(lines as isize).min(store.len());
         self.view = (target > 0).then(|| store.end() - target);
@@ -550,6 +593,7 @@ impl VtEngine for AlacrittyEngine {
     }
 
     fn search(&self, search: &mut Search) -> SearchStep {
+        self.sync();
         let rows = search.next_rows(&self.held_rows());
         self.visit_rows(rows.clone(), |number, row| search.row(number, row));
         search.end_step(rows)
@@ -558,6 +602,7 @@ impl VtEngine for AlacrittyEngine {
     // shortcut: one call and one allocation, whose pages the allocator keeps after it is freed.
     // Fine for small selections. `benches/scrollback.rs` measures a whole store this way.
     fn selection_text(&self, selection: Selection, text: &mut String) -> bool {
+        self.sync();
         let mut copy = Copying::new(selection);
         copy.next_rows(&self.held_rows());
         // Sized up front, since growing keeps the old copy and doubles what a copy costs.
@@ -574,6 +619,7 @@ impl VtEngine for AlacrittyEngine {
     }
 
     fn copy_step(&self, copy: &mut Copying, text: &mut String) -> CopyStep {
+        self.sync();
         let rows = copy.next_rows(&self.held_rows());
         self.visit_rows(rows.clone(), |number, row| copy.row(number, row, text));
         copy.end_step(rows)
