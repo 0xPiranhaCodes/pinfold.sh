@@ -71,10 +71,10 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Fixed
 
-- A paste or a key no longer vanishes while the core lags. The window waits for the link in order, holding at most about 3 MiB, and past that says so under the pane, as it does for input a stalled program has no room for. A paste over the 1 MiB limit, less its brackets, is refused with a note instead of going missing. The link's version is now 4.
 - A core test that failed on macOS when its stand-in window had already ended.
 - `pinfold` waits until the window is on screen, and fails with a short reason if the window cannot run, ends during start or is not ready after 2 seconds. It used to exit 0 once the process existed, and said only "no window can open".
 - Bold `i` and other glyphs of several contours no longer come out thinner than regular.
+- A paste or a key no longer vanishes while the core lags. The window waits for the link in order, holding at most about 3 MiB, and past that says so under the pane, as it does for input a stalled program has no room for. A paste over the 1 MiB limit, less its brackets, is refused with a note instead of going missing. The link's version is now 4.
 - Fallback font pages no longer count against the window once a frame is drawn.
 - A copy of a whole pane can run in steps, which keeps its text out of the core's footprint.
 - A window taller than 24 rows no longer costs the core about 2 MB, as growing a grid makes only the rows it needs.
