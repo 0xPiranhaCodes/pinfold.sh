@@ -122,7 +122,13 @@ impl Bar {
 }
 
 /// Writes `text` into the row at cell `row` from `column`, and returns the column after it.
-fn write(frame: &mut Frame, row: usize, mut column: usize, text: &str, colour: u32) -> usize {
+pub(crate) fn write(
+    frame: &mut Frame,
+    row: usize,
+    mut column: usize,
+    text: &str,
+    colour: u32,
+) -> usize {
     let columns = usize::from(frame.columns);
     for character in text.chars() {
         let width = character.width().unwrap_or(0);

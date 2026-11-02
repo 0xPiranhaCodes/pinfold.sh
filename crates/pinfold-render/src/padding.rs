@@ -1,7 +1,10 @@
 //! The empty pixels between the window's edge and the grid.
 
-/// Padding on each side in logical pixels, as `(left, top, right, bottom)`.
-const LOGICAL: (f64, f64, f64, f64) = (14.0, 12.0, 14.0, 10.0);
+/// Padding on each side in logical pixels, as `(left, top, right, bottom)`. The top puts the
+/// first row level with the macOS traffic lights.
+const LOGICAL: (f64, f64, f64, f64) = (14.0, 8.0, 14.0, 10.0);
+/// Logical pixels under the first row, so the top bar stands clear of the pane.
+const FIRST_ROW_GAP: f64 = 6.0;
 
 /// Physical pixels around the grid. Only the default background is drawn here, and window
 /// chrome can use these numbers to place itself.
@@ -15,6 +18,8 @@ pub struct Padding {
     pub right: usize,
     /// Pixels below the last row, at least.
     pub bottom: usize,
+    /// Pixels between the first row and the second.
+    pub gap: usize,
 }
 
 impl Padding {
@@ -24,7 +29,7 @@ impl Padding {
     /// use pinfold_render::padding::Padding;
     ///
     /// let padding = Padding::scaled(2.0);
-    /// assert_eq!((padding.left, padding.top), (28, 24));
+    /// assert_eq!((padding.left, padding.top), (28, 16));
     /// ```
     #[must_use]
     pub fn scaled(scale: f64) -> Self {
@@ -34,7 +39,17 @@ impl Padding {
             top: pixels(LOGICAL.1),
             right: pixels(LOGICAL.2),
             bottom: pixels(LOGICAL.3),
+            gap: pixels(FIRST_ROW_GAP),
         }
+    }
+
+    /// Returns the pixel a row starts at, for cells `cell_height` tall.
+    #[must_use]
+    pub fn row_top(self, row: usize, cell_height: usize) -> usize {
+        let gap = if row == 0 { 0 } else { self.gap };
+        self.top
+            .saturating_add(row.saturating_mul(cell_height))
+            .saturating_add(gap)
     }
 
     /// Returns how many whole `(width, height)` cells fit in a surface, as `(rows, columns)`.
@@ -46,7 +61,13 @@ impl Padding {
             u16::try_from(room / size).unwrap_or(u16::MAX)
         };
         (
-            fit(height, self.top.saturating_add(self.bottom), cell.1),
+            fit(
+                height,
+                self.top
+                    .saturating_add(self.bottom)
+                    .saturating_add(self.gap),
+                cell.1,
+            ),
             fit(width, self.left.saturating_add(self.right), cell.0),
         )
     }
@@ -78,16 +99,22 @@ mod tests {
             top: 12,
             right: 14,
             bottom: 10,
+            gap: 0,
         }
     }
 
     #[test]
     fn padding_follows_the_scale_factor() {
-        assert_eq!(Padding::scaled(1.0), padding());
+        let expected = Padding {
+            top: 8,
+            gap: 6,
+            ..padding()
+        };
+        assert_eq!(Padding::scaled(1.0), expected);
         let scaled = Padding::scaled(1.5);
         assert_eq!(
             (scaled.left, scaled.top, scaled.right, scaled.bottom),
-            (21, 18, 21, 15)
+            (21, 12, 21, 15)
         );
     }
 
@@ -97,6 +124,19 @@ mod tests {
         // One pixel short of the next row and column.
         assert_eq!(padding().grid(127, 61, CELL), (1, 9));
         assert_eq!(Padding::default().grid(128, 62, CELL), (3, 12));
+    }
+
+    #[test]
+    fn only_rows_after_the_first_sit_below_the_gap() {
+        let padding = Padding {
+            gap: 6,
+            ..padding()
+        };
+        assert_eq!(padding.row_top(0, 20), 12);
+        assert_eq!(padding.row_top(1, 20), 38);
+        assert_eq!(padding.row_top(2, 20), 58);
+        assert_eq!(padding.grid(128, 68, CELL), (2, 10));
+        assert_eq!(padding.grid(128, 67, CELL), (1, 10));
     }
 
     #[test]

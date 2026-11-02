@@ -42,7 +42,8 @@ echo "keys reached the program"
 xdotool type --delay 15 'stty -echo -icanon; printf "\033[?1000h\033[?1006h"; head -c 38 | od -An -c > /tmp/mouse; printf "\033[?1000l\033[?1006l"; stty sane'
 xdotool key Return
 sleep 0.5
-xdotool mousemove --window "$ID" 3 3 click 1 click 4
+# Below the top bar, in the pane's first row.
+xdotool mousemove --window "$ID" 3 36 click 1 click 4
 sleep 0.5
 mouse=$(tr -d ' \n' < /tmp/mouse)
 # Two wheel reports: winit counts a synthetic wheel button's press and its release.

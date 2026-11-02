@@ -79,7 +79,7 @@ fn instances(
         let (row, column) = (index / columns.max(1), index % columns.max(1));
         (
             padding.left as f32 + column as f32 * width,
-            padding.top as f32 + row as f32 * height,
+            padding.row_top(row, metrics.cell_height) as f32,
         )
     };
     // Backgrounds go first, so a wide glyph is not covered by the cell after it.
@@ -317,6 +317,7 @@ mod tests {
             top: 12,
             right: 14,
             bottom: 10,
+            gap: 0,
         };
         let cells = [cell(' ', PAPER), cell('x', 0x00ff_0000)];
         instances(&cells, 2, METRICS, padding, PAPER, slot, &mut out);
