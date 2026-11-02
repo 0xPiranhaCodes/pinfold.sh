@@ -95,8 +95,8 @@ Every PR that changes behavior needs tests.
 - **Golden images** cover renderer output.
 - **Property tests** (`proptest`) cover parser input paths, the layout tree and the
   scrollback compression round-trip.
-- **Fuzz targets** cover the VT input path, JSON-RPC decoder, markdown renderer,
-  unified-diff parser, paste sanitizer and config parser.
+- **Fuzz targets** cover the VT input path, window link decoder, JSON-RPC decoder, markdown
+  renderer, unified-diff parser, paste sanitizer and config parser.
 - **Conformance** runs vttest and esctest against a tracked pass list.
 - **Recorded agent sessions** cover status detection.
 - **Approval-prompt UI tests** prove that only the keyboard can answer a prompt.

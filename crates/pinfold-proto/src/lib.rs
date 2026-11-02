@@ -1,5 +1,7 @@
 //! API types, JSON Schemas and version negotiation, with no I/O.
 
+pub mod link;
+
 /// Bold text, set in the top byte of [`Cell::foreground`].
 pub const BOLD: u32 = 1 << 24;
 /// Italic text, set in the top byte of [`Cell::foreground`].

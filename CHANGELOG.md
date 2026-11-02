@@ -54,6 +54,7 @@ Entries are generated from Conventional Commits with git-cliff
 - PTY spawning, and the `VtEngine` trait over `alacritty_terminal`.
 - Cargo workspace with empty crates, `cargo xtask`, CI and a dry-run release workflow.
 - M0 spike results for caller identity, tiered scrollback, the process split and window memory, with the M0 report.
+- The binary protocol between the core and the window, as pure encoding and decoding with a streaming decoder and a fuzz target.
 
 ### Fixed
 
