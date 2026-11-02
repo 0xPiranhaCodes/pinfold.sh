@@ -896,11 +896,8 @@ mod tests {
         reactor.open_tab(pane, 24, 80).unwrap();
         reactor.spawn_window(Path::new("/bin/cat")).unwrap();
         let window = reactor.host.window.as_ref().unwrap();
-        window
-            .session
-            .socket
-            .shutdown(std::net::Shutdown::Both)
-            .unwrap();
+        // `cat` may have ended already, and macOS then answers that nothing is connected.
+        let _ = window.session.socket.shutdown(std::net::Shutdown::Both);
         assert!(turn_until(&mut reactor, |r| {
             !r.has_window() && r.host.dying.is_empty()
         }));

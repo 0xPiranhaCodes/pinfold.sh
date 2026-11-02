@@ -354,7 +354,7 @@ impl App {
     }
 
     fn open_window(&mut self, event_loop: &ActiveEventLoop) -> Result<(), Error> {
-        let attributes = Window::default_attributes().with_title("Pinfold");
+        let attributes = Window::default_attributes().with_title("PinFold");
         let attributes = match self.size {
             Some((width, height)) => attributes.with_inner_size(PhysicalSize::new(width, height)),
             None => attributes.with_inner_size(DEFAULT_SIZE),
