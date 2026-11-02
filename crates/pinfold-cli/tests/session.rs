@@ -32,10 +32,10 @@ impl Session {
         let directory = env::temp_dir().join(format!("ps{}{name}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir_all(directory.join("run"))?;
-        fs::copy(env!("CARGO_BIN_EXE_pinfold"), directory.join("pinfold"))?;
-        fs::copy(
+        place(env!("CARGO_BIN_EXE_pinfold"), &directory.join("pinfold"))?;
+        place(
             env!("CARGO_BIN_EXE_pinfold-core"),
-            directory.join("pinfold-core"),
+            &directory.join("pinfold-core"),
         )?;
         if let Some(window) = window {
             let script = directory.join("pinfold-window");
@@ -87,6 +87,12 @@ impl Drop for Session {
         }
         let _ = fs::remove_dir_all(&self.directory);
     }
+}
+
+/// Links a binary in. A copy's descriptor, open for writing, leaks into any child another test
+/// is forking, and Linux then refuses to run the copy with ETXTBSY.
+fn place(binary: &str, to: &Path) -> std::io::Result<()> {
+    fs::hard_link(binary, to).or_else(|_| fs::copy(binary, to).map(drop))
 }
 
 /// The shell's builtin, as a slim image has no `kill` program.
