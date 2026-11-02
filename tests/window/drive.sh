@@ -173,6 +173,36 @@ if [ "$(shell_in up)" != "$RIGHT" ]; then
 fi
 import -window root /out/splits.png
 echo "a split and a tab opened with real keys, each with its own shell"
+# The + button, a shell that exits, a tab's box, and a pane, with the window at 1000x640.
+xdotool mousemove --window "$ID" 970 34 click 1
+sleep 1
+PLUS=$(shell_in plus)
+if [ "$PLUS" = "$TAB" ] || [ "$PLUS" = "$RIGHT" ]; then
+  echo "FAIL: the + button did not open a tab"
+  exit 1
+fi
+xdotool type --delay 15 'exit'
+xdotool key Return
+sleep 1
+if ! gone "$PLUS"; then
+  echo "FAIL: a shell did not exit"
+  exit 1
+fi
+xdotool mousemove --window "$ID" 100 34 click 1
+sleep 1
+xdotool mousemove --window "$ID" 100 300 click 1
+sleep 1
+if [ "$(shell_in clicked)" != "$LEFT" ]; then
+  echo "FAIL: clicks did not reach the first tab's left pane"
+  exit 1
+fi
+xdotool mousemove --window "$ID" 700 100 click 1
+sleep 1
+if [ "$(shell_in up)" != "$RIGHT" ]; then
+  echo "FAIL: a click did not focus a pane"
+  exit 1
+fi
+echo "clicks open a tab, pick a tab and focus a pane"
 xdotool windowsize "$ID" 800 500
 sleep 1
 shell_in small >/dev/null
