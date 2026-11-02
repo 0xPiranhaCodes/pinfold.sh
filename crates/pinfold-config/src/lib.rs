@@ -4,7 +4,7 @@
 
 use std::env;
 use std::ffi::OsString;
-use std::fs::{Metadata, OpenOptions};
+use std::fs::{self, Metadata, OpenOptions};
 use std::io::{self, Read};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
@@ -17,7 +17,7 @@ pub const MAX_BYTES: u64 = 64 * 1024;
 const MIN_FONT_SIZE: f32 = 6.0;
 const MAX_FONT_SIZE: f32 = 72.0;
 
-/// Settings read at startup. Every key is optional.
+/// Settings read at startup and on each save. Every key is optional.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -146,6 +146,54 @@ fn check(metadata: &Metadata) -> Result<(), Error> {
     }
 }
 
+/// What changes when a file is saved or replaced, or its owner or mode change.
+fn stamp(path: &Path) -> Option<(u64, u64, i64, i64)> {
+    let metadata = fs::metadata(path).ok()?;
+    Some((
+        metadata.ino(),
+        metadata.size(),
+        metadata.ctime(),
+        metadata.ctime_nsec(),
+    ))
+}
+
+/// Notices saves to the config file by comparing its `stat`, which follows a symlink and
+/// sees a save by rename as well as a write in place.
+#[derive(Debug)]
+pub struct Watch {
+    path: PathBuf,
+    seen: Option<(u64, u64, i64, i64)>,
+}
+
+impl Watch {
+    /// Starts from the file as it is now. Create this before the first [`load`], so a save
+    /// between the two is not missed.
+    pub fn new(path: PathBuf) -> Self {
+        let seen = stamp(&path);
+        Self { path, seen }
+    }
+
+    /// Reads the file if it changed since the last poll, with the checks of [`load`]. Each
+    /// save is reported once, so a bad file is not reported every poll.
+    ///
+    /// shortcut: an editor that truncates and writes in place can be read half way, which the
+    /// next poll corrects, wait for the file to settle if a real editor shows that.
+    pub fn poll(&mut self) -> Option<Result<Config, Error>> {
+        let before = stamp(&self.path);
+        // A file that is gone can be the middle of a save, so it changes nothing.
+        if before.is_none() || before == self.seen {
+            return None;
+        }
+        let config = load(&self.path);
+        // Saved again while it was read, so the next poll reads the newer file.
+        if stamp(&self.path) != before {
+            return None;
+        }
+        self.seen = before;
+        Some(config)
+    }
+}
+
 /// Parses the contents of a config file.
 ///
 /// # Errors
@@ -171,7 +219,7 @@ pub fn parse(bytes: &[u8]) -> Result<Config, Error> {
 
 #[cfg(test)]
 mod tests {
-    use std::fs::{self, Permissions};
+    use std::fs::Permissions;
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::process::Command;
 
@@ -371,6 +419,100 @@ mod tests {
         assert_eq!(load(&path).unwrap(), Config::default());
         let (_dir, path) = file(&vec![b'\n'; limit + 1], 0o600).unwrap();
         assert!(matches!(load(&path), Err(Error::TooLarge)));
+    }
+
+    /// Replaces the file the way most editors save, by renaming a new file over it.
+    fn save_by_rename(path: &Path, contents: &[u8]) {
+        let new = path.with_extension("new");
+        fs::write(&new, contents).unwrap();
+        fs::set_permissions(&new, Permissions::from_mode(0o600)).unwrap();
+        fs::rename(&new, path).unwrap();
+    }
+
+    fn polled_size(watch: &mut Watch) -> Option<f32> {
+        watch.poll().map(|config| config.unwrap().font_size)
+    }
+
+    #[test]
+    fn an_unchanged_file_is_not_read_again() {
+        let (_dir, path) = file(b"font_size = 20", 0o600).unwrap();
+        let mut watch = Watch::new(path);
+        assert!(watch.poll().is_none());
+    }
+
+    #[test]
+    fn a_save_in_place_is_reported_once() {
+        let (_dir, path) = file(b"font_size = 20", 0o600).unwrap();
+        let mut watch = Watch::new(path.clone());
+        fs::write(&path, b"font_size = 21.5").unwrap();
+        assert_eq!(polled_size(&mut watch), Some(21.5));
+        assert!(watch.poll().is_none());
+    }
+
+    #[test]
+    fn a_save_by_rename_is_reported() {
+        let (_dir, path) = file(b"font_size = 20", 0o600).unwrap();
+        let mut watch = Watch::new(path.clone());
+        save_by_rename(&path, b"font_size = 21");
+        assert_eq!(polled_size(&mut watch), Some(21.0));
+        save_by_rename(&path, b"font_size = 22");
+        assert_eq!(polled_size(&mut watch), Some(22.0));
+    }
+
+    #[test]
+    fn a_save_through_a_symlink_is_reported() {
+        let (dir, path) = file(b"font_size = 20", 0o600).unwrap();
+        let link = dir.path().join("link.toml");
+        symlink(&path, &link).unwrap();
+        let mut watch = Watch::new(link);
+        save_by_rename(&path, b"font_size = 21");
+        assert_eq!(polled_size(&mut watch), Some(21.0));
+    }
+
+    #[test]
+    fn a_new_file_is_reported() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut watch = Watch::new(path.clone());
+        assert!(watch.poll().is_none());
+        fs::write(&path, b"font_size = 21").unwrap();
+        fs::set_permissions(&path, Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(polled_size(&mut watch), Some(21.0));
+    }
+
+    #[test]
+    fn a_deleted_file_changes_nothing() {
+        let (_dir, path) = file(b"font_size = 20", 0o600).unwrap();
+        let mut watch = Watch::new(path.clone());
+        fs::remove_file(&path).unwrap();
+        assert!(watch.poll().is_none());
+        save_by_rename(&path, b"font_size = 21");
+        assert_eq!(polled_size(&mut watch), Some(21.0));
+    }
+
+    #[test]
+    fn a_bad_save_is_reported_once_and_then_fixed() {
+        let (_dir, path) = file(b"font_size = 20", 0o600).unwrap();
+        let mut watch = Watch::new(path.clone());
+        fs::write(&path, b"font_size = 500").unwrap();
+        assert!(matches!(watch.poll(), Some(Err(Error::Invalid(_)))));
+        assert!(watch.poll().is_none());
+        fs::write(&path, b"font_size = 21").unwrap();
+        assert_eq!(polled_size(&mut watch), Some(21.0));
+    }
+
+    #[test]
+    fn a_save_gets_the_checks_of_the_first_load() {
+        let (_dir, path) = file(b"font_size = 20", 0o600).unwrap();
+        let mut watch = Watch::new(path.clone());
+        fs::set_permissions(&path, Permissions::from_mode(0o666)).unwrap();
+        assert!(matches!(watch.poll(), Some(Err(Error::Writable))));
+        // `chmod` alone is a change, so following the advice in the message is enough.
+        fs::set_permissions(&path, Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(polled_size(&mut watch), Some(20.0));
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(matches!(watch.poll(), Some(Err(Error::NotAFile))));
     }
 
     proptest! {

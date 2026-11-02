@@ -165,6 +165,11 @@ impl Renderer for MetalRenderer {
         self.shelves = Shelves::new(ATLAS_SIZE);
     }
 
+    fn set_font(&mut self, font: Font) {
+        self.fonts = font.into();
+        self.set_font_size(self.size);
+    }
+
     fn draw(&mut self, frame: &Frame) -> Result<(), RenderError> {
         cells_with_cursor(frame, &mut self.cells);
         let clear = frame.cells.first().map_or(0, |cell| cell.background);

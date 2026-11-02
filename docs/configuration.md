@@ -2,7 +2,7 @@
 
 Pinfold reads one TOML file at startup, on Linux and macOS alike:
 `$XDG_CONFIG_HOME/pinfold/pinfold.toml`, or `~/.config/pinfold/pinfold.toml` when that
-variable is unset. There is no reload yet, so restart to apply a change.
+variable is unset. Saving the file applies it to the running window within about a second.
 
 | Key                   | Type   | Default | Meaning                                                  |
 | --------------------- | ------ | ------- | -------------------------------------------------------- |
@@ -28,3 +28,17 @@ stderr and uses the defaults for every key. That covers an unknown key or a bad 
 file's place, a file it cannot read, and a file that another user owns or that group or
 others can write (the rule from the threat model). A symlink is followed, and those
 checks apply to its target.
+
+## Reload
+
+Every key applies on save, with no restart. The window keeps its size, so a new font or font
+size changes how many rows and columns fit, and programs get a resize. Editors that write the
+file in place and editors that save by rename both work, and so does a symlink.
+
+A save gets the same checks as startup. If it has any of the problems above, Pinfold prints
+why to stderr, once, and keeps the current settings rather than the defaults, until a later
+save or `chmod` fixes it. A bad `font_path` file means the bundled font, as it does at startup.
+Deleting the file changes nothing until the next start.
+
+Pinfold checks the file with one `stat` a second on a thread of its own, so an idle window
+wakes once a second for this. Changes to the font file itself are not noticed.

@@ -12,6 +12,7 @@ Entries are generated from Conventional Commits with git-cliff
 ### Added
 
 - A TOML config file with `font_size` and `macos_option_as_alt`. A bad file means the defaults.
+- Config hot reload: saving the file applies it to the running window, and a bad save keeps the current settings.
 - CJK text from a system font, opened only when the bundled font lacks a character.
 - Bold and italic drawing, a `font_path` config key, and text blended in linear light.
 - Text stays sharp across displays: the font size follows the window's scale factor.

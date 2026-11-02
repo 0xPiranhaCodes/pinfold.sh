@@ -26,11 +26,11 @@ use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent
 use winit::event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 #[cfg(target_os = "macos")]
-use winit::platform::macos::{OptionAsAlt, WindowAttributesExtMacOS};
+use winit::platform::macos::{OptionAsAlt, WindowAttributesExtMacOS, WindowExtMacOS};
 use winit::window::{Window, WindowId};
 
 use crate::paste::Prompt;
-use crate::{ime, input, mouse, paste};
+use crate::{ime, input, mouse, paste, reload};
 
 const DEFAULT_SIZE: LogicalSize<u32> = LogicalSize::new(1000, 640);
 const PANE: usize = 0;
@@ -70,6 +70,8 @@ enum Request {
 enum Notice {
     Frame,
     Exited,
+    /// The config file was saved, and this is what it now says.
+    Config(Config),
 }
 
 /// The latest screen. While `pending`, the window has not taken it yet, so the I/O thread
@@ -119,6 +121,15 @@ fn run_io(
 struct Open {
     window: Rc<Window>,
     renderer: Box<dyn Renderer>,
+}
+
+#[cfg(target_os = "macos")]
+fn option_as_alt(config: &Config) -> OptionAsAlt {
+    if config.macos_option_as_alt {
+        OptionAsAlt::Both
+    } else {
+        OptionAsAlt::None
+    }
 }
 
 /// Metal on macOS (ADR-0022), or CPU drawing if this Mac has no Metal device.
@@ -185,11 +196,7 @@ impl App {
         };
         // Without this macOS hands over the composed character, such as ƒ for Option+f.
         #[cfg(target_os = "macos")]
-        let attributes = attributes.with_option_as_alt(if self.config.macos_option_as_alt {
-            OptionAsAlt::Both
-        } else {
-            OptionAsAlt::None
-        });
+        let attributes = attributes.with_option_as_alt(option_as_alt(&self.config));
         let window = Rc::new(event_loop.create_window(attributes)?);
         window.set_ime_allowed(true);
         let size = self.config.font_size * window.scale_factor() as f32;
@@ -217,6 +224,25 @@ impl App {
         let size = open.window.inner_size();
         self.ime_cursor = None;
         self.resized(size);
+    }
+
+    /// Applies a saved config. The window keeps its size, so the grid gets new dimensions.
+    fn configure(&mut self, config: Config) {
+        if config == self.config {
+            return;
+        }
+        let old = std::mem::replace(&mut self.config, config);
+        let Some(open) = &mut self.open else { return };
+        #[cfg(target_os = "macos")]
+        open.window.set_option_as_alt(option_as_alt(&self.config));
+        if self.config.font_path != old.font_path {
+            match Font::chosen(self.config.font_path.as_deref()) {
+                Ok(font) => open.renderer.set_font(font),
+                Err(error) => eprintln!("pinfold: keeping the current font: {error}"),
+            }
+        }
+        let scale = open.window.scale_factor();
+        self.scale_changed(scale);
     }
 
     fn redraw(&mut self) -> Result<(), Error> {
@@ -405,6 +431,7 @@ impl ApplicationHandler<Notice> for App {
                 }
             }
             Notice::Exited => event_loop.exit(),
+            Notice::Config(config) => self.configure(config),
         }
     }
 
@@ -499,6 +526,9 @@ pub fn run(size: Option<(u32, u32)>) -> Result<(), Error> {
                 let _ = proxy.send_event(Notice::Exited);
             }
         })?;
+    // Before the file is first read, so a save between the two is not missed.
+    let proxy = event_loop.create_proxy();
+    reload::watch(move |config| proxy.send_event(Notice::Config(config)).is_ok())?;
     let mut app = App {
         config: config(),
         size,

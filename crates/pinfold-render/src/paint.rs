@@ -113,6 +113,11 @@ impl Painter {
         self.cache.set_size(clamp_size(size));
     }
 
+    /// Replaces the font, dropping every glyph drawn with the old one.
+    pub fn set_font(&mut self, font: Font) {
+        self.cache.set_font(font);
+    }
+
     /// Returns the glyph cache.
     #[must_use]
     pub fn cache(&self) -> &GlyphCache {
@@ -176,6 +181,8 @@ impl Painter {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use pinfold_proto::{BOLD, ITALIC};
 
     use super::*;
@@ -329,6 +336,22 @@ mod tests {
         assert_eq!(painter.cache().used(), 0);
         assert!(!painter.cache().contains('M'));
         assert!(painter.cell_size().0 > before.0 && painter.cell_size().1 > before.1);
+    }
+
+    #[test]
+    fn a_new_font_drops_glyphs_and_draws_what_the_old_one_lacked() {
+        let file = File::new(&kanji_font().unwrap()).unwrap();
+        let mut painter = painter();
+        let (mut buffer, width, height) = pixels(&painter, 1, 1);
+        let mut canvas = Canvas::new(&mut buffer, width, height).unwrap();
+        painter.draw_row(&mut canvas, 0, &[cell('M')]);
+        assert!(painter.cache().used() > 0);
+        painter.set_font(Font::open(Path::new(file.list[0])).unwrap());
+        assert_eq!(painter.cache().used(), 0);
+        let mut canvas = Canvas::new(&mut buffer, width, height).unwrap();
+        canvas.clear(PAPER);
+        painter.draw_row(&mut canvas, 0, &[cell(KANJI)]);
+        assert!(buffer.iter().any(|&pixel| pixel != PAPER));
     }
 
     #[test]
