@@ -52,6 +52,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Fixed
 
+- Bold `i` and other glyphs of several contours no longer come out thinner than regular.
 - Fallback font pages no longer count against the window once a frame is drawn.
 - A copy of a whole pane can run in steps, which keeps its text out of the core's footprint.
 - The config file is `pinfold.toml`, the name the design gives it.

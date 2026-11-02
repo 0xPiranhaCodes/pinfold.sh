@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use pinfold_proto::{BOLD, ITALIC};
-use swash::scale::{Render, ScaleContext, Source};
+use swash::scale::{Render, ScaleContext, Scaler, Source};
 use swash::zeno::{Format, Transform};
 use unicode_width::UnicodeWidthChar;
 
@@ -59,12 +59,13 @@ pub(crate) fn contained<T>(work: impl FnOnce() -> Option<T>) -> Option<T> {
 
 /// What a style does to an outline: how far to embolden it, then how to place it. Swash grows
 /// an outline up and to the right by twice the strength, so the shift centres bold on the old
-/// stem. Italic leans around the middle of the cell.
-fn synthetic(style: u32, size: f32, metrics: Metrics) -> (f32, Transform) {
+/// stem, and a negative strength grows the other way. Italic leans around the middle of the
+/// cell.
+fn synthetic(style: u32, size: f32, metrics: Metrics, grows: f32) -> (f32, Transform) {
     let bold = if style & BOLD == 0 {
         0.0
     } else {
-        size * BOLD_GROWTH / 2.0
+        grows * size * BOLD_GROWTH / 2.0
     };
     let slant = if style & ITALIC == 0 {
         0.0
@@ -76,6 +77,22 @@ fn synthetic(style: u32, size: f32, metrics: Metrics) -> (f32, Transform) {
     (bold, Transform::new(1.0, 0.0, slant, 1.0, across, -bold))
 }
 
+/// Returns the sign of the strength that emboldens this outline. Swash judges an outline's
+/// direction from all its points at once, which can come out backwards when there are several
+/// contours, as in `i`, and then a positive strength thins it.
+fn growth(scaler: &mut Scaler, id: u16) -> f32 {
+    let Some(mut outline) = scaler.scale_outline(id) else {
+        return 1.0;
+    };
+    let before = outline.bounds().width();
+    outline.embolden(1.0, 1.0);
+    if outline.bounds().width() < before {
+        -1.0
+    } else {
+        1.0
+    }
+}
+
 fn render(
     context: &mut ScaleContext,
     font: &Font,
@@ -85,8 +102,8 @@ fn render(
     style: u32,
     metrics: Metrics,
 ) -> Option<Glyph> {
-    let (bold, transform) = synthetic(style, size, metrics);
     let mut scaler = context.builder(font.face()).size(size).hint(hint).build();
+    let (bold, transform) = synthetic(style, size, metrics, growth(&mut scaler, id));
     let image = Render::new(&[Source::Outline])
         .format(Format::Alpha)
         .embolden(bold)
@@ -111,8 +128,8 @@ fn extent(
     style: u32,
     metrics: Metrics,
 ) -> Option<(f32, f32)> {
-    let (bold, transform) = synthetic(style, size, metrics);
     let mut scaler = context.builder(font.face()).size(size).hint(hint).build();
+    let (bold, transform) = synthetic(style, size, metrics, growth(&mut scaler, id));
     let mut outline = scaler.scale_outline(id)?;
     outline.embolden(bold, bold);
     outline.transform(&transform);
@@ -506,6 +523,17 @@ mod tests {
         assert_ne!(masks[1], masks[2]);
         assert_eq!(mask(&mut cache, BOLD), masks[0]);
         assert_eq!(cache.used(), used);
+    }
+
+    #[test]
+    fn bold_never_thins_a_glyph() {
+        let mut cache = GlyphCache::new(bundled(), 32.0, CACHE_LIMIT);
+        let ink = |glyph: &Glyph| glyph.mask.iter().map(|&a| u32::from(a)).sum::<u32>();
+        for character in '!'..='~' {
+            let regular = ink(cache.get(character, 0).unwrap());
+            let bold = ink(cache.get(character, BOLD).unwrap());
+            assert!(bold > regular, "{character}: {bold} is not over {regular}");
+        }
     }
 
     #[test]
