@@ -55,6 +55,7 @@ Entries are generated from Conventional Commits with git-cliff
 - Cargo workspace with empty crates, `cargo xtask`, CI and a dry-run release workflow.
 - M0 spike results for caller identity, tiered scrollback, the process split and window memory, with the M0 report.
 - The binary protocol between the core and the window, as pure encoding and decoding with a streaming decoder and a fuzz target.
+- The window's end of that link, a client that keeps a local copy of the screen and reports a disconnect as a value. Nothing uses it yet.
 
 ### Fixed
 

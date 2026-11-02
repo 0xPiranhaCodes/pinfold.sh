@@ -10,6 +10,7 @@ homepage.workspace = true
 publish.workspace = true
 
 [dependencies]
+mio = { version = "1.2.4", features = ["os-ext", "os-poll"] }
 pinfold-config = { path = "../pinfold-config", version = "0.0.0" }
 pinfold-core = { path = "../pinfold-core", version = "0.0.0" }
 pinfold-proto = { path = "../pinfold-proto", version = "0.0.0" }
