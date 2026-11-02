@@ -1,4 +1,5 @@
-//! Scrollback size, feed speed, read latency and wheel latency on the M0 spike's corpora.
+//! Scrollback size, feed speed, read, wheel, search and selection latency on the M0 spike's
+//! corpora.
 //!
 //! Run with `cargo run --release -p pinfold-benches --bin scrollback`. Adding
 //! `-- --write <dir>` saves the corpora instead, which is how `cargo xtask mem-gate` gets them.
@@ -14,12 +15,15 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 use pinfold_core::scrollback::Scrollback;
+use pinfold_core::search::{Direction, MAX_QUERY, Position, Search, SearchStep, Selection};
 use pinfold_core::vt::{AlacrittyEngine, VtEngine};
 use pinfold_proto::Frame;
 
 const COLUMNS: usize = 120;
 const SCREEN: usize = 50;
 const FED_LINES: usize = 12_000;
+/// Searches each way, and whole-store copies.
+const ROUNDS: usize = 20;
 const CORPORA: [&str; 7] = [
     "build-log",
     "plain-log",
@@ -185,37 +189,163 @@ fn feed(bytes: &[u8], sink: Option<&Arc<Mutex<Scrollback>>>) -> f64 {
     bytes.len() as f64 / 1e6 / start.elapsed().as_secs_f64()
 }
 
-/// Prints a table row for one wheel notch: a scroll and the frame it needs, over a pane's whole
-/// store and back. Each corpus runs in its own process, so footprint growth is its own.
-fn notches(name: &str) -> std::io::Result<()> {
+/// A pane that has been fed a corpus, and the rows its store holds.
+fn filled(name: &str) -> std::io::Result<(AlacrittyEngine, usize)> {
     let mut engine = AlacrittyEngine::new(SCREEN as u16, COLUMNS as u16);
     let mut replies = Vec::new();
     for read in corpus(name)?.chunks(64 * 1024) {
         engine.feed(read, &mut replies);
     }
     let held = engine.scrollback().lock().map_or(0, |store| store.len());
+    Ok((engine, held))
+}
+
+/// Returns p50, p99 and the maximum of `times`, which it sorts.
+fn percentiles(times: &mut [f64]) -> (f64, f64, f64) {
+    times.sort_by(f64::total_cmp);
+    let at = |share: usize| times.get(times.len() * share / 100).copied().unwrap_or(0.0);
+    (at(50), at(99), times.last().copied().unwrap_or(0.0))
+}
+
+/// Runs a search that misses over the whole store, both ways, which is the longest one runs.
+/// Returns the time of each step, which is one call on the reactor's thread, and of each search.
+fn misses(engine: &AlacrittyEngine, query: &str) -> (Vec<f64>, Vec<f64>) {
+    let (mut steps, mut wholes) = (vec![0.0; 64 * 1024], vec![0.0; ROUNDS * 2]);
+    steps.clear();
+    wholes.clear();
+    for round in 0..ROUNDS * 2 {
+        let (from, direction) = if round % 2 == 0 {
+            (Position::default(), Direction::Forward)
+        } else {
+            let row = usize::MAX;
+            (Position { row, column: 0 }, Direction::Backward)
+        };
+        let Some(mut search) = Search::new(query, from, direction) else {
+            continue;
+        };
+        let whole = Instant::now();
+        loop {
+            let start = Instant::now();
+            let step = engine.search(&mut search);
+            steps.push(start.elapsed().as_secs_f64() * 1e3);
+            if step != SearchStep::Running {
+                break;
+            }
+        }
+        wholes.push(whole.elapsed().as_secs_f64() * 1e3);
+    }
+    (steps, wholes)
+}
+
+/// Prints a table row from `misses`.
+fn print_misses(name: &str, call: &str, held: usize, mut times: (Vec<f64>, Vec<f64>), grown: f64) {
+    let calls = times.0.len() / times.1.len().max(1);
+    let (p50, p99, most) = percentiles(&mut times.0);
+    let (whole, _, _) = percentiles(&mut times.1);
+    println!(
+        "| {name} | {call} | {held} | {calls} | {p50:.3} | {p99:.3} | {most:.3} | {whole:.2} | {grown:.3} |"
+    );
+}
+
+/// The most work a query can make per cell: over rows of `a`, every window compares in full.
+fn worst_query() -> std::io::Result<()> {
+    let mut engine = AlacrittyEngine::new(SCREEN as u16, COLUMNS as u16);
+    let line = "a".repeat(COLUMNS - 1) + "\r\n";
+    engine.feed(line.repeat(FED_LINES).as_bytes(), &mut Vec::new());
+    let held = engine.scrollback().lock().map_or(0, |store| store.len());
+    let query = "a".repeat(MAX_QUERY - 1) + "b";
+    print_misses(
+        "all a",
+        "search, worst query",
+        held,
+        misses(&engine, &query),
+        0.0,
+    );
+    Ok(())
+}
+
+/// Prints table rows for searching a whole store and for copying all of it. Footprint growth
+/// leaves out what `bytes()` grew by and adds up from row to row, so "wheel too" is what search
+/// and scrolling cost together, and the copy row holds all three.
+fn finds(name: &str) -> std::io::Result<()> {
+    let (mut engine, held) = filled(name)?;
+    let pid = std::process::id();
+    let bytes = |engine: &AlacrittyEngine| {
+        let store = engine.scrollback().lock();
+        store.map_or(0, |store| store.bytes()) as u64
+    };
     let mut frame = Frame::default();
     engine.frame(&mut frame);
-    // Written before the first reading, so these pages do not count as growth.
     let mut times = vec![0.0; held * 2];
+    let (first_bytes, before) = (bytes(&engine), pinfold_sys::footprint(pid)?);
+    let grown = |engine: &AlacrittyEngine| -> std::io::Result<f64> {
+        let total = pinfold_sys::footprint(pid)?.saturating_sub(before);
+        Ok(total.saturating_sub(bytes(engine) - first_bytes) as f64 / 1e6)
+    };
+    let searches = misses(&engine, "absent-needle");
+    let growth = grown(&engine)?;
+    print_misses(name, "search", held, searches, growth);
+    wheel(&mut engine, &mut frame, &mut times);
+    let growth = grown(&engine)?;
+    println!("| {name} | wheel too | {held} | | | | | | {growth:.3} |");
+
+    let selection = Selection {
+        anchor: Position::default(),
+        focus: Position {
+            row: usize::MAX,
+            column: u16::MAX,
+        },
+    };
+    let mut times = vec![0.0; ROUNDS];
     times.clear();
-    let before = pinfold_sys::footprint(std::process::id())?;
+    let (mut size, mut peak) = (0, 0.0_f64);
+    for _ in 0..ROUNDS {
+        let mut text = String::new();
+        let start = Instant::now();
+        std::hint::black_box(engine.selection_text(selection, &mut text));
+        times.push(start.elapsed().as_secs_f64() * 1e3);
+        std::hint::black_box(&text);
+        size = text.len();
+        peak = peak.max(grown(&engine)?);
+    }
+    let growth = grown(&engine)?;
+    let size = size as f64 / 1e6;
+    let (p50, p99, most) = percentiles(&mut times);
+    println!(
+        "| {name} | copy {size:.2} MB, {peak:.3} MB while held | {held} | 1 | {p50:.3} | {p99:.3} | {most:.3} | {p50:.2} | {growth:.3} |"
+    );
+    Ok(())
+}
+
+/// Moves the view through the whole store and back, timing each notch into `times`.
+fn wheel(engine: &mut AlacrittyEngine, frame: &mut Frame, times: &mut Vec<f64>) {
+    times.clear();
     for lines in [1, -1] {
         loop {
             let start = Instant::now();
             let moved = engine.scroll(lines);
-            engine.frame(&mut frame);
-            std::hint::black_box(&frame);
+            engine.frame(frame);
+            std::hint::black_box(&*frame);
             if !moved {
                 break;
             }
             times.push(start.elapsed().as_secs_f64() * 1e3);
         }
     }
+}
+
+/// Prints a table row for one wheel notch: a scroll and the frame it needs, over a pane's whole
+/// store and back. Each corpus runs in its own process, so footprint growth is its own.
+fn notches(name: &str) -> std::io::Result<()> {
+    let (mut engine, held) = filled(name)?;
+    let mut frame = Frame::default();
+    engine.frame(&mut frame);
+    // Written before the first reading, so these pages do not count as growth.
+    let mut times = vec![0.0; held * 2];
+    let before = pinfold_sys::footprint(std::process::id())?;
+    wheel(&mut engine, &mut frame, &mut times);
     let grown = pinfold_sys::footprint(std::process::id())?.saturating_sub(before);
-    times.sort_by(f64::total_cmp);
-    let at = |share: usize| times.get(times.len() * share / 100).copied().unwrap_or(0.0);
-    let (p50, p99, most) = (at(50), at(99), times.last().copied().unwrap_or(0.0));
+    let (p50, p99, most) = percentiles(&mut times);
     let grown = grown as f64 / 1e6;
     println!("| {name} | {held} | {p50:.3} | {p99:.3} | {most:.3} | {grown:.3} |");
     Ok(())
@@ -235,6 +365,16 @@ fn main() -> std::io::Result<()> {
         && flag == "--notches"
     {
         return notches(name);
+    }
+    if let [flag] = args.as_slice()
+        && flag == "--worst-query"
+    {
+        return worst_query();
+    }
+    if let [flag, name] = args.as_slice()
+        && flag == "--finds"
+    {
+        return finds(name);
     }
     println!("{COLUMNS} columns, {SCREEN}-row screen, {FED_LINES} lines fed.\n");
     println!(
@@ -271,5 +411,17 @@ fn main() -> std::io::Result<()> {
             .args(["--notches", name])
             .status()?;
     }
+    println!(
+        "\n| Corpus | Call | Rows held | Calls | p50 ms | p99 ms | Max ms | Whole ms | Footprint growth MB |"
+    );
+    println!("| --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+    for name in CORPORA {
+        std::process::Command::new(std::env::current_exe()?)
+            .args(["--finds", name])
+            .status()?;
+    }
+    std::process::Command::new(std::env::current_exe()?)
+        .arg("--worst-query")
+        .status()?;
     Ok(())
 }

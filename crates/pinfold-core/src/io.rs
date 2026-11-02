@@ -15,6 +15,7 @@ use mio::{Events, Interest, Poll, Token};
 use pinfold_sys::pty::Pty;
 
 use crate::paste;
+use crate::search::{Direction, Position, Search, SearchStep, Selection};
 use crate::vt::{AlacrittyEngine, VtEngine};
 
 pub use mio::Waker;
@@ -94,6 +95,9 @@ struct Pane {
     readable: bool,
     closed: bool,
     dirty: bool,
+    /// The running search, which gets one step per pass, so PTYs are served between steps.
+    search: Option<Search>,
+    found: Option<Selection>,
 }
 
 impl Pane {
@@ -157,6 +161,8 @@ impl Reactor {
             readable: true,
             closed: false,
             dirty: true,
+            search: None,
+            found: None,
         });
         Ok(pane)
     }
@@ -169,7 +175,10 @@ impl Reactor {
     ///
     /// Returns an error if polling fails.
     pub fn turn(&mut self, timeout: Option<Duration>) -> io::Result<()> {
-        let unfinished = self.panes.iter().any(|pane| pane.readable);
+        let unfinished = self
+            .panes
+            .iter()
+            .any(|pane| pane.readable || pane.search.is_some());
         let now = Instant::now();
         let deadline = self
             .panes
@@ -212,6 +221,16 @@ impl Reactor {
                 pane.engine.end_sync(&mut pane.replies);
                 pane.replies.truncate(MAX_REPLIES);
                 pane.dirty = true;
+            }
+            if let Some(search) = pane.search.as_mut() {
+                let step = pane.engine.search(search);
+                if step != SearchStep::Running {
+                    pane.search = None;
+                    pane.dirty = true;
+                }
+                if let SearchStep::Found(found) = step {
+                    pane.found = Some(found);
+                }
             }
             pane.flush();
         }
@@ -269,6 +288,36 @@ impl Reactor {
         if let Some(pane) = self.panes.get_mut(pane) {
             pane.dirty |= pane.engine.scroll(lines);
         }
+    }
+
+    /// Starts a search in a pane, replacing any it has running, and returns whether it could.
+    /// [`Reactor::turn`] runs it a step at a time and marks the pane dirty when it ends.
+    pub fn search(
+        &mut self,
+        pane: usize,
+        query: &str,
+        from: Position,
+        direction: Direction,
+    ) -> bool {
+        let Some(pane) = self.panes.get_mut(pane) else {
+            return false;
+        };
+        pane.search = Search::new(query, from, direction);
+        pane.found = None;
+        pane.search.is_some()
+    }
+
+    /// Returns whether a pane has a search running. Unknown panes have none.
+    #[must_use]
+    pub fn is_searching(&self, pane: usize) -> bool {
+        self.panes
+            .get(pane)
+            .is_some_and(|pane| pane.search.is_some())
+    }
+
+    /// Returns the match of a pane's last search, once, or nothing if it has not found one.
+    pub fn take_found(&mut self, pane: usize) -> Option<Selection> {
+        self.panes.get_mut(pane)?.found.take()
     }
 
     /// Returns whether a pane changed since the last call, and clears that.
@@ -490,6 +539,46 @@ mod tests {
         reactor.write(pane, b"x");
         assert!(reactor.take_dirty(pane));
         assert_eq!(top(&reactor), live);
+    }
+
+    #[test]
+    fn a_search_runs_between_turns_and_reports_once() {
+        let mut reactor = Reactor::new().unwrap();
+        let script = "seq 1 3000; echo needle; sleep 30";
+        let pane = reactor.spawn(shell(script), 4, 20).unwrap();
+        assert!(turn_until(&mut reactor, |r| on_screen(r, pane, "needle")));
+        let from = Position::default();
+        assert!(reactor.search(pane, "NEEDLE", from, Direction::Forward));
+        assert!(reactor.is_searching(pane));
+        reactor.take_dirty(pane);
+        reactor.turn(Some(Duration::ZERO)).unwrap();
+        assert!(
+            reactor.is_searching(pane),
+            "one turn must not read 3,000 rows"
+        );
+        assert!(turn_until(&mut reactor, |r| !r.is_searching(pane)));
+        assert!(reactor.take_dirty(pane));
+        let found = reactor.take_found(pane).unwrap();
+        assert_eq!(found.anchor.row, 3000);
+        assert_eq!(reactor.take_found(pane), None);
+        let mut text = String::new();
+        let engine = reactor.engine(pane).unwrap();
+        assert!(engine.selection_text(found, &mut text));
+        assert_eq!(text, "needle");
+    }
+
+    #[test]
+    fn a_search_that_finds_nothing_ends_and_bad_ones_never_start() {
+        let mut reactor = Reactor::new().unwrap();
+        let pane = reactor.spawn(shell("sleep 30"), 4, 20).unwrap();
+        let from = Position::default();
+        assert!(!reactor.search(pane, "", from, Direction::Backward));
+        assert!(!reactor.search(9, "x", from, Direction::Backward));
+        assert!(!reactor.is_searching(9));
+        assert!(reactor.search(pane, "absent", from, Direction::Backward));
+        assert!(turn_until(&mut reactor, |r| !r.is_searching(pane)));
+        assert_eq!(reactor.take_found(pane), None);
+        assert_eq!(reactor.take_found(9), None);
     }
 
     #[test]

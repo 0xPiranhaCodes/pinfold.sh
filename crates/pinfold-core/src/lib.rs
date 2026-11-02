@@ -4,4 +4,5 @@ pub mod io;
 pub mod marks;
 pub mod paste;
 pub mod scrollback;
+pub mod search;
 pub mod vt;

@@ -33,6 +33,7 @@ Entries are generated from Conventional Commits with git-cliff
 - OSC 133 command marks and the OSC 7 working directory, tracked per pane as hints.
 - Mouse reporting, and the wheel as arrow keys on the alternate screen.
 - The wheel scrolls through history on the primary screen, and input returns to the live screen.
+- Search and selection in the core across scrollback and the screen, a bounded step per I/O pass.
 - A fork of `alacritty_terminal` that hands rows leaving the screen to their owner.
 - Metal renderer on macOS, with CPU drawing as its fallback.
 - macOS window budget raised to 30 MB plus pixels.

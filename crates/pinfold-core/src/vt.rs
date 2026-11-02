@@ -1,12 +1,13 @@
 //! The terminal engine behind a trait, with `alacritty_terminal` as its implementation.
 
+use std::ops::Range;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::{Column, Line};
-use alacritty_terminal::term::cell::{Cell as GridCell, Flags};
+use alacritty_terminal::term::cell::{Cell as GridCell, Flags, LineLength};
 use alacritty_terminal::term::color;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, Processor};
@@ -14,6 +15,7 @@ use pinfold_proto::{Cell, Frame, MouseEncoding, MouseMode};
 
 use crate::marks::{Marks, ShellMarks, WorkingDirectory};
 use crate::scrollback::Scrollback;
+use crate::search::{self, Position, Search, SearchStep, Selection};
 
 /// The slot Alacritty's colour table gives the default background.
 const BACKGROUND_SLOT: usize = 257;
@@ -61,6 +63,19 @@ pub trait VtEngine {
 
     /// Returns the view to the live screen, and returns whether it was scrolled back.
     fn snap_to_live(&mut self) -> bool;
+
+    /// Returns where a cell of the view is. Scrolling to a row takes the difference between
+    /// the view's top and that row.
+    fn position(&self, line: u16, column: u16) -> Position;
+
+    /// Runs one bounded step of `search` over history and the screen, or only the screen on the
+    /// alternate screen, which is all a person can see there.
+    fn search(&self, search: &mut Search) -> SearchStep;
+
+    /// Appends the text of `selection` to `text`, clamped to the rows still held. A wrapped
+    /// line joins up and a wide character appears once. Returns false if it stopped at a row
+    /// boundary because the text would pass [`search::MAX_SELECTION`].
+    fn selection_text(&self, selection: Selection, text: &mut String) -> bool;
 
     /// Returns whether the program has asked for pastes wrapped in brackets.
     fn bracketed_paste(&self) -> bool;
@@ -326,6 +341,41 @@ impl AlacrittyEngine {
         frame.cells.len() / columns.max(1)
     }
 
+    /// Returns the numbers of the rows that can be read, which always include the screen.
+    fn held_rows(&self) -> Range<usize> {
+        let Ok(store) = self.scrollback.lock() else {
+            return 0..0;
+        };
+        let first = if self.term.mode().contains(TermMode::ALT_SCREEN) {
+            store.end()
+        } else {
+            store.end() - store.len()
+        };
+        first..store.end() + self.term.grid().screen_lines()
+    }
+
+    /// Calls `visit` with the number and cells of each row in `rows`, history before screen.
+    /// `rows` must lie inside [`Self::held_rows`].
+    fn visit_rows(&self, rows: Range<usize>, mut visit: impl FnMut(usize, &[GridCell])) {
+        let Ok(mut store) = self.scrollback.lock() else {
+            return;
+        };
+        let live = store.end();
+        let cold = rows.start..rows.end.min(live);
+        if let Some(index) = store.index(rows.start).filter(|_| !cold.is_empty()) {
+            let mut number = rows.start;
+            store.read_rows(index, cold.len(), |row| {
+                visit(number, row);
+                number += 1;
+            });
+        }
+        let grid = self.term.grid();
+        for number in rows.start.max(live)..rows.end.min(live + grid.screen_lines()) {
+            let row = &grid[Line((number - live) as i32)];
+            visit(number, &row[..row.line_length()]);
+        }
+    }
+
     fn take_replies(&self, replies: &mut Vec<u8>) {
         if let Ok(mut pending) = self.replies.0.lock() {
             replies.append(&mut pending);
@@ -456,6 +506,53 @@ impl VtEngine for AlacrittyEngine {
 
     fn snap_to_live(&mut self) -> bool {
         self.view.take().is_some()
+    }
+
+    fn position(&self, line: u16, column: u16) -> Position {
+        let row = self.scrollback.lock().map_or(0, |store| {
+            store.end() - self.rows_back(&store) + usize::from(line)
+        });
+        Position { row, column }
+    }
+
+    fn search(&self, search: &mut Search) -> SearchStep {
+        let rows = search.next_rows(&self.held_rows());
+        self.visit_rows(rows.clone(), |number, row| search.row(number, row));
+        search.end_step(rows)
+    }
+
+    // shortcut: one call, unlike search, since a person asks for it and output cannot repeat it.
+    // `benches/scrollback.rs` times a whole store. Split it into steps if that ever shows.
+    fn selection_text(&self, selection: Selection, text: &mut String) -> bool {
+        let held = self.held_rows();
+        let (mut start, mut end) = if selection.anchor <= selection.focus {
+            (selection.anchor, selection.focus)
+        } else {
+            (selection.focus, selection.anchor)
+        };
+        if start.row < held.start {
+            start = Position {
+                row: held.start,
+                column: 0,
+            };
+        }
+        if end.row >= held.end {
+            end = Position {
+                row: held.end.saturating_sub(1),
+                column: u16::MAX,
+            };
+        }
+        let mut fits = true;
+        if start <= end && !held.is_empty() {
+            // Sized up front, since growing keeps the old copy and doubles what a copy costs.
+            let rows = end.row - start.row + 1;
+            let columns = self.term.grid().columns() + 1;
+            text.reserve(rows.saturating_mul(columns).min(search::MAX_SELECTION));
+            self.visit_rows(start.row..end.row + 1, |number, row| {
+                fits = fits && search::copy_row((start, end), number, row, text);
+            });
+        }
+        fits
     }
 
     fn bracketed_paste(&self) -> bool {
