@@ -549,6 +549,46 @@ impl Session {
         Ok(())
     }
 
+    /// Activates the next tab, or the previous one, wrapping at the ends.
+    ///
+    /// ```
+    /// use pinfold_mux::Session;
+    ///
+    /// let mut session = Session::default();
+    /// session.new_tab(1)?;
+    /// session.new_tab(2)?;
+    /// session.step_tab(true);
+    /// assert_eq!(session.active(), 0);
+    /// session.step_tab(false);
+    /// assert_eq!(session.active(), 1);
+    /// # Ok::<(), pinfold_mux::LayoutError>(())
+    /// ```
+    pub fn step_tab(&mut self, forward: bool) {
+        let count = self.tabs.len().max(1);
+        let step = if forward { 1 } else { count - 1 };
+        self.active = (self.active + step) % count;
+    }
+
+    /// The index of the active tab.
+    #[must_use]
+    pub fn active(&self) -> usize {
+        self.active
+    }
+
+    /// Focuses `pane`, if the active tab holds it.
+    ///
+    /// # Errors
+    ///
+    /// [`LayoutError::UnknownPane`] if it does not.
+    pub fn focus(&mut self, pane: PaneId) -> Result<(), LayoutError> {
+        let tab = self.tabs.get_mut(self.active);
+        let tab = tab
+            .filter(|tab| tab.index_of(pane).is_some())
+            .ok_or(LayoutError::UnknownPane(pane))?;
+        tab.focus = pane;
+        Ok(())
+    }
+
     /// Splits `pane` in half and focuses `new` in the second half, in whichever tab holds
     /// `pane`. That tab stops zooming, so the new pane is seen in place.
     ///
@@ -751,6 +791,39 @@ mod tests {
         assert_eq!(focused(&session), Some(1));
         session.close_pane(1)?;
         assert_eq!(focused(&session), Some(2));
+        Ok(())
+    }
+
+    #[test]
+    fn stepping_wraps_and_an_empty_session_stays_put() -> Result<(), LayoutError> {
+        let mut session = Session::default();
+        session.step_tab(true);
+        session.step_tab(false);
+        assert_eq!(session.active(), 0);
+        for pane in 1..=3 {
+            session.new_tab(pane)?;
+        }
+        let order: Vec<usize> = (0..4)
+            .map(|_| {
+                session.step_tab(true);
+                session.active()
+            })
+            .collect();
+        assert_eq!(order, [0, 1, 2, 0]);
+        session.step_tab(false);
+        assert_eq!(session.active(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn only_a_pane_of_the_active_tab_takes_focus() -> Result<(), LayoutError> {
+        let mut session = grid()?;
+        session.new_tab(9)?;
+        session.switch_tab(0)?;
+        session.focus(1)?;
+        assert_eq!(focused(&session), Some(1));
+        assert_eq!(session.focus(9), Err(LayoutError::UnknownPane(9)));
+        assert_eq!(focused(&session), Some(1));
         Ok(())
     }
 

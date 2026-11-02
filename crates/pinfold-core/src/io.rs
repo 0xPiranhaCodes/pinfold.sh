@@ -12,12 +12,13 @@ use std::time::{Duration, Instant};
 
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token};
+use pinfold_mux::{Session, Size};
 use pinfold_sys::pty::Pty;
 
 use crate::link::{Host, LINK};
-use crate::paste;
 use crate::search::{Direction, Position, Search, SearchStep, Selection};
 use crate::vt::{AlacrittyEngine, VtEngine};
+use crate::{paste, shell};
 
 pub use mio::Waker;
 
@@ -89,6 +90,8 @@ fn flush(sink: &mut impl Write, replies: &mut Vec<u8>) {
 }
 
 struct Pane {
+    /// Never used twice, so a late message cannot reach a pane that took a closed one's place.
+    number: usize,
     pty: Pty,
     engine: Box<dyn VtEngine + Send>,
     replies: Vec<u8>,
@@ -116,7 +119,18 @@ pub struct Reactor {
     pub(crate) poll: Poll,
     waker: Arc<Waker>,
     events: Events,
+    /// In order of number.
     panes: Vec<Pane>,
+    pub(crate) next_pane: usize,
+    /// Which panes make up which tabs. A new window finds this as the last one left it.
+    pub(crate) session: Session,
+    /// The space for panes, once a window has said. It outlives the window, so a pane opened
+    /// between windows gets the last size.
+    pub(crate) area: Option<Size>,
+    /// Counts changes to what a window should show.
+    pub(crate) revision: u64,
+    /// Starts the shell of each pane a window opens.
+    pub(crate) shell: fn() -> Command,
     buffer: Vec<u8>,
     pub(crate) host: Host,
 }
@@ -135,12 +149,18 @@ impl Reactor {
             waker,
             events: Events::with_capacity(EVENT_CAPACITY),
             panes: Vec::new(),
+            next_pane: 0,
+            session: Session::default(),
+            area: None,
+            revision: 0,
+            shell: shell::command,
             buffer: vec![0; READ_BUDGET],
             host: Host::default(),
         })
     }
 
-    /// Starts `command` on a new PTY and returns its pane number.
+    /// Starts `command` on a new PTY and returns its pane number. The pane is in no tab, so it
+    /// stays when its program exits, for reading. [`Reactor::open_tab`] adds one to the session.
     ///
     /// The reactor's thread makes every spawn, which [`Pty::spawn`] requires.
     ///
@@ -150,13 +170,15 @@ impl Reactor {
     pub fn spawn(&mut self, mut command: Command, rows: u16, columns: u16) -> io::Result<usize> {
         command.env("TERM", "xterm-256color");
         let pty = Pty::spawn(command, rows, columns)?;
-        let pane = self.panes.len();
+        let pane = self.next_pane;
         let fd = pty.master().as_raw_fd();
         let interest = Interest::READABLE | Interest::WRITABLE;
         self.poll
             .registry()
             .register(&mut SourceFd(&fd), Token(pane), interest)?;
+        self.next_pane += 1;
         self.panes.push(Pane {
+            number: pane,
             pty,
             engine: Box::new(AlacrittyEngine::new(rows, columns)),
             replies: Vec::new(),
@@ -203,7 +225,7 @@ impl Reactor {
             if event.token() == LINK {
                 self.host.wake();
             }
-            if let Some(pane) = self.panes.get_mut(event.token().0) {
+            if let Some(pane) = pane_mut(&mut self.panes, event.token().0) {
                 pane.readable |= !pane.closed && (event.is_readable() || event.is_read_closed());
             }
         }
@@ -241,6 +263,7 @@ impl Reactor {
             }
             pane.flush();
         }
+        self.reap();
         self.serve_window();
         Ok(())
     }
@@ -254,7 +277,7 @@ impl Reactor {
     /// Queues bytes for a pane's program, such as keyboard input. Returns false if the queue
     /// has no room for all of them, or the pane is unknown, and then queues none.
     pub fn write(&mut self, pane: usize, bytes: &[u8]) -> bool {
-        let Some(pane) = self.panes.get_mut(pane) else {
+        let Some(pane) = pane_mut(&mut self.panes, pane) else {
             return false;
         };
         if pane.input.len() + bytes.len() > MAX_INPUT {
@@ -269,7 +292,7 @@ impl Reactor {
     /// Queues pasted text for a pane's program, sanitized. Returns what [`Reactor::write`]
     /// returns.
     pub fn paste(&mut self, pane: usize, text: &str) -> bool {
-        let Some(engine) = self.panes.get(pane).map(|pane| &pane.engine) else {
+        let Some(engine) = self.engine(pane) else {
             return false;
         };
         let bracketed = engine.bracketed_paste();
@@ -282,7 +305,7 @@ impl Reactor {
     ///
     /// Returns an error if the PTY rejects the new size.
     pub fn resize(&mut self, pane: usize, rows: u16, columns: u16) -> io::Result<()> {
-        let Some(pane) = self.panes.get_mut(pane) else {
+        let Some(pane) = pane_mut(&mut self.panes, pane) else {
             return Ok(());
         };
         pane.engine.resize(rows, columns);
@@ -293,7 +316,7 @@ impl Reactor {
 
     /// Moves a pane's view through history. See [`VtEngine::scroll`].
     pub fn scroll(&mut self, pane: usize, lines: i32) {
-        if let Some(pane) = self.panes.get_mut(pane) {
+        if let Some(pane) = pane_mut(&mut self.panes, pane) {
             pane.dirty |= pane.engine.scroll(lines);
         }
     }
@@ -307,7 +330,7 @@ impl Reactor {
         from: Position,
         direction: Direction,
     ) -> bool {
-        let Some(pane) = self.panes.get_mut(pane) else {
+        let Some(pane) = pane_mut(&mut self.panes, pane) else {
             return false;
         };
         pane.search = Search::new(query, from, direction);
@@ -318,30 +341,27 @@ impl Reactor {
     /// Returns whether a pane has a search running. Unknown panes have none.
     #[must_use]
     pub fn is_searching(&self, pane: usize) -> bool {
-        self.panes
-            .get(pane)
-            .is_some_and(|pane| pane.search.is_some())
+        self.pane(pane).is_some_and(|pane| pane.search.is_some())
     }
 
     /// Returns the match of a pane's last search, once, or nothing if it has not found one.
     pub fn take_found(&mut self, pane: usize) -> Option<Selection> {
-        self.panes.get_mut(pane)?.found.take()
+        pane_mut(&mut self.panes, pane)?.found.take()
     }
 
     /// Returns whether a pane changed since the last call, and clears that.
     pub fn take_dirty(&mut self, pane: usize) -> bool {
-        self.panes
-            .get_mut(pane)
-            .is_some_and(|pane| std::mem::take(&mut pane.dirty))
+        pane_mut(&mut self.panes, pane).is_some_and(|pane| std::mem::take(&mut pane.dirty))
     }
 
     /// Returns a pane's terminal.
     #[must_use]
     pub fn engine(&self, pane: usize) -> Option<&(dyn VtEngine + Send)> {
-        self.panes.get(pane).map(|pane| pane.engine.as_ref())
+        self.pane(pane).map(|pane| pane.engine.as_ref())
     }
 
-    /// Returns how many panes there are. Numbers run from 0, and a closed pane keeps its own.
+    /// Returns how many panes there are. A pane of a tab goes when its program exits or a window
+    /// closes it, and its number is not used again.
     #[must_use]
     pub fn pane_count(&self) -> usize {
         self.panes.len()
@@ -350,8 +370,42 @@ impl Reactor {
     /// Returns whether a pane's child has closed the PTY. Unknown panes count as closed.
     #[must_use]
     pub fn is_closed(&self, pane: usize) -> bool {
-        self.panes.get(pane).is_none_or(|pane| pane.closed)
+        self.pane(pane).is_none_or(|pane| pane.closed)
     }
+
+    fn pane(&self, number: usize) -> Option<&Pane> {
+        let index = self.panes.binary_search_by_key(&number, |pane| pane.number);
+        self.panes.get(index.ok()?)
+    }
+
+    /// Closes each pane of a tab whose program has exited. A pane in no tab stays, for reading.
+    fn reap(&mut self) {
+        for index in (0..self.panes.len()).rev() {
+            let closed = self.panes.get(index).filter(|pane| pane.closed);
+            if let Some(number) = closed.map(|pane| pane.number) {
+                self.close_pane(number);
+            }
+        }
+    }
+
+    /// Returns the pane numbers, lowest first.
+    pub(crate) fn numbers(&self) -> impl Iterator<Item = usize> + '_ {
+        self.panes.iter().map(|pane| pane.number)
+    }
+
+    /// Stops polling a pane and drops it, which ends its program and frees its terminal.
+    pub(crate) fn drop_pane(&mut self, number: usize) {
+        if let Ok(index) = self.panes.binary_search_by_key(&number, |pane| pane.number) {
+            let pane = self.panes.remove(index);
+            let fd = pane.pty.master().as_raw_fd();
+            let _ = self.poll.registry().deregister(&mut SourceFd(&fd));
+        }
+    }
+}
+
+fn pane_mut(panes: &mut [Pane], number: usize) -> Option<&mut Pane> {
+    let index = panes.binary_search_by_key(&number, |pane| pane.number);
+    panes.get_mut(index.ok()?)
 }
 
 #[cfg(test)]
@@ -458,6 +512,20 @@ mod tests {
         assert!(!reactor.take_dirty(9));
         reactor.write(9, b"x");
         reactor.resize(9, 24, 80).unwrap();
+    }
+
+    #[test]
+    fn a_dropped_pane_leaves_the_others_their_numbers() {
+        let mut reactor = Reactor::new().unwrap();
+        let panes = [(); 3].map(|()| reactor.spawn(shell("cat"), 24, 80).unwrap());
+        assert_eq!(panes, [0, 1, 2]);
+        reactor.drop_pane(1);
+        reactor.drop_pane(9);
+        assert!(reactor.is_closed(1) && reactor.engine(1).is_none());
+        assert_eq!(reactor.pane_count(), 2);
+        reactor.write(2, b"key\n");
+        assert!(turn_until(&mut reactor, |r| on_screen(r, 2, "key")));
+        assert_eq!(reactor.spawn(shell("cat"), 24, 80).unwrap(), 3);
     }
 
     #[test]

@@ -6,9 +6,9 @@
 //! | Keys                | Command                 | From                       |
 //! | ------------------- | ----------------------- | -------------------------- |
 //! | `c`                 | New tab                 | tmux                       |
-//! | `x`                 | Close the pane          | tmux                       |
+//! | `x`                 | Close the pane, asked first | tmux                   |
 //! | `n`, `p`            | Next, previous tab      | tmux                       |
-//! | `0` to `9`          | Tab at that index       | tmux, so `0` is the first  |
+//! | `1` to `9`, `0`     | That tab, `0` the tenth | the tab strip's numbers    |
 //! | <code>&#124;</code> or `%` | Split right      | the design doc, then tmux  |
 //! | `-` or `"`          | Split down              | the design doc, then tmux  |
 //! | Arrows              | Move focus              | tmux                       |
@@ -23,24 +23,23 @@
 //! The prefix pressed twice passes the second press through, so the pane gets it as it would
 //! any key. Any other key after the prefix cancels and is swallowed. There is no timeout: the
 //! design names none, and a timer would be idle work.
+//!
+//! The window asks this after its paste, copy, search and vi shortcuts, which a program never
+//! sees and which cancel the prefix, and before the search bar, vi mode and the pane. So Ctrl+a
+//! works in vi mode and the bar, Command+V is never swallowed, and while unarmed every key
+//! reaches vi mode as it would.
+//!
+//! Tabs and panes close on the prompt `x` raises, or when their last program exits. Closing the
+//! session's last pane says so in the prompt, in red, as it ends the session.
+//!
+//! On macOS Command+T opens a tab and Command+1 to Command+9 go to one, as the tab strip's keys
+//! show. Command+N stays free, as a window is all a session has.
 
+pub use pinfold_proto::link::Side as Direction;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 /// How far Alt+arrow moves a border, as tmux does.
 const LARGE_RESIZE: u16 = 5;
-
-/// A direction to move focus or a border.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Direction {
-    /// Towards column 0.
-    Left,
-    /// Away from column 0.
-    Right,
-    /// Towards row 0.
-    Up,
-    /// Away from row 0.
-    Down,
-}
 
 /// What the window does for a bound key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,7 +129,8 @@ fn command(key: &Key, modifiers: ModifiersState) -> Option<Command> {
         // Shift and Alt are not checked: some layouts need Option to type `|`, as a German
         // Mac does, and winit has already applied both to the text.
         Key::Character(text) => match text.as_bytes() {
-            [digit @ b'0'..=b'9'] => Some(Command::Tab(usize::from(digit - b'0'))),
+            // As the strip numbers them, and in keyboard order, so `0` follows `9`.
+            [digit @ b'0'..=b'9'] => Some(Command::Tab((usize::from(digit - b'0') + 9) % 10)),
             b"c" => Some(Command::NewTab),
             b"x" => Some(Command::ClosePane),
             b"n" => Some(Command::NextTab),
@@ -289,9 +289,12 @@ mod tests {
 
     #[test]
     fn digits_pick_a_tab_by_index() {
-        for digit in 0..10 {
-            let command = Command::Tab(digit);
-            assert_after_prefix(&text(&digit.to_string()), NONE, Step::Run(command));
+        for (digit, tab) in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"]
+            .into_iter()
+            .enumerate()
+            .map(|(tab, digit)| (digit, tab))
+        {
+            assert_after_prefix(&text(digit), NONE, Step::Run(Command::Tab(tab)));
         }
     }
 

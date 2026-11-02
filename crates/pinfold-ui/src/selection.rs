@@ -5,7 +5,7 @@
 
 use std::ops::Range;
 
-use pinfold_proto::link::{Position, Selection};
+use pinfold_proto::link::{Position, Rect, Selection};
 use pinfold_proto::{Frame, MouseMode};
 use winit::keyboard::ModifiersState;
 
@@ -90,13 +90,13 @@ fn visible(
     })
 }
 
-/// Inverts the cells of `selection` in a view of `frame` from row `top`.
+/// Inverts the cells of `selection` in the pane at `rect` of `frame`, whose first row is `top`.
 // shortcut: a search match ending on a wide character inverts only its first cell, since the
 // frame does not say which cells are a wide character's second half.
-pub fn overlay(frame: &mut Frame, top: usize, selection: Selection) {
+pub fn overlay(frame: &mut Frame, rect: Rect, top: usize, selection: Selection) {
     let width = usize::from(frame.columns);
-    for (row, columns) in visible(selection, top, frame.rows, frame.columns) {
-        let start = (row - top) * width;
+    for (row, columns) in visible(selection, top, rect.rows, rect.columns) {
+        let start = (row - top + usize::from(rect.y)) * width + usize::from(rect.x);
         if let Some(cells) = frame
             .cells
             .get_mut(start + columns.start..start + columns.end)
@@ -135,6 +135,35 @@ fn damaged(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The pane as the whole grid.
+    fn overlay(frame: &mut Frame, top: usize, selection: Selection) {
+        let (rows, columns) = (frame.rows, frame.columns);
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            columns,
+            rows,
+        };
+        super::overlay(frame, rect, top, selection);
+    }
+
+    #[test]
+    fn a_selection_stays_in_its_pane_on_a_shared_grid() {
+        let plain = frame("abcdefghijklmnopqrstuvwx", 6);
+        let mut grid = plain.clone();
+        let rect = Rect {
+            x: 3,
+            y: 1,
+            columns: 2,
+            rows: 2,
+        };
+        super::overlay(&mut grid, rect, 10, select(at(10, 0), at(11, 500)));
+        let inverted: Vec<usize> = (0..24)
+            .filter(|at| grid.cells[*at] != plain.cells[*at])
+            .collect();
+        assert_eq!(inverted, [9, 10, 15, 16]);
+    }
     use pinfold_core::vt::{AlacrittyEngine, VtEngine};
     use pinfold_proto::Cell;
 

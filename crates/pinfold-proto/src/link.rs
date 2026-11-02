@@ -37,10 +37,20 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 2;
+pub const VERSION: u16 = 3;
 
 /// Most rows or columns a screen can have, which the core clamps its panes to.
 pub const MAX_DIMENSION: u16 = 1024;
+
+/// Most tabs in a session. A strip of this many still gives each a box on a full HD screen, and
+/// past it the core refuses the command.
+pub const MAX_TABS: usize = 32;
+
+/// Most panes in a session, across its tabs. Each holds a PTY's descriptor and a shell, and a
+/// pane's cold history alone can reach 2 MB, so this bounds what a window can make the core hold.
+/// macOS starts a process with 256 descriptors, which leaves this plenty of room. Past it the core
+/// refuses the command.
+pub const MAX_PANES: usize = 64;
 
 const PREFIX: usize = 4;
 const KIND: usize = 1;
@@ -72,6 +82,9 @@ pub const MAX_PASTE: usize = MAX_INPUT - BRACKETS;
 /// budget. This holds a full frame of 200x80 cells.
 const KEEP: usize = 256 * 1024;
 
+/// The indexes a tab can have on the link.
+const LAST_TAB: RangeInclusive<u16> = 0..=MAX_TABS as u16 - 1;
+
 /// Bytes of a search ahead of its query.
 const HEAD: usize = 11;
 
@@ -97,13 +110,23 @@ const SEARCH: u8 = 6;
 const COPY: u8 = 7;
 const FULL_FRAME: u8 = 8;
 const QUIT: u8 = 9;
+const NEW_TAB: u8 = 10;
+const SWITCH_TAB: u8 = 11;
+const STEP_TAB: u8 = 12;
+const SPLIT: u8 = 13;
+const CLOSE_PANE: u8 = 14;
+const FOCUS: u8 = 15;
+const MOVE_FOCUS: u8 = 16;
+const MOVE_BORDER: u8 = 17;
+const ZOOM: u8 = 18;
 
 const FRAME: u8 = 1;
 const CWD: u8 = 2;
 const SEARCHED: u8 = 3;
 const COPIED: u8 = 4;
-const EXITED: u8 = 5;
+const LAYOUT: u8 = 5;
 const RAISE: u8 = 6;
+const REFUSED: u8 = 7;
 
 const FLAG_FULL: u8 = 1;
 const FLAG_CURSOR: u8 = 1 << 1;
@@ -119,6 +142,11 @@ const BLANK: Cell = Cell {
     foreground: 0,
     background: 0,
 };
+
+/// A tab in a layout: its focused pane.
+const LAYOUT_TAB: usize = 4;
+/// A pane in a layout: its number and the four sides of its rectangle.
+const LAYOUT_PANE: usize = 4 + 4 * 2;
 
 /// Why bytes could not be encoded or decoded. This holds sizes and tags, never message contents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -228,6 +256,58 @@ pub enum Direction {
     Backward,
 }
 
+/// Where a split puts its second pane.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SplitWay {
+    /// Beside the first.
+    Right,
+    /// Under the first.
+    Down,
+}
+
+/// A way across a pane's border.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    /// Towards column 0.
+    Left,
+    /// Away from column 0.
+    Right,
+    /// Towards row 0.
+    Up,
+    /// Away from row 0.
+    Down,
+}
+
+/// Why the core did not carry out a command. The link stays up.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum Refusal {
+    /// The session holds [`MAX_TABS`].
+    #[error("This session has as many tabs as it can hold")]
+    Tabs,
+    /// The session holds [`MAX_PANES`].
+    #[error("This session has as many panes as it can hold")]
+    Panes,
+    /// The tab has no room for another pane.
+    #[error("No room for another pane here")]
+    Room,
+    /// The shell would not start.
+    #[error("The shell would not start")]
+    Spawn,
+}
+
+/// A rectangle of cells, from the top left of the space for panes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Rect {
+    /// Left column.
+    pub x: u16,
+    /// Top row.
+    pub y: u16,
+    /// Width.
+    pub columns: u16,
+    /// Height.
+    pub rows: u16,
+}
+
 /// A message from a window to the core. Text and bytes borrow from the decoder's buffer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Request<'a> {
@@ -254,11 +334,10 @@ pub enum Request<'a> {
         // needs to paste more than 1 MiB, as the pane's input queue would refuse it anyway.
         text: &'a str,
     },
-    /// A new pane size. Each side must be from 1 to [`MAX_DIMENSION`], so the window clamps its
+    /// The space for panes, which the core lays the active tab out in, and until which it sends
+    /// no layout or frame. Each side must be from 1 to [`MAX_DIMENSION`], so the window clamps its
     /// grid before sending, as a tiny or huge surface can give anything from 0 to `u16::MAX`.
     Resize {
-        /// The pane.
-        pane: u32,
         /// Number of rows.
         rows: u16,
         /// Number of columns.
@@ -296,14 +375,59 @@ pub enum Request<'a> {
         /// What to copy.
         selection: Selection,
     },
-    /// Asks for a full frame, when the window has none to apply changes to. The core sends no
-    /// frames for a pane until the window asks, and from then on sends each change.
+    /// Asks for a full frame of a shown pane, when the window cannot apply a change to the one
+    /// it holds. The core sends a pane's frames while [`Notice::Layout`] shows it, and no others.
     FullFrame {
         /// The pane.
         pane: u32,
     },
     /// The window is closing.
     Quit,
+    /// Opens a tab with a new shell after the others, and activates it. The core picks the
+    /// program, as ADR-0028 lets nothing a window sends name one.
+    NewTab,
+    /// Activates a tab.
+    SwitchTab {
+        /// Its index, from 0. Below [`MAX_TABS`], and an index with no tab does nothing.
+        index: u16,
+    },
+    /// Activates the next or previous tab, wrapping at the ends.
+    StepTab {
+        /// Whether towards the next.
+        forward: bool,
+    },
+    /// Splits a pane in half and focuses a new shell in the second half.
+    Split {
+        /// The pane.
+        pane: u32,
+        /// Where the new pane goes.
+        way: SplitWay,
+    },
+    /// Closes a pane and ends its program. The last pane of a tab closes the tab, and the last
+    /// tab ends the session, so the window asks the user first.
+    ClosePane {
+        /// The pane.
+        pane: u32,
+    },
+    /// Focuses a pane of the active tab.
+    Focus {
+        /// The pane.
+        pane: u32,
+    },
+    /// Moves focus across a border of the focused pane.
+    MoveFocus {
+        /// Which way.
+        side: Side,
+    },
+    /// Moves a border of the focused pane.
+    MoveBorder {
+        /// Which way.
+        side: Side,
+        /// By how many cells, from 1 to [`MAX_DIMENSION`].
+        cells: u16,
+    },
+    /// Toggles whether the focused pane fills its tab.
+    Zoom,
 }
 
 /// A message from the core to a window. Text borrows from the decoder's buffer.
@@ -337,13 +461,65 @@ pub enum Notice<'a> {
         /// The text.
         text: &'a str,
     },
-    /// A pane's program exited and the pane closed.
-    Exited {
-        /// The pane.
-        pane: u32,
-    },
+    /// The session's tabs and what the active one shows. [`encode_layout`] writes this one. A
+    /// pane that left it has closed or is hidden, and no tabs at all means the session ended.
+    Layout(Layout<'a>),
     /// Someone asked for a window while this one is open, so it comes to the front (ADR-0028).
     Raise,
+    /// A command was not carried out.
+    Refused {
+        /// Why.
+        reason: Refusal,
+    },
+}
+
+/// The session as the window draws it.
+///
+/// Only [`Decoder`] makes one, so its lists are already checked: at most [`MAX_TABS`] tabs and
+/// [`MAX_PANES`] panes, each pane once, and each rectangle inside the largest screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Layout<'a> {
+    /// The index of the active tab. It is below the count of tabs, or 0 if there are none.
+    pub active: u16,
+    /// The pane keys go to. It can be missing from [`Layout::panes`] in a window too small for it.
+    pub focused: u32,
+    /// How many panes the session holds, shown or not, up to [`MAX_PANES`].
+    pub total: u16,
+    tabs: &'a [u8],
+    panes: &'a [u8],
+}
+
+impl Layout<'_> {
+    /// Returns each tab's focused pane, in order. That pane's directory names the tab.
+    pub fn tabs(&self) -> impl Iterator<Item = u32> + '_ {
+        self.tabs
+            .as_chunks::<LAYOUT_TAB>()
+            .0
+            .iter()
+            .filter_map(|tab| Reader(tab).u32().ok())
+    }
+
+    /// Returns each pane the active tab shows, and where.
+    pub fn panes(&self) -> impl Iterator<Item = (u32, Rect)> + '_ {
+        self.panes
+            .as_chunks::<LAYOUT_PANE>()
+            .0
+            .iter()
+            .filter_map(|pane| read_pane(pane).ok())
+    }
+
+    /// Returns whether no tab is left, which ends the window.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.tabs.is_empty()
+    }
+
+    fn write(&self, out: &mut Vec<u8>) {
+        let (tabs, panes) = (self.tabs.len() / LAYOUT_TAB, self.panes.len() / LAYOUT_PANE);
+        put!(out; self.active, self.focused, self.total, tabs as u16, panes as u16);
+        out.extend_from_slice(self.tabs);
+        out.extend_from_slice(self.panes);
+    }
 }
 
 /// A pane's screen as sent: its state, and the rows that changed since the last frame.
@@ -512,12 +688,18 @@ impl Request<'_> {
     ///
     /// # Errors
     ///
-    /// [`Error::TooLarge`] past [`MAX_REQUEST`], and [`Error::OutOfBounds`] for a resize outside
-    /// 1 to [`MAX_DIMENSION`].
+    /// [`Error::TooLarge`] past [`MAX_REQUEST`], and [`Error::OutOfBounds`] for a resize or a
+    /// border's move outside 1 to [`MAX_DIMENSION`], or a tab past [`MAX_TABS`].
     pub fn encode(&self, out: &mut Vec<u8>) -> Result<(), Error> {
-        if let Self::Resize { rows, columns, .. } = *self {
+        if let Self::Resize { rows, columns } = *self {
             check("rows", rows, 1..=MAX_DIMENSION)?;
             check("columns", columns, 1..=MAX_DIMENSION)?;
+        }
+        if let Self::SwitchTab { index } = *self {
+            check("tab", index, LAST_TAB)?;
+        }
+        if let Self::MoveBorder { cells, .. } = *self {
+            check("cells", cells, 1..=MAX_DIMENSION)?;
         }
         let start = begin(out);
         let kind = match *self {
@@ -526,11 +708,7 @@ impl Request<'_> {
             Self::Paste { pane, text } => {
                 put_tail(out, start, MAX_PASTE, PASTE, pane, text.as_bytes())?
             }
-            Self::Resize {
-                pane,
-                rows,
-                columns,
-            } => put!(out, RESIZE, pane, rows, columns),
+            Self::Resize { rows, columns } => put!(out, RESIZE, rows, columns),
             Self::Scroll { pane, lines } => put!(out, SCROLL, pane, lines),
             Self::Reveal { pane, row } => put!(out, REVEAL, pane, row as u64),
             Self::Search {
@@ -558,6 +736,28 @@ impl Request<'_> {
             }
             Self::FullFrame { pane } => put!(out, FULL_FRAME, pane),
             Self::Quit => QUIT,
+            Self::NewTab => NEW_TAB,
+            Self::SwitchTab { index } => put!(out, SWITCH_TAB, index),
+            Self::StepTab { forward } => {
+                out.push(u8::from(forward));
+                STEP_TAB
+            }
+            Self::Split { pane, way } => {
+                put!(out; pane);
+                out.push(way as u8);
+                SPLIT
+            }
+            Self::ClosePane { pane } => put!(out, CLOSE_PANE, pane),
+            Self::Focus { pane } => put!(out, FOCUS, pane),
+            Self::MoveFocus { side } => {
+                out.push(side as u8);
+                MOVE_FOCUS
+            }
+            Self::MoveBorder { side, cells } => {
+                out.push(side as u8);
+                put!(out, MOVE_BORDER, cells)
+            }
+            Self::Zoom => ZOOM,
         };
         finish(out, start, MAX_REQUEST, kind)
     }
@@ -583,14 +783,10 @@ impl Request<'_> {
                 Request::Paste { pane, text }
             }
             RESIZE => {
-                let (pane, rows, columns) = (body.u32()?, body.u16()?, body.u16()?);
+                let (rows, columns) = (body.u16()?, body.u16()?);
                 check("rows", rows, 1..=MAX_DIMENSION)?;
                 check("columns", columns, 1..=MAX_DIMENSION)?;
-                Request::Resize {
-                    pane,
-                    rows,
-                    columns,
-                }
+                Request::Resize { rows, columns }
             }
             SCROLL => Request::Scroll {
                 pane: body.u32()?,
@@ -612,6 +808,28 @@ impl Request<'_> {
             },
             FULL_FRAME => Request::FullFrame { pane: body.u32()? },
             QUIT => Request::Quit,
+            NEW_TAB => Request::NewTab,
+            SWITCH_TAB => {
+                let index = body.u16()?;
+                check("tab", index, LAST_TAB)?;
+                Request::SwitchTab { index }
+            }
+            STEP_TAB => Request::StepTab {
+                forward: body.tag("tab step", &[false, true])?,
+            },
+            SPLIT => Request::Split {
+                pane: body.u32()?,
+                way: body.tag("split", &[SplitWay::Right, SplitWay::Down])?,
+            },
+            CLOSE_PANE => Request::ClosePane { pane: body.u32()? },
+            FOCUS => Request::Focus { pane: body.u32()? },
+            MOVE_FOCUS => Request::MoveFocus { side: body.side()? },
+            MOVE_BORDER => {
+                let (side, cells) = (body.side()?, body.u16()?);
+                check("cells", cells, 1..=MAX_DIMENSION)?;
+                Request::MoveBorder { side, cells }
+            }
+            ZOOM => Request::Zoom,
             kind => return Err(Error::UnknownKind { kind }),
         };
         body.end()?;
@@ -652,8 +870,15 @@ impl Notice<'_> {
             Self::Copied { pane, text } => {
                 put_tail(out, start, MAX_MESSAGE, COPIED, *pane, text.as_bytes())?
             }
-            Self::Exited { pane } => put!(out, EXITED, pane),
+            Self::Layout(layout) => {
+                layout.write(out);
+                LAYOUT
+            }
             Self::Raise => RAISE,
+            Self::Refused { reason } => {
+                out.push(*reason as u8);
+                REFUSED
+            }
         };
         finish(out, start, MAX_MESSAGE, kind)
     }
@@ -681,8 +906,14 @@ impl Notice<'_> {
                 pane: body.u32()?,
                 text: body.text()?,
             },
-            EXITED => Notice::Exited { pane: body.u32()? },
+            LAYOUT => Notice::Layout(read_layout(&mut body)?),
             RAISE => Notice::Raise,
+            REFUSED => Notice::Refused {
+                reason: body.tag(
+                    "refusal",
+                    &[Refusal::Tabs, Refusal::Panes, Refusal::Room, Refusal::Spawn],
+                )?,
+            },
             kind => return Err(Error::UnknownKind { kind }),
         };
         body.end()?;
@@ -766,6 +997,43 @@ pub fn encode_frame(
         field.copy_from_slice(&changed.to_le_bytes());
     }
     finish(out, start, MAX_MESSAGE, FRAME)
+}
+
+/// Appends a [`Notice::Layout`]. `tabs` holds each tab's focused pane, `panes` what the active
+/// tab shows, and `total` how many panes the session holds. On an error `out` is as it was.
+///
+/// # Errors
+///
+/// What a peer would refuse: [`Error::OutOfBounds`] for too many tabs or panes, an `active` tab
+/// that does not exist, a pane listed twice or a rectangle off the largest screen.
+pub fn encode_layout(
+    out: &mut Vec<u8>,
+    active: u16,
+    focused: u32,
+    total: u16,
+    tabs: &[u32],
+    panes: &[(u32, Rect)],
+) -> Result<(), Error> {
+    let too_long = |value: usize| Error::OutOfBounds {
+        field: "layout",
+        value: value as u64,
+    };
+    let tabs_count = u16::try_from(tabs.len()).map_err(|_| too_long(tabs.len()))?;
+    let panes_count = u16::try_from(panes.len()).map_err(|_| too_long(panes.len()))?;
+    let start = begin(out);
+    put!(out; active, focused, total, tabs_count, panes_count);
+    for tab in tabs {
+        put!(out; tab);
+    }
+    for (pane, rect) in panes {
+        put!(out; pane, rect.x, rect.y, rect.columns, rect.rows);
+    }
+    let body = out.get(start + PREFIX + KIND..).unwrap_or_default();
+    if let Err(error) = read_layout(&mut Reader(body)) {
+        out.truncate(start);
+        return Err(error);
+    }
+    finish(out, start, MAX_MESSAGE, LAYOUT)
 }
 
 /// Turns bytes in chunks of any size into messages, one at a time.
@@ -1064,6 +1332,71 @@ fn read_frame<'a>(body: &mut Reader<'a>) -> Result<FrameUpdate<'a>, Error> {
     Ok(update)
 }
 
+fn read_pane(bytes: &[u8]) -> Result<(u32, Rect), Error> {
+    let mut pane = Reader(bytes);
+    let number = pane.u32()?;
+    let rect = Rect {
+        x: pane.u16()?,
+        y: pane.u16()?,
+        columns: pane.u16()?,
+        rows: pane.u16()?,
+    };
+    check("columns", rect.columns, 1..=MAX_DIMENSION)?;
+    check("rows", rect.rows, 1..=MAX_DIMENSION)?;
+    check("x", rect.x, 0..=MAX_DIMENSION - rect.columns)?;
+    check("y", rect.y, 0..=MAX_DIMENSION - rect.rows)?;
+    Ok((number, rect))
+}
+
+/// Whether two records of `size` bytes start with the same pane. These lists stop at
+/// [`MAX_PANES`], so comparing each pair costs little and allocates nothing.
+fn repeats(records: &[u8], size: usize) -> bool {
+    let number = |record: &[u8]| record.first_chunk::<LAYOUT_TAB>().copied();
+    let mut records = records.chunks_exact(size);
+    while let Some(record) = records.next() {
+        if records.clone().any(|later| number(later) == number(record)) {
+            return true;
+        }
+    }
+    false
+}
+
+fn read_layout<'a>(body: &mut Reader<'a>) -> Result<Layout<'a>, Error> {
+    let (active, focused, total) = (body.u16()?, body.u32()?, body.u16()?);
+    let (tabs, panes) = (usize::from(body.u16()?), usize::from(body.u16()?));
+    let bound = |field, value: usize, most: usize| {
+        if value > most {
+            return Err(Error::OutOfBounds {
+                field,
+                value: value as u64,
+            });
+        }
+        Ok(())
+    };
+    bound("tabs", tabs, MAX_TABS)?;
+    bound("panes", panes, usize::from(total))?;
+    bound("session's panes", usize::from(total), MAX_PANES)?;
+    bound("active tab", usize::from(active), tabs.saturating_sub(1))?;
+    let tabs = body.take(tabs * LAYOUT_TAB)?;
+    let panes = body.take(panes * LAYOUT_PANE)?;
+    for pane in panes.as_chunks::<LAYOUT_PANE>().0 {
+        read_pane(pane)?;
+    }
+    if repeats(tabs, LAYOUT_TAB) || repeats(panes, LAYOUT_PANE) {
+        return Err(Error::OutOfBounds {
+            field: "repeated pane",
+            value: u64::from(focused),
+        });
+    }
+    Ok(Layout {
+        active,
+        focused,
+        total,
+        tabs,
+        panes,
+    })
+}
+
 /// Reads fields from the front of a body, and never past its end.
 struct Reader<'a>(&'a [u8]);
 
@@ -1119,6 +1452,16 @@ impl<'a> Reader<'a> {
         })
     }
 
+    fn side(&mut self) -> Result<Side, Error> {
+        self.tag("side", &[Side::Left, Side::Right, Side::Up, Side::Down])
+    }
+
+    fn take(&mut self, count: usize) -> Result<&'a [u8], Error> {
+        let (head, rest) = self.0.split_at_checked(count).ok_or(Error::Truncated)?;
+        self.0 = rest;
+        Ok(head)
+    }
+
     fn rest(&mut self) -> &'a [u8] {
         std::mem::take(&mut self.0)
     }
@@ -1143,7 +1486,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 2, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 3, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -1153,6 +1496,22 @@ mod tests {
     const COUNT_AT: usize = 48;
     const ROWS_AT: usize = 50;
     const CELLS_AT: usize = 52;
+
+    /// Any rectangle a peer accepts.
+    fn rects() -> impl Strategy<Value = Rect> {
+        (1..=MAX_DIMENSION, 1..=MAX_DIMENSION).prop_flat_map(|(columns, rows)| {
+            (0..=MAX_DIMENSION - columns, 0..=MAX_DIMENSION - rows).prop_map(move |(x, y)| Rect {
+                x,
+                y,
+                columns,
+                rows,
+            })
+        })
+    }
+
+    fn wire_chunks<'a>(input: &mut &'a [u8], chunk: usize) -> std::slice::Chunks<'a, u8> {
+        std::mem::take(input).chunks(chunk)
+    }
 
     fn raw(kind: u8, body: &[u8]) -> Vec<u8> {
         let mut wire = ((body.len() + KIND) as u32).to_le_bytes().to_vec();
@@ -1357,7 +1716,7 @@ mod tests {
             assert!(decoder.buffer.capacity() <= PREFIX + MAX_MESSAGE);
         }
 
-        let small = raw(EXITED, &[0; 4]);
+        let small = raw(RAISE, &[]);
         assert!(
             decoder
                 .next_notice(&mut small.as_slice())
@@ -1468,22 +1827,148 @@ mod tests {
     #[test]
     fn a_resize_out_of_bounds_is_refused_both_ways() {
         for (rows, columns) in [(0, 80), (24, 0), (MAX_DIMENSION + 1, 80), (24, u16::MAX)] {
-            let message = Request::Resize {
-                pane: 0,
-                rows,
-                columns,
-            };
+            let message = Request::Resize { rows, columns };
             let mut out = Vec::new();
             assert!(message.encode(&mut out).is_err());
             assert!(out.is_empty());
-            let mut body = 0_u32.to_le_bytes().to_vec();
-            body.extend_from_slice(&rows.to_le_bytes());
+            let mut body = rows.to_le_bytes().to_vec();
             body.extend_from_slice(&columns.to_le_bytes());
             assert!(matches!(
                 request_error(&raw(RESIZE, &body)),
                 Err(Error::OutOfBounds { .. })
             ));
         }
+    }
+
+    fn layout_body(active: u16, tabs: &[u32], panes: &[(u32, Rect)]) -> Vec<u8> {
+        let mut body = active.to_le_bytes().to_vec();
+        body.extend_from_slice(&7_u32.to_le_bytes());
+        body.extend_from_slice(&(MAX_PANES as u16).to_le_bytes());
+        body.extend_from_slice(&(tabs.len() as u16).to_le_bytes());
+        body.extend_from_slice(&(panes.len() as u16).to_le_bytes());
+        for tab in tabs {
+            body.extend_from_slice(&tab.to_le_bytes());
+        }
+        for (pane, rect) in panes {
+            body.extend_from_slice(&pane.to_le_bytes());
+            for side in [rect.x, rect.y, rect.columns, rect.rows] {
+                body.extend_from_slice(&side.to_le_bytes());
+            }
+        }
+        body
+    }
+
+    const CORNER: Rect = Rect {
+        x: 0,
+        y: 0,
+        columns: 80,
+        rows: 24,
+    };
+
+    #[test]
+    fn a_layout_past_its_limits_is_refused_both_ways() {
+        type Bad<'a> = (u16, &'a [u32], &'a [(u32, Rect)], &'a str);
+        let tabs: Vec<u32> = (0..=MAX_TABS as u32).collect();
+        let panes: Vec<(u32, Rect)> = (0..=MAX_PANES as u32).map(|pane| (pane, CORNER)).collect();
+        let off = |rect| [(1, rect)];
+        let bad: [Bad; 8] = [
+            (0, &tabs, &[], "tabs"),
+            (0, &[1], &panes, "panes"),
+            (1, &[1], &[], "active tab"),
+            (1, &[], &[], "active tab"),
+            (0, &[1, 1], &[], "repeated pane"),
+            (0, &[1], &[(2, CORNER), (2, CORNER)], "repeated pane"),
+            (
+                0,
+                &[1],
+                &off(Rect {
+                    columns: 0,
+                    ..CORNER
+                }),
+                "columns",
+            ),
+            (
+                0,
+                &[1],
+                &off(Rect {
+                    x: MAX_DIMENSION - 79,
+                    ..CORNER
+                }),
+                "x",
+            ),
+        ];
+        for (active, tabs, panes, field) in bad {
+            let mut out = vec![9];
+            let total = MAX_PANES as u16;
+            let error = encode_layout(&mut out, active, 7, total, tabs, panes).unwrap_err();
+            assert!(matches!(error, Error::OutOfBounds { field: f, .. } if f == field));
+            assert_eq!(out, [9]);
+            let wire = raw(LAYOUT, &layout_body(active, tabs, panes));
+            assert_eq!(notice_error(&wire), Err(error));
+        }
+    }
+
+    #[test]
+    fn a_layout_that_promises_more_than_it_holds_is_refused() {
+        let mut body = layout_body(0, &[1], &[(2, CORNER)]);
+        body.truncate(body.len() - 1);
+        assert_eq!(notice_error(&raw(LAYOUT, &body)), Err(Error::Truncated));
+        let mut body = layout_body(0, &[1], &[(2, CORNER)]);
+        body.push(0);
+        let wire = raw(LAYOUT, &body);
+        assert_eq!(notice_error(&wire), Err(Error::Trailing { bytes: 1 }));
+    }
+
+    #[test]
+    fn an_empty_session_is_a_layout() {
+        let mut wire = HELLO_WIRE.to_vec();
+        encode_layout(&mut wire, 0, 0, 0, &[], &[]).unwrap();
+        let (mut decoder, mut input) = (Decoder::default(), wire.as_slice());
+        decoder.next_notice(&mut input).unwrap();
+        let notice = decoder.next_notice(&mut input).unwrap();
+        assert!(matches!(notice, Some(Notice::Layout(layout)) if layout.is_empty()));
+    }
+
+    #[test]
+    fn commands_out_of_bounds_are_refused_both_ways() {
+        let tab = Request::SwitchTab {
+            index: MAX_TABS as u16,
+        };
+        let border = |cells| Request::MoveBorder {
+            side: Side::Up,
+            cells,
+        };
+        for message in [tab, border(0), border(MAX_DIMENSION + 1)] {
+            assert!(matches!(
+                message.encode(&mut Vec::new()),
+                Err(Error::OutOfBounds { .. })
+            ));
+        }
+        assert!(matches!(
+            request_error(&raw(SWITCH_TAB, &(MAX_TABS as u16).to_le_bytes())),
+            Err(Error::OutOfBounds { .. })
+        ));
+        assert!(matches!(
+            request_error(&raw(MOVE_BORDER, &[0, 0, 0])),
+            Err(Error::OutOfBounds { .. })
+        ));
+        for (kind, body, field) in [
+            (STEP_TAB, [2].as_slice(), "tab step"),
+            (SPLIT, [0, 0, 0, 0, 2].as_slice(), "split"),
+            (MOVE_FOCUS, [4].as_slice(), "side"),
+            (MOVE_BORDER, [4, 1, 0].as_slice(), "side"),
+        ] {
+            let error = request_error(&raw(kind, body));
+            assert!(matches!(error, Err(Error::BadTag { field: f, .. }) if f == field));
+        }
+        let error = notice_error(&raw(REFUSED, &[4]));
+        assert!(matches!(
+            error,
+            Err(Error::BadTag {
+                field: "refusal",
+                ..
+            })
+        ));
     }
 
     #[test]
@@ -1629,11 +2114,18 @@ mod tests {
     #[test]
     fn a_message_cut_anywhere_short_is_refused() {
         for (kind, length) in [
-            (RESIZE, 8),
+            (RESIZE, 4),
             (SCROLL, 8),
             (REVEAL, 12),
             (SEARCH, 15),
             (COPY, 24),
+            (SWITCH_TAB, 2),
+            (STEP_TAB, 1),
+            (SPLIT, 5),
+            (CLOSE_PANE, 4),
+            (FOCUS, 4),
+            (MOVE_FOCUS, 1),
+            (MOVE_BORDER, 3),
         ] {
             for short in 0..length {
                 let wire = raw(kind, &vec![1; short]);
@@ -1655,7 +2147,7 @@ mod tests {
     fn a_message_that_goes_on_is_refused() {
         let wire = raw(QUIT, &[0]);
         assert_eq!(request_error(&wire), Err(Error::Trailing { bytes: 1 }));
-        let wire = raw(EXITED, &[0; 6]);
+        let wire = raw(RAISE, &[0; 2]);
         assert_eq!(notice_error(&wire), Err(Error::Trailing { bytes: 2 }));
         let frame = frame_wire(&screen(2, 3), None);
         let mut body = frame[PREFIX + KIND..].to_vec();
@@ -1930,12 +2422,79 @@ mod tests {
 
         #[test]
         fn resize_round_trips(
-            pane in any::<u32>(),
             rows in 1..=MAX_DIMENSION,
             columns in 1..=MAX_DIMENSION,
             chunk in chunks(),
         ) {
-            prop_assert!(request_survives(Request::Resize { pane, rows, columns }, chunk), "changed on the link");
+            prop_assert!(request_survives(Request::Resize { rows, columns }, chunk), "changed on the link");
+        }
+
+        #[test]
+        fn commands_round_trip(
+            pane in any::<u32>(),
+            index in 0..MAX_TABS as u16,
+            forward in any::<bool>(),
+            way in prop::sample::select(&[SplitWay::Right, SplitWay::Down][..]),
+            side in prop::sample::select(&[Side::Left, Side::Right, Side::Up, Side::Down][..]),
+            cells in 1..=MAX_DIMENSION,
+            chunk in chunks(),
+        ) {
+            for command in [
+                Request::NewTab,
+                Request::SwitchTab { index },
+                Request::StepTab { forward },
+                Request::Split { pane, way },
+                Request::ClosePane { pane },
+                Request::Focus { pane },
+                Request::MoveFocus { side },
+                Request::MoveBorder { side, cells },
+                Request::Zoom,
+            ] {
+                prop_assert!(request_survives(command, chunk), "changed on the link");
+            }
+        }
+
+        #[test]
+        fn a_layout_round_trips(
+            mut tabs in prop::collection::btree_set(any::<u32>(), 0..=MAX_TABS),
+            panes in prop::collection::btree_map(any::<u32>(), rects(), 0..=MAX_PANES),
+            active in any::<u16>(),
+            focused in any::<u32>(),
+            chunk in chunks(),
+        ) {
+            let active = active % tabs.len().max(1) as u16;
+            let tabs: Vec<u32> = std::mem::take(&mut tabs).into_iter().collect();
+            let panes: Vec<(u32, Rect)> = panes.into_iter().collect();
+            let mut wire = Vec::new();
+            encode_layout(&mut wire, active, focused, MAX_PANES as u16, &tabs, &panes).unwrap();
+            let mut decoder = Decoder::default();
+            let hello = [HELLO_WIRE.as_slice(), wire.as_slice()].concat();
+            let mut input = hello.as_slice();
+            let mut seen = None;
+            for part in wire_chunks(&mut input, chunk) {
+                let mut part = part;
+                while let Some(notice) = decoder.next_notice(&mut part).unwrap() {
+                    if let Notice::Layout(layout) = notice {
+                        seen = Some((
+                            layout.active,
+                            layout.focused,
+                            layout.tabs().collect::<Vec<_>>(),
+                            layout.panes().collect::<Vec<_>>(),
+                        ));
+                    }
+                }
+            }
+            prop_assert_eq!(seen, Some((active, focused, tabs, panes)));
+        }
+
+        #[test]
+        fn a_refusal_round_trips(
+            reason in prop::sample::select(
+                &[Refusal::Tabs, Refusal::Panes, Refusal::Room, Refusal::Spawn][..],
+            ),
+            chunk in chunks(),
+        ) {
+            prop_assert!(notice_survives(&Notice::Refused { reason }, chunk), "changed on the link");
         }
 
         #[test]
@@ -1998,11 +2557,6 @@ mod tests {
         #[test]
         fn copied_round_trips(pane in any::<u32>(), text in any::<String>(), chunk in chunks()) {
             prop_assert!(notice_survives(&Notice::Copied { pane, text: &text }, chunk), "changed on the link");
-        }
-
-        #[test]
-        fn exited_round_trips(pane in any::<u32>(), chunk in chunks()) {
-            prop_assert!(notice_survives(&Notice::Exited { pane }, chunk), "changed on the link");
         }
 
         #[test]

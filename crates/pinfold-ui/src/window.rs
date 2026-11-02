@@ -1,14 +1,14 @@
-//! One window with one pane.
+//! One window on the core's session.
 //!
-//! The core owns the PTY, and the I/O thread here owns the link to it (ADR-0028). That thread
-//! hands the window copies of the screen, so a window that dies leaves the pane running.
+//! The core owns the PTYs and the tabs, and the I/O thread here owns the link to it (ADR-0028).
+//! That thread hands the window copies of the panes the active tab shows, so a window that dies
+//! leaves them running, and a hidden tab costs nothing here.
 
 use std::io;
-use std::ops::Range;
 use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use mio::Waker;
 use pinfold_config::Config;
-use pinfold_proto::link::{Direction, Position, Selection};
+use pinfold_proto::link::{self as proto, Direction, MAX_DIMENSION, Position, Rect, Selection};
 use pinfold_proto::{Frame, MouseMode};
 use pinfold_render::cpu::{CpuRenderer, Renderer};
 use pinfold_render::font::{Font, FontError};
@@ -35,17 +35,16 @@ use winit::platform::macos::{OptionAsAlt, WindowAttributesExtMacOS, WindowExtMac
 use winit::window::{Window, WindowId};
 
 use crate::flash::{self, Flash};
-use crate::link::Link;
+use crate::link::{self, Link, Screen, Tab};
 use crate::paste::Prompt;
+use crate::prefix::{self, Command, Prefix};
 use crate::search_bar::{Bar, Step};
 use crate::selection::Selecting;
-use crate::top_bar::Clicks;
+use crate::top_bar::{Clicks, Hit};
 use crate::vi::{Step as ViStep, Vi, View};
-use crate::{ime, input, mouse, paste, reload, selection, top_bar};
+use crate::{ime, input, mouse, panes, paste, reload, selection, top_bar};
 
 const DEFAULT_SIZE: LogicalSize<u32> = LogicalSize::new(1000, 640);
-/// The core starts this pane itself.
-const PANE: u32 = 0;
 /// Rows under the pane that belong to Pinfold, so program output cannot reach them.
 const CHROME_ROWS: u16 = 1;
 
@@ -70,27 +69,28 @@ pub enum Error {
 }
 
 enum Request {
-    Input(Vec<u8>),
-    Paste(String),
+    Input(u32, Vec<u8>),
+    Paste(u32, String),
     Resize(u16, u16),
-    /// Rows to move the view into history, or back if negative.
-    Scroll(i32),
-    /// Scrolls the view just far enough to show this row.
-    Reveal(usize),
-    /// Replaces any search running.
+    /// Replaces any search running in the pane.
     Search {
+        pane: u32,
         query: String,
         from: Position,
         direction: Direction,
     },
-    Copy(Selection),
+    Copy(u32, Selection),
+    /// Anything that owns all it says.
+    Core(proto::Request<'static>),
 }
 
 enum Notice {
     Frame,
-    /// The last search ended, and its match is in view if it had one.
-    Searched(Option<Selection>),
+    /// The last search in this pane ended, and its match is in view if it had one.
+    Searched(u32, Option<Selection>),
     Copied(String),
+    /// The core did not carry out a command.
+    Refused(proto::Refusal),
     Exited,
     /// The link ended, so the panes went with the core.
     Ended,
@@ -100,17 +100,24 @@ enum Notice {
     Config(Config),
 }
 
-/// The latest screen. While `pending`, the window has not taken it yet, so the I/O thread
-/// leaves the pane dirty. That limits copies to what the window can draw.
+/// What the I/O thread has for the window. A screen marked dirty here is one the window has not
+/// taken yet.
+#[derive(Default)]
+struct Shown {
+    screens: Vec<Screen>,
+    tabs: Vec<Tab>,
+    active: usize,
+    focused: u32,
+    total: usize,
+    /// Whether what is above, past the screens' contents, changed since the window read it.
+    laid: bool,
+}
+
+/// While `pending`, the window has not taken `shown` yet, so the I/O thread leaves the link's
+/// panes dirty. That limits copies to what the window can draw.
 #[derive(Default)]
 struct Latest {
-    frame: Mutex<Frame>,
-    /// The core's number for the first row of `frame`.
-    top: AtomicUsize,
-    /// The rows the view can reach.
-    held: Mutex<Range<usize>>,
-    /// The last directory the pane reported, as program output wrote it. Empty if none.
-    cwd: Mutex<String>,
+    shown: Mutex<Shown>,
     pending: AtomicBool,
 }
 
@@ -122,7 +129,41 @@ fn copy_frame(target: &mut Frame, source: &Frame) {
     *target = Frame { cells, ..*source };
 }
 
-/// Runs the link until it ends or the pane closes. The last screen stays in `latest`.
+/// Copies what changed in `link` to `shown`, and returns whether anything did. Only panes with a
+/// new screen are copied, so an idle pane costs nothing per frame.
+fn publish(link: &mut Link, shown: &mut Shown) -> bool {
+    let mut changed = link.take_laid();
+    if changed {
+        let screens = link.screens();
+        link::follow(
+            &mut shown.screens,
+            screens.iter().map(|screen| (screen.pane, screen.rect)),
+        );
+        shown.tabs.resize_with(link.tabs().len(), Tab::default);
+        for (ours, tab) in shown.tabs.iter_mut().zip(link.tabs()) {
+            ours.pane = tab.pane;
+            ours.cwd.clone_from(&tab.cwd);
+        }
+        shown.active = link.active();
+        shown.focused = link.focused();
+        shown.total = link.total();
+        shown.laid = true;
+    }
+    for screen in link.screens_mut().iter_mut().filter(|screen| screen.dirty) {
+        screen.dirty = false;
+        changed = true;
+        let mut ours = shown.screens.iter_mut();
+        if let Some(ours) = ours.find(|ours| ours.pane == screen.pane) {
+            copy_frame(&mut ours.frame, &screen.frame);
+            ours.top = screen.top;
+            ours.held.clone_from(&screen.held);
+            ours.dirty = true;
+        }
+    }
+    changed
+}
+
+/// Runs the link until it ends or the session does. The last screens stay in `latest`.
 fn run_io(
     mut link: Link,
     requests: &Receiver<Request>,
@@ -136,56 +177,60 @@ fn run_io(
         // or key puts right, retry them if a person ever sees one go.
         while let Ok(request) = requests.try_recv() {
             match request {
-                Request::Input(bytes) => {
-                    link.write(&bytes);
+                Request::Input(pane, bytes) => {
+                    link.send(proto::Request::Input {
+                        pane,
+                        bytes: &bytes,
+                    });
                 }
-                Request::Paste(text) => {
-                    link.paste(&text);
+                Request::Paste(pane, text) => {
+                    link.send(proto::Request::Paste { pane, text: &text });
                 }
                 Request::Resize(rows, columns) => {
                     link.resize(rows, columns);
                 }
-                Request::Scroll(lines) => {
-                    link.scroll(lines);
-                }
-                Request::Reveal(row) => {
-                    link.reveal(row);
-                }
                 Request::Search {
+                    pane,
                     query,
                     from,
                     direction,
                 } => {
-                    link.search(&query, from, direction);
+                    link.send(proto::Request::Search {
+                        pane,
+                        from,
+                        direction,
+                        query: &query,
+                    });
                 }
-                Request::Copy(selection) => {
-                    link.copy(selection);
+                Request::Copy(pane, selection) => {
+                    link.copy(pane, selection);
+                }
+                Request::Core(request) => {
+                    link.send(request);
                 }
             }
         }
-        let searched = link.take_searched().map(Notice::Searched);
+        let searched = link
+            .take_searched()
+            .map(|(pane, found)| Notice::Searched(pane, found));
         let copied = link.take_copied().map(Notice::Copied);
         let raised = link.take_raised().then_some(Notice::Raise);
-        for notice in [searched, copied, raised].into_iter().flatten() {
+        let refused = link.take_refused().map(Notice::Refused);
+        for notice in [searched, copied, raised, refused].into_iter().flatten() {
             if proxy.send_event(notice).is_err() {
                 return;
             }
         }
-        if !latest.pending.load(Ordering::Acquire) && link.take_dirty() {
-            if let Ok(mut frame) = latest.frame.lock() {
-                copy_frame(&mut frame, link.frame());
-                latest.top.store(link.top(), Ordering::Release);
-                if let Ok(mut held) = latest.held.lock() {
-                    *held = link.held();
+        if !latest.pending.load(Ordering::Acquire) {
+            let changed = latest
+                .shown
+                .lock()
+                .is_ok_and(|mut shown| publish(&mut link, &mut shown));
+            if changed {
+                latest.pending.store(true, Ordering::Release);
+                if proxy.send_event(Notice::Frame).is_err() {
+                    return;
                 }
-                if let Ok(mut cwd) = latest.cwd.lock() {
-                    cwd.clear();
-                    cwd.push_str(link.cwd());
-                }
-            }
-            latest.pending.store(true, Ordering::Release);
-            if proxy.send_event(Notice::Frame).is_err() {
-                return;
             }
         }
         if link.is_closed() {
@@ -249,6 +294,20 @@ fn renderer(
     )?))
 }
 
+/// Finds what is known of `pane`, while it is shown.
+fn find(panes: &[Screen], pane: u32) -> Option<&Screen> {
+    panes.iter().find(|screen| screen.pane == pane)
+}
+
+/// What vi mode sees of a pane.
+fn view(screen: &Screen) -> View<'_> {
+    View {
+        frame: &screen.frame,
+        top: screen.top,
+        held: &screen.held,
+    }
+}
+
 struct App {
     config: Config,
     size: Option<(u32, u32)>,
@@ -256,18 +315,24 @@ struct App {
     latest: Arc<Latest>,
     waker: Arc<Waker>,
     open: Option<Open>,
-    frame: Frame,
+    /// The panes the active tab shows.
+    panes: Vec<Screen>,
+    /// Where each of `panes` is, for drawing borders with no allocation.
+    rects: Vec<Rect>,
+    /// The pane keys go to. It is missing from `panes` in a window too small for it.
+    focused: u32,
+    /// How many panes the session holds, shown or not.
+    total: usize,
+    /// The space for panes, as `(rows, columns)`.
+    area: (u16, u16),
     modifiers: ModifiersState,
     /// Text the input method is composing, and the byte its caret is at.
     preedit: (String, usize),
-    /// The core's number for the first row of `frame`.
-    top: usize,
-    /// The rows the view can reach, as of `frame`.
-    held: Range<usize>,
-    /// The screen with the selection, `preedit` and chrome over it.
+    /// The panes with their borders, the selection, `preedit` and chrome over them.
     composed: Frame,
-    /// The top bar's label, made safe to draw.
-    label: String,
+    /// The tabs' labels, made safe to draw.
+    labels: Vec<String>,
+    active: usize,
     /// When the clock in the top bar next changes.
     minute: Instant,
     /// Whether the pointer is over the top bar.
@@ -277,7 +342,7 @@ struct App {
     clicks: Clicks,
     /// Where the input method's window was last told to go.
     ime_cursor: Option<(u16, u16)>,
-    /// The pane cell under the pointer, as `(row, column)`. Over the top bar, its top row.
+    /// The cell of `area` under the pointer, as `(row, column)`. Over the top bar, its top row.
     pointer: (u16, u16),
     /// The buttons held, by their number in reports, lowest first.
     buttons: [bool; 3],
@@ -285,8 +350,9 @@ struct App {
     wheel: f32,
     /// Connected on first use, so a window that never pastes or copies does not pay for it.
     clipboard: Option<Clipboard>,
-    /// A paste waiting for the user. Every key goes to this until it is answered.
+    /// A question for the user. Every key goes to this until it is answered.
     prompt: Option<Prompt>,
+    prefix: Prefix,
     flash: Flash,
     selecting: Selecting,
     /// The search bar, while open. Keys go to this before the program.
@@ -314,6 +380,10 @@ impl App {
         if self.requests.send(request).is_ok() {
             let _ = self.waker.wake();
         }
+    }
+
+    fn core(&self, request: proto::Request<'static>) {
+        self.request(Request::Core(request));
     }
 
     fn redraw_soon(&self) {
@@ -353,6 +423,7 @@ impl App {
         let (rows, columns) = padding.grid(size.width, size.height, cell);
         open.window.request_redraw();
         let rows = rows.saturating_sub(top_bar::ROWS + CHROME_ROWS).max(1);
+        self.area = (rows.min(MAX_DIMENSION), columns.clamp(1, MAX_DIMENSION));
         self.request(Request::Resize(rows, columns.max(1)));
     }
 
@@ -372,6 +443,9 @@ impl App {
             return;
         }
         let old = std::mem::replace(&mut self.config, config);
+        if self.config.keys.prefix != old.keys.prefix {
+            self.prefix = Prefix::new(self.config.keys.prefix);
+        }
         let Some(open) = &mut self.open else { return };
         #[cfg(target_os = "macos")]
         open.window.set_option_as_alt(option_as_alt(&self.config));
@@ -386,55 +460,124 @@ impl App {
         self.scale_changed(scale);
     }
 
+    /// Applies a new shape: the panes shown, the tabs and the focus.
+    fn lay_out(&mut self, shown: &Shown) {
+        let screens = shown.screens.iter();
+        link::follow(
+            &mut self.panes,
+            screens.map(|screen| (screen.pane, screen.rect)),
+        );
+        self.rects.clear();
+        self.rects.extend(self.panes.iter().map(|pane| pane.rect));
+        self.labels.resize_with(shown.tabs.len(), String::new);
+        for (label, tab) in self.labels.iter_mut().zip(&shown.tabs) {
+            top_bar::label(&tab.cwd, label);
+        }
+        self.active = shown.active;
+        self.total = shown.total;
+        // Another pane may have closed under the question.
+        if let Some(Prompt::Close { last, .. }) = &mut self.prompt {
+            *last = self.total == 1;
+        }
+        if self.focused != shown.focused {
+            let old = std::mem::replace(&mut self.focused, shown.focused);
+            self.focus_moved(old);
+        }
+    }
+
+    /// Ends what was going on in the pane that lost focus, as all of it belongs to one pane.
+    fn focus_moved(&mut self, old: u32) {
+        if self.vi.take().is_some() {
+            self.core(proto::Request::Scroll {
+                pane: old,
+                lines: i32::MIN,
+            });
+            if let Some(open) = &self.open {
+                open.window.set_ime_allowed(true);
+            }
+        }
+        self.bar = None;
+        self.prompt = None;
+        self.selecting = Selecting::default();
+        self.preedit.0.clear();
+        self.ime_cursor = None;
+    }
+
+    /// Takes everything new from the I/O thread. A swap, so no copy happens under the lock.
+    fn take(&mut self, shown: &mut Shown) {
+        if std::mem::take(&mut shown.laid) {
+            self.lay_out(shown);
+        }
+        for fresh in shown.screens.iter_mut().filter(|screen| screen.dirty) {
+            fresh.dirty = false;
+            let mut panes = self.panes.iter_mut();
+            let Some(pane) = panes.find(|pane| pane.pane == fresh.pane) else {
+                continue;
+            };
+            std::mem::swap(&mut fresh.frame, &mut pane.frame);
+            std::mem::swap(&mut fresh.top, &mut pane.top);
+            pane.held.clone_from(&fresh.held);
+            if pane.pane == self.focused {
+                self.selecting
+                    .check((&fresh.frame, fresh.top), (&pane.frame, pane.top));
+            }
+            let writes = pane.frame.clipboard_writes;
+            if fresh.frame.rows > 0 && fresh.frame.clipboard_writes != writes {
+                self.flash.blocked(Instant::now());
+            }
+        }
+        if let (Some(vi), Some(pane)) = (&mut self.vi, find(&self.panes, self.focused)) {
+            vi.settle(&view(pane));
+        }
+    }
+
     fn redraw(&mut self) -> Result<(), Error> {
         if self.latest.pending.load(Ordering::Acquire) {
-            if let Ok(mut latest) = self.latest.frame.lock() {
-                std::mem::swap(&mut *latest, &mut self.frame);
-                let top = self.latest.top.load(Ordering::Acquire);
-                self.selecting
-                    .check((&latest, self.top), (&self.frame, top));
-                self.top = top;
+            let latest = self.latest.clone();
+            if let Ok(mut shown) = latest.shown.lock() {
+                self.take(&mut shown);
             }
-            if let Ok(held) = self.latest.held.lock() {
-                self.held.clone_from(&held);
-            }
-            if let Ok(cwd) = self.latest.cwd.lock() {
-                top_bar::label(&cwd, &mut self.label);
-            }
-            if let Some(vi) = &mut self.vi {
-                vi.settle(&View {
-                    frame: &self.frame,
-                    top: self.top,
-                    held: &self.held,
-                });
-            }
-            self.latest.pending.store(false, Ordering::Release);
+            latest.pending.store(false, Ordering::Release);
             let _ = self.waker.wake();
         }
-        self.flash
-            .observe(self.frame.clipboard_writes, Instant::now());
+        self.flash.tick(Instant::now());
         if let Some(open) = &mut self.open {
-            if self.ime_cursor != self.frame.cursor {
-                self.ime_cursor = self.frame.cursor;
-                if let Some((row, column)) = self.frame.cursor {
-                    let (width, height) = open.renderer.cell_size();
-                    let padding = open.padding();
-                    let row = usize::from(row) + usize::from(top_bar::ROWS);
-                    let x = padding.left + usize::from(column) * width;
-                    let y = padding.row_top(row, height);
-                    open.window.set_ime_cursor_area(
-                        PhysicalPosition::new(x as u32, y as u32),
-                        PhysicalSize::new(width as u32, height as u32),
-                    );
+            let (rows, columns) = self.area;
+            panes::blank(&mut self.composed, rows, columns);
+            for pane in &self.panes {
+                panes::blit(&mut self.composed, &pane.frame, pane.rect);
+            }
+            let focused = find(&self.panes, self.focused);
+            panes::dividers(
+                &mut self.composed,
+                &self.rects,
+                focused.map(|pane| pane.rect),
+            );
+            if let Some(pane) = focused {
+                let (rect, top) = (pane.rect, pane.top);
+                self.composed.cursor = panes::cursor(rect, pane.frame.cursor);
+                if self.ime_cursor != self.composed.cursor {
+                    self.ime_cursor = self.composed.cursor;
+                    if let Some((row, column)) = self.composed.cursor {
+                        let (width, height) = open.renderer.cell_size();
+                        let padding = open.padding();
+                        let row = usize::from(row) + usize::from(top_bar::ROWS);
+                        let x = padding.left + usize::from(column) * width;
+                        let y = padding.row_top(row, height);
+                        open.window.set_ime_cursor_area(
+                            PhysicalPosition::new(x as u32, y as u32),
+                            PhysicalSize::new(width as u32, height as u32),
+                        );
+                    }
                 }
-            }
-            copy_frame(&mut self.composed, &self.frame);
-            if let Some(selection) = self.selecting.current {
-                selection::overlay(&mut self.composed, self.top, selection);
-            }
-            ime::overlay(&mut self.composed, &self.preedit.0, self.preedit.1);
-            if let Some(vi) = &self.vi {
-                self.composed.cursor = vi.drawn(self.top, self.frame.rows);
+                if let Some(selection) = self.selecting.current {
+                    selection::overlay(&mut self.composed, rect, top, selection);
+                }
+                let end = rect.x + rect.columns;
+                ime::overlay(&mut self.composed, end, &self.preedit.0, self.preedit.1);
+                if let Some(vi) = &self.vi {
+                    self.composed.cursor = panes::cursor(rect, vi.drawn(top, rect.rows));
+                }
             }
             if self.ended {
                 flash::ended(&mut self.composed);
@@ -453,7 +596,7 @@ impl App {
             let cell_width = open.renderer.cell_size().0;
             let left = open.padding().left;
             let inset = top_bar::inset(top_bar::LEFT_POINTS, scale, left, cell_width);
-            top_bar::draw(&mut self.composed, &[&self.label], 0, time, inset);
+            top_bar::draw(&mut self.composed, &self.labels, self.active, time, inset);
             open.renderer.draw(&self.composed)?;
         }
         Ok(())
@@ -475,7 +618,7 @@ impl App {
             return;
         }
         match paste::check(text) {
-            Ok(text) => self.request(Request::Paste(text)),
+            Ok(text) => self.request(Request::Paste(self.focused, text)),
             Err(prompt) => {
                 self.prompt = Some(prompt);
                 self.redraw_soon();
@@ -483,13 +626,53 @@ impl App {
         }
     }
 
-    /// Handles a key that is the window's, and returns whether it was.
-    fn shortcut(&mut self, event: &KeyEvent) -> bool {
+    /// Carries out what a prefix key or a Command key asked for.
+    fn command(&mut self, event_loop: &ActiveEventLoop, command: Command) {
+        let pane = self.focused;
+        let request = match command {
+            Command::NewTab => proto::Request::NewTab,
+            Command::NextTab => proto::Request::StepTab { forward: true },
+            Command::PreviousTab => proto::Request::StepTab { forward: false },
+            Command::Tab(index) => proto::Request::SwitchTab {
+                index: index as u16,
+            },
+            Command::SplitRight => proto::Request::Split {
+                pane,
+                way: proto::SplitWay::Right,
+            },
+            Command::SplitDown => proto::Request::Split {
+                pane,
+                way: proto::SplitWay::Down,
+            },
+            Command::Focus(side) => proto::Request::MoveFocus { side },
+            Command::Resize(side, cells) => proto::Request::MoveBorder { side, cells },
+            Command::Zoom => proto::Request::Zoom,
+            // The session stays in the core for the next window.
+            Command::Detach => return event_loop.exit(),
+            // A program dies with its pane, so this asks first as tmux does.
+            Command::ClosePane => {
+                let last = self.total == 1;
+                self.prompt = Some(Prompt::Close { pane, last });
+                return self.redraw_soon();
+            }
+        };
+        self.core(request);
+    }
+
+    /// Handles a key that belongs to the window whatever else is going on, and returns whether
+    /// it did. These come before the prefix, so that an armed prefix cannot swallow a paste.
+    fn window_key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) -> bool {
         let key = &event.logical_key;
+        if input::is_paste(key, self.modifiers) {
+            if !event.repeat {
+                self.paste();
+            }
+            return true;
+        }
         // Only this key copies, so output alone can never reach the clipboard.
         if input::is_copy(key, self.modifiers) {
             if let Some(selection) = self.selecting.current.filter(|_| !event.repeat) {
-                self.request(Request::Copy(selection));
+                self.request(Request::Copy(self.focused, selection));
             }
             return true;
         }
@@ -504,6 +687,19 @@ impl App {
             }
             return true;
         }
+        let tab = input::tab_key(key, self.modifiers).filter(|_| cfg!(target_os = "macos"));
+        if let Some(command) = tab {
+            if !event.repeat {
+                self.command(event_loop, command);
+            }
+            return true;
+        }
+        false
+    }
+
+    /// Hands a key to the search bar or vi mode, and returns whether either took it.
+    fn shortcut(&mut self, event: &KeyEvent) -> bool {
+        let key = &event.logical_key;
         let text = event.text.as_ref().map(|text| text.as_str());
         let bar = self.bar.as_mut().filter(|_| self.preedit.0.is_empty());
         match bar.and_then(|bar| bar.key(key, text, self.modifiers)) {
@@ -516,19 +712,50 @@ impl App {
         true
     }
 
+    /// Sends a key press where it goes: the window, then the prefix, then the search bar and vi
+    /// mode, then the pane. A key pressed while composing belongs to the input method, so it
+    /// neither reaches a program nor counts as the prefix.
+    fn key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) {
+        if self.window_key(event, event_loop) {
+            self.prefix.cancel();
+            return;
+        }
+        let composing = !self.preedit.0.is_empty();
+        if !composing {
+            match self
+                .prefix
+                .key(&event.logical_key, self.modifiers, event.repeat)
+            {
+                prefix::Step::Pass => {}
+                prefix::Step::Swallow => return,
+                prefix::Step::Run(command) => return self.command(event_loop, command),
+            }
+        }
+        if self.shortcut(event) || composing {
+            return;
+        }
+        let Some(pane) = find(&self.panes, self.focused) else {
+            return;
+        };
+        let text = event.text.as_ref().map(|text| text.as_str());
+        let (app_cursor, alt) = (pane.frame.app_cursor, self.config.macos_option_as_alt);
+        let bytes = input::encode(&event.logical_key, text, self.modifiers, app_cursor, alt);
+        if !bytes.is_empty() {
+            self.request(Request::Input(self.focused, bytes));
+        }
+    }
+
     /// Turns vi mode on at the program's cursor, or off and back to the live screen. An input
     /// method would take its keys, so that goes off with it.
     fn toggle_vi(&mut self) {
-        self.vi = match self.vi {
-            Some(_) => None,
-            None => Some(Vi::new(&View {
-                frame: &self.frame,
-                top: self.top,
-                held: &self.held,
-            })),
+        let pane = self.focused;
+        self.vi = match (self.vi, find(&self.panes, pane)) {
+            (None, Some(screen)) => Some(Vi::new(&view(screen))),
+            _ => None,
         };
         if self.vi.is_none() {
-            self.request(Request::Scroll(i32::MIN));
+            let lines = i32::MIN;
+            self.core(proto::Request::Scroll { pane, lines });
         }
         if let Some(open) = &self.open {
             open.window.set_ime_allowed(self.vi.is_none());
@@ -542,22 +769,21 @@ impl App {
         let Some(vi) = &mut self.vi else {
             return false;
         };
+        let Some(screen) = find(&self.panes, self.focused) else {
+            return true;
+        };
         // A click or new text under the selection ended it.
         if self.selecting.current.is_none() {
             vi.end_selection();
         }
-        let view = View {
-            frame: &self.frame,
-            top: self.top,
-            held: &self.held,
-        };
-        let step = vi.key(&event.logical_key, self.modifiers, &view);
+        let step = vi.key(&event.logical_key, self.modifiers, &view(screen));
         let (row, selection) = (vi.row(), vi.selection());
         match step {
             ViStep::Stay => return true,
             ViStep::Moved => {
                 self.selecting.current = selection.or(self.selecting.current);
-                self.request(Request::Reveal(row));
+                let pane = self.focused;
+                self.core(proto::Request::Reveal { pane, row });
             }
             ViStep::Unselect => self.selecting.current = None,
             ViStep::Find => {
@@ -565,7 +791,7 @@ impl App {
             }
             ViStep::Yank => {
                 if let Some(selection) = self.selecting.current.take() {
-                    self.request(Request::Copy(selection));
+                    self.request(Request::Copy(self.focused, selection));
                 }
             }
             ViStep::Close => self.toggle_vi(),
@@ -596,14 +822,15 @@ impl App {
         let (query, from, direction) = bar.search(step, self.selecting.current);
         let query = query.to_owned();
         self.request(Request::Search {
+            pane: self.focused,
             query,
             from,
             direction,
         });
     }
 
-    fn searched(&mut self, found: Option<Selection>) {
-        if let Some(bar) = &mut self.bar {
+    fn searched(&mut self, pane: u32, found: Option<Selection>) {
+        if let Some(bar) = self.bar.as_mut().filter(|_| pane == self.focused) {
             bar.missing = found.is_none();
             self.selecting.current = found.or(self.selecting.current);
             if let (Some(vi), Some(found)) = (&mut self.vi, found) {
@@ -613,20 +840,35 @@ impl App {
         }
     }
 
-    fn pointer_position(&self) -> Position {
-        Position {
-            row: self.top + usize::from(self.pointer.0),
-            column: self.pointer.1,
-        }
+    /// Returns where the pointer is in the focused pane, or the nearest cell there. A drag that
+    /// leaves the pane stays in it.
+    fn pointer_position(&self) -> Option<Position> {
+        let pane = find(&self.panes, self.focused)?;
+        let (row, column) = panes::local(pane.rect, self.pointer);
+        Some(Position {
+            row: pane.top + usize::from(row),
+            column,
+        })
+    }
+
+    /// Returns the pane under the pointer.
+    fn hovered(&self) -> Option<&Screen> {
+        let (row, column) = self.pointer;
+        let mut panes = self.panes.iter().filter(|_| !self.on_bar);
+        panes.find(|pane| panes::holds(pane.rect, row, column))
     }
 
     fn answer(&mut self, key: &Key) {
         match key {
-            Key::Named(NamedKey::Enter) => {
-                if let Some(Prompt::Confirm { text, .. }) = self.prompt.take() {
-                    self.request(Request::Paste(text));
+            Key::Named(NamedKey::Enter) => match self.prompt.take() {
+                Some(Prompt::Confirm { text, .. }) => {
+                    self.request(Request::Paste(self.focused, text));
                 }
-            }
+                Some(Prompt::Close { pane, .. }) => {
+                    self.core(proto::Request::ClosePane { pane });
+                }
+                _ => {}
+            },
             Key::Named(NamedKey::Escape) => self.prompt = None,
             _ => {}
         }
@@ -635,38 +877,47 @@ impl App {
         }
     }
 
-    fn report(&self, event: mouse::Event) {
+    /// Tells `pane` of `event`, at the pointer's nearest cell there.
+    fn report(&self, event: mouse::Event, pane: &Screen) {
         if self.vi.is_some() || !top_bar::reaches_program(event, self.on_bar) {
             return;
         }
-        let frame = &self.frame;
+        let frame = &pane.frame;
         let report = mouse::encode(
             event,
-            self.pointer,
+            panes::local(pane.rect, self.pointer),
             self.modifiers,
             frame.mouse,
             frame.mouse_encoding,
         );
         if !report.is_empty() {
-            self.request(Request::Input(report));
+            self.request(Request::Input(pane.pane, report));
         }
     }
 
     fn pointer_moved(&mut self, x: f64, y: f64) {
         let Some(open) = &self.open else { return };
-        let grid = (self.frame.rows, self.frame.columns);
+        let grid = self.area;
         let cell_size = open.renderer.cell_size();
         let (on_bar, pointer) = top_bar::locate(open.padding(), x, y, cell_size, grid);
         self.on_bar = on_bar;
         self.on_title = top_bar::on_title(open.padding(), y, cell_size.1);
         if self.pointer != pointer {
             self.pointer = pointer;
-            if self.selecting.drag(self.pointer_position()) {
+            let position = self.pointer_position();
+            if position.is_some_and(|at| self.selecting.drag(at)) {
                 self.redraw_soon();
                 return;
             }
             let held = self.buttons.iter().position(|&held| held);
-            self.report(mouse::Event::Motion(held.map(|button| button as u8)));
+            // A pane hears of a pointer passing over it only while it holds focus.
+            let pane = match held {
+                Some(_) => find(&self.panes, self.focused),
+                None => self.hovered().filter(|pane| pane.pane == self.focused),
+            };
+            if let Some(pane) = pane {
+                self.report(mouse::Event::Motion(held.map(|button| button as u8)), pane);
+            }
         }
     }
 
@@ -684,6 +935,17 @@ impl App {
             }
             return;
         }
+        if down {
+            // Borders take no press, and the first press on a pane only focuses it.
+            match self.hovered().map(|pane| pane.pane) {
+                None => return,
+                Some(pane) if pane != self.focused => {
+                    self.core(proto::Request::Focus { pane });
+                    return;
+                }
+                Some(_) => {}
+            }
+        }
         if number == 0 && self.select(down) {
             return;
         }
@@ -692,17 +954,26 @@ impl App {
             return;
         }
         self.buttons[usize::from(number)] = down;
-        self.report(if down {
-            mouse::Event::Press(number)
-        } else {
-            mouse::Event::Release(number)
-        });
+        if let Some(pane) = find(&self.panes, self.focused) {
+            let event = if down {
+                mouse::Event::Press(number)
+            } else {
+                mouse::Event::Release(number)
+            };
+            self.report(event, pane);
+        }
     }
 
-    /// Moves or zooms the window from a left press on the top bar's title row.
+    /// Moves or zooms the window from a left press on the top bar's title row, and takes a press
+    /// on the tabs' row.
     fn bar_pressed(&mut self) {
         let Some(open) = &self.open else { return };
         if !self.on_title {
+            match top_bar::hit(self.pointer.1, self.labels.len(), self.area.1) {
+                Some(Hit::NewTab) => self.core(proto::Request::NewTab),
+                Some(Hit::Tab(tab)) => self.core(proto::Request::SwitchTab { index: tab as u16 }),
+                None => {}
+            }
             return;
         }
         // shortcut: always zooms in a fixed time, read the macOS double-click settings if asked.
@@ -718,18 +989,19 @@ impl App {
         if !down {
             return self.selecting.release();
         }
-        let owned = selection::owns_press(self.frame.mouse, self.modifiers);
-        if owned {
-            self.selecting.press(self.pointer_position());
+        let Some(pane) = find(&self.panes, self.focused) else {
+            return false;
+        };
+        let owned = selection::owns_press(pane.frame.mouse, self.modifiers);
+        if let Some(at) = self.pointer_position().filter(|_| owned) {
+            self.selecting.press(at);
             self.redraw_soon();
         }
         owned
     }
 
     fn wheel(&mut self, delta: MouseScrollDelta) {
-        let Some(open) = self.open.as_ref().filter(|_| !self.on_bar) else {
-            return;
-        };
+        let Some(open) = &self.open else { return };
         self.wheel += match delta {
             MouseScrollDelta::LineDelta(_, lines) => lines,
             MouseScrollDelta::PixelDelta(position) => {
@@ -738,20 +1010,23 @@ impl App {
         };
         let lines = self.wheel.trunc();
         self.wheel -= lines;
+        let Some(screen) = self.hovered() else { return };
+        let (pane, frame) = (screen.pane, &screen.frame);
         let key = Key::Named(if lines > 0.0 {
             NamedKey::ArrowUp
         } else {
             NamedKey::ArrowDown
         });
         for _ in 0..lines.abs() as u32 {
-            if self.frame.mouse != MouseMode::Off {
-                self.report(mouse::Event::Wheel(lines > 0.0));
-            } else if self.frame.alternate_scroll && self.vi.is_none() {
+            if frame.mouse != MouseMode::Off {
+                self.report(mouse::Event::Wheel(lines > 0.0), screen);
+            } else if frame.alternate_scroll && self.vi.is_none() {
                 let empty = ModifiersState::empty();
-                let arrow = input::encode(&key, None, empty, self.frame.app_cursor, false);
-                self.request(Request::Input(arrow));
+                let arrow = input::encode(&key, None, empty, frame.app_cursor, false);
+                self.request(Request::Input(pane, arrow));
             } else {
-                self.request(Request::Scroll(if lines > 0.0 { 1 } else { -1 }));
+                let lines = if lines > 0.0 { 1 } else { -1 };
+                self.core(proto::Request::Scroll { pane, lines });
             }
         }
     }
@@ -762,7 +1037,9 @@ impl App {
                 // Composing is typing, and it draws at a cursor that history hides.
                 // shortcut: with the bar open it still draws at the pane's cursor, not the bar's.
                 if !text.is_empty() && self.bar.is_none() && self.vi.is_none() {
-                    self.request(Request::Scroll(i32::MIN));
+                    let pane = self.focused;
+                    let lines = i32::MIN;
+                    self.core(proto::Request::Scroll { pane, lines });
                 }
                 self.preedit.1 = caret.map_or(text.len(), |(start, _)| start);
                 self.preedit.0 = text;
@@ -770,7 +1047,7 @@ impl App {
             Ime::Commit(text) => {
                 self.preedit.0.clear();
                 if !self.type_in_bar(&text) && self.prompt.is_none() && self.vi.is_none() {
-                    self.request(Request::Input(text.into_bytes()));
+                    self.request(Request::Input(self.focused, text.into_bytes()));
                 }
             }
             Ime::Disabled => self.preedit.0.clear(),
@@ -806,13 +1083,17 @@ impl ApplicationHandler<Notice> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, notice: Notice) {
         match notice {
             Notice::Frame => self.redraw_soon(),
-            Notice::Searched(found) => self.searched(found),
+            Notice::Searched(pane, found) => self.searched(pane, found),
             // Blank cells copy as nothing, which must not empty the clipboard.
             Notice::Copied(text) if text.is_empty() => {}
             Notice::Copied(text) => {
                 if let Some(clipboard) = self.clipboard() {
                     clipboard.set_text(text);
                 }
+            }
+            Notice::Refused(reason) => {
+                self.flash.refused(reason, Instant::now());
+                self.redraw_soon();
             }
             Notice::Exited => event_loop.exit(),
             Notice::Ended => {
@@ -838,6 +1119,7 @@ impl ApplicationHandler<Notice> for App {
                 self.scale_changed(scale_factor);
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            WindowEvent::Focused(false) => self.prefix.cancel(),
             WindowEvent::Ime(event) => self.ime(event),
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer_moved(position.x, position.y);
@@ -850,27 +1132,8 @@ impl ApplicationHandler<Notice> for App {
                     self.answer(&event.logical_key);
                 }
             }
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed
-                    && input::is_paste(&event.logical_key, self.modifiers) =>
-            {
-                if !event.repeat {
-                    self.paste();
-                }
-            }
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed && self.shortcut(&event) => {}
-            // A key pressed while composing belongs to the input method.
-            WindowEvent::KeyboardInput { event, .. }
-                if event.state == ElementState::Pressed && self.preedit.0.is_empty() =>
-            {
-                let text = event.text.as_ref().map(|text| text.as_str());
-                let (app_cursor, alt) = (self.frame.app_cursor, self.config.macos_option_as_alt);
-                let bytes =
-                    input::encode(&event.logical_key, text, self.modifiers, app_cursor, alt);
-                if !bytes.is_empty() {
-                    self.request(Request::Input(bytes));
-                }
+            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
+                self.key(&event, event_loop);
             }
             WindowEvent::RedrawRequested => {
                 if let Err(error) = self.redraw() {
@@ -905,7 +1168,7 @@ fn config() -> Config {
 }
 
 /// Opens a window on the core at the other end of `link`, and returns when the window closes
-/// or the pane's program exits. A core that goes away leaves the window open and saying so.
+/// or the session's last pane does. A core that goes away leaves the window open and saying so.
 ///
 /// `size` is an optional inner size in physical pixels.
 ///
@@ -913,7 +1176,7 @@ fn config() -> Config {
 ///
 /// Returns an error if the window, font, surface or link cannot be set up.
 pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
-    let link = Link::new(link, PANE)?;
+    let link = Link::new(link)?;
     let waker = link.waker();
     let (requests, received) = mpsc::channel();
     let latest = Arc::new(Latest::default());
@@ -925,20 +1188,25 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
     // Before the file is first read, so a save between the two is not missed.
     let proxy = event_loop.create_proxy();
     reload::watch(move |config| proxy.send_event(Notice::Config(config)).is_ok())?;
+    let config = config();
     let mut app = App {
-        config: config(),
+        prefix: Prefix::new(config.keys.prefix),
+        config,
         size,
         requests,
         latest,
         waker,
         open: None,
-        frame: Frame::default(),
+        panes: Vec::new(),
+        rects: Vec::new(),
+        focused: 0,
+        total: 0,
+        area: (0, 0),
         modifiers: ModifiersState::empty(),
         preedit: (String::new(), 0),
-        top: 0,
-        held: 0..0,
         composed: Frame::default(),
-        label: String::new(),
+        labels: Vec::new(),
+        active: 0,
         on_title: false,
         minute: Instant::now(),
         on_bar: false,

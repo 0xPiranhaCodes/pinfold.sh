@@ -4,7 +4,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use pinfold_proto::Frame;
-use pinfold_proto::link::{Decoder, Notice, Request, VERSION};
+use pinfold_proto::link::{Decoder, MAX_DIMENSION, MAX_PANES, MAX_TABS, Notice, Request, VERSION};
 
 fuzz_target!(|data: &[u8]| {
     let Some((&chunk, data)) = data.split_first() else {
@@ -42,6 +42,16 @@ fuzz_target!(|data: &[u8]| {
                             let cells = usize::from(drawn.rows) * usize::from(drawn.columns);
                             assert_eq!(drawn.cells.len(), cells);
                         }
+                    }
+                    if let Notice::Layout(layout) = &notice {
+                        assert!(layout.tabs().count() <= MAX_TABS);
+                        assert!(layout.panes().count() <= usize::from(layout.total));
+                        assert!(usize::from(layout.total) <= MAX_PANES);
+                        assert!(usize::from(layout.active) < layout.tabs().count().max(1));
+                        assert!(layout.panes().all(|(_, rect)| {
+                            rect.x + rect.columns <= MAX_DIMENSION
+                                && rect.y + rect.rows <= MAX_DIMENSION
+                        }));
                     }
                 }
                 Ok(None) => break,

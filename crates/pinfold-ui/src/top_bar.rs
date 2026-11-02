@@ -89,10 +89,9 @@ pub fn inset(points: f64, scale: f64, padding: usize, cell_width: usize) -> usiz
 
 /// Adds the bar above the pane in `frame`. The title starts `inset` cells in and is the active
 /// tab's label. `tabs` hold labels from [`label`]. No time means no clock.
-// shortcut: the window has one tab and + and the keys do nothing, until M2's multiplexer.
 pub fn draw(
     frame: &mut Frame,
-    tabs: &[&str],
+    tabs: &[impl AsRef<str>],
     active: usize,
     time: Option<LocalTime>,
     inset: usize,
@@ -109,7 +108,7 @@ pub fn draw(
     frame.cells.rotate_right(bar);
     frame.rows += ROWS;
     frame.cursor = frame.cursor.map(|(row, column)| (row + ROWS, column));
-    let title = tabs.get(active).copied().unwrap_or_default();
+    let title = tabs.get(active).map_or("", AsRef::as_ref);
     let end = write(frame, 0, inset, title, MUTED);
     if let Some(time) = time {
         clock(frame, time, end);
@@ -117,12 +116,36 @@ pub fn draw(
     strip(frame, tabs, active);
 }
 
+/// Returns the cells each tab takes, its gap included.
+fn tab_width(columns: usize, tabs: usize) -> usize {
+    (columns.saturating_sub(NEW_TAB.len() + 1) / tabs.max(1)).min(MAX_TAB)
+}
+
+/// What a press on the tabs' row landed on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hit {
+    /// The tab at this index.
+    Tab(usize),
+    /// The new tab button.
+    NewTab,
+}
+
+/// Returns what `column` of the tabs' row holds, in a window `columns` wide with `tabs` tabs.
+pub fn hit(column: u16, tabs: usize, columns: u16) -> Option<Hit> {
+    let (column, columns) = (usize::from(column), usize::from(columns));
+    if column >= columns.saturating_sub(NEW_TAB.len()) {
+        return Some(Hit::NewTab);
+    }
+    let width = tab_width(columns, tabs);
+    let tab = column.checked_div(width)?;
+    (tab < tabs && column % width < width - 1).then_some(Hit::Tab(tab))
+}
+
 /// Writes the second row: boxes of equal width from the left, a cell apart, then the new tab button at the right end.
-fn strip(frame: &mut Frame, tabs: &[&str], active: usize) {
+fn strip(frame: &mut Frame, tabs: &[impl AsRef<str>], active: usize) {
     let columns = usize::from(frame.columns);
     let button = NEW_TAB.len();
-    let room = columns.saturating_sub(button + 1);
-    let width = (room / tabs.len().max(1)).min(MAX_TAB);
+    let width = tab_width(columns, tabs.len());
     fill(frame, columns.saturating_sub(button)..columns, BOX);
     write(
         frame,
@@ -143,7 +166,7 @@ fn strip(frame: &mut Frame, tabs: &[&str], active: usize) {
             break;
         }
         fill(frame, start..end - 1, if is_active { ACTIVE } else { BOX });
-        let shown = fit(label, width.saturating_sub(TAB_CHROME + 1));
+        let shown = fit(label.as_ref(), width.saturating_sub(TAB_CHROME + 1));
         let used: usize = shown.chars().filter_map(UnicodeWidthChar::width).sum();
         let left = width.saturating_sub(TAB_CHROME - 1 + used) / 2;
         write(frame, columns, start + left, &shown, colour);
@@ -285,6 +308,7 @@ mod tests {
     use super::*;
     use crate::selection;
     use pinfold_core::search::{Position, Selection};
+    use pinfold_proto::link::MAX_TABS;
     use pinfold_proto::{MouseEncoding, MouseMode};
     use winit::keyboard::ModifiersState;
 
@@ -410,6 +434,33 @@ mod tests {
     }
 
     #[test]
+    fn a_press_lands_on_what_the_strip_drew() {
+        // The boxes of `each_tab_is_a_box_with_a_gap_after_it`: 11 cells each, then a gap.
+        assert_eq!(hit(0, 3, 40), Some(Hit::Tab(0)));
+        assert_eq!(hit(10, 3, 40), Some(Hit::Tab(0)));
+        assert_eq!(hit(11, 3, 40), None, "the gap");
+        assert_eq!(hit(12, 3, 40), Some(Hit::Tab(1)));
+        assert_eq!(hit(34, 3, 40), Some(Hit::Tab(2)));
+        assert_eq!(hit(36, 3, 40), None, "past the tabs");
+        for column in 37..40 {
+            assert_eq!(hit(column, 3, 40), Some(Hit::NewTab));
+        }
+        assert_eq!(hit(1, 1, 100), Some(Hit::Tab(0)));
+        assert_eq!(
+            hit(MAX_TAB as u16 + 2, 1, 100),
+            None,
+            "a lone tab stays a box"
+        );
+    }
+
+    #[test]
+    fn a_strip_too_narrow_for_its_tabs_still_has_a_button() {
+        assert_eq!(hit(0, MAX_TABS, 20), None);
+        assert_eq!(hit(19, MAX_TABS, 20), Some(Hit::NewTab));
+        assert_eq!(hit(0, 1, 0), Some(Hit::NewTab));
+    }
+
+    #[test]
     fn a_lone_tab_stays_a_box() {
         let frame = tabs(100, &["a"], 0);
         assert_eq!(frame.cells[100 + MAX_TAB - 6].background, ACTIVE);
@@ -485,7 +536,7 @@ mod tests {
         let mut frame = Frame::default();
         draw(&mut frame, &["shell"], 0, Some(TIME), 8);
         assert!(frame.cells.is_empty());
-        draw(&mut frame, &[], 3, Some(TIME), 8);
+        draw(&mut frame, &[] as &[&str], 3, Some(TIME), 8);
         assert!(frame.cells.is_empty());
     }
 
@@ -635,7 +686,13 @@ mod tests {
             anchor: at,
             focus: at,
         };
-        selection::overlay(&mut frame, 100, selected);
+        let rect = pinfold_proto::link::Rect {
+            x: 0,
+            y: 0,
+            columns: frame.columns,
+            rows: frame.rows,
+        };
+        selection::overlay(&mut frame, rect, 100, selected);
         draw(&mut frame, &["x"], 0, None, 1);
         let inverted: Vec<usize> = (0..frame.cells.len())
             .filter(|&index| frame.cells[index].foreground == 2)

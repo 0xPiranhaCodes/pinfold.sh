@@ -1284,6 +1284,7 @@ dependencies = [
  "insta",
  "lz4_flex",
  "mio",
+ "pinfold-mux",
  "pinfold-proto",
  "pinfold-sys",
  "proptest",

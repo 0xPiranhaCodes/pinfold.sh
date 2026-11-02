@@ -2,6 +2,8 @@
 
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
+use crate::prefix::Command;
+
 /// How a key that has no text is written.
 #[derive(Clone, Copy)]
 enum Sequence {
@@ -70,6 +72,22 @@ pub fn is_find(key: &Key, modifiers: ModifiersState) -> bool {
 /// Whether this is the shortcut that turns vi mode on and off.
 pub fn is_vi(key: &Key, modifiers: ModifiersState) -> bool {
     is_shortcut(key, modifiers, "x")
+}
+
+/// The Mac's own keys for tabs: Command+T, and Command with a digit from 1, whatever the tab
+/// strip's width. Command is not a modifier programs hear of, so no program loses these.
+pub fn tab_key(key: &Key, modifiers: ModifiersState) -> Option<Command> {
+    let Key::Character(text) = key else {
+        return None;
+    };
+    if modifiers != ModifiersState::SUPER {
+        return None;
+    }
+    match text.as_bytes() {
+        [b't' | b'T'] => Some(Command::NewTab),
+        [digit @ b'1'..=b'9'] => Some(Command::Tab(usize::from(digit - b'1'))),
+        _ => None,
+    }
 }
 
 /// xterm's modifier parameter, or nothing without modifiers.
@@ -186,6 +204,20 @@ mod tests {
 
     fn named(key: NamedKey, modifiers: ModifiersState) -> Vec<u8> {
         encode(&Key::Named(key), None, modifiers, false, false)
+    }
+
+    #[test]
+    fn command_opens_and_picks_tabs_and_nothing_else_does() {
+        let key = |text: &str| Key::Character(text.into());
+        let command = ModifiersState::SUPER;
+        assert_eq!(tab_key(&key("t"), command), Some(Command::NewTab));
+        assert_eq!(tab_key(&key("1"), command), Some(Command::Tab(0)));
+        assert_eq!(tab_key(&key("9"), command), Some(Command::Tab(8)));
+        assert_eq!(tab_key(&key("0"), command), None);
+        assert_eq!(tab_key(&key("n"), command), None);
+        assert_eq!(tab_key(&key("t"), ModifiersState::empty()), None);
+        assert_eq!(tab_key(&key("t"), ModifiersState::CONTROL), None);
+        assert_eq!(tab_key(&key("t"), command | ModifiersState::SHIFT), None);
     }
 
     #[test]
