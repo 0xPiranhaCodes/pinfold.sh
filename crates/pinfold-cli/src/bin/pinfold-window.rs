@@ -22,11 +22,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    if size.is_none() {
-        if let Err(error) = pinfold_sys::harden() {
-            eprintln!("pinfold-window: cannot harden: {error}");
-            return ExitCode::FAILURE;
-        }
+    if size.is_none()
+        && let Err(error) = pinfold_sys::harden()
+    {
+        eprintln!("pinfold-window: cannot harden: {error}");
+        return ExitCode::FAILURE;
     }
     let Ok(link) = socket::take_link() else {
         eprintln!("pinfold-window: no link to a core on descriptor {LINK_FD}: run pinfold instead");
