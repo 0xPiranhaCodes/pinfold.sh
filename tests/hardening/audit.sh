@@ -17,7 +17,23 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 WORK=$(mktemp -d /tmp/pfaudit.XXXXXX)
 MARKER=PFMARK42
 PIDS=()
-trap 'kill -9 "${PIDS[@]}" 2>/dev/null; rm -rf "$WORK"' EXIT
+trap 'kill -9 ${PIDS[@]+"${PIDS[@]}"} 2>/dev/null; rm -rf "$WORK"' EXIT
+
+# Kills processes and forgets them, so that the trap cannot hit a pid reused since.
+stop() {
+  kill -9 "$@" 2>/dev/null
+  local pid kept=()
+  for pid in "$@"; do
+    wait "$pid" 2>/dev/null
+  done
+  for pid in ${PIDS[@]+"${PIDS[@]}"}; do
+    case " $* " in
+      *" $pid "*) ;;
+      *) kept+=("$pid") ;;
+    esac
+  done
+  PIDS=(${kept[@]+"${kept[@]}"})
+}
 
 # Runs a command for at most $1 seconds, and says how it ended.
 bounded() {
@@ -93,8 +109,7 @@ EOF
     rm -f "$WORK"/graph*
     echo "- gcore: $(bounded 30 gcore -o "$WORK/dump" "$CORE" 2>&1 | head -1)"
     echo "- still running: $(ps -o stat= -p "$CORE")"
-    kill -9 "$CORE" 2>/dev/null
-    wait "$CORE" 2>/dev/null
+    stop "$CORE"
   done
 
   # lldb is run only with -p above: on macOS 27 with these Command Line Tools its own start-up
@@ -130,8 +145,7 @@ EOF
     sleep 0.1
   done
   grep -v finished "$AUDIT_PANE.debug" | sed 's/^/- /'
-  kill -9 "$CORE" 2>/dev/null
-  wait "$CORE" 2>/dev/null
+  stop "$CORE"
 
   echo "== the same with no core"
   AUDIT_PANE=$WORK/outside "$WORK/pane-debug.sh" </dev/null 2>/dev/null &
@@ -142,7 +156,7 @@ EOF
     sleep 0.1
   done
   grep -v finished "$WORK/outside.debug" | sed 's/^/- /'
-  kill -9 "$outside" 2>/dev/null
+  stop "$outside"
 
   echo "== started under a tracer, as lldb starts a program"
   local run
@@ -180,7 +194,7 @@ EOF
     echo "- $mode core, debugger entitlement: $(bounded 10 "$WORK/debugger" attach "$CORE" 2>&1)"
     echo "- $mode window: $(bounded 10 "$WORK/probe" attach "$window" 2>&1)"
     echo "- $mode window, task port: $(bounded 30 "$WORK/debugger" scan "$window" $MARKER 2>&1)"
-    kill -9 "$window" "$CORE"
+    stop "$window" "$CORE"
   done
 }
 
@@ -200,8 +214,7 @@ linux() {
     echo "- pidfd_getfd: $(bounded 10 "$WORK/probe" copy "$CORE" 2>&1)"
     echo "- pane shell, owner of /proc/pid/mem: $(stat -c %u "/proc/$pane/mem")"
     echo "- pane shell, attach: $(bounded 10 "$WORK/probe" attach "$pane" 2>&1)"
-    kill -9 "$CORE" 2>/dev/null
-    wait "$CORE" 2>/dev/null
+    stop "$CORE"
   done
 
   echo "== debugging inside a pane of a hardened core"
@@ -220,8 +233,7 @@ EOF
     sleep 0.1
   done
   sed 's/^/- pane: /' "$AUDIT_PANE.debug"
-  kill -9 "$CORE" 2>/dev/null
-  wait "$CORE" 2>/dev/null
+  stop "$CORE"
 
   echo "== a core started under a tracer"
   local run
