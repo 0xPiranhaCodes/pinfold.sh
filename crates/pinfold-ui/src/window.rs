@@ -3,11 +3,9 @@
 //! The I/O thread owns the PTY and hands the window copies of the screen. M2 moves that
 //! thread into the core process, and until then a window crash ends the shell.
 
-use std::env;
 use std::io;
 use std::ops::Range;
 use std::path::Path;
-use std::process::Command;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -40,7 +38,7 @@ use crate::paste::Prompt;
 use crate::search_bar::{Bar, Step};
 use crate::selection::Selecting;
 use crate::top_bar::Clicks;
-use crate::{ime, input, mouse, paste, reload, search_bar, selection, top_bar};
+use crate::{ime, input, mouse, paste, reload, search_bar, selection, shell, top_bar};
 
 const DEFAULT_SIZE: LogicalSize<u32> = LogicalSize::new(1000, 640);
 const PANE: usize = 0;
@@ -786,9 +784,8 @@ fn config() -> Config {
 ///
 /// Returns an error if the window, font, surface or shell cannot be set up.
 pub fn run(size: Option<(u32, u32)>) -> Result<(), Error> {
-    let shell = env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into());
     let mut reactor = Reactor::new()?;
-    reactor.spawn(Command::new(shell), ROWS, COLUMNS)?;
+    reactor.spawn(shell::command(), ROWS, COLUMNS)?;
     let waker = reactor.waker();
     let (requests, received) = mpsc::channel();
     let latest = Arc::new(Latest::default());
