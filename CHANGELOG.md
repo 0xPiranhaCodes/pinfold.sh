@@ -71,13 +71,12 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Fixed
 
-- A core started by `pinfold`, and its windows, write problems to `default.log` in the runtime directory, so a window that dies says why even from the Dock, and a failed `pinfold` names the file. It is private, starts empty with each core, and a panic there prints only its place, as a panic's text can quote a pane.
-- `pinfold` waits until the window is on screen, and fails with a short reason if the window cannot run, ends during start or is not ready in time: 10 seconds for a core's first window, so a slow Mac does not report failure for a window that opens, and 2 seconds after that. It used to exit 0 once the process existed, and said only "no window can open".
 - A core test that failed on macOS when its stand-in window had already ended.
-- `pinfold` waits until the window is on screen, and fails with a short reason if the window cannot run, ends during start or is not ready after 2 seconds. It used to exit 0 once the process existed, and said only "no window can open".
+- `pinfold` waits until the window is on screen, and fails with a short reason if the window cannot run, ends during start or is not ready in time: 10 seconds for a core's first window, so a slow Mac does not report failure for a window that opens, and 2 seconds after that. It used to exit 0 once the process existed, and said only "no window can open".
 - Bold `i` and other glyphs of several contours no longer come out thinner than regular.
 - Fallback font pages no longer count against the window once a frame is drawn.
 - A copy of a whole pane can run in steps, which keeps its text out of the core's footprint.
+- A core started by `pinfold`, and its windows, write problems to `default.log` in the runtime directory, so a window that dies says why even from the Dock, and a failed `pinfold` names the file. It is private, starts empty with each core, and a panic there prints only its place, as a panic's text can quote a pane.
 - A window taller than 24 rows no longer costs the core about 2 MB, as growing a grid makes only the rows it needs.
 - The core sends a window only the panes it asked for, so a hidden pane holds no frame.
 - The config file is `pinfold.toml`, the name the design gives it.
