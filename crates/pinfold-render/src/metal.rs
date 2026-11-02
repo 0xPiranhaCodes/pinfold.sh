@@ -218,6 +218,7 @@ impl Renderer for MetalRenderer {
             slot,
             &mut self.instances,
         );
+        self.fonts.release_pages();
         self.gpu.draw(clear, &self.instances);
         Ok(())
     }

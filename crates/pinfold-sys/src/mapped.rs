@@ -61,6 +61,14 @@ impl Mapped {
         let data = NonNull::new(data.cast()).ok_or_else(io::Error::last_os_error)?;
         Ok(Self { data, length })
     }
+
+    /// Gives this mapping's pages back to the page cache. Reading them again costs a fault,
+    /// and the bytes stay the same.
+    pub fn release_pages(&self) {
+        // SAFETY: this is the whole of a read-only file mapping, so nothing can be lost and
+        // borrowed bytes read back from the file. Failing only leaves the pages mapped.
+        unsafe { libc::madvise(self.data.as_ptr().cast(), self.length, libc::MADV_DONTNEED) };
+    }
 }
 
 impl Deref for Mapped {
@@ -88,6 +96,15 @@ mod tests {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         let mapped = Mapped::open(&path).unwrap();
         assert_eq!(&*mapped, std::fs::read(path).unwrap());
+    }
+
+    #[test]
+    fn released_pages_read_back_the_same() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+        let mapped = Mapped::open(&path).unwrap();
+        let before = mapped.to_vec();
+        mapped.release_pages();
+        assert_eq!(*mapped, *before);
     }
 
     #[test]

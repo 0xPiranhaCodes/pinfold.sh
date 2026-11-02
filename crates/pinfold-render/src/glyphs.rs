@@ -196,6 +196,7 @@ pub(crate) fn rasterize(
     metrics: Metrics,
     (character, style): (char, u32),
 ) -> Glyph {
+    fonts.touched = true;
     let span = cell_span(character);
     let id = contained(|| Some(fonts.primary().glyph(character))).unwrap_or(0);
     if id == 0 {
@@ -298,6 +299,10 @@ impl GlyphCache {
         self.metrics
     }
 
+    pub(crate) fn release_font_pages(&mut self) {
+        self.fonts.release_pages();
+    }
+
     /// Bytes the cache counts as held.
     #[must_use]
     pub fn used(&self) -> usize {
@@ -364,6 +369,16 @@ mod tests {
     fn the_box() -> Box<[u8]> {
         let mut cache = GlyphCache::new(Fonts::with_fallbacks(bundled(), &[]), SIZE, CACHE_LIMIT);
         cache.get(KANJI, 0).unwrap().mask.clone()
+    }
+
+    #[test]
+    fn glyphs_are_the_same_after_font_pages_are_released() {
+        let file = File::new(&kanji_font().unwrap()).unwrap();
+        let mut cache = GlyphCache::new(Fonts::with_fallbacks(bundled(), file.list), 26.0, 1 << 20);
+        let first = cache.get(KANJI, 0).unwrap().mask.clone();
+        cache.release_font_pages();
+        cache.set_size(26.0);
+        assert_eq!(cache.get(KANJI, 0).unwrap().mask, first);
     }
 
     #[test]
