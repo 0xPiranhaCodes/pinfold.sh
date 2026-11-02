@@ -183,7 +183,7 @@ fn a_session_outlives_its_client_and_says_when_the_core_dies() {
 
 #[test]
 fn two_launchers_at_once_share_one_core_and_one_window() {
-    let window = "cd \"$PINFOLD_TEST_CLIENT\"\necho $PPID > core\necho start >> starts\nexec cat <&3 >/dev/null";
+    let window = "cd \"$PINFOLD_TEST_CLIENT\"\necho start >> starts\necho $PPID > core\nexec cat <&3 >/dev/null";
     let session = Session::new("b", Some(window)).unwrap();
     let (mut first, mut second) = (
         session.start_launcher().unwrap(),
