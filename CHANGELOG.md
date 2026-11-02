@@ -11,7 +11,9 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Added
 
-- `pinfold-core` runs as a hardened daemon with a private control socket that takes `hello` and `window.open`. Nothing starts it yet, and no window can open from it.
+- `pinfold-core` runs as a hardened daemon with a private control socket that takes `hello` and `window.open`.
+- `pinfold` is now a launcher: it starts the core if none answers, checks that the socket's owner is you, asks for a window and exits. The window is its own `pinfold-window` process on the link (ADR-0028), so a window that crashes or closes leaves every pane running and `pinfold` reattaches. A second `pinfold` brings the window to the front, and a window whose core dies says the session ended. `pinfold --size` is gone.
+- `cargo xtask mem-gate` measures the window and the core as separate processes, and the core beside a window.
 - A TOML config file with `font_size` and `macos_option_as_alt`. A bad file means the defaults.
 - Padding around the grid, and on macOS a full-height window under the native traffic lights, with `background_opacity` and `background_blur`.
 - Config hot reload: saving the file applies it to the running window, and a bad save keeps the current settings.
@@ -58,7 +60,7 @@ Entries are generated from Conventional Commits with git-cliff
 - Cargo workspace with empty crates, `cargo xtask`, CI and a dry-run release workflow.
 - M0 spike results for caller identity, tiered scrollback, the process split and window memory, with the M0 report.
 - The binary protocol between the core and the window, as pure encoding and decoding with a streaming decoder and a fuzz target.
-- The window's end of that link, a client that keeps a local copy of the screen and reports a disconnect as a value. Nothing uses it yet.
+- The window's end of that link, a client that keeps a local copy of the screen and reports a disconnect as a value.
 
 ### Fixed
 
