@@ -1,14 +1,43 @@
 //! API types, JSON Schemas and version negotiation, with no I/O.
 
+/// Bold text, set in the top byte of [`Cell::foreground`].
+pub const BOLD: u32 = 1 << 24;
+/// Italic text, set in the top byte of [`Cell::foreground`].
+pub const ITALIC: u32 = 1 << 25;
+
 /// One character with its colours, as `0x00RRGGBB`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Cell {
     /// The character. A space draws only the background.
     pub character: char,
-    /// Text colour.
+    /// Text colour, with any of [`BOLD`] and [`ITALIC`] in the top byte, which keeps a cell
+    /// at 12 bytes.
     pub foreground: u32,
     /// Background colour.
     pub background: u32,
+}
+
+impl Cell {
+    /// The style bits of [`Cell::foreground`], 0 for regular text.
+    ///
+    /// ```
+    /// use pinfold_proto::{BOLD, Cell};
+    ///
+    /// let cell = Cell { character: 'a', foreground: 0x00ff_ffff | BOLD, background: 0 };
+    /// assert_eq!(cell.style(), BOLD);
+    /// ```
+    #[must_use]
+    pub fn style(&self) -> u32 {
+        self.foreground & (BOLD | ITALIC)
+    }
+
+    /// Swaps text and background colours. The style stays with the text.
+    pub fn invert(&mut self) {
+        let style = self.style();
+        std::mem::swap(&mut self.foreground, &mut self.background);
+        self.foreground |= style;
+        self.background &= !style;
+    }
 }
 
 /// Which mouse events a program asked to be told about.

@@ -7,12 +7,20 @@ variable is unset. There is no reload yet, so restart to apply a change.
 | Key                   | Type   | Default | Meaning                                                  |
 | --------------------- | ------ | ------- | -------------------------------------------------------- |
 | `font_size`           | number | `13`    | In points, from 6 to 72                                  |
+| `font_path`           | string | none    | Absolute path to a monospace font file to use            |
 | `macos_option_as_alt` | bool   | `false` | Option sends Alt instead of composing text. macOS only   |
 
 ```toml
 font_size = 14
+font_path = "/System/Library/Fonts/Menlo.ttc"
 macos_option_as_alt = true
 ```
+
+`font_path` takes a TrueType or OpenType file, or the first font in a collection. Pinfold
+draws bold and italic by thickening and slanting that one font, not from separate files, and
+without `font_path` it uses the bundled JetBrains Mono. A font file is treated as untrusted:
+if it cannot be read, is damaged, or cannot draw all of ASCII, Pinfold prints why to stderr
+and uses the bundled font. `~` is not expanded.
 
 Every key is optional. Pinfold always opens: if the file has a problem, it prints why to
 stderr and uses the defaults for every key. That covers an unknown key or a bad value

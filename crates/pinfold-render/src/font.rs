@@ -1,10 +1,12 @@
 //! Fonts, memory-mapped and read lazily by `swash` (ADR-0025).
 
-use std::io;
 use std::path::{Path, PathBuf};
+use std::{fs, io};
 
 use pinfold_sys::mapped::Mapped;
 use swash::{CacheKey, FontRef};
+
+use crate::glyphs::{can_draw_text, contained};
 
 /// JetBrains Mono, the default font (ADR-0026). See `fonts/README.md`.
 const BUNDLED: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
@@ -98,6 +100,47 @@ impl Font {
     /// Returns an error only if the embedded file is not a font, which a test rules out.
     pub fn bundled() -> Result<Self, FontError> {
         Self::parse(Data::Bundled, Path::new(BUNDLED_NAME))
+    }
+
+    /// Opens the font at `path`, the user's choice, or the bundled font without one. The file
+    /// is untrusted, so one that is unreadable, damaged or cannot draw text is reported and
+    /// replaced by the bundled font.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only if the embedded file is not a font, which a test rules out.
+    pub fn chosen(path: Option<&Path>) -> Result<Self, FontError> {
+        match path.map(Self::open_checked) {
+            Some(Ok(font)) => Ok(font),
+            Some(Err(error)) => {
+                // shortcut: stderr only, so a launch from the Dock shows nothing, draw it in the
+                // chrome.
+                eprintln!("pinfold: using the bundled font: {error}");
+                Self::bundled()
+            }
+            None => Self::bundled(),
+        }
+    }
+
+    fn open_checked(path: &Path) -> Result<Self, FontError> {
+        let invalid = || FontError::Invalid(path.to_owned());
+        let metadata = fs::metadata(path).map_err(|source| FontError::Read {
+            path: path.to_owned(),
+            source,
+        })?;
+        // Opening a FIFO would hang startup.
+        if !metadata.is_file() {
+            return Err(invalid());
+        }
+        contained(|| Some(Self::open(path).map(|font| can_draw_text(&font).then_some(font))))
+            .ok_or_else(invalid)?
+            .and_then(|font| font.ok_or_else(invalid))
+    }
+
+    /// Whether this is the font embedded in the binary.
+    #[cfg(test)]
+    pub(crate) fn is_bundled(&self) -> bool {
+        matches!(self.data, Data::Bundled)
     }
 
     pub(crate) fn face(&self) -> FontRef<'_> {
@@ -200,6 +243,11 @@ pub(crate) mod fixture {
         Some(word(font, record + 8) as usize)
     }
 
+    /// The bundled font as a file's bytes, which `Font::chosen` accepts.
+    pub fn plain_font() -> Vec<u8> {
+        BUNDLED.to_vec()
+    }
+
     /// The bundled font with a new `cmap` that maps `KANJI` and the 255 characters after it,
     /// to the glyph for 'H' and those after it.
     pub fn kanji_font() -> Option<Vec<u8>> {
@@ -274,7 +322,7 @@ pub(crate) mod fixture {
 
 #[cfg(test)]
 mod tests {
-    use super::fixture::{File, KANJI, collection, kanji_font, table};
+    use super::fixture::{File, KANJI, collection, kanji_font, plain_font, table};
     use super::*;
 
     fn bundled() -> Font {
@@ -313,6 +361,68 @@ mod tests {
         let file = File::new(&font).unwrap();
         let result = Font::open(Path::new(file.list[0]));
         assert!(matches!(result, Err(FontError::Invalid(_))));
+    }
+
+    #[test]
+    fn no_chosen_font_is_the_bundled_font() {
+        assert!(Font::chosen(None).unwrap().is_bundled());
+    }
+
+    #[test]
+    fn a_chosen_font_is_used() {
+        let file = File::new(&collection(plain_font())).unwrap();
+        let font = Font::chosen(Some(Path::new(file.list[0]))).unwrap();
+        assert!(!font.is_bundled());
+    }
+
+    /// A real collection, on machines that have it.
+    #[test]
+    fn a_system_font_can_be_chosen_if_installed() {
+        let path = Path::new("/System/Library/Fonts/Menlo.ttc");
+        if path.exists() {
+            assert!(!Font::chosen(Some(path)).unwrap().is_bundled());
+        }
+    }
+
+    #[test]
+    fn a_bad_chosen_font_falls_back_to_the_bundled_font() {
+        let font = plain_font();
+        let mut no_metrics = font.clone();
+        let hhea = table(&font, b"hhea").unwrap();
+        no_metrics[hhea + 34..hhea + 36].fill(0);
+        let cut = table(&font, b"glyf").unwrap() + 64;
+        let no_ascii = kanji_font().unwrap();
+        let bad = [
+            &b"not a font"[..],
+            &font[..12],
+            &font[..cut],
+            &no_metrics,
+            &no_ascii,
+        ];
+        for bytes in bad {
+            let file = File::new(bytes).unwrap();
+            assert!(
+                Font::chosen(Some(Path::new(file.list[0])))
+                    .unwrap()
+                    .is_bundled()
+            );
+        }
+        for path in ["/does/not/exist", "/", "/dev/zero"] {
+            let chosen = Font::chosen(Some(Path::new(path))).unwrap();
+            assert!(chosen.is_bundled(), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_fifo_as_the_chosen_font_does_not_hang() {
+        let file = File::new(b"").unwrap();
+        fs::remove_file(file.list[0]).unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .arg(file.list[0])
+            .status();
+        assert!(made.unwrap().success());
+        let chosen = Font::chosen(Some(Path::new(file.list[0]))).unwrap();
+        assert!(chosen.is_bundled());
     }
 
     #[test]
