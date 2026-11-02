@@ -8,6 +8,9 @@
 //! and when it drains it gets one frame of the newest state. That frame is still a diff, as
 //! nothing it was promised was lost. Replies cannot be merged like that, so one that would
 //! pass [`MAX_PENDING`] ends the link.
+//!
+//! A pane gets frames once the window asks for one, so a hidden pane costs no frame here or in
+//! the window. Replies and [`Notice::Exited`] reach the window for any pane.
 
 use std::io::{self, ErrorKind, Read, Write};
 use std::mem;
@@ -60,6 +63,8 @@ struct PaneLink {
     sent: Frame,
     /// Whether the window holds a frame to apply a diff to.
     synced: bool,
+    /// Whether the window has asked for this pane's frames.
+    watched: bool,
     cwd: String,
     searching: bool,
     exited: bool,
@@ -168,8 +173,11 @@ impl Session {
                     text: String::new(),
                 });
             }
+            // shortcut: asking for a pane that does not exist yet does nothing, as the daemon
+            // spawns its panes before a window. Keep the wish if a window can ever open first.
             Request::FullFrame { pane } => {
                 if let Some(state) = self.panes.get_mut(pane as usize) {
+                    state.watched = true;
                     state.synced = false;
                 }
             }
@@ -235,7 +243,7 @@ impl Session {
             return Ok(());
         };
         let dirty = reactor.take_dirty(pane);
-        if dirty || !state.synced {
+        if state.watched && (dirty || !state.synced) {
             let Some(engine) = reactor.engine(pane) else {
                 return Ok(());
             };
@@ -564,6 +572,17 @@ mod tests {
             peer
         }
 
+        /// Attaches, says hello and asks for `pane`, as a window does.
+        fn watching(reactor: &mut Reactor, pane: usize) -> Self {
+            let peer = Self::greet(reactor);
+            peer.watch(pane);
+            peer
+        }
+
+        fn watch(&self, pane: usize) {
+            self.send(Request::FullFrame { pane: pane as u32 });
+        }
+
         fn send(&self, request: Request<'_>) {
             let mut wire = Vec::new();
             request.encode(&mut wire).unwrap();
@@ -661,6 +680,7 @@ mod tests {
         assert_eq!(peer.hellos, 1);
         assert!(peer.frames.is_empty(), "a frame came before the hello");
         peer.send(Request::Hello { version: VERSION });
+        peer.watch(pane);
         serve(&mut reactor, &mut peer, |r, p| p.matches(r, pane));
     }
 
@@ -726,7 +746,8 @@ mod tests {
         let script = "yes | head -n 30000; echo finished; sleep 30";
         let flood = reactor.spawn(shell(script), rows, columns).unwrap();
         let quiet = reactor.spawn(shell(ALIVE), 24, 80).unwrap();
-        let mut peer = Peer::greet(&mut reactor);
+        let mut peer = Peer::watching(&mut reactor, flood);
+        peer.watch(quiet);
 
         let one_frame = 64 + usize::from(rows) * (2 + usize::from(columns) * 12);
         let (mut most, mut capacity) = (0, 0);
@@ -754,7 +775,7 @@ mod tests {
     fn a_blocked_turn_wakes_when_the_window_drains_the_socket() {
         let mut reactor = Reactor::new().unwrap();
         let pane = reactor.spawn(shell("sleep 30"), 400, 400).unwrap();
-        let peer = Peer::greet(&mut reactor);
+        let peer = Peer::watching(&mut reactor, pane);
         turn_until(&mut reactor, |r| {
             r.host
                 .window
@@ -834,7 +855,7 @@ mod tests {
     fn bad_pane_numbers_and_wild_values_change_nothing() {
         let mut reactor = Reactor::new().unwrap();
         let pane = reactor.spawn(shell(ALIVE), 24, 80).unwrap();
-        let mut peer = Peer::greet(&mut reactor);
+        let mut peer = Peer::watching(&mut reactor, pane);
         serve(&mut reactor, &mut peer, |r, p| p.matches(r, pane));
 
         let far = link::Position {
@@ -940,7 +961,7 @@ mod tests {
         let mut reactor = Reactor::new().unwrap();
         let script = r"seq 1 100; printf '\033[1;31mred\033[0m'; read line; echo more; sleep 30";
         let pane = reactor.spawn(shell(script), 10, 40).unwrap();
-        let mut peer = Peer::greet(&mut reactor);
+        let mut peer = Peer::watching(&mut reactor, pane);
         let number = pane as u32;
         serve(&mut reactor, &mut peer, |r, p| {
             on_screen(r, pane, "red") && p.matches(r, pane)
@@ -979,15 +1000,52 @@ mod tests {
     }
 
     #[test]
-    fn a_pane_opened_later_gets_a_full_frame() {
+    fn a_pane_opened_later_gets_a_full_frame_once_asked() {
         let mut reactor = Reactor::new().unwrap();
         let mut peer = Peer::greet(&mut reactor);
         serve(&mut reactor, &mut peer, |_, p| p.hellos == 1);
         let script = "echo later; sleep 30";
         let pane = reactor.spawn(shell(script), 24, 80).unwrap();
+        serve(&mut reactor, &mut peer, |r, _| on_screen(r, pane, "later"));
+        peer.watch(pane);
+        serve(&mut reactor, &mut peer, |r, p| p.matches(r, pane));
+    }
+
+    #[test]
+    fn a_hidden_pane_costs_no_frame_and_still_answers() {
+        let mut reactor = Reactor::new().unwrap();
+        let shown = reactor.spawn(shell(ALIVE), 24, 80).unwrap();
+        let script = "echo needle; read line; exit 0";
+        let hidden = reactor.spawn(shell(script), 24, 80).unwrap();
+        let mut peer = Peer::watching(&mut reactor, shown);
         serve(&mut reactor, &mut peer, |r, p| {
-            on_screen(r, pane, "later") && p.matches(r, pane)
+            on_screen(r, hidden, "needle") && p.matches(r, shown)
         });
+
+        let number = hidden as u32;
+        peer.send(Request::Search {
+            pane: number,
+            from: link::Position::default(),
+            direction: link::Direction::Forward,
+            query: "needle",
+        });
+        serve(&mut reactor, &mut peer, |_, p| p.searched.len() == 1);
+        peer.send(Request::Copy {
+            pane: number,
+            selection: peer.searched[0].unwrap(),
+        });
+        serve(&mut reactor, &mut peer, |_, p| p.copied.len() == 1);
+        assert_eq!(peer.copied, ["needle"]);
+        peer.send(Request::Input {
+            pane: number,
+            bytes: b"\n",
+        });
+        serve(&mut reactor, &mut peer, |_, p| p.exited == [number]);
+
+        assert!(!peer.frames.contains_key(&number));
+        let session = &reactor.host.window.as_ref().unwrap().session;
+        assert_eq!(session.panes[hidden].sent.cells.capacity(), 0);
+        assert!(peer.matches(&reactor, shown));
     }
 
     #[test]
@@ -995,7 +1053,7 @@ mod tests {
         let mut reactor = Reactor::new().unwrap();
         let script = r"seq 1 200; echo needle; printf '\033]7;file:///tmp/where\033\\'; seq 1 50; read line; exit 0";
         let pane = reactor.spawn(shell(script), 10, 40).unwrap();
-        let mut peer = Peer::greet(&mut reactor);
+        let mut peer = Peer::watching(&mut reactor, pane);
         let number = pane as u32;
         serve(&mut reactor, &mut peer, |_, p| p.cwd == "/tmp/where");
 
@@ -1041,7 +1099,7 @@ mod tests {
     fn buffers_shrink_back_after_a_large_frame() {
         let mut reactor = Reactor::new().unwrap();
         let pane = reactor.spawn(shell("sleep 30"), 24, 80).unwrap();
-        let mut peer = Peer::greet(&mut reactor);
+        let mut peer = Peer::watching(&mut reactor, pane);
         let number = pane as u32;
         for size in [400, 24] {
             peer.send(Request::Resize {

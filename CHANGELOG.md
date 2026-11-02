@@ -68,6 +68,8 @@ Entries are generated from Conventional Commits with git-cliff
 - Bold `i` and other glyphs of several contours no longer come out thinner than regular.
 - Fallback font pages no longer count against the window once a frame is drawn.
 - A copy of a whole pane can run in steps, which keeps its text out of the core's footprint.
+- A window taller than 24 rows no longer costs the core about 2 MB, as growing a grid makes only the rows it needs.
+- The core sends a window only the panes it asked for, so a hidden pane holds no frame.
 - The config file is `pinfold.toml`, the name the design gives it.
 - Closing a pane with unread output can no longer hang on macOS.
 - A window narrowed to one column with a wide character on screen no longer exhausts memory.

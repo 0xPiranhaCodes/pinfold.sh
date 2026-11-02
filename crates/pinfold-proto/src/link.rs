@@ -296,7 +296,8 @@ pub enum Request<'a> {
         /// What to copy.
         selection: Selection,
     },
-    /// Asks for a full frame, when the window has none to apply changes to.
+    /// Asks for a full frame, when the window has none to apply changes to. The core sends no
+    /// frames for a pane until the window asks, and from then on sends each change.
     FullFrame {
         /// The pane.
         pane: u32,
