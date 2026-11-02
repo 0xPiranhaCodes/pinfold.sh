@@ -28,6 +28,7 @@ Entries are generated from Conventional Commits with git-cliff
 - `cargo xtask mem-gate` measures 10k lines of typical text and a pane at its scrollback cap.
 - `cargo xtask mem-gate` measures the window with a full screen of bold, italic and CJK text.
 - Fuzzing of the terminal input path, on each PR and nightly.
+- The core serves a window over a socketpair link (ADR-0028): `Reactor::spawn_window` starts one window, with the link on descriptor 3, and a window that misbehaves or stalls never touches a PTY.
 - Function keys, modifier combinations and application cursor mode, as xterm sends them.
 - Paste from the clipboard, with a confirmation for anything that ends a line.
 - `Pinfold.app` for macOS, with its icon, and a login shell in the home folder when opened from the Dock.
