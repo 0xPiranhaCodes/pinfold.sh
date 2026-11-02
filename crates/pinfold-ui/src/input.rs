@@ -67,6 +67,11 @@ pub fn is_find(key: &Key, modifiers: ModifiersState) -> bool {
     is_shortcut(key, modifiers, "f")
 }
 
+/// Whether this is the shortcut that turns vi mode on and off.
+pub fn is_vi(key: &Key, modifiers: ModifiersState) -> bool {
+    is_shortcut(key, modifiers, "x")
+}
+
 /// xterm's modifier parameter, or nothing without modifiers.
 fn parameter(modifiers: ModifiersState) -> Option<u8> {
     let bits = u8::from(modifiers.shift_key())
@@ -300,6 +305,8 @@ mod tests {
         assert!(is_copy(&key("C"), held));
         assert!(is_find(&key("f"), held));
         assert!(is_paste(&key("v"), held));
+        assert!(is_vi(&key("x"), held));
+        assert!(!is_vi(&key("x"), CONTROL));
         assert!(!is_copy(&key("x"), held));
         assert!(!is_copy(&key("c"), CONTROL));
         assert!(!is_find(&key("f"), CONTROL));

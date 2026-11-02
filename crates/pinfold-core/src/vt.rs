@@ -69,6 +69,9 @@ pub trait VtEngine {
     /// the view's top and that row.
     fn position(&self, line: u16, column: u16) -> Position;
 
+    /// Returns the numbers of the rows the view can reach, which always include the screen.
+    fn view_rows(&self) -> Range<usize>;
+
     /// Runs one bounded step of `search` over history and the screen, or only the screen on the
     /// alternate screen, which is all a person can see there.
     fn search(&self, search: &mut Search) -> SearchStep;
@@ -535,6 +538,15 @@ impl VtEngine for AlacrittyEngine {
             store.end() - self.rows_back(&store) + usize::from(line)
         });
         Position { row, column }
+    }
+
+    fn view_rows(&self) -> Range<usize> {
+        let held = self.held_rows();
+        if self.term.mode().intersects(NO_HISTORY) {
+            held.end.saturating_sub(self.term.grid().screen_lines())..held.end
+        } else {
+            held
+        }
     }
 
     fn search(&self, search: &mut Search) -> SearchStep {

@@ -38,6 +38,7 @@ use crate::paste::Prompt;
 use crate::search_bar::{Bar, Step};
 use crate::selection::Selecting;
 use crate::top_bar::Clicks;
+use crate::vi::{Step as ViStep, Vi, View};
 use crate::{ime, input, mouse, paste, reload, search_bar, selection, shell, top_bar};
 
 const DEFAULT_SIZE: LogicalSize<u32> = LogicalSize::new(1000, 640);
@@ -73,6 +74,8 @@ enum Request {
     Resize(u16, u16),
     /// Rows to move the view into history, or back if negative.
     Scroll(i32),
+    /// Scrolls the view just far enough to show this row.
+    Reveal(usize),
     /// Replaces any search running.
     Search {
         query: String,
@@ -99,9 +102,20 @@ struct Latest {
     frame: Mutex<Frame>,
     /// The core's number for the first row of `frame`.
     top: AtomicUsize,
+    /// The rows the view can reach.
+    held: Mutex<Range<usize>>,
     /// The last directory the pane reported, as program output wrote it. Empty if none.
     cwd: Mutex<String>,
     pending: AtomicBool,
+}
+
+/// Scrolls the pane's view just far enough to show `row`.
+fn reveal(reactor: &mut Reactor, row: usize) {
+    if let Some(engine) = reactor.engine(PANE) {
+        let top = engine.position(0, 0).row;
+        let lines = search_bar::scroll_to(row, top, engine.size().0);
+        reactor.scroll(PANE, lines);
+    }
 }
 
 fn run_io(
@@ -123,6 +137,7 @@ fn run_io(
                 }
                 Request::Resize(rows, columns) => reactor.resize(PANE, rows, columns)?,
                 Request::Scroll(lines) => reactor.scroll(PANE, lines),
+                Request::Reveal(row) => reveal(&mut reactor, row),
                 Request::Search {
                     query,
                     from,
@@ -144,10 +159,8 @@ fn run_io(
         if searching && !reactor.is_searching(PANE) {
             searching = false;
             let found = reactor.take_found(PANE);
-            if let (Some(found), Some(engine)) = (found, reactor.engine(PANE)) {
-                let top = engine.position(0, 0).row;
-                let lines = search_bar::scroll_to(found.anchor.row, top, engine.size().0);
-                reactor.scroll(PANE, lines);
+            if let Some(found) = found {
+                reveal(&mut reactor, found.anchor.row);
             }
             if proxy.send_event(Notice::Searched(found)).is_err() {
                 return Ok(());
@@ -158,6 +171,9 @@ fn run_io(
                 engine.frame(&mut frame);
                 let top = engine.position(0, 0).row;
                 latest.top.store(top, Ordering::Release);
+                if let Ok(mut held) = latest.held.lock() {
+                    *held = engine.view_rows();
+                }
                 if let Ok(mut cwd) = latest.cwd.lock() {
                     cwd.clear();
                     cwd.push_str(engine.cwd().map_or("", |cwd| cwd.path.as_str()));
@@ -241,6 +257,8 @@ struct App {
     preedit: (String, usize),
     /// The core's number for the first row of `frame`.
     top: usize,
+    /// The rows the view can reach, as of `frame`.
+    held: Range<usize>,
     /// The screen with the selection, `preedit` and chrome over it.
     composed: Frame,
     /// The top bar's label, made safe to draw.
@@ -268,6 +286,8 @@ struct App {
     selecting: Selecting,
     /// The search bar, while open. Keys go to this before the program.
     bar: Option<Bar>,
+    /// Vi mode, while on. Keys go to this or the bar, and none to the program.
+    vi: Option<Vi>,
     result: Result<(), Error>,
 }
 
@@ -357,8 +377,18 @@ impl App {
                     .check((&latest, self.top), (&self.frame, top));
                 self.top = top;
             }
+            if let Ok(held) = self.latest.held.lock() {
+                self.held.clone_from(&held);
+            }
             if let Ok(cwd) = self.latest.cwd.lock() {
                 top_bar::label(&cwd, &mut self.label);
+            }
+            if let Some(vi) = &mut self.vi {
+                vi.settle(&View {
+                    frame: &self.frame,
+                    top: self.top,
+                    held: &self.held,
+                });
             }
             self.latest.pending.store(false, Ordering::Release);
             let _ = self.waker.wake();
@@ -391,10 +421,15 @@ impl App {
                 selection::overlay(&mut self.composed, self.top, selection);
             }
             ime::overlay(&mut self.composed, &self.preedit.0, self.preedit.1);
+            if let Some(vi) = &self.vi {
+                self.composed.cursor = vi.drawn(self.top, self.frame.rows);
+            }
             if let Some(prompt) = &self.prompt {
                 paste::banner(&mut self.composed, prompt);
             } else if let Some(bar) = &self.bar {
                 bar.draw(&mut self.composed);
+            } else if let Some(vi) = self.vi.filter(|_| self.flash.until().is_none()) {
+                vi.draw(&mut self.composed);
             } else {
                 self.flash.banner(&mut self.composed);
             }
@@ -422,7 +457,7 @@ impl App {
         let Some(text) = self.clipboard().and_then(Clipboard::text) else {
             return;
         };
-        if self.type_in_bar(&text) {
+        if self.type_in_bar(&text) || self.vi.is_some() {
             return;
         }
         match paste::check(text) {
@@ -449,13 +484,77 @@ impl App {
             self.redraw_soon();
             return true;
         }
+        if input::is_vi(key, self.modifiers) {
+            if !event.repeat {
+                self.toggle_vi();
+            }
+            return true;
+        }
         let text = event.text.as_ref().map(|text| text.as_str());
         let bar = self.bar.as_mut().filter(|_| self.preedit.0.is_empty());
         match bar.and_then(|bar| bar.key(key, text, self.modifiers)) {
-            None => return false,
+            None => return self.vi_key(event),
             Some(Step::Stay) => {}
             Some(Step::Close) => self.bar = None,
             Some(step) => self.find(step),
+        }
+        self.redraw_soon();
+        true
+    }
+
+    /// Turns vi mode on at the program's cursor, or off and back to the live screen. An input
+    /// method would take its keys, so that goes off with it.
+    fn toggle_vi(&mut self) {
+        self.vi = match self.vi {
+            Some(_) => None,
+            None => Some(Vi::new(&View {
+                frame: &self.frame,
+                top: self.top,
+                held: &self.held,
+            })),
+        };
+        if self.vi.is_none() {
+            self.request(Request::Scroll(i32::MIN));
+        }
+        if let Some(open) = &self.open {
+            open.window.set_ime_allowed(self.vi.is_none());
+        }
+        self.ime_cursor = None;
+        self.redraw_soon();
+    }
+
+    /// Hands a key to vi mode. Returns false if vi mode is off.
+    fn vi_key(&mut self, event: &KeyEvent) -> bool {
+        let Some(vi) = &mut self.vi else {
+            return false;
+        };
+        // A click or new text under the selection ended it.
+        if self.selecting.current.is_none() {
+            vi.end_selection();
+        }
+        let view = View {
+            frame: &self.frame,
+            top: self.top,
+            held: &self.held,
+        };
+        let step = vi.key(&event.logical_key, self.modifiers, &view);
+        let (row, selection) = (vi.row(), vi.selection());
+        match step {
+            ViStep::Stay => return true,
+            ViStep::Moved => {
+                self.selecting.current = selection.or(self.selecting.current);
+                self.request(Request::Reveal(row));
+            }
+            ViStep::Unselect => self.selecting.current = None,
+            ViStep::Find => {
+                self.bar.get_or_insert_default();
+            }
+            ViStep::Yank => {
+                if let Some(selection) = self.selecting.current.take() {
+                    self.request(Request::Copy(selection));
+                }
+            }
+            ViStep::Close => self.toggle_vi(),
         }
         self.redraw_soon();
         true
@@ -493,6 +592,9 @@ impl App {
         if let Some(bar) = &mut self.bar {
             bar.missing = found.is_none();
             self.selecting.current = found.or(self.selecting.current);
+            if let (Some(vi), Some(found)) = (&mut self.vi, found) {
+                vi.jump(found.anchor);
+            }
             self.redraw_soon();
         }
     }
@@ -520,7 +622,7 @@ impl App {
     }
 
     fn report(&self, event: mouse::Event) {
-        if !top_bar::reaches_program(event, self.on_bar) {
+        if self.vi.is_some() || !top_bar::reaches_program(event, self.on_bar) {
             return;
         }
         let frame = &self.frame;
@@ -629,7 +731,7 @@ impl App {
         for _ in 0..lines.abs() as u32 {
             if self.frame.mouse != MouseMode::Off {
                 self.report(mouse::Event::Wheel(lines > 0.0));
-            } else if self.frame.alternate_scroll {
+            } else if self.frame.alternate_scroll && self.vi.is_none() {
                 let empty = ModifiersState::empty();
                 let arrow = input::encode(&key, None, empty, self.frame.app_cursor, false);
                 self.request(Request::Input(arrow));
@@ -644,7 +746,7 @@ impl App {
             Ime::Preedit(text, caret) => {
                 // Composing is typing, and it draws at a cursor that history hides.
                 // shortcut: with the bar open it still draws at the pane's cursor, not the bar's.
-                if !text.is_empty() && self.bar.is_none() {
+                if !text.is_empty() && self.bar.is_none() && self.vi.is_none() {
                     self.request(Request::Scroll(i32::MIN));
                 }
                 self.preedit.1 = caret.map_or(text.len(), |(start, _)| start);
@@ -652,7 +754,7 @@ impl App {
             }
             Ime::Commit(text) => {
                 self.preedit.0.clear();
-                if !self.type_in_bar(&text) && self.prompt.is_none() {
+                if !self.type_in_bar(&text) && self.prompt.is_none() && self.vi.is_none() {
                     self.request(Request::Input(text.into_bytes()));
                 }
             }
@@ -813,6 +915,7 @@ pub fn run(size: Option<(u32, u32)>) -> Result<(), Error> {
         modifiers: ModifiersState::empty(),
         preedit: (String::new(), 0),
         top: 0,
+        held: 0..0,
         composed: Frame::default(),
         label: String::new(),
         tab: 0..0,
@@ -828,6 +931,7 @@ pub fn run(size: Option<(u32, u32)>) -> Result<(), Error> {
         flash: Flash::default(),
         selecting: Selecting::default(),
         bar: None,
+        vi: None,
         result: Ok(()),
     };
     event_loop.run_app(&mut app)?;

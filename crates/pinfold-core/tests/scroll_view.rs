@@ -245,3 +245,18 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn the_view_reaches_history_unless_the_program_owns_the_screen() {
+    let mut engine = pane(50);
+    let top = engine.position(0, 0).row;
+    let screen = top..top + usize::from(ROWS);
+    assert_eq!(engine.view_rows(), top - 47..screen.end);
+    assert!(engine.scroll(i32::MAX));
+    assert_eq!(engine.position(0, 0).row, engine.view_rows().start);
+    engine.snap_to_live();
+    feed(&mut engine, b"\x1b[?1000h");
+    assert_eq!(engine.view_rows(), screen);
+    feed(&mut engine, b"\x1b[?1000l\x1b[?1049h");
+    assert_eq!(engine.view_rows(), screen);
+}

@@ -56,3 +56,29 @@ Deleting the file changes nothing until the next start.
 
 Pinfold checks the file with one `stat` a second on a thread of its own, so an idle window
 wakes once a second for this. Changes to the font file itself are not noticed.
+
+## Vi mode
+
+Command+X on macOS, or Ctrl+Shift+X elsewhere, turns vi mode on at the program's cursor, and
+off again. While it is on, nothing you do reaches the program: no keys, pastes, input method
+text or mouse events. The program keeps running, and the row under the pane says `VI` or
+`VISUAL`. Vi mode has no config keys.
+
+| Keys                        | Action                                          |
+| --------------------------- | ----------------------------------------------- |
+| `h` `j` `k` `l`, arrows     | Move a cell                                     |
+| `0` `^` `$`, Home, End      | Start of the row, its first text, its last text |
+| `w` `e` `b`                 | Next word, end of the word, previous word       |
+| `H` `M` `L`                 | Top, middle and bottom of the view              |
+| `gg` `G`                    | Oldest row held, newest row                     |
+| Ctrl+`u`, Ctrl+`d`          | Half a view up, down                            |
+| Ctrl+`b`, Ctrl+`f`, paging  | A view up, down                                 |
+| `v` `V`                     | Select cells, select whole rows. Again to stop  |
+| `y`                         | Copy the selection and drop it                  |
+| `/`                         | Open the search bar. A match moves the cursor   |
+| Esc, `q`                    | Leave for the live screen. Esc drops a selection first |
+
+The cursor stays on its text as output scrolls it, and the next motion brings it back into view.
+Word motions read the rows in view, so at the view's edge they stop on the next row. On the
+alternate screen, or under a program that reports the mouse, the view cannot leave the screen,
+so neither can the cursor. A copy stops at 2 MB, as any selection does.
