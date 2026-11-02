@@ -40,8 +40,8 @@ fn core(path: &Path) -> Result<UnixStream, Box<dyn Error>> {
     let binary = std::env::current_exe()?
         .canonicalize()?
         .with_file_name("pinfold-core");
-    // shortcut: the core's stderr goes nowhere, so a window that fails to start says nothing,
-    // keep a log in the runtime directory once tracing reaches the core.
+    // shortcut: the core's stderr goes nowhere, and a window's with it, so a launcher hears that
+    // a window ended and not why, keep a log in the runtime directory once tracing reaches them.
     pinfold_sys::spawn_detached(Command::new(&binary))
         .map_err(|error| format!("cannot start {}: {error}", binary.display()))?;
     let start = Instant::now();

@@ -456,6 +456,13 @@ impl Reactor {
         self.host.window.is_some()
     }
 
+    /// Returns whether a window on the link has said hello, which it does once it is up.
+    #[must_use]
+    pub fn is_window_ready(&self) -> bool {
+        let window = self.host.window.as_ref();
+        window.is_some_and(|window| window.session.greeted)
+    }
+
     /// Returns the process id of a window this reactor started, while its link is open.
     #[must_use]
     pub fn window_pid(&self) -> Option<u32> {
@@ -678,9 +685,11 @@ mod tests {
         peer.read();
         assert_eq!(peer.hellos, 1);
         assert!(peer.frames.is_empty(), "a frame came before the hello");
+        assert!(!reactor.is_window_ready());
         peer.send(Request::Hello { version: VERSION });
         peer.watch(pane);
         serve(&mut reactor, &mut peer, |r, p| p.matches(r, pane));
+        assert!(reactor.is_window_ready());
     }
 
     #[test]

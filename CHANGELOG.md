@@ -65,6 +65,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Fixed
 
+- `pinfold` waits until the window is on screen, and fails with a short reason if the window cannot run, ends during start or is not ready after 2 seconds. It used to exit 0 once the process existed, and said only "no window can open".
 - Bold `i` and other glyphs of several contours no longer come out thinner than regular.
 - Fallback font pages no longer count against the window once a frame is drawn.
 - A copy of a whole pane can run in steps, which keeps its text out of the core's footprint.

@@ -70,6 +70,8 @@ pub enum Error {
 }
 
 enum Request {
+    /// The window is on screen, so the link can say hello, which a launcher is waiting on.
+    Opened,
     Input(Vec<u8>),
     Paste(String),
     Resize(u16, u16),
@@ -136,6 +138,7 @@ fn run_io(
         // or key puts right, retry them if a person ever sees one go.
         while let Ok(request) = requests.try_recv() {
             match request {
+                Request::Opened => link.greet(),
                 Request::Input(bytes) => {
                     link.write(&bytes);
                 }
@@ -799,6 +802,7 @@ impl ApplicationHandler<Notice> for App {
             event_loop.exit();
         }
         if let Some(size) = self.open.as_ref().map(|open| open.window.inner_size()) {
+            self.request(Request::Opened);
             self.resized(size);
         }
     }
@@ -913,7 +917,7 @@ fn config() -> Config {
 ///
 /// Returns an error if the window, font, surface or link cannot be set up.
 pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
-    let link = Link::new(link, PANE)?;
+    let link = Link::silent(link, PANE)?;
     let waker = link.waker();
     let (requests, received) = mpsc::channel();
     let latest = Arc::new(Latest::default());
