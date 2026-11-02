@@ -23,7 +23,7 @@ use pinfold_proto::link::{self, Decoder, Notice, Request, VERSION, encode_frame}
 use pinfold_sys::socket;
 
 use crate::io::{READ_BUDGET, Reactor};
-use crate::search::{CopyStep, Copying, Direction, Position, Selection};
+use crate::search::{CopyStep, Copying};
 
 /// Beyond any pane number, like the waker's token.
 pub(crate) const LINK: Token = Token(usize::MAX - 1);
@@ -48,46 +48,6 @@ pub enum WindowOpen {
     Started,
     /// One is already open, so no process started.
     AlreadyOpen,
-}
-
-impl From<link::Position> for Position {
-    fn from(position: link::Position) -> Self {
-        Self {
-            row: position.row,
-            column: position.column,
-        }
-    }
-}
-
-impl From<link::Selection> for Selection {
-    fn from(selection: link::Selection) -> Self {
-        Self {
-            anchor: selection.anchor.into(),
-            focus: selection.focus.into(),
-        }
-    }
-}
-
-impl From<Selection> for link::Selection {
-    fn from(selection: Selection) -> Self {
-        let position = |at: Position| link::Position {
-            row: at.row,
-            column: at.column,
-        };
-        Self {
-            anchor: position(selection.anchor),
-            focus: position(selection.focus),
-        }
-    }
-}
-
-impl From<link::Direction> for Direction {
-    fn from(direction: link::Direction) -> Self {
-        match direction {
-            link::Direction::Forward => Self::Forward,
-            link::Direction::Backward => Self::Backward,
-        }
-    }
 }
 
 /// The link has ended. Why does not matter, as every cause is handled the same way.
@@ -192,7 +152,7 @@ impl Session {
                 query,
             } => {
                 let pane = pane as usize;
-                reactor.search(pane, query, from.into(), direction.into());
+                reactor.search(pane, query, from, direction);
                 // One that could not start ends now, and `report` says so.
                 if let Some(state) = self.panes.get_mut(pane) {
                     state.searching = true;
@@ -204,7 +164,7 @@ impl Session {
                 let pane = pane as usize;
                 self.copying = self.panes.get(pane).map(|_| CopyJob {
                     pane,
-                    copy: Copying::new(selection.into()),
+                    copy: Copying::new(selection),
                     text: String::new(),
                 });
             }
@@ -234,7 +194,7 @@ impl Session {
             }
             self.notice(&Notice::Searched {
                 pane: pane as u32,
-                found: found.map(Into::into),
+                found,
             })?;
         }
         let Some(job) = self.copying.as_mut() else {
@@ -432,9 +392,10 @@ impl Drop for Host {
 impl Reactor {
     /// Starts `binary` as this session's window, with no arguments, on a new link.
     ///
-    /// A session has one window, so while one lives this starts nothing and says so. The
-    /// program finds the link on [`socket::LINK_FD`], and pane children never get it. A window
-    /// whose link ends is killed, and this can then start another.
+    /// A session has one window, so while one lives this starts nothing, asks it to come to
+    /// the front, and says so. The program finds the link on [`socket::LINK_FD`], and pane
+    /// children never get it. A window whose link ends is killed, and this can then start
+    /// another.
     ///
     /// # Errors
     ///
@@ -456,15 +417,27 @@ impl Reactor {
     /// # Ok::<(), std::io::Error>(())
     /// ```
     pub fn spawn_window(&mut self, binary: &Path) -> io::Result<WindowOpen> {
+        self.spawn_window_command(Command::new(binary))
+    }
+
+    /// Does what [`Reactor::spawn_window`] does with a prepared `command`. Only the core's
+    /// measuring mode uses this, as nothing from a control socket may reach a window's command.
+    ///
+    /// # Errors
+    ///
+    /// Returns what [`Reactor::spawn_window`] returns.
+    pub fn spawn_window_command(&mut self, mut command: Command) -> io::Result<WindowOpen> {
         self.host.reap();
-        if self.host.window.is_some() {
+        if let Some(window) = self.host.window.as_mut() {
+            // A window over the cap on replies, or one that has gone, is about to end anyway.
+            let _ = window.session.notice(&Notice::Raise);
+            let _ = window.session.flush();
             return Ok(WindowOpen::AlreadyOpen);
         }
-        if !binary.is_absolute() {
+        if !Path::new(command.get_program()).is_absolute() {
             return Err(io::Error::from(ErrorKind::InvalidInput));
         }
         let (ours, theirs) = socket::pair()?;
-        let mut command = Command::new(binary);
         command.stdin(Stdio::null());
         let child = socket::spawn_with_link(command, theirs)?;
         self.attach_window(ours, Some(child))?;
@@ -475,6 +448,12 @@ impl Reactor {
     #[must_use]
     pub fn has_window(&self) -> bool {
         self.host.window.is_some()
+    }
+
+    /// Returns the process id of a window this reactor started, while its link is open.
+    #[must_use]
+    pub fn window_pid(&self) -> Option<u32> {
+        self.host.window.as_ref()?.child.as_ref().map(Child::id)
     }
 
     /// Serves `socket` as the window, and sends the version check.
@@ -556,6 +535,7 @@ mod tests {
         searched: Vec<Option<link::Selection>>,
         copied: Vec<String>,
         exited: Vec<u32>,
+        raises: usize,
     }
 
     impl Peer {
@@ -573,6 +553,7 @@ mod tests {
                 searched: Vec::new(),
                 copied: Vec::new(),
                 exited: Vec::new(),
+                raises: 0,
             }
         }
 
@@ -617,6 +598,7 @@ mod tests {
                         Notice::Searched { found, .. } => self.searched.push(found),
                         Notice::Copied { text, .. } => self.copied.push(text.to_owned()),
                         Notice::Exited { pane } => self.exited.push(pane),
+                        Notice::Raise => self.raises += 1,
                     }
                 }
             }
@@ -1104,7 +1086,7 @@ mod tests {
 
     #[test]
     fn a_second_open_starts_nothing_until_the_first_has_gone() {
-        let hello = r"printf '\003\000\000\000\000\001\000' >&3; exec cat <&3 >/dev/null";
+        let hello = r"printf '\003\000\000\000\000\002\000' >&3; exec cat <&3 >/dev/null";
         let (binary, log) = window_script("second-open", hello);
         let mut reactor = Reactor::new().unwrap();
         assert_eq!(spawn_window(&mut reactor, &binary), WindowOpen::Started);
@@ -1120,6 +1102,16 @@ mod tests {
         assert!(turn_until(&mut reactor, |_| starts(&log) == "0\n0\n"));
         drop(reactor);
         fs::remove_dir_all(binary.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_second_open_raises_the_window_it_finds() {
+        let mut reactor = Reactor::new().unwrap();
+        let mut peer = Peer::greet(&mut reactor);
+        let open = reactor.spawn_window(Path::new("/does/not/exist")).unwrap();
+        assert_eq!(open, WindowOpen::AlreadyOpen);
+        serve(&mut reactor, &mut peer, |_, p| p.raises == 1);
+        assert!(reactor.has_window());
     }
 
     #[test]

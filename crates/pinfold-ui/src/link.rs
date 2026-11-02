@@ -84,6 +84,7 @@ struct State {
     copied: Option<String>,
     /// Copies asked for and not answered.
     copying: u32,
+    raised: bool,
 }
 
 impl State {
@@ -132,6 +133,7 @@ impl State {
                 self.copied = Some(text.to_owned());
             }
             Notice::Exited { pane } if pane == self.pane => self.exited = true,
+            Notice::Raise => self.raised = true,
             _ => {}
         }
         Ok(())
@@ -422,6 +424,11 @@ impl Link {
     /// Returns the text of the last copy asked for, once.
     pub fn take_copied(&mut self) -> Option<String> {
         self.state.copied.take()
+    }
+
+    /// Returns whether someone asked to bring this window to the front since the last call.
+    pub fn take_raised(&mut self) -> bool {
+        std::mem::take(&mut self.state.raised)
     }
 
     /// Returns whether the core has answered the version check.
@@ -839,6 +846,16 @@ mod tests {
         assert!(turn_until(&mut link, |link| link.is_closed()));
         assert!(!link.take_dirty(), "the same directory changes nothing");
         assert_eq!(link.disconnected(), None, "an exit is not a disconnect");
+    }
+
+    #[test]
+    fn a_raise_is_reported_once() {
+        let (mut link, mut peer) = linked().unwrap();
+        peer.greet().unwrap();
+        peer.notices(&[Notice::Raise]).unwrap();
+        assert!(turn_until(&mut link, |link| link.state.raised));
+        assert!(link.take_raised());
+        assert!(!link.take_raised());
     }
 
     #[test]

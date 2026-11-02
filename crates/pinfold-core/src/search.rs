@@ -7,52 +7,17 @@
 use std::ops::Range;
 
 use alacritty_terminal::term::cell::{Cell, Flags};
+pub use pinfold_proto::link::{Direction, MAX_QUERY, Position, Selection};
 
 /// Most rows one step of a search or copy reads, which is one or two blocks. See
 /// `benches/scrollback.rs`.
 const STEP_ROWS: usize = 64;
-/// Longest query, in characters, which bounds the work per cell and what a search carries.
-pub const MAX_QUERY: usize = 256;
 /// Most text one selection returns, which is the threat model's limit on a read.
 pub const MAX_SELECTION: usize = 2_000_000;
 /// Default tab stops, since history does not keep the stops in force when it was written.
 const TAB_STOP: usize = 8;
 
 const SPACERS: Flags = Flags::WIDE_CHAR_SPACER.union(Flags::LEADING_WIDE_CHAR_SPACER);
-
-/// A cell, in numbers that survive output and eviction, though not a change of width.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub struct Position {
-    /// The row's number at the pane's width. A new width reflows rows and numbers them back from
-    /// the same end, so a position taken before it names other text afterwards (ADR-0029).
-    pub row: usize,
-    /// The column at that width.
-    pub column: u16,
-}
-
-/// The cells of a match, or of a selection in either order, both ends included.
-///
-/// This is a plain value: it holds nothing output can invalidate. Reading one clamps it to the
-/// rows still held.
-// shortcut: a screen row's number names whatever is there now, so text a program overwrites
-// after selection is copied as the new text, and the alternate screen shares its numbers with
-// the primary. Clear selections on damage when the window draws them.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Selection {
-    /// Where it started.
-    pub anchor: Position,
-    /// Where it ends now.
-    pub focus: Position,
-}
-
-/// Which way a search runs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Direction {
-    /// Toward newer rows.
-    Forward,
-    /// Toward older rows.
-    Backward,
-}
 
 /// What a step of a search came to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
