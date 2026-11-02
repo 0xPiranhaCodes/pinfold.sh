@@ -17,6 +17,8 @@ use pinfold_ui::link::{Disconnect, Link};
 
 /// Names the directory of a run, in a process acting as the window.
 const CLIENT: &str = "PINFOLD_TEST_CLIENT";
+/// Asks this test binary, in a process of its own, to harden itself twice.
+const HARDEN: &str = "PINFOLD_TEST_HARDEN";
 const PATIENCE: Duration = Duration::from_secs(30);
 
 type Result<T = ()> = std::result::Result<T, Box<dyn Error>>;
@@ -57,6 +59,22 @@ impl Session {
 
     fn launch(&self) -> Result<Output> {
         Ok(self.launcher("/bin/sh").output()?)
+    }
+
+    /// Starts a core with `arguments` and a one-line shell, and notes the core.
+    fn start_core(&self, arguments: &[&str], shell: &str) -> Result<Child> {
+        let script = self.directory.join("shell");
+        fs::write(&script, format!("#!/bin/sh\n{shell}\n"))?;
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o700))?;
+        let core = Command::new(self.directory.join("pinfold-core"))
+            .args(arguments)
+            .env("XDG_RUNTIME_DIR", self.directory.join("run"))
+            .env("SHELL", &script)
+            .env(CLIENT, &self.directory)
+            .spawn()?;
+        fs::write(self.directory.join("core"), core.id().to_string())?;
+        Ok(core)
     }
 
     fn start_launcher(&self) -> Result<Child> {
@@ -282,4 +300,70 @@ fn a_launcher_reports_a_core_with_no_window_and_that_core_exits_with_its_shell()
         assert!(start.elapsed() < PATIENCE, "the core outlived its panes");
         thread::sleep(Duration::from_millis(20));
     }
+}
+
+/// Whether a debugger can reach `pid`, as far as hardening decides that. On macOS a plain process
+/// is refused whatever the target, so the answer is how.
+#[cfg(target_os = "macos")]
+fn debuggable(pid: u32) -> Result<bool> {
+    let refused = pinfold_sys::probe_attach(pid).err();
+    Ok(refused.is_none_or(|error| error.kind() != std::io::ErrorKind::ResourceBusy))
+}
+
+/// Whether a debugger can reach `pid`, which on Linux is what lets this read its `/proc` entries.
+#[cfg(target_os = "linux")]
+fn debuggable(pid: u32) -> Result<bool> {
+    match fs::read(format!("/proc/{pid}/smaps_rollup")) {
+        Ok(_) => Ok(true),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Shell that notes itself and stays.
+const NOTE_PANE: &str = "echo $$ > \"$PINFOLD_TEST_CLIENT/pane\"\nexec sleep 60";
+
+#[test]
+fn hardening_closes_the_core_and_leaves_its_panes_open() {
+    let session = Session::new("h", None).unwrap();
+    let mut core = session.start_core(&[], NOTE_PANE).unwrap();
+    assert!(session.wait_for("pane"), "the pane's shell did not start");
+    let pane: u32 = session.read("pane").trim().parse().unwrap();
+
+    assert!(!debuggable(core.id()).unwrap(), "the core is open");
+    assert!(
+        debuggable(pane).unwrap(),
+        "a pane took the core's hardening"
+    );
+
+    core.kill().unwrap();
+    core.wait().unwrap();
+
+    // The same probe on the same binary without hardening, or the above proves nothing.
+    let session = Session::new("i", None).unwrap();
+    let mut open = session.start_core(&["--idle", "1"], NOTE_PANE).unwrap();
+    assert!(session.wait_for("pane"), "the pane's shell did not start");
+    assert!(debuggable(open.id()).unwrap(), "the probe cannot tell");
+    open.kill().unwrap();
+    open.wait().unwrap();
+}
+
+/// Not a test: [`hardening_twice_is_harmless`] runs this, so that this binary stays debuggable.
+#[test]
+fn harden_process() {
+    if env::var_os(HARDEN).is_some() {
+        pinfold_sys::harden().unwrap();
+        pinfold_sys::harden().unwrap();
+    }
+}
+
+#[test]
+fn hardening_twice_is_harmless() {
+    let status = Command::new(env::current_exe().unwrap())
+        .args(["--exact", "harden_process"])
+        .env(HARDEN, "1")
+        .stdout(Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success());
 }

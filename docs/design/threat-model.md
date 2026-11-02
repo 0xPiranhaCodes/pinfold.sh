@@ -94,8 +94,30 @@ into the core:
    on the control socket can ask for a window to open, with no arguments, and gets no channel
    into a pane. The window sets the same hardening as the core.
 6. **Core hardening.** Before opening any PTY, the core sets `PR_SET_DUMPABLE(0)` on Linux
-   and `PT_DENY_ATTACH` on macOS, so that a same-user process cannot copy a PTY master out
-   of it.
+   and `PT_DENY_ATTACH` on macOS. Neither reaches a pane: `exec` clears both, so you can
+   debug your own programs in a pane. What each stops was measured with
+   [`tests/hardening/audit.sh`](../../tests/hardening/audit.sh), and
+   `crates/pinfold-cli/tests/session.rs` fails if the core or a pane changes side.
+
+   | Same-user attempt on the core                  | Linux    | macOS, plain build              | macOS, hardened runtime |
+   | ---------------------------------------------- | -------- | ------------------------------- | ----------------------- |
+   | `ptrace` attach                                | Refused  | Refused, attacker gets SIGSEGV  | Refused, same           |
+   | Copy a PTY master (`pidfd_getfd`)              | Refused  | No such call                    | No such call            |
+   | Task port, signed with the debugger entitlement | No such call | **Granted: memory was read** | Refused                 |
+   | Apple's `vmmap` and `leaks`                    | No such tool | Work: region and heap sizes | Work: same              |
+
+   A plain macOS build is therefore not safe from a same-user process that can ad-hoc sign a
+   program, which needs no admin rights and no Developer Mode. That task port reads the core's
+   memory, and a task port normally allows writes too, which was not tried. `Pinfold.app` is
+   signed with the hardened runtime for this reason. A `cargo` build is not.
+
+   These stay open on purpose. `pinfold-core --idle <panes>` and `--window` skip hardening so
+   that the core can be measured and debugged, and any same-user process can run them. If one
+   owns the socket, `pinfold` uses it. That gives an attacker nothing new, as a same-user
+   process could equally start its own program there and the launcher checks only the owner. A
+   core started under a tracer stays traced on Linux, where the tracer keeps its registers but
+   loses its memory reads, and exits with status 45 on macOS. Apple's tools read sizes, and
+   `gcore` was refused and a `leaks` memory graph did not hold a marker printed in a pane.
 
 The [M0 spike](../spikes/m0-caller-identity/README.md) showed on Linux and macOS that a
 process in pane A was never identified as pane B through the API, even with pane B's full
@@ -103,6 +125,8 @@ environment.
 
 ### Still open
 
+- Whether a build without the hardened runtime, such as Homebrew building from source, should
+  refuse to run a session or warn about it. Only the core and window of `Pinfold.app` have it.
 - How macOS closes the pid-reuse race. `LOCAL_PEERTOKEN` is the likely answer and is
   untested.
 - How sandboxed agents block TIOCSTI while staying in their pane's session, tested with

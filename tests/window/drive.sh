@@ -30,6 +30,10 @@ sleep 1
 export DISPLAY=:9
 "$PINFOLD"
 window_id
+if cat "/proc/$WINDOW/smaps_rollup" >/dev/null 2>&1; then
+  echo "FAIL: the window is not hardened"
+  exit 1
+fi
 sleep 2
 DAEMON=$(parent "$WINDOW")
 xdotool windowfocus "$ID"

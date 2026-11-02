@@ -17,7 +17,8 @@ cp "$pinfold" "$core" "$window" "$app/Contents/MacOS/"
 cp packaging/macos/AppIcon.icns crates/pinfold-render/fonts/OFL.txt LICENSE-MIT LICENSE-APACHE \
   "$app/Contents/Resources/"
 # shortcut: an ad-hoc signature, enough to run here but not past Gatekeeper elsewhere, Developer ID and notarization arrive in M5.
-codesign --force --sign - "$app/Contents/MacOS/pinfold-core"
-codesign --force --sign - "$app/Contents/MacOS/pinfold-window"
+# The hardened runtime is what refuses a task port: PT_DENY_ATTACH does not (ADR-0020).
+codesign --force --sign - --options runtime "$app/Contents/MacOS/pinfold-core"
+codesign --force --sign - --options runtime "$app/Contents/MacOS/pinfold-window"
 codesign --force --sign - "$app"
 echo "$app"
