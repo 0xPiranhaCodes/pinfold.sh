@@ -74,6 +74,11 @@ fn measure_once(budget: &Budget, args: &[&str]) -> io::Result<Reading> {
     command.args(args).stdout(stdout);
     if let Some(screen) = budget.screen {
         command.env("SHELL", screen);
+    } else {
+        // A core takes its session's socket, which a core the user is running holds.
+        let runtime = std::env::temp_dir().join(format!("pinfold-gate-{}", std::process::id()));
+        std::fs::create_dir_all(&runtime)?;
+        command.env("XDG_RUNTIME_DIR", runtime);
     }
     let mut child = command.spawn()?;
     // A process that dies closes the pipe, so this read cannot outlive it.

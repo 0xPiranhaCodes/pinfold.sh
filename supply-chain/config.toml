@@ -276,6 +276,10 @@ criteria = "safe-to-deploy"
 version = "1.49.0"
 criteria = "safe-to-run"
 
+[[exemptions.itoa]]
+version = "1.0.18"
+criteria = "safe-to-deploy"
+
 [[exemptions.jni]]
 version = "0.22.4"
 criteria = "safe-to-deploy"
@@ -648,6 +652,10 @@ criteria = "safe-to-deploy"
 version = "1.0.229"
 criteria = "safe-to-deploy"
 
+[[exemptions.serde_json]]
+version = "1.0.154"
+criteria = "safe-to-deploy"
+
 [[exemptions.serde_spanned]]
 version = "1.1.2"
 criteria = "safe-to-deploy"
@@ -986,4 +994,8 @@ criteria = "safe-to-deploy"
 
 [[exemptions.zerocopy-derive]]
 version = "0.8.63"
+criteria = "safe-to-deploy"
+
+[[exemptions.zmij]]
+version = "1.0.23"
 criteria = "safe-to-deploy"

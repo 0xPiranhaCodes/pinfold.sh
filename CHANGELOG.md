@@ -11,6 +11,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Added
 
+- `pinfold-core` runs as a hardened daemon with a private control socket that takes `hello` and `window.open`. Nothing starts it yet, and no window can open from it.
 - A TOML config file with `font_size` and `macos_option_as_alt`. A bad file means the defaults.
 - Padding around the grid, and on macOS a full-height window under the native traffic lights, with `background_opacity` and `background_blur`.
 - Config hot reload: saving the file applies it to the running window, and a bad save keeps the current settings.
