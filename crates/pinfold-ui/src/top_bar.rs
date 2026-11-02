@@ -30,8 +30,9 @@ pub const LEFT_POINTS: f64 = if cfg!(target_os = "macos") { 78.0 } else { 0.0 };
 const CHROME: u32 = DEFAULT_BACKGROUND;
 /// `Rule, quiet fill` in Foundations, for a tab that is not active and the new tab button.
 const BOX: u32 = 0x0026_2b33;
-/// The border colour in Foundations. The accent is the blue of a running agent, so it is not used.
-const ACTIVE: u32 = 0x0034_3a44;
+/// The teal among the Main board's accents. The default blue is a running agent's colour, and
+/// a state is glyph, colour and word, so a tab must not look like one.
+const ACTIVE: u32 = 0x005f_d4d0;
 /// The Main board's quiet label text. Foundations' secondary text is the idle state's grey.
 const MUTED: u32 = 0x0085_8d98;
 
@@ -44,8 +45,6 @@ const GAP: usize = 2;
 const NEW_TAB: &str = " + ";
 /// `Pane` in Foundations, behind a tab's key so it reads as a keycap.
 const KEYCAP: u32 = 0x0012_151a;
-/// Marks the active tab at its left edge, in the text colour as every accent means a state.
-const EDGE: &str = "▌";
 /// Cells a tab keeps for its padding and its key: a space, the key, a space, the gap after it.
 const TAB_CHROME: usize = 5;
 /// Widest tab in cells, so that a lone tab stays a box and does not become the whole row.
@@ -135,7 +134,11 @@ fn strip(frame: &mut Frame, tabs: &[&str], active: usize) {
     for (index, label) in tabs.iter().enumerate() {
         let (start, end) = (index * width, (index + 1) * width);
         let is_active = index == active;
-        let colour = if is_active { TEXT | BOLD } else { MUTED };
+        let (colour, key_colour) = if is_active {
+            (CHROME | BOLD, ACTIVE)
+        } else {
+            (MUTED, MUTED)
+        };
         if width == 0 {
             break;
         }
@@ -147,10 +150,7 @@ fn strip(frame: &mut Frame, tabs: &[&str], active: usize) {
         if width > TAB_CHROME && index < 9 {
             let key = format!("{KEY}{}", index + 1);
             fill(frame, end - 5..end - 1, KEYCAP);
-            write(frame, columns, end - 4, &key, colour);
-        }
-        if is_active && width > 1 {
-            write(frame, columns, start, EDGE, TEXT);
+            write(frame, columns, end - 4, &key, key_colour);
         }
     }
 }
@@ -407,13 +407,6 @@ mod tests {
         assert_eq!(background(35..37), CHROME);
         assert_eq!(background(37..40), BOX);
         assert_eq!(row[38].character, '+');
-        assert_eq!((row[12].character, row[12].foreground), ('▌', TEXT));
-        assert!(
-            row[..12]
-                .iter()
-                .chain(&row[24..])
-                .all(|cell| cell.character != '▌')
-        );
     }
 
     #[test]
@@ -431,12 +424,11 @@ mod tests {
         assert!(strip.contains("one"), "{strip}");
         assert!(strip.contains(&key(4)), "{strip}");
         assert_eq!(frame.cells[44 + 1].background, ACTIVE);
-        let active = frame.cells[44..54].iter();
-        assert!(
-            active
-                .filter(|cell| !matches!(cell.character, ' ' | '▌'))
-                .all(|cell| cell.foreground == TEXT | BOLD)
-        );
+        let label = frame.cells[44..49].iter();
+        let drawn = label.filter(|cell| cell.character != ' ');
+        assert!(drawn.clone().count() > 0);
+        assert!(drawn.clone().all(|cell| cell.foreground == CHROME | BOLD));
+        assert!(drawn.into_iter().all(|cell| cell.background == ACTIVE));
     }
 
     #[test]
