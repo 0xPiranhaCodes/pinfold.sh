@@ -11,6 +11,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Added
 
+- The app is called PinFold: `PinFold.app`, the window's title and the Dock.
 - Tab pills stand a little taller than a cell, with their text centred, in any font. A chosen font without `⌘` takes it from the bundled font.
 - Pill tabs in the top bar, with hover, a mark on a hidden tab that printed, a quiet look for an
   unfocused window, and no title row in fullscreen.

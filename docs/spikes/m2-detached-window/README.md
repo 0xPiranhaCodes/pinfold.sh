@@ -3,7 +3,7 @@
 Question: when the Dock launches Pinfold and the launcher exits, can a detached process start
 the window and still get a real app?
 
-Method: copy `Pinfold.app` to `Spike.app`, set `CFBundleExecutable` to `launcher.sh` and the
+Method: copy `PinFold.app` to `Spike.app`, set `CFBundleExecutable` to `launcher.sh` and the
 bundle ID to `sh.pinfold.Spike`, sign it ad hoc, and run `open Spike.app`. The launcher double
 forks, calls `setsid` and execs the bundle's `pinfold`, then exits. Read the result with
 `lsappinfo info`.

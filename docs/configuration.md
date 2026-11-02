@@ -1,6 +1,6 @@
 # Configuration
 
-Pinfold reads one TOML file at startup, on Linux and macOS alike:
+PinFold reads one TOML file at startup, on Linux and macOS alike:
 `$XDG_CONFIG_HOME/pinfold/pinfold.toml`, or `~/.config/pinfold/pinfold.toml` when that
 variable is unset. Saving the file applies it to the running window within about a second.
 
@@ -24,10 +24,10 @@ background_blur = true
 prefix = "C-b"
 ```
 
-`font_path` takes a TrueType or OpenType file, or the first font in a collection. Pinfold
+`font_path` takes a TrueType or OpenType file, or the first font in a collection. PinFold
 draws bold and italic by thickening and slanting that one font, not from separate files, and
 without `font_path` it uses the bundled JetBrains Mono. A font file is treated as untrusted:
-if it cannot be read, is damaged, or cannot draw all of ASCII, Pinfold says why in its
+if it cannot be read, is damaged, or cannot draw all of ASCII, PinFold says why in its
 [log](#where-problems-are-reported) and uses the bundled font. `~` is not expanded.
 
 `background_opacity` applies only to the default background and the padding around the grid.
@@ -38,9 +38,9 @@ at opacity 1. Its radius is fixed at 80, because winit sets it through a private
 call that takes no radius from callers, and macOS may change that call.
 
 On Linux, and on a Mac with no Metal device, the window draws with the CPU and stays opaque:
-Pinfold accepts both keys and ignores them.
+PinFold accepts both keys and ignores them.
 
-Every key is optional. Pinfold always opens: if the file has a problem, it says why in
+Every key is optional. PinFold always opens: if the file has a problem, it says why in
 its [log](#where-problems-are-reported) and uses the defaults for every key. That covers an unknown key or a bad value
 (named with its line), a file that is not UTF-8 or is over 64 KiB, a directory in the
 file's place, a file it cannot read, and a file that another user owns or that group or
@@ -77,12 +77,12 @@ Every key applies on save, with no restart. The window keeps its size, so a new 
 size changes how many rows and columns fit, and programs get a resize. Editors that write the
 file in place and editors that save by rename both work, and so does a symlink.
 
-A save gets the same checks as startup. If it has any of the problems above, Pinfold says
+A save gets the same checks as startup. If it has any of the problems above, PinFold says
 why in its [log](#where-problems-are-reported), once, and keeps the current settings rather than the defaults, until a later
 save or `chmod` fixes it. A bad `font_path` file means the bundled font, as it does at startup.
 Deleting the file changes nothing until the next start.
 
-Pinfold checks the file with one `stat` a second on a thread of its own, so an idle window
+PinFold checks the file with one `stat` a second on a thread of its own, so an idle window
 wakes once a second for this. Changes to the font file itself are not noticed.
 
 ## Vi mode
