@@ -59,7 +59,7 @@ xdotool type --delay 15 'stty -echo -icanon; printf "\033[?1000h\033[?1006h"; he
 xdotool key Return
 sleep 0.5
 # Below the top bar, in the pane's first row.
-xdotool mousemove --window "$ID" 9 70 click 1 click 4
+xdotool mousemove --window "$ID" 9 74 click 1 click 4
 sleep 0.5
 mouse=$(tr -d ' \n' < /tmp/mouse)
 # Two wheel reports: winit counts a synthetic wheel button's press and its release.

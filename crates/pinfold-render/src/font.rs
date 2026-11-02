@@ -175,6 +175,8 @@ pub struct Fonts {
     opened: Vec<Font>,
     /// Whether a glyph was drawn since pages were last released.
     pub(crate) touched: bool,
+    /// Whether the bundled font is among `opened` yet.
+    bundled: bool,
 }
 
 impl From<Font> for Fonts {
@@ -190,6 +192,7 @@ impl Fonts {
             untried,
             opened: Vec::new(),
             touched: false,
+            bundled: false,
         }
     }
 
@@ -206,15 +209,25 @@ impl Fonts {
         &self.primary
     }
 
+    /// How many fallbacks are open.
+    #[cfg(test)]
+    pub(crate) fn opened_count(&self) -> usize {
+        self.opened.len()
+    }
+
     /// How many fallbacks have not been tried yet.
     #[cfg(test)]
     pub(crate) fn untried(&self) -> usize {
         self.untried.len()
     }
 
-    /// Finds a fallback with `character`, opening more of them until one has it. A file
-    /// that is missing or corrupt is skipped.
+    /// Finds a fallback with `character`, opening more of them until one has it. The bundled
+    /// font comes first, so a chosen font without `⌘` still draws it the same way. A file that
+    /// is missing or corrupt is skipped.
     pub(crate) fn fallback(&mut self, character: char) -> Option<(&Font, u16)> {
+        if !std::mem::replace(&mut self.bundled, true) {
+            self.opened.extend(Font::bundled());
+        }
         let has = |font: &Font| font.glyph(character) != 0;
         let mut found = self.opened.iter().position(has);
         while found.is_none() {
@@ -458,7 +471,7 @@ mod tests {
         let mut fonts = Fonts::with_fallbacks(bundled(), vec!["/does/not/exist", cargo].leak());
         assert!(fonts.fallback(KANJI).is_none());
         assert_eq!(fonts.untried(), 0);
-        assert!(fonts.opened.is_empty());
+        assert_eq!(fonts.opened_count(), 1, "only the bundled font");
     }
 
     #[test]

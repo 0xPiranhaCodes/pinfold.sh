@@ -2,7 +2,7 @@
 
 use std::sync::LazyLock;
 
-use pinfold_proto::Cell;
+use pinfold_proto::{Cell, DEFAULT_BACKGROUND, LEFT_CAP, RIGHT_CAP, TALL};
 
 use crate::font::{Font, Fonts};
 use crate::glyphs::{CACHE_LIMIT, GlyphCache, Metrics, clamp_size};
@@ -93,6 +93,26 @@ fn blend(background: u32, foreground: u32, alpha: u8) -> u32 {
     mix(16) | mix(8) | mix(0)
 }
 
+/// Returns the colour above and below each cell of the row of tabs: its own background, except
+/// that a tab's number sits in a smaller pill inside the tab, which goes on around it.
+pub(crate) fn bleeds(cells: &[Cell]) -> impl Iterator<Item = u32> + '_ {
+    let mut around = DEFAULT_BACKGROUND;
+    cells.iter().map(move |cell| {
+        let inside = cell.background == DEFAULT_BACKGROUND
+            && cell.character != ' '
+            && cell.style() & TALL == 0;
+        if !inside {
+            around = cell.background;
+        }
+        around
+    })
+}
+
+/// Returns whether `character` is the end of a pill, which is drawn to fit its cell.
+pub(crate) fn is_cap(character: char) -> bool {
+    matches!(character, LEFT_CAP | RIGHT_CAP)
+}
+
 /// Turns cells into pixels, using one font at one size.
 pub struct Painter {
     cache: GlyphCache,
@@ -142,11 +162,19 @@ impl Painter {
     /// Draws a row of cells. Anything past the canvas is clipped, and nothing is drawn
     /// outside this row, so damaged rows can be redrawn alone.
     pub fn draw_row(&mut self, canvas: &mut Canvas, row: usize, cells: &[Cell]) {
+        let metrics = self.cache.metrics();
         let Metrics {
             cell_width,
             cell_height,
             baseline,
-        } = self.cache.metrics();
+            ..
+        } = metrics;
+        let tabs = canvas.padding.tab_row == Some(row);
+        let (bleed, drop) = if tabs {
+            (metrics.bleed(), metrics.tab_text_drop)
+        } else {
+            (0, 0)
+        };
         let top = canvas.padding.row_top(row, cell_height);
         if top >= canvas.height {
             return;
@@ -163,6 +191,14 @@ impl Painter {
                 cell.background,
             );
         }
+        if tabs {
+            for (column, colour) in bleeds(cells).enumerate() {
+                let left = column.saturating_mul(cell_width) + canvas.padding.left;
+                let right = left.saturating_add(cell_width);
+                canvas.fill(left, top.saturating_sub(bleed), right, top, colour);
+                canvas.fill(left, bottom, right, bottom + bleed, colour);
+            }
+        }
         let pen_y = i32::try_from(top)
             .unwrap_or(i32::MAX)
             .saturating_add(baseline);
@@ -175,10 +211,11 @@ impl Painter {
             };
             let left = i64::try_from(column * cell_width + canvas.padding.left).unwrap_or(i64::MAX)
                 + i64::from(glyph.left);
-            let first = i64::from(pen_y) - i64::from(glyph.top);
+            let drop = if is_cap(cell.character) { 0 } else { drop };
+            let first = i64::from(pen_y) - i64::from(glyph.top) + i64::from(drop);
             for (line, mask) in glyph.mask.chunks(glyph.width.max(1)).enumerate() {
                 let y = first + line as i64;
-                if y < top as i64 || y >= bottom as i64 {
+                if y < (top as i64) - bleed as i64 || y >= (bottom + bleed) as i64 {
                     continue;
                 }
                 for (offset, &alpha) in mask.iter().enumerate() {
@@ -261,6 +298,55 @@ mod tests {
         let row = height / 3;
         assert!(buffer[..row * width].iter().all(|&pixel| pixel == 0));
         assert!(buffer[2 * row * width..].iter().all(|&pixel| pixel == 0));
+    }
+
+    #[test]
+    fn a_tabs_pill_goes_on_around_its_number() {
+        let cell = |character, foreground, background| Cell {
+            character,
+            foreground,
+            background,
+        };
+        const FILL: u32 = 0x0012_3456;
+        let clear = DEFAULT_BACKGROUND;
+        let row = [
+            cell(LEFT_CAP, FILL | TALL, clear),
+            cell('a', 0, FILL),
+            cell(LEFT_CAP, clear, FILL),
+            cell('1', 0, clear),
+            cell(RIGHT_CAP, clear, FILL),
+            cell(RIGHT_CAP, FILL | TALL, clear),
+            cell(' ', 0, clear),
+        ];
+        let colours: Vec<_> = bleeds(&row).collect();
+        assert_eq!(colours, [clear, FILL, FILL, FILL, FILL, clear, clear]);
+    }
+
+    #[test]
+    fn only_the_row_of_tabs_paints_past_itself() {
+        let mut painter = painter();
+        let (cell_width, cell_height) = painter.cell_size();
+        let bleed = painter.cache().metrics().bleed();
+        let (width, height) = (cell_width, 3 * cell_height);
+        let padding = Padding {
+            tab_row: Some(1),
+            ..Padding::default()
+        };
+        let mut ink = |row: usize| {
+            let mut buffer = vec![0; width * height];
+            let mut canvas = Canvas::new(&mut buffer, width, height)
+                .unwrap()
+                .inset(padding);
+            let cells = [Cell {
+                character: ' ',
+                foreground: 0,
+                background: 0x00ff_0000,
+            }];
+            painter.draw_row(&mut canvas, row, &cells);
+            buffer.chunks(width).filter(|line| line[0] != 0).count()
+        };
+        assert_eq!(ink(1), cell_height + 2 * bleed);
+        assert_eq!(ink(0), cell_height);
     }
 
     #[test]
