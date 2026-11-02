@@ -10,5 +10,9 @@ stops decoding.
 `paste` runs any text through the paste sanitizer. It fails if a control character other
 than tab or a line end comes out, or if the brackets are not exactly at the two ends.
 
+`link` feeds any bytes in chunks to the decoders of the window link, after a good version
+check. It fails on a panic, an out-of-memory or a hang, if a decoded message does not encode
+back to the bytes it came from, or if an applied frame's cells do not fit its size.
+
 `vt.dict` holds the escape sequences a mutator rarely writes by chance. It uses libFuzzer's
 format, which only knows the escapes `\\`, `\"` and `\xNN`.

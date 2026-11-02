@@ -26,7 +26,7 @@ pub const READ_BUDGET: usize = 64 * 1024;
 pub const MAX_REPLIES: usize = 4 * 1024;
 /// Most input waiting for a program that is not reading it. Input past this is refused
 /// whole, since a paste cut short would lose its closing bracket.
-pub const MAX_INPUT: usize = 1024 * 1024;
+pub const MAX_INPUT: usize = pinfold_proto::link::MAX_INPUT;
 /// Queue capacity an empty pane keeps, so one large paste does not cost memory for good.
 const KEPT_INPUT: usize = 4 * 1024;
 

@@ -22,7 +22,7 @@ use crate::search::{self, CopyStep, Copying, Position, Search, SearchStep, Selec
 const BACKGROUND_SLOT: usize = 257;
 
 /// Larger sizes are clamped, so a bad resize cannot allocate gigabytes of cells.
-pub const MAX_DIMENSION: u16 = 1024;
+pub const MAX_DIMENSION: u16 = pinfold_proto::link::MAX_DIMENSION;
 /// Longest OSC string that reaches the parser, whose own buffer has no limit.
 pub const MAX_SEQUENCE: usize = 4096;
 /// Most output a synchronized update holds back. Past this it is shown early, which can
