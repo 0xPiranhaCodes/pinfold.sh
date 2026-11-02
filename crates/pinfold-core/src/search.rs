@@ -7,7 +7,8 @@ use std::ops::Range;
 
 use alacritty_terminal::term::cell::{Cell, Flags};
 
-/// Most rows one step reads, which is one or two blocks. See `benches/scrollback.rs`.
+/// Most rows one step of a search or copy reads, which is one or two blocks. See
+/// `benches/scrollback.rs`.
 const STEP_ROWS: usize = 64;
 /// Longest query, in characters, which bounds the work per cell and what a search carries.
 pub const MAX_QUERY: usize = 256;
@@ -60,6 +61,17 @@ pub enum SearchStep {
     Found(Selection),
     /// Every row was read.
     NotFound,
+}
+
+/// What a step of a copy came to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CopyStep {
+    /// Take the text, and call again.
+    Running,
+    /// The last of the text has been given.
+    Done,
+    /// It stopped at a row boundary, because the text would pass [`MAX_SELECTION`].
+    TooLong,
 }
 
 /// Lowers a character to one character.
@@ -228,54 +240,153 @@ impl Search {
     }
 }
 
-/// Appends `selection`'s part of a row to `text`. Returns false, adding nothing, if that would
-/// pass [`MAX_SELECTION`].
-pub(crate) fn copy_row(
-    (start, end): (Position, Position),
-    number: usize,
-    cells: &[Cell],
-    text: &mut String,
-) -> bool {
-    let wrapped = is_wrapped(cells);
-    let used = cells
-        .iter()
-        .rposition(|cell| wrapped || cell.c != ' ')
-        .map_or(0, |at| at + 1);
-    let mut first = if number == start.row {
-        usize::from(start.column)
-    } else {
-        0
-    };
-    if cells
-        .get(first)
-        .is_some_and(|cell| cell.flags.contains(Flags::WIDE_CHAR_SPACER))
-    {
-        first = first.saturating_sub(1);
-    }
-    let last = if number == end.row {
-        used.min(usize::from(end.column) + 1)
-    } else {
-        used
-    };
-    let length = text.len();
-    let mut tab = false;
-    for (column, cell) in cells.iter().enumerate().take(last).skip(first) {
-        // A tab fills the cells to the next stop with blanks that nobody typed.
-        tab = tab && column % TAB_STOP != 0 && cell.c == ' ';
-        if !tab && !cell.flags.intersects(SPACERS) {
-            text.push(cell.c);
-            text.extend(cell.zerowidth().unwrap_or_default());
+/// A copy of a selection that hands over a few blocks' worth of rows per step, so the whole
+/// text never sits in one allocation here. The system allocator keeps the pages of a freed
+/// block in footprint, 1 to 2 times its size on macOS, which counts against a pane's 2 MB
+/// (ADR-0021). `benches/scrollback.rs` measures both ways.
+///
+/// Rows evicted between steps are left out, and rows written after the first step are not
+/// copied, so output can neither keep a copy running nor fail one.
+///
+/// ```
+/// use pinfold_core::search::{CopyStep, Copying, Position, Selection};
+/// use pinfold_core::vt::{AlacrittyEngine, VtEngine};
+///
+/// let mut engine = AlacrittyEngine::new(4, 20);
+/// engine.feed(b"some text", &mut Vec::new());
+/// let focus = Position { row: 0, column: 3 };
+/// let mut copy = Copying::new(Selection { anchor: Position::default(), focus });
+/// let mut text = String::new();
+/// assert_eq!(engine.copy_step(&mut copy, &mut text), CopyStep::Done);
+/// assert_eq!(text, "some");
+/// ```
+// shortcut: a step is bounded in rows, so 64 wide rows of combining marks make one step of about
+// MAX_SELECTION. Bound it in bytes too if a step's text ever outgrows what its reader can take.
+#[derive(Debug)]
+pub struct Copying {
+    /// The first cell not copied yet.
+    start: Position,
+    end: Position,
+    /// The text given so far.
+    bytes: usize,
+    full: bool,
+}
+
+impl Copying {
+    /// Prepares a copy of `selection`.
+    #[must_use]
+    pub fn new(selection: Selection) -> Self {
+        let (start, end) = if selection.anchor <= selection.focus {
+            (selection.anchor, selection.focus)
+        } else {
+            (selection.focus, selection.anchor)
+        };
+        Self {
+            start,
+            end,
+            bytes: 0,
+            full: false,
         }
-        tab |= cell.c == '\t';
     }
-    if !wrapped && number != end.row {
-        text.push('\n');
+
+    /// Clamps the copy to the rows `held` now, and returns the rows of the next step.
+    pub(crate) fn next_rows(&mut self, held: &Range<usize>) -> Range<usize> {
+        if self.start.row < held.start {
+            self.start = Position {
+                row: held.start,
+                column: 0,
+            };
+        }
+        if self.end.row >= held.end {
+            self.end = Position {
+                row: held.end.saturating_sub(1),
+                column: u16::MAX,
+            };
+        }
+        if self.full || self.start > self.end || held.is_empty() {
+            return 0..0;
+        }
+        let row = self.start.row;
+        row..row.saturating_add(STEP_ROWS).min(self.end.row + 1)
     }
-    let fits = text.len() <= MAX_SELECTION;
-    if !fits {
-        text.truncate(length);
+
+    /// Returns how many rows are left, as of the last [`Self::next_rows`].
+    pub(crate) fn rows_left(&self) -> usize {
+        self.end
+            .row
+            .saturating_add(1)
+            .saturating_sub(self.start.row)
     }
-    fits
+
+    /// Appends the selection's part of a row to `text`, or nothing if that would pass
+    /// [`MAX_SELECTION`].
+    pub(crate) fn row(&mut self, number: usize, cells: &[Cell], text: &mut String) {
+        if self.full {
+            return;
+        }
+        let (start, end) = (self.start, self.end);
+        let wrapped = is_wrapped(cells);
+        let used = cells
+            .iter()
+            .rposition(|cell| wrapped || cell.c != ' ')
+            .map_or(0, |at| at + 1);
+        let mut first = if number == start.row {
+            usize::from(start.column)
+        } else {
+            0
+        };
+        if cells
+            .get(first)
+            .is_some_and(|cell| cell.flags.contains(Flags::WIDE_CHAR_SPACER))
+        {
+            first = first.saturating_sub(1);
+        }
+        let last = if number == end.row {
+            used.min(usize::from(end.column) + 1)
+        } else {
+            used
+        };
+        let length = text.len();
+        let mut tab = false;
+        for (column, cell) in cells.iter().enumerate().take(last).skip(first) {
+            // A tab fills the cells to the next stop with blanks that nobody typed.
+            tab = tab && column % TAB_STOP != 0 && cell.c == ' ';
+            if !tab && !cell.flags.intersects(SPACERS) {
+                text.push(cell.c);
+                text.extend(cell.zerowidth().unwrap_or_default());
+            }
+            tab |= cell.c == '\t';
+        }
+        if !wrapped && number != end.row {
+            text.push('\n');
+        }
+        let bytes = self.bytes + (text.len() - length);
+        self.full = bytes > MAX_SELECTION;
+        if self.full {
+            text.truncate(length);
+        } else {
+            self.bytes = bytes;
+        }
+    }
+
+    /// Finishes a step over `rows`.
+    pub(crate) fn end_step(&mut self, rows: Range<usize>) -> CopyStep {
+        if self.full {
+            return CopyStep::TooLong;
+        }
+        if rows.is_empty() {
+            return CopyStep::Done;
+        }
+        self.start = Position {
+            row: rows.end,
+            column: 0,
+        };
+        if self.start > self.end {
+            CopyStep::Done
+        } else {
+            CopyStep::Running
+        }
+    }
 }
 
 #[cfg(test)]

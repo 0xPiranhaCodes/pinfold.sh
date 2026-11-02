@@ -15,7 +15,9 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::term::{Config, Term};
 use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 use pinfold_core::scrollback::Scrollback;
-use pinfold_core::search::{Direction, MAX_QUERY, Position, Search, SearchStep, Selection};
+use pinfold_core::search::{
+    CopyStep, Copying, Direction, MAX_QUERY, Position, Search, SearchStep, Selection,
+};
 use pinfold_core::vt::{AlacrittyEngine, VtEngine};
 use pinfold_proto::Frame;
 
@@ -158,16 +160,28 @@ fn line(name: &str, rng: &mut Rng, number: usize, out: &mut Vec<u8>) -> std::io:
     Ok(())
 }
 
-fn corpus(name: &str) -> std::io::Result<Vec<u8>> {
+/// Calls `take` with a corpus in reads of about 64 KB, as a PTY would.
+fn reads(name: &str, mut take: impl FnMut(&[u8])) -> std::io::Result<()> {
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
-    let mut out = Vec::new();
+    let mut read = Vec::new();
     let mut one = Vec::new();
     for number in 0..FED_LINES {
         one.clear();
         line(name, &mut rng, number, &mut one)?;
         one.extend_from_slice(b"\r\n");
-        out.extend_from_slice(&one);
+        read.extend_from_slice(&one);
+        if read.len() >= 64 * 1024 {
+            take(&read);
+            read.clear();
+        }
     }
+    take(&read);
+    Ok(())
+}
+
+fn corpus(name: &str) -> std::io::Result<Vec<u8>> {
+    let mut out = Vec::new();
+    reads(name, |read| out.extend_from_slice(read))?;
     Ok(out)
 }
 
@@ -189,13 +203,12 @@ fn feed(bytes: &[u8], sink: Option<&Arc<Mutex<Scrollback>>>) -> f64 {
     bytes.len() as f64 / 1e6 / start.elapsed().as_secs_f64()
 }
 
-/// A pane that has been fed a corpus, and the rows its store holds.
+/// A pane that has been fed a corpus, and the rows its store holds. The corpus is never held
+/// whole, because a later copy could land in its freed pages and hide what that copy costs.
 fn filled(name: &str) -> std::io::Result<(AlacrittyEngine, usize)> {
     let mut engine = AlacrittyEngine::new(SCREEN as u16, COLUMNS as u16);
     let mut replies = Vec::new();
-    for read in corpus(name)?.chunks(64 * 1024) {
-        engine.feed(read, &mut replies);
-    }
+    reads(name, |read| engine.feed(read, &mut replies))?;
     let held = engine.scrollback().lock().map_or(0, |store| store.len());
     Ok((engine, held))
 }
@@ -243,7 +256,7 @@ fn print_misses(name: &str, call: &str, held: usize, mut times: (Vec<f64>, Vec<f
     let (p50, p99, most) = percentiles(&mut times.0);
     let (whole, _, _) = percentiles(&mut times.1);
     println!(
-        "| {name} | {call} | {held} | {calls} | {p50:.3} | {p99:.3} | {most:.3} | {whole:.2} | {grown:.3} |"
+        "| {name} | {call} | {held} | {calls} | {p50:.3} | {p99:.3} | {most:.3} | {whole:.2} | | {grown:.3} |"
     );
 }
 
@@ -266,7 +279,9 @@ fn worst_query() -> std::io::Result<()> {
 
 /// Prints table rows for searching a whole store and for copying all of it. Footprint growth
 /// leaves out what `bytes()` grew by and adds up from row to row, so "wheel too" is what search
-/// and scrolling cost together, and the copy row holds all three.
+/// and scrolling cost together, and each copy row holds what came before it. Held is the most
+/// seen while a copy's text was alive, and left is what stays once it has gone. A copy in steps
+/// drops each step's text, as a caller that passes it on would.
 fn finds(name: &str) -> std::io::Result<()> {
     let (mut engine, held) = filled(name)?;
     let pid = std::process::id();
@@ -287,7 +302,7 @@ fn finds(name: &str) -> std::io::Result<()> {
     print_misses(name, "search", held, searches, growth);
     wheel(&mut engine, &mut frame, &mut times);
     let growth = grown(&engine)?;
-    println!("| {name} | wheel too | {held} | | | | | | {growth:.3} |");
+    println!("| {name} | wheel too | {held} | | | | | | | {growth:.3} |");
 
     let selection = Selection {
         anchor: Position::default(),
@@ -296,25 +311,74 @@ fn finds(name: &str) -> std::io::Result<()> {
             column: u16::MAX,
         },
     };
-    let mut times = vec![0.0; ROUNDS];
+    // `times` was written by the wheel, so these pages do not count as growth.
     times.clear();
+    let mut wholes = vec![0.0; ROUNDS];
+    wholes.clear();
+    let (mut piece, mut size, mut peak) = (String::new(), 0, 0.0_f64);
+    for _ in 0..ROUNDS {
+        let mut copy = Copying::new(selection);
+        let whole = Instant::now();
+        size = 0;
+        loop {
+            piece.clear();
+            let start = Instant::now();
+            let step = engine.copy_step(&mut copy, &mut piece);
+            times.push(start.elapsed().as_secs_f64() * 1e3);
+            std::hint::black_box(&piece);
+            size += piece.len();
+            if step != CopyStep::Running {
+                break;
+            }
+        }
+        wholes.push(whole.elapsed().as_secs_f64() * 1e3);
+        peak = peak.max(grown(&engine)?);
+    }
+    drop(piece);
+    let call = format!("copy {:.2} MB in steps", size as f64 / 1e6);
+    print_copy(
+        name,
+        &call,
+        held,
+        (&mut times, &mut wholes),
+        peak,
+        grown(&engine)?,
+    );
+
+    times.clear();
+    wholes.clear();
     let (mut size, mut peak) = (0, 0.0_f64);
     for _ in 0..ROUNDS {
         let mut text = String::new();
         let start = Instant::now();
         std::hint::black_box(engine.selection_text(selection, &mut text));
         times.push(start.elapsed().as_secs_f64() * 1e3);
+        wholes.push(start.elapsed().as_secs_f64() * 1e3);
         std::hint::black_box(&text);
         size = text.len();
         peak = peak.max(grown(&engine)?);
     }
-    let growth = grown(&engine)?;
-    let size = size as f64 / 1e6;
-    let (p50, p99, most) = percentiles(&mut times);
-    println!(
-        "| {name} | copy {size:.2} MB, {peak:.3} MB while held | {held} | 1 | {p50:.3} | {p99:.3} | {most:.3} | {p50:.2} | {growth:.3} |"
-    );
+    let left = grown(&engine)?;
+    let call = format!("copy {:.2} MB in one String", size as f64 / 1e6);
+    print_copy(name, &call, held, (&mut times, &mut wholes), peak, left);
     Ok(())
+}
+
+/// Prints a table row for repeated copies of a whole store.
+fn print_copy(
+    name: &str,
+    call: &str,
+    held: usize,
+    times: (&mut [f64], &mut [f64]),
+    peak: f64,
+    left: f64,
+) {
+    let calls = times.0.len() / times.1.len().max(1);
+    let (p50, p99, most) = percentiles(times.0);
+    let (whole, _, _) = percentiles(times.1);
+    println!(
+        "| {name} | {call} | {held} | {calls} | {p50:.3} | {p99:.3} | {most:.3} | {whole:.2} | {peak:.3} | {left:.3} |"
+    );
 }
 
 /// Moves the view through the whole store and back, timing each notch into `times`.
@@ -412,9 +476,9 @@ fn main() -> std::io::Result<()> {
             .status()?;
     }
     println!(
-        "\n| Corpus | Call | Rows held | Calls | p50 ms | p99 ms | Max ms | Whole ms | Footprint growth MB |"
+        "\n| Corpus | Call | Rows held | Calls | p50 ms | p99 ms | Max ms | Whole ms | Held MB | Left MB |"
     );
-    println!("| --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+    println!("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
     for name in CORPORA {
         std::process::Command::new(std::env::current_exe()?)
             .args(["--finds", name])
