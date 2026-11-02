@@ -3,14 +3,31 @@
 //! Until M3 it takes only `hello` and `window.open`, as newline-delimited JSON-RPC 2.0
 //! (ADR-0009, ADR-0028). `window.open` takes no arguments, so a caller cannot name a program,
 //! and nothing here reaches a pane. Same-user controls are guardrails (threat model).
+//!
+//! ```no_run
+//! use std::io::{BufRead, BufReader, Write};
+//! use std::os::unix::net::UnixStream;
+//!
+//! use pinfold_api::control::{self, Control};
+//!
+//! let directory = control::runtime_dir();
+//! let core = Control::bind(&directory)?;
+//! std::thread::spawn(move || core.serve(|| true));
+//!
+//! let mut launcher = UnixStream::connect(control::socket_path(&directory))?;
+//! launcher.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"hello\",\"params\":{\"version\":1}}\n")?;
+//! let mut reply = String::new();
+//! BufReader::new(&launcher).read_line(&mut reply)?;
+//! # Ok::<(), Box<dyn std::error::Error>>(())
+//! ```
 
 use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::os::fd::AsFd;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -25,10 +42,12 @@ const SESSION: &str = "default";
 const MAX_LINE: usize = 4096;
 /// Most bytes one connection may send: both requests, so it cannot stay and keep talking.
 const MAX_CONNECTION: u64 = 2 * MAX_LINE as u64;
-/// Longest wait on one peer, as this thread serves them one at a time.
+/// Longest stay of one peer, however it spaces its bytes, as this thread serves them one at a
+/// time.
 const TIMEOUT: Duration = Duration::from_secs(2);
 
 const PARSE_ERROR: i64 = -32700;
+const NOT_A_REQUEST: i64 = -32600;
 const NO_METHOD: i64 = -32601;
 const BAD_VERSION: i64 = -32001;
 const NO_HELLO: i64 = -32002;
@@ -37,10 +56,10 @@ const NO_WINDOW: i64 = -32003;
 /// Why the core cannot take the control socket.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    /// The directory could be reached or changed by someone else.
-    #[error("{path} is not a safe directory: {reason}")]
+    /// A path could be reached or changed by someone else, or holds something unexpected.
+    #[error("{path} is not safe to use: {reason}")]
     Unsafe {
-        /// The directory.
+        /// The path.
         path: PathBuf,
         /// What is wrong with it.
         reason: &'static str,
@@ -53,8 +72,8 @@ pub enum Error {
     Io(#[from] io::Error),
 }
 
-/// Returns the directory that holds the session's socket: `$XDG_RUNTIME_DIR/pinfold`, or under
-/// the per-user temporary directory where that is unset, as on macOS.
+/// Returns the directory that holds the session's socket: `$XDG_RUNTIME_DIR/pinfold`, or a
+/// directory named for this user in the temporary directory where that is unset, as on macOS.
 #[must_use]
 pub fn runtime_dir() -> PathBuf {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR")
@@ -62,8 +81,7 @@ pub fn runtime_dir() -> PathBuf {
         .filter(|path| path.is_absolute());
     match runtime {
         Some(runtime) => runtime.join("pinfold"),
-        None if cfg!(target_os = "macos") => std::env::temp_dir().join("pinfold"),
-        // /tmp is shared, so the name is the user's and `checked` refuses anyone else's.
+        // It may be a shared /tmp, so the name is the user's and `checked` refuses anyone else's.
         None => std::env::temp_dir().join(format!("pinfold-{}", pinfold_sys::effective_uid())),
     }
 }
@@ -112,8 +130,9 @@ impl Control {
     ///
     /// # Errors
     ///
-    /// [`Error::Unsafe`] for a directory others can reach, [`Error::Running`] if a core holds
-    /// the session, and [`Error::Io`] if the system refuses.
+    /// [`Error::Unsafe`] for a directory others can reach or anything but a socket at the
+    /// socket's path, [`Error::Running`] if a core holds the session, and [`Error::Io`] if the
+    /// system refuses.
     pub fn bind(directory: &Path) -> Result<Self, Error> {
         checked(directory)?;
         let lock = OpenOptions::new()
@@ -128,9 +147,16 @@ impl Control {
             Err(TryLockError::Error(error)) => return Err(error.into()),
         }
         let path = socket_path(directory);
-        match fs::remove_file(&path) {
+        match fs::symlink_metadata(&path) {
+            Ok(found) if found.file_type().is_socket() => fs::remove_file(&path)?,
+            Ok(_) => {
+                return Err(Error::Unsafe {
+                    path,
+                    reason: "it is not a socket",
+                });
+            }
             Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error.into()),
-            _ => {}
+            Err(_) => {}
         }
         let listener = UnixListener::bind(&path)?;
         fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
@@ -149,14 +175,31 @@ impl Control {
     }
 }
 
+/// A connection that fails once a moment has passed, however often bytes arrive before it.
+struct Deadline<'a> {
+    stream: &'a UnixStream,
+    until: Instant,
+}
+
+impl Read for Deadline<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let left = self.until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(io::ErrorKind::TimedOut.into());
+        }
+        self.stream.set_read_timeout(Some(left))?;
+        (&mut &*self.stream).read(buffer)
+    }
+}
+
 /// Takes one connection from a peer of this user, until it fails or ends.
 fn serve_peer(stream: &UnixStream, open: &mut impl FnMut() -> bool) -> io::Result<()> {
     if pinfold_sys::peer_uid(stream.as_fd())? != pinfold_sys::effective_uid() {
         return Ok(());
     }
-    stream.set_read_timeout(Some(TIMEOUT))?;
     stream.set_write_timeout(Some(TIMEOUT))?;
-    let mut lines = BufReader::new(stream.take(MAX_CONNECTION));
+    let until = Instant::now() + TIMEOUT;
+    let mut lines = BufReader::new(Deadline { stream, until }.take(MAX_CONNECTION));
     let mut greeted = false;
     let mut line = Vec::new();
     loop {
@@ -168,16 +211,19 @@ fn serve_peer(stream: &UnixStream, open: &mut impl FnMut() -> bool) -> io::Resul
             return Ok(());
         }
         let (reply, go_on) = answer(&line, &mut greeted, open);
-        let mut bytes = reply.to_string().into_bytes();
-        bytes.push(b'\n');
-        (&mut &*stream).write_all(&bytes)?;
+        if !reply.is_null() {
+            let mut bytes = reply.to_string().into_bytes();
+            bytes.push(b'\n');
+            (&mut &*stream).write_all(&bytes)?;
+        }
         if !go_on {
             return Ok(());
         }
     }
 }
 
-/// Returns the reply to one request, and whether the connection goes on.
+/// Returns the reply to one request, and whether the connection goes on. A null reply means a
+/// notification: JSON-RPC gives it no answer, and no method here is one, so it does nothing.
 fn answer(line: &[u8], greeted: &mut bool, open: &mut impl FnMut() -> bool) -> (Value, bool) {
     let refuse = |id: Option<&Value>, code, message: &str| {
         let id = id.cloned().unwrap_or(Value::Null);
@@ -188,6 +234,17 @@ fn answer(line: &[u8], greeted: &mut bool, open: &mut impl FnMut() -> bool) -> (
         return refuse(None, PARSE_ERROR, "not JSON");
     };
     let id = request.get("id");
+    if request.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
+        || !matches!(
+            id,
+            None | Some(Value::Null | Value::Number(_) | Value::String(_))
+        )
+    {
+        return refuse(None, NOT_A_REQUEST, "not a JSON-RPC 2.0 request");
+    }
+    if id.is_none() {
+        return (Value::Null, false);
+    }
     let done = |result: Value| (json!({"jsonrpc": "2.0", "id": id, "result": result}), true);
     match request.get("method").and_then(Value::as_str) {
         Some("hello") if *greeted => refuse(id, NO_METHOD, "hello comes once"),
@@ -197,7 +254,7 @@ fn answer(line: &[u8], greeted: &mut bool, open: &mut impl FnMut() -> bool) -> (
                 return refuse(id, BAD_VERSION, "unknown version");
             }
             *greeted = true;
-            done(json!({"version": VERSION}))
+            done(json!({"version": VERSION, "capabilities": ["window.open"]}))
         }
         _ if !*greeted => refuse(id, NO_HELLO, "hello comes first"),
         Some("window.open") if open() => done(json!({})),
@@ -242,6 +299,7 @@ mod tests {
         assert_eq!((code(&reply), go_on), (Some(NO_HELLO), false));
         let (reply, go_on) = answer(HELLO, &mut greeted, &mut open);
         assert_eq!(reply["result"]["version"], json!(VERSION));
+        assert_eq!(reply["result"]["capabilities"], json!(["window.open"]));
         assert_eq!(reply["id"], json!(1));
         assert!(go_on);
         let (reply, go_on) = answer(HELLO, &mut greeted, &mut open);
@@ -250,7 +308,7 @@ mod tests {
 
     #[test]
     fn a_wrong_version_is_refused() {
-        let line = br#"{"id":1,"method":"hello","params":{"version":2}}"#;
+        let line = br#"{"jsonrpc":"2.0","id":1,"method":"hello","params":{"version":2}}"#;
         let mut greeted = false;
         let (reply, go_on) = answer(line, &mut greeted, &mut || true);
         assert_eq!(
@@ -262,7 +320,7 @@ mod tests {
     #[test]
     fn only_hello_and_window_open_exist() {
         for method in ["pane.read", "pane.write", "window.close", "", "HELLO"] {
-            let line = json!({"id": 1, "method": method}).to_string();
+            let line = json!({"jsonrpc": "2.0", "id": 1, "method": method}).to_string();
             let mut greeted = true;
             let (reply, go_on) = answer(line.as_bytes(), &mut greeted, &mut || true);
             assert_eq!((code(&reply), go_on), (Some(NO_METHOD), false), "{method}");
@@ -271,7 +329,8 @@ mod tests {
 
     #[test]
     fn window_open_reports_what_happened_and_ignores_arguments() {
-        let line = br#"{"id":2,"method":"window.open","params":{"path":"/bin/sh"}}"#;
+        let line =
+            br#"{"jsonrpc":"2.0","id":2,"method":"window.open","params":{"path":"/bin/sh"}}"#;
         let mut asked = 0;
         let mut greeted = true;
         let (reply, go_on) = answer(line, &mut greeted, &mut || {
@@ -282,6 +341,41 @@ mod tests {
         let (reply, _) = answer(line, &mut greeted, &mut || false);
         assert_eq!(code(&reply), Some(NO_WINDOW));
         assert_eq!(asked, 1);
+    }
+
+    #[test]
+    fn only_json_rpc_2_requests_are_taken() {
+        let mut asked = 0;
+        for line in [
+            json!({"id": 1, "method": "window.open"}),
+            json!({"jsonrpc": "1.0", "id": 1, "method": "window.open"}),
+            json!({"jsonrpc": "2.0", "id": [1], "method": "window.open"}),
+            json!(null),
+        ] {
+            let mut open = || {
+                asked += 1;
+                true
+            };
+            let line = line.to_string();
+            let (reply, go_on) = answer(line.as_bytes(), &mut true, &mut open);
+            assert_eq!(
+                (code(&reply), go_on),
+                (Some(NOT_A_REQUEST), false),
+                "{line}"
+            );
+        }
+        assert_eq!(asked, 0);
+    }
+
+    #[test]
+    fn a_notification_gets_no_reply_and_does_nothing() {
+        let line = br#"{"jsonrpc":"2.0","method":"window.open"}"#;
+        let mut opened = false;
+        let (reply, go_on) = answer(line, &mut true, &mut || {
+            opened = true;
+            true
+        });
+        assert_eq!((reply, go_on, opened), (Value::Null, false, false));
     }
 
     #[test]
@@ -340,6 +434,46 @@ mod tests {
     }
 
     #[test]
+    fn something_else_at_the_socket_path_is_kept() {
+        let directory = fresh();
+        DirBuilder::new().mode(0o700).create(&directory).unwrap();
+        let path = socket_path(&directory);
+        fs::write(&path, b"keep").unwrap();
+        assert!(matches!(
+            Control::bind(&directory),
+            Err(Error::Unsafe { .. })
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"keep");
+    }
+
+    #[test]
+    fn a_slow_peer_cannot_hold_the_socket() {
+        let directory = fresh();
+        let control = Control::bind(&directory).unwrap();
+        thread::spawn(move || control.serve(|| true));
+
+        let path = socket_path(&directory);
+        let mut slow = UnixStream::connect(&path).unwrap();
+        thread::spawn(move || {
+            // Each byte comes well inside the deadline, so only a total limit ends this.
+            while slow.write_all(b"x").is_ok() {
+                thread::sleep(Duration::from_millis(50));
+            }
+        });
+        thread::sleep(Duration::from_millis(100));
+
+        let start = Instant::now();
+        let mut peer = UnixStream::connect(&path).unwrap();
+        peer.set_read_timeout(Some(2 * TIMEOUT)).unwrap();
+        peer.write_all(OPEN).unwrap();
+        peer.write_all(b"\n").unwrap();
+        let mut reply = String::new();
+        BufReader::new(&peer).read_line(&mut reply).unwrap();
+        assert!(reply.contains("hello comes first"), "{reply}");
+        assert!(start.elapsed() < 2 * TIMEOUT);
+    }
+
+    #[test]
     fn a_connection_gets_answers_and_cannot_stay_for_ever() {
         let directory = fresh();
         let control = Control::bind(&directory).unwrap();
@@ -353,16 +487,21 @@ mod tests {
         let mut reader = BufReader::new(&stream);
         let mut reply = String::new();
         reader.read_line(&mut reply).unwrap();
-        assert!(reply.contains("\"version\":1"), "{reply}");
+        let hello: Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(hello["jsonrpc"], "2.0");
+        assert_eq!(hello["id"], json!(1));
+        assert_eq!(hello["result"]["version"], json!(VERSION));
         reply.clear();
         reader.read_line(&mut reply).unwrap();
-        assert!(reply.contains("\"result\":{}"), "{reply}");
+        let opened: Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!((&opened["id"], &opened["result"]), (&json!(2), &json!({})));
 
         // A line with no end is cut at the limit, and the next peer is served.
         let mut flood = UnixStream::connect(socket_path(&directory)).unwrap();
         let _ = flood.write_all(&vec![b'x'; 3 * MAX_LINE]);
         let mut peer = UnixStream::connect(socket_path(&directory)).unwrap();
-        peer.write_all(b"null\n").unwrap();
+        peer.write_all(OPEN).unwrap();
+        peer.write_all(b"\n").unwrap();
         let mut reply = String::new();
         BufReader::new(&peer).read_line(&mut reply).unwrap();
         assert!(reply.contains("hello comes first"), "{reply}");

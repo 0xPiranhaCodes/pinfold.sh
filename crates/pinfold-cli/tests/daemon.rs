@@ -40,11 +40,16 @@ fn a_core_answers_alone_and_a_killed_one_can_be_replaced() {
     let mut first = core(&runtime).unwrap();
     let mut stream = connect(&path).unwrap();
     stream
-        .write_all(b"{\"id\":1,\"method\":\"hello\",\"params\":{\"version\":1}}\n")
+        .write_all(
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"hello\",\"params\":{\"version\":1}}\n",
+        )
         .unwrap();
     let mut reply = String::new();
     BufReader::new(&stream).read_line(&mut reply).unwrap();
-    assert!(reply.contains("\"version\":1"), "{reply}");
+    let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(reply["jsonrpc"], "2.0");
+    assert_eq!(reply["id"], 1);
+    assert_eq!(reply["result"]["version"], 1);
 
     // Hardened: on Linux another process cannot read its memory map.
     #[cfg(target_os = "linux")]

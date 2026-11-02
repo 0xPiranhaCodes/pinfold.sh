@@ -32,5 +32,8 @@ pinfold-api = { path = "../pinfold-api", version = "0.0.0" }
 pinfold-core = { path = "../pinfold-core", version = "0.0.0" }
 pinfold-sys = { path = "../pinfold-sys", version = "0.0.0" }
 
+[dev-dependencies]
+serde_json = "1.0.154"
+
 [lints]
 workspace = true

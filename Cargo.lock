@@ -1259,6 +1259,7 @@ dependencies = [
  "pinfold-core",
  "pinfold-sys",
  "pinfold-ui",
+ "serde_json",
 ]
 
 [[package]]
