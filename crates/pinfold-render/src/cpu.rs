@@ -23,6 +23,10 @@ pub trait Renderer {
     /// `cell_size` changes with it, so the grid needs resizing afterwards.
     fn set_font_size(&mut self, size: f32);
 
+    /// Replaces the font, dropping every glyph drawn with the old one. `cell_size` changes
+    /// with it, so the grid needs resizing afterwards.
+    fn set_font(&mut self, font: Font);
+
     /// Draws `frame`, redrawing only rows that changed where the surface allows it.
     ///
     /// # Errors
@@ -95,6 +99,11 @@ where
     fn set_font_size(&mut self, size: f32) {
         self.painter.set_font_size(size);
         // Equal cells no longer mean equal pixels.
+        self.drawn.clear();
+    }
+
+    fn set_font(&mut self, font: Font) {
+        self.painter.set_font(font);
         self.drawn.clear();
     }
 

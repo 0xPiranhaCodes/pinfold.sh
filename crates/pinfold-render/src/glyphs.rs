@@ -288,6 +288,12 @@ impl GlyphCache {
         self.used = 0;
     }
 
+    /// Switches to `font`, dropping every glyph drawn with the old one.
+    pub fn set_font(&mut self, font: Font) {
+        self.fonts = font.into();
+        self.set_size(self.size);
+    }
+
     pub(crate) fn metrics(&self) -> Metrics {
         self.metrics
     }
