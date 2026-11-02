@@ -28,6 +28,9 @@ pub const SETTLE: Duration = Duration::from_secs(1);
 /// A window takes seconds to fall from its startup peak, and budgets are for idle windows.
 pub const WINDOW_SETTLE: Duration = Duration::from_secs(7);
 
+/// Parts of the file names of `FALLBACKS` in `pinfold-render`, which keeps that list private.
+const CJK_FONTS: [&str; 4] = ["Hiragino", "AppleSDGothicNeo", "NotoSansCJK", "wqy-zenhei"];
+
 /// ADR-0021 budgets with nothing to measure yet, and the issue that makes them measurable.
 const NOT_MEASURED: [(&str, &str); 1] = [("Window on Wayland", "a compositor in CI")];
 
@@ -41,18 +44,38 @@ pub struct Budget<'a> {
     pub settle: Duration,
     /// Starts the settle time when the process prints a line, not when it starts.
     pub wait_for_line: bool,
+    /// Runs this as the window's shell, and checks that the window opened a CJK font for it.
+    pub screen: Option<&'a Path>,
 }
 
-fn measure_once(budget: &Budget, args: &[&str]) -> io::Result<u64> {
+/// Bytes, and whether a screen's CJK text went undrawn for want of a font.
+type Reading = (u64, bool);
+
+/// Fallback fonts open on first use and stay mapped, so a mapping proves one was drawn from.
+fn has_cjk_font(pid: u32) -> io::Result<bool> {
+    let maps = if cfg!(target_os = "linux") {
+        std::fs::read_to_string(format!("/proc/{pid}/maps"))?
+    } else {
+        let output = Command::new("lsof")
+            .args(["-Fn", "-p", &pid.to_string()])
+            .output()?;
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    Ok(CJK_FONTS.iter().any(|name| maps.contains(name)))
+}
+
+fn measure_once(budget: &Budget, args: &[&str]) -> io::Result<Reading> {
     let stdout = if budget.wait_for_line {
         Stdio::piped()
     } else {
         Stdio::null()
     };
-    let mut child = Command::new(budget.program)
-        .args(args)
-        .stdout(stdout)
-        .spawn()?;
+    let mut command = Command::new(budget.program);
+    command.args(args).stdout(stdout);
+    if let Some(screen) = budget.screen {
+        command.env("SHELL", screen);
+    }
+    let mut child = command.spawn()?;
     // A process that dies closes the pipe, so this read cannot outlive it.
     let piped = child.stdout.take();
     if let Some(stdout) = piped {
@@ -65,29 +88,31 @@ fn measure_once(budget: &Budget, args: &[&str]) -> io::Result<u64> {
     } else {
         pinfold_sys::footprint(child.id())
     };
+    let no_font = !exited && budget.screen.is_some() && !has_cjk_font(child.id())?;
     let _ = child.kill();
     let _ = child.wait();
     match bytes {
         Ok(0) => Err(io::Error::other("measured zero bytes")),
-        other => other,
+        other => Ok((other?, no_font)),
     }
 }
 
-fn median(budget: &Budget, args: &[&str]) -> io::Result<u64> {
+fn median(budget: &Budget, args: &[&str]) -> io::Result<Reading> {
     let mut samples = (0..RUNS)
         .map(|_| measure_once(budget, args))
-        .collect::<io::Result<Vec<u64>>>()?;
+        .collect::<io::Result<Vec<Reading>>>()?;
+    let no_font = samples.iter().any(|sample| sample.1);
     samples.sort_unstable();
-    Ok(samples[RUNS / 2])
+    Ok((samples[RUNS / 2].0, no_font))
 }
 
-fn measure(budget: &Budget) -> io::Result<u64> {
-    let bytes = median(budget, budget.args)?;
+fn measure(budget: &Budget) -> io::Result<Reading> {
+    let (bytes, no_font) = median(budget, budget.args)?;
     match budget.per_pane_over {
-        None => Ok(bytes),
+        None => Ok((bytes, no_font)),
         Some((baseline, panes)) => {
-            let growth = bytes.saturating_sub(median(budget, baseline)?);
-            Ok(growth / panes)
+            let growth = bytes.saturating_sub(median(budget, baseline)?.0);
+            Ok((growth / panes, no_font))
         }
     }
 }
@@ -96,7 +121,8 @@ fn megabytes(bytes: u64) -> f64 {
     bytes as f64 / 1e6
 }
 
-/// Prints the table. Returns false if a budget is exceeded or cannot be measured.
+/// Prints the table. Returns false if a budget is exceeded or cannot be measured. A screen with
+/// no CJK font is under-measured, not failed, as hosted CI may have none.
 pub fn run(budgets: &[Budget]) -> bool {
     println!(
         "Median of {RUNS} runs in MB (10^6 bytes), on {}.\n",
@@ -108,14 +134,21 @@ pub fn run(budgets: &[Budget]) -> bool {
     for budget in budgets {
         let limit = megabytes(budget.limit);
         match measure(budget) {
-            Ok(bytes) if bytes <= budget.limit => {
+            Ok((bytes, true)) if bytes <= budget.limit => {
+                println!(
+                    "| {} | {:.2} | {limit:.2} | no CJK font, so this leaves CJK out |",
+                    budget.metric,
+                    megabytes(bytes)
+                );
+            }
+            Ok((bytes, false)) if bytes <= budget.limit => {
                 println!(
                     "| {} | {:.2} | {limit:.2} | pass |",
                     budget.metric,
                     megabytes(bytes)
                 );
             }
-            Ok(bytes) => {
+            Ok((bytes, _)) => {
                 passed = false;
                 println!(
                     "| {} | {:.2} | {limit:.2} | **FAIL** |",
@@ -151,6 +184,7 @@ mod tests {
             per_pane_over: None,
             settle: SETTLE,
             wait_for_line: false,
+            screen: None,
         }
     }
 
@@ -179,6 +213,7 @@ mod tests {
             per_pane_over: None,
             settle: SETTLE,
             wait_for_line: false,
+            screen: None,
         };
         assert!(!run(&[budget]));
     }
@@ -213,6 +248,44 @@ mod tests {
             per_pane_over: Some((&["30"], 2)),
             ..sleep(u64::MAX, &["30"])
         };
-        assert!(measure(&budget).unwrap() < 1_000_000);
+        assert!(measure(&budget).unwrap().0 < 1_000_000);
+    }
+
+    #[test]
+    fn a_screen_with_no_cjk_font_says_so_without_failing() {
+        let budget = Budget {
+            screen: Some(Path::new("/bin/sh")),
+            ..sleep(u64::MAX, &["30"])
+        };
+        assert!(measure(&budget).unwrap().1);
+        assert!(run(&[budget]));
+    }
+
+    #[test]
+    fn a_screen_with_no_cjk_font_still_fails_over_budget() {
+        let budget = Budget {
+            screen: Some(Path::new("/bin/sh")),
+            ..sleep(1, &["30"])
+        };
+        assert!(!run(&[budget]));
+    }
+
+    #[test]
+    fn the_cjk_font_names_match_the_renderer() {
+        let fonts = include_str!("../../crates/pinfold-render/src/font.rs");
+        assert!(CJK_FONTS.iter().all(|name| fonts.contains(name)));
+    }
+
+    #[test]
+    fn the_heavy_screen_is_wider_and_taller_than_any_window_in_the_gate() {
+        let screen = include_str!("../../tests/window/heavy-screen.txt");
+        assert_eq!(screen.lines().count(), 120);
+        for line in screen.lines() {
+            let text = ["\x1b[0m", "\x1b[1m", "\x1b[3m"]
+                .iter()
+                .fold(line.to_owned(), |text, sgr| text.replace(sgr, ""));
+            let width: usize = text.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum();
+            assert!(width >= 300, "{width} columns");
+        }
     }
 }
