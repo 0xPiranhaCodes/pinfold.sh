@@ -1,6 +1,6 @@
 # ADR-0030: The macOS window's fixed part is 33 MB
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-02
 
 ## Context
@@ -24,7 +24,7 @@ some runs. The gate should not pass on that timing, so the budget assumes the po
 
 ## Consequences
 
-The margin is about 1.1 MB with text, on one Mac. The budget now rests on measurements of a real
+The margin is about 1.05 MB with text, on one Mac. The budget now rests on measurements of a real
 renderer, and `docs` that quote 30 MB change with it. A window holding 3 or 4 drawables, as 9 of
 the first 24 spike runs did, still fails the gate, and should: it is 11.4 MB of real memory.
 

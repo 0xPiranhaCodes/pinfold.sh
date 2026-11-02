@@ -1,7 +1,8 @@
 # M2: why the macOS window reading scattered
 
 **Result: the scatter of 48 to 63 MB had three causes. One is narrowed, one is the Metal driver's
-timing, and one is unexplained. The budget of 52.86 MB is still missed, by 1.1 to 1.9 MB.**
+timing, and one is unexplained. The budget of the time, 52.86 MB, was missed by 1.1 to 1.9 MB,
+and [ADR-0030](../../adr/0030-macos-window-fixed-part.md) raised it to 55.86 MB.**
 
 `./sample.sh` prints what follows, one line per run, on a measuring window that draws the same
 idle screen each time. All runs are on one Mac with a 5K display, on
@@ -40,7 +41,7 @@ are matched, so it was not kept. The 12 MiB of heap is mostly not Pinfold's.
 
 ## The gate after this change
 
-Three runs of `XDG_CONFIG_HOME=<empty dir> cargo xtask mem-gate`, limit 52.86 MB.
+Three runs of `XDG_CONFIG_HOME=<empty dir> cargo xtask mem-gate`, at the old limit of 52.86 MB.
 
 | Reading, MB | Run 1 | Run 2 | Run 3 |
 | --- | --- | --- | --- |
@@ -51,7 +52,11 @@ Three runs of `XDG_CONFIG_HOME=<empty dir> cargo xtask mem-gate`, limit 52.86 MB
 These are steady, but over the limit. The buffer narrows single runs, not this median: two
 branches without it read 54.40 and 54.04 in one gate run each, and 54.05 and 54.49 with text.
 [ADR-0030](../../adr/0030-macos-window-fixed-part.md)
-proposes what to do about that.
+sets the budget that followed.
+
+At the new limit of 55.86 MB, three more runs read 48.71, 54.13 and 54.15, and 54.61, 54.81 and
+54.77 with text, so all pass. The 48.71 is Metal's pool going uncounted, and the margin is the
+higher readings' 1.05 to 1.7 MB.
 
 ## Not tested
 

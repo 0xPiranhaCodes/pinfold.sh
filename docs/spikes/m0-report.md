@@ -1,6 +1,6 @@
 # M0 report
 
-Date: 2026-10-31. Later change: the macOS window fixed part is now 30 MB, see ADR-0021.
+Date: 2026-10-31. Later change: the macOS window fixed part is now 33 MB, see ADR-0030.
 
 **Decided:** the maintainer accepted all four recommendations, recorded in
 ADR-0021 to ADR-0024.
