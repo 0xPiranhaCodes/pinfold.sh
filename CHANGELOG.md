@@ -28,6 +28,7 @@ Entries are generated from Conventional Commits with git-cliff
 - Fuzzing of the terminal input path, on each PR and nightly.
 - Function keys, modifier combinations and application cursor mode, as xterm sends them.
 - Paste from the clipboard, with a confirmation for anything that ends a line.
+- Drag to select across history and the screen, Shift-drag past mouse reporting, a copy key, and a search bar.
 - A paste sanitizer in the core, and an input queue of 1 MiB so a large write is not cut.
 - A two-second flash in the row under the pane when a program's OSC 52 clipboard write is blocked.
 - Input method composition, drawn at the cursor.

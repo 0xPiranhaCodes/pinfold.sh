@@ -30,6 +30,11 @@ impl Clipboard {
     pub fn text(&mut self) -> Option<String> {
         self.provider.get_contents().ok()
     }
+
+    /// Replaces the clipboard's text, and returns whether it did.
+    pub fn set_text(&mut self, text: String) -> bool {
+        self.provider.set_contents(text).is_ok()
+    }
 }
 
 #[cfg(not(target_os = "macos"))]

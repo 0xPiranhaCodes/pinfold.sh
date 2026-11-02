@@ -42,14 +42,29 @@ fn sequence(key: NamedKey) -> Option<Sequence> {
     })
 }
 
-/// Whether this is the paste shortcut: Command+V on macOS, Ctrl+Shift+V elsewhere.
-pub fn is_paste(key: &Key, modifiers: ModifiersState) -> bool {
+/// Whether this is a shortcut for `letter`: Command on macOS, Ctrl+Shift elsewhere.
+fn is_shortcut(key: &Key, modifiers: ModifiersState, letter: &str) -> bool {
     let held = if cfg!(target_os = "macos") {
         ModifiersState::SUPER
     } else {
         ModifiersState::CONTROL | ModifiersState::SHIFT
     };
-    modifiers == held && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("v"))
+    modifiers == held && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case(letter))
+}
+
+/// Whether this is the paste shortcut: Command+V on macOS, Ctrl+Shift+V elsewhere.
+pub fn is_paste(key: &Key, modifiers: ModifiersState) -> bool {
+    is_shortcut(key, modifiers, "v")
+}
+
+/// Whether this is the copy shortcut, which plain Ctrl+C is not.
+pub fn is_copy(key: &Key, modifiers: ModifiersState) -> bool {
+    is_shortcut(key, modifiers, "c")
+}
+
+/// Whether this is the shortcut that opens the search bar.
+pub fn is_find(key: &Key, modifiers: ModifiersState) -> bool {
+    is_shortcut(key, modifiers, "f")
 }
 
 /// xterm's modifier parameter, or nothing without modifiers.
@@ -271,6 +286,24 @@ mod tests {
     fn super_sends_nothing() {
         assert!(press("c", ModifiersState::SUPER).is_empty());
         assert!(named(NamedKey::ArrowUp, ModifiersState::SUPER).is_empty());
+    }
+
+    #[test]
+    fn shortcuts_need_exactly_their_modifiers() {
+        let held = if cfg!(target_os = "macos") {
+            ModifiersState::SUPER
+        } else {
+            CONTROL | SHIFT
+        };
+        let key = |letter: &str| Key::Character(letter.into());
+        assert!(is_copy(&key("c"), held));
+        assert!(is_copy(&key("C"), held));
+        assert!(is_find(&key("f"), held));
+        assert!(is_paste(&key("v"), held));
+        assert!(!is_copy(&key("x"), held));
+        assert!(!is_copy(&key("c"), CONTROL));
+        assert!(!is_find(&key("f"), CONTROL));
+        assert!(!is_copy(&key("c"), held | ALT));
     }
 
     #[test]

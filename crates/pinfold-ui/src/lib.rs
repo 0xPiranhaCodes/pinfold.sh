@@ -6,6 +6,8 @@ mod input;
 mod mouse;
 mod paste;
 mod reload;
+mod search_bar;
+mod selection;
 mod window;
 
 pub use window::{Error, run};
