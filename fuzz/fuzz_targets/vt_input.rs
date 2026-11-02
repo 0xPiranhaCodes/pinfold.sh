@@ -26,8 +26,10 @@ fuzz_target!(|data: &[u8]| {
         engine.resize(read.len() as u16 % 64, width);
     }
 
-    let store = engine.scrollback().lock().unwrap();
+    let mut store = engine.scrollback().lock().unwrap();
     assert!(store.bytes() <= BYTE_CAP);
+    // `len` is an estimate after a new width, until something reads history.
+    store.sync();
     // `rows` hides a block it cannot decode, so a short answer is how a bad block shows.
     assert_eq!(store.rows(0, store.len()).len(), store.len());
 });

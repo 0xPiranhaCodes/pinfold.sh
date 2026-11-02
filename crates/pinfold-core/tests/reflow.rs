@@ -282,3 +282,19 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn a_synced_store_reads_every_row_it_counts() {
+    // Found by the `vt_input` fuzz target: base64 LwD1ZczMCg==.
+    let mut engine = AlacrittyEngine::new(47, 0);
+    let (mut replies, mut frame) = (Vec::new(), Frame::default());
+    engine.feed(b"", &mut replies);
+    engine.frame(&mut frame);
+    engine.resize(0, 1);
+    engine.feed(b"e\xcc\xcc\n", &mut replies);
+    engine.frame(&mut frame);
+    engine.resize(4, 101);
+    let mut store = engine.scrollback().lock().unwrap();
+    store.sync();
+    assert_eq!(store.rows(0, store.len()).len(), store.len());
+}
