@@ -298,6 +298,17 @@ struct App {
     result: Result<(), Error>,
 }
 
+/// The scale glyphs are drawn at. The gate's macOS budget names a Retina window, so a measured
+/// one draws at that scale on any display: a 1x runner would hold four times the cells.
+fn font_scale(measured: Option<(u32, u32)>, scale: f64) -> f32 {
+    let reference = if cfg!(target_os = "macos") && measured.is_some() {
+        scale.max(2.0)
+    } else {
+        scale
+    };
+    reference as f32
+}
+
 impl App {
     fn request(&self, request: Request) {
         if self.requests.send(request).is_ok() {
@@ -326,7 +337,7 @@ impl App {
             .with_title_hidden(true);
         let window = Rc::new(event_loop.create_window(attributes)?);
         window.set_ime_allowed(true);
-        let size = self.config.font_size * window.scale_factor() as f32;
+        let size = self.config.font_size * font_scale(self.size, window.scale_factor());
         let renderer = renderer(&window, size, self.config.font_path.as_deref())?;
         let mut open = Open { window, renderer };
         open.apply_background(&self.config);
@@ -349,7 +360,7 @@ impl App {
     fn scale_changed(&mut self, scale: f64) {
         let Some(open) = &mut self.open else { return };
         open.renderer
-            .set_font_size(self.config.font_size * scale as f32);
+            .set_font_size(self.config.font_size * font_scale(self.size, scale));
         let size = open.window.inner_size();
         self.ime_cursor = None;
         self.resized(size);
@@ -947,4 +958,19 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
     };
     event_loop.run_app(&mut app)?;
     app.result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn only_a_measured_window_on_macos_changes_its_font_scale() {
+        assert_eq!(font_scale(None, 1.0), 1.0);
+        assert_eq!(font_scale(None, 2.0), 2.0);
+        assert_eq!(font_scale(Some((1, 1)), 3.0), 3.0);
+        let measured = if cfg!(target_os = "macos") { 2.0 } else { 1.0 };
+        assert_eq!(font_scale(Some((1, 1)), 1.0), measured);
+    }
 }
