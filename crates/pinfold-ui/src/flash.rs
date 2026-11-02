@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use pinfold_proto::Frame;
 
-use crate::paste::{self, AMBER, TEXT};
+use crate::paste::{self, AMBER, RED, TEXT};
 
 const SHOWN: Duration = Duration::from_secs(2);
 
@@ -50,6 +50,17 @@ impl Flash {
     }
 }
 
+/// Adds the row under the pane in `frame` that says the core has gone, and the panes with it.
+pub fn ended(frame: &mut Frame) {
+    paste::row(
+        frame,
+        &[
+            (" ✕ session ended  ".to_owned(), RED),
+            ("The panes are gone. Close this window".to_owned(), TEXT),
+        ],
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,6 +97,20 @@ mod tests {
         flash.observe(u32::MAX, start + SHOWN);
         flash.observe(0, start + SHOWN);
         assert!(flash.until().is_some());
+    }
+
+    #[test]
+    fn the_end_of_a_session_says_so_under_the_pane() {
+        let mut frame = Frame {
+            rows: 1,
+            columns: 60,
+            ..Frame::default()
+        };
+        ended(&mut frame);
+        assert_eq!(frame.rows, 2);
+        let text: String = frame.cells.iter().map(|cell| cell.character).collect();
+        assert!(text.starts_with(" ✕ session ended  The panes are gone"));
+        assert_eq!(frame.cells[1].foreground, RED);
     }
 
     #[test]

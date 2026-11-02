@@ -33,6 +33,29 @@ fn connect(path: &Path) -> Option<UnixStream> {
     None
 }
 
+#[cfg(feature = "window")]
+#[test]
+fn a_window_with_no_link_says_so_and_exits() {
+    let output = Command::new(env!("CARGO_BIN_EXE_pinfold-window"))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("no link to a core"), "{error}");
+}
+
+#[cfg(feature = "window")]
+#[test]
+fn a_window_refuses_arguments() {
+    let output = Command::new(env!("CARGO_BIN_EXE_pinfold-window"))
+        .arg("/bin/sh")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("takes no arguments"), "{error}");
+}
+
 #[test]
 fn a_core_answers_alone_and_a_killed_one_can_be_replaced() {
     let runtime = runtime();

@@ -5,7 +5,7 @@
 
 use std::ops::Range;
 
-use pinfold_core::search::{Position, Selection};
+use pinfold_proto::link::{Position, Selection};
 use pinfold_proto::{Frame, MouseMode};
 use winit::keyboard::ModifiersState;
 

@@ -1257,6 +1257,7 @@ version = "0.0.0"
 dependencies = [
  "pinfold-api",
  "pinfold-core",
+ "pinfold-proto",
  "pinfold-sys",
  "pinfold-ui",
  "serde_json",

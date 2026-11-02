@@ -9,7 +9,6 @@ mod paste;
 mod reload;
 mod search_bar;
 mod selection;
-mod shell;
 mod top_bar;
 mod vi;
 mod window;

@@ -7,4 +7,5 @@ pub mod paste;
 mod reflow;
 pub mod scrollback;
 pub mod search;
+pub mod shell;
 pub mod vt;

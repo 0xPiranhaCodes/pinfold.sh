@@ -1,6 +1,6 @@
 [package]
 name = "pinfold-cli"
-description = "The pinfold and pinfold-core binaries."
+description = "The pinfold, pinfold-core and pinfold-window binaries."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,12 +14,17 @@ publish.workspace = true
 name = "pinfold"
 path = "src/bin/pinfold.rs"
 doc = false
-required-features = ["window"]
 
 [[bin]]
 name = "pinfold-core"
 path = "src/bin/pinfold-core.rs"
 doc = false
+
+[[bin]]
+name = "pinfold-window"
+path = "src/bin/pinfold-window.rs"
+doc = false
+required-features = ["window"]
 
 # Build pinfold-core with --no-default-features, so the window stack is not linked into it.
 [features]
@@ -33,6 +38,8 @@ pinfold-core = { path = "../pinfold-core", version = "0.0.0" }
 pinfold-sys = { path = "../pinfold-sys", version = "0.0.0" }
 
 [dev-dependencies]
+pinfold-proto = { path = "../pinfold-proto", version = "0.0.0" }
+pinfold-ui = { path = "../pinfold-ui", version = "0.0.0" }
 serde_json = "1.0.154"
 
 [lints]
