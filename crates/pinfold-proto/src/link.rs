@@ -37,7 +37,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 3;
+pub const VERSION: u16 = 4;
 
 /// Most rows or columns a screen can have, which the core clamps its panes to.
 pub const MAX_DIMENSION: u16 = 1024;
@@ -294,6 +294,10 @@ pub enum Refusal {
     /// The shell would not start.
     #[error("The shell would not start")]
     Spawn,
+    /// Input found no room: in the pane's queue, for a program that has stopped reading, or in
+    /// the window, for a core that has.
+    #[error("Input not sent: the program or the core is behind")]
+    Input,
 }
 
 /// A rectangle of cells, from the top left of the space for panes.
@@ -330,9 +334,9 @@ pub enum Request<'a> {
         pane: u32,
         /// What to paste, as the window read it. This format keeps any control character, and
         /// `Reactor::paste` is what cleans them (T7 in the threat model), so a paste must reach
-        /// a program through that and never as [`Request::Input`].
-        // shortcut: a paste over MAX_PASTE fails to encode, send it in parts if a person ever
-        // needs to paste more than 1 MiB, as the pane's input queue would refuse it anyway.
+        /// a program through that and never as [`Request::Input`]. Past [`MAX_PASTE`] this does
+        /// not encode, so the window refuses such a paste before it gets here. Parts would be
+        /// separate pastes to a program, each in its own brackets.
         text: &'a str,
     },
     /// The space for panes, which the core lays the active tab out in, and until which it sends
@@ -923,7 +927,13 @@ impl Notice<'_> {
             REFUSED => Notice::Refused {
                 reason: body.tag(
                     "refusal",
-                    &[Refusal::Tabs, Refusal::Panes, Refusal::Room, Refusal::Spawn],
+                    &[
+                        Refusal::Tabs,
+                        Refusal::Panes,
+                        Refusal::Room,
+                        Refusal::Spawn,
+                        Refusal::Input,
+                    ],
                 )?,
             },
             kind => return Err(Error::UnknownKind { kind }),
@@ -1498,7 +1508,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 3, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 4, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -1973,7 +1983,7 @@ mod tests {
             let error = request_error(&raw(kind, body));
             assert!(matches!(error, Err(Error::BadTag { field: f, .. }) if f == field));
         }
-        let error = notice_error(&raw(REFUSED, &[4]));
+        let error = notice_error(&raw(REFUSED, &[5]));
         assert!(matches!(
             error,
             Err(Error::BadTag {
@@ -2502,7 +2512,13 @@ mod tests {
         #[test]
         fn a_refusal_round_trips(
             reason in prop::sample::select(
-                &[Refusal::Tabs, Refusal::Panes, Refusal::Room, Refusal::Spawn][..],
+                &[
+                    Refusal::Tabs,
+                    Refusal::Panes,
+                    Refusal::Room,
+                    Refusal::Spawn,
+                    Refusal::Input,
+                ][..],
             ),
             chunk in chunks(),
         ) {

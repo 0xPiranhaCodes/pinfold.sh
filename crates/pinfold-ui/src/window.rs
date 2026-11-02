@@ -9,14 +9,13 @@ use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
 use mio::Waker;
 use pinfold_config::Config;
-use pinfold_proto::link::{self as proto, Direction, MAX_DIMENSION, Position, Rect, Selection};
+use pinfold_proto::link::{self as proto, MAX_DIMENSION, Position, Rect, Selection};
 use pinfold_proto::{Frame, MouseMode};
 use pinfold_render::cpu::{CpuRenderer, Renderer};
 use pinfold_render::font::{Font, FontError};
@@ -36,6 +35,7 @@ use winit::window::{Window, WindowId};
 
 use crate::flash::{self, Flash};
 use crate::link::{self, Link, Screen, Tab};
+use crate::outbox::{self, Inbox, Outbox, Request};
 use crate::paste::Prompt;
 use crate::prefix::{self, Command, Prefix};
 use crate::search_bar::{Bar, Step};
@@ -66,24 +66,6 @@ pub enum Error {
     /// The link or poller failed.
     #[error(transparent)]
     Io(#[from] io::Error),
-}
-
-enum Request {
-    /// The window is on screen, so the link can say hello, which a launcher is waiting on.
-    Opened,
-    Input(u32, Vec<u8>),
-    Paste(u32, String),
-    Resize(u16, u16),
-    /// Replaces any search running in the pane.
-    Search {
-        pane: u32,
-        query: String,
-        from: Position,
-        direction: Direction,
-    },
-    Copy(u32, Selection),
-    /// Anything that owns all it says.
-    Core(proto::Request<'static>),
 }
 
 enum Notice {
@@ -168,53 +150,11 @@ fn publish(link: &mut Link, shown: &mut Shown) -> bool {
 }
 
 /// Runs the link until it ends or the session does. The last screens stay in `latest`.
-fn run_io(
-    mut link: Link,
-    requests: &Receiver<Request>,
-    latest: &Latest,
-    proxy: &EventLoopProxy<Notice>,
-) {
+fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopProxy<Notice>) {
     loop {
         // An error stays in `link`, which the end of this pass reads.
         let _ = link.turn(None);
-        // shortcut: a request the link refuses while the core lags is lost, which a later resize
-        // or key puts right, retry them if a person ever sees one go.
-        while let Ok(request) = requests.try_recv() {
-            match request {
-                Request::Opened => link.greet(),
-                Request::Input(pane, bytes) => {
-                    link.send(proto::Request::Input {
-                        pane,
-                        bytes: &bytes,
-                    });
-                }
-                Request::Paste(pane, text) => {
-                    link.send(proto::Request::Paste { pane, text: &text });
-                }
-                Request::Resize(rows, columns) => {
-                    link.resize(rows, columns);
-                }
-                Request::Search {
-                    pane,
-                    query,
-                    from,
-                    direction,
-                } => {
-                    link.send(proto::Request::Search {
-                        pane,
-                        from,
-                        direction,
-                        query: &query,
-                    });
-                }
-                Request::Copy(pane, selection) => {
-                    link.copy(pane, selection);
-                }
-                Request::Core(request) => {
-                    link.send(request);
-                }
-            }
-        }
+        requests.drain(&mut link);
         let searched = link
             .take_searched()
             .map(|(pane, found)| Notice::Searched(pane, found));
@@ -324,7 +264,7 @@ fn view(screen: &Screen) -> View<'_> {
 struct App {
     config: Config,
     size: Option<(u32, u32)>,
-    requests: Sender<Request>,
+    outbox: Outbox,
     latest: Arc<Latest>,
     waker: Arc<Waker>,
     open: Option<Open>,
@@ -396,8 +336,10 @@ fn font_scale(measured: Option<(u32, u32)>, scale: f64) -> f32 {
 
 impl App {
     fn request(&self, request: Request) {
-        if self.requests.send(request).is_ok() {
+        if self.outbox.send(request) {
             let _ = self.waker.wake();
+        } else {
+            self.redraw_soon();
         }
     }
 
@@ -566,6 +508,9 @@ impl App {
             }
             latest.pending.store(false, Ordering::Release);
             let _ = self.waker.wake();
+        }
+        if self.outbox.take_refused() {
+            self.flash.refused(proto::Refusal::Input, Instant::now());
         }
         self.flash.tick(Instant::now());
         if let Some(open) = &mut self.open {
@@ -1235,13 +1180,13 @@ fn config() -> Config {
 pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
     let link = Link::silent(link)?;
     let waker = link.waker();
-    let (requests, received) = mpsc::channel();
+    let (outbox, inbox) = outbox::channel();
     let latest = Arc::new(Latest::default());
     let event_loop = EventLoop::with_user_event().build()?;
     let (proxy, shared) = (event_loop.create_proxy(), latest.clone());
     thread::Builder::new()
         .name("pinfold-io".into())
-        .spawn(move || run_io(link, &received, &shared, &proxy))?;
+        .spawn(move || run_io(link, &inbox, &shared, &proxy))?;
     // Before the file is first read, so a save between the two is not missed.
     let proxy = event_loop.create_proxy();
     reload::watch(move |config| proxy.send_event(Notice::Config(config)).is_ok())?;
@@ -1250,7 +1195,7 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
         prefix: Prefix::new(config.keys.prefix),
         config,
         size,
-        requests,
+        outbox,
         latest,
         waker,
         open: None,
