@@ -6,6 +6,9 @@ pub mod link;
 pub const BOLD: u32 = 1 << 24;
 /// Italic text, set in the top byte of [`Cell::foreground`].
 pub const ITALIC: u32 = 1 << 25;
+/// On [`LEFT_CAP`] or [`RIGHT_CAP`], the end of a tab, which stands taller than its cell. Only
+/// the window's own top bar sets this.
+pub const TALL: u32 = 1 << 26;
 /// The colour of a cell no program has coloured, and of the window around the grid.
 ///
 /// shortcut: a copy of the core's own default, so after OSC 11 a program's new default counts
@@ -41,7 +44,7 @@ impl Cell {
     /// ```
     #[must_use]
     pub fn style(&self) -> u32 {
-        self.foreground & (BOLD | ITALIC)
+        self.foreground & (BOLD | ITALIC | TALL)
     }
 
     /// Swaps text and background colours. The style stays with the text.

@@ -11,6 +11,7 @@ use crate::cpu::{RenderError, Renderer, cells_with_cursor};
 use crate::font::{Font, Fonts};
 use crate::glyphs::{Metrics, clamp_size, rasterize};
 use crate::padding::Padding;
+use crate::paint::{bleeds, is_cap};
 
 /// The atlas is 1 MB of 8-bit coverage, the same cap as the CPU renderer's glyph cache.
 const ATLAS_SIZE: usize = 1000;
@@ -82,6 +83,11 @@ fn instances(
             padding.row_top(row, metrics.cell_height) as f32,
         )
     };
+    let tabs = padding.tab_row.map_or(0..0, |row| {
+        let start = (row * columns).min(cells.len());
+        start..(start + columns).min(cells.len())
+    });
+    let bleed = metrics.bleed() as f32;
     // Backgrounds go first, so a wide glyph is not covered by the cell after it.
     for (index, cell) in cells.iter().enumerate() {
         if cell.background != clear {
@@ -95,6 +101,20 @@ fn instances(
             });
         }
     }
+    for (offset, colour) in bleeds(&cells[tabs.clone()]).enumerate() {
+        if colour != clear {
+            let (x, y) = position(tabs.start + offset);
+            for top in [y - bleed, y + height] {
+                out.push(Instance {
+                    position: [x, top],
+                    size: [width, bleed],
+                    atlas: [0.0, 0.0],
+                    colour,
+                    textured: 0,
+                });
+            }
+        }
+    }
     for (index, cell) in cells.iter().enumerate() {
         if cell.character == ' ' {
             continue;
@@ -103,10 +123,15 @@ fn instances(
             continue;
         };
         let (x, y) = position(index);
+        let drop = if tabs.contains(&index) && !is_cap(cell.character) {
+            metrics.tab_text_drop
+        } else {
+            0
+        };
         out.push(Instance {
             position: [
                 x + glyph.left as f32,
-                y + (metrics.baseline - glyph.top) as f32,
+                y + (metrics.baseline + drop - glyph.top) as f32,
             ],
             size: [glyph.width as f32, glyph.height as f32],
             atlas: [glyph.x as f32, glyph.y as f32],
@@ -246,6 +271,7 @@ mod tests {
     const METRICS: Metrics = Metrics {
         cell_width: 10,
         cell_height: 20,
+        tab_text_drop: 0,
         baseline: 16,
     };
 
@@ -307,6 +333,37 @@ mod tests {
         );
         assert_eq!(out[0].colour, 0x00ff_0000);
         assert_eq!(out[0].position, [10.0, 0.0]);
+    }
+
+    #[test]
+    fn a_tabs_pill_gets_strips_and_its_text_drops() {
+        let metrics = Metrics {
+            tab_text_drop: 2,
+            ..METRICS
+        };
+        let padding = Padding {
+            tab_row: Some(1),
+            ..Padding::default()
+        };
+        let cells = [cell(' ', PAPER), cell('x', 0x00ff_0000), cell('y', PAPER)];
+        let slot = |_, _| {
+            Some(Slot {
+                x: 0,
+                y: 0,
+                width: 4,
+                height: 4,
+                left: 0,
+                top: 0,
+            })
+        };
+        let mut out = Vec::new();
+        instances(&cells, 1, metrics, padding, PAPER, slot, &mut out);
+        let strips: Vec<_> = out.iter().filter(|quad| quad.size[1] == 4.0).collect();
+        assert_eq!(strips.iter().filter(|quad| quad.textured == 0).count(), 2);
+        let glyphs: Vec<_> = out.iter().filter(|quad| quad.textured == 1).collect();
+        let tops: Vec<_> = glyphs.iter().map(|quad| quad.position[1]).collect();
+        let baseline = METRICS.baseline as f32;
+        assert_eq!(tops, [20.0 + baseline + 2.0, 40.0 + baseline]);
     }
 
     #[test]

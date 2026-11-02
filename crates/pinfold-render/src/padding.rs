@@ -4,9 +4,9 @@
 /// first row level with the macOS traffic lights, and the sides match the red one's inset.
 const LOGICAL: (f64, f64, f64, f64) = (8.0, 8.0, 8.0, 10.0);
 /// Logical pixels under the top bar, so it stands clear of the pane.
-const BAR_GAP: f64 = 10.0;
+const BAR_GAP: f64 = 14.0;
 /// Logical pixels between the title and the tabs.
-const TITLE_GAP: f64 = 10.0;
+const TITLE_GAP: f64 = 12.0;
 /// Logical pixels above the tabs in fullscreen, where there is no title.
 const FULLSCREEN_TOP: f64 = 14.0;
 
@@ -31,6 +31,8 @@ pub struct Padding {
     pub title_gap: usize,
     /// Whether the top bar has lost its title row, as a fullscreen window does.
     pub fullscreen: bool,
+    /// The row of tabs, whose pills stand taller than the row and whose text is centred in them.
+    pub tab_row: Option<usize>,
 }
 
 impl Padding {
@@ -53,6 +55,7 @@ impl Padding {
             gap: pixels(BAR_GAP),
             title_gap: pixels(TITLE_GAP),
             fullscreen: false,
+            tab_row: Some(BAR_ROWS - 1),
         }
     }
 
@@ -62,6 +65,7 @@ impl Padding {
         Self {
             top: (FULLSCREEN_TOP * scale).round() as usize,
             fullscreen: true,
+            tab_row: Some(0),
             ..self
         }
     }
@@ -143,15 +147,16 @@ mod tests {
     #[test]
     fn a_fullscreen_window_has_no_title_row() {
         let padding = Padding::scaled(1.0);
-        assert_eq!(padding.row_top(1, 20), 8 + 20 + 10);
-        assert_eq!(padding.row_top(2, 20), 8 + 40 + 10 + 10);
+        assert_eq!(padding.row_top(1, 20), 8 + 20 + 12);
+        assert_eq!(padding.row_top(2, 20), 8 + 40 + 12 + 14);
         let full = padding.in_fullscreen(1.0);
         assert_eq!(full.bar_rows(), 1);
         assert_eq!(full.row_top(0, 20), 14);
-        assert_eq!(full.row_top(1, 20), 14 + 20 + 10);
+        assert_eq!(full.row_top(1, 20), 14 + 20 + 14);
+        assert_eq!((padding.tab_row, full.tab_row), (Some(1), Some(0)));
         let rows = |padding: Padding| padding.grid(100, 200, (10, 20)).0;
-        assert_eq!(rows(padding), (200 - 8 - 10 - 10 - 10) / 20);
-        assert_eq!(rows(full), (200 - 14 - 10 - 10) / 20);
+        assert_eq!(rows(padding), (200 - 8 - 10 - 14 - 12) / 20);
+        assert_eq!(rows(full), (200 - 14 - 10 - 14) / 20);
     }
 
     #[test]
@@ -160,8 +165,9 @@ mod tests {
             left: 8,
             top: 8,
             right: 8,
-            gap: 10,
-            title_gap: 10,
+            gap: 14,
+            title_gap: 12,
+            tab_row: Some(1),
             ..padding()
         };
         assert_eq!(Padding::scaled(1.0), expected);

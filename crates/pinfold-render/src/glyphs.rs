@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use pinfold_proto::{BOLD, ITALIC, LEFT_CAP, RIGHT_CAP};
+use pinfold_proto::{BOLD, ITALIC, LEFT_CAP, RIGHT_CAP, TALL};
 use swash::scale::{Render, ScaleContext, Scaler, Source};
 use swash::zeno::{Format, Transform};
 use unicode_width::UnicodeWidthChar;
@@ -207,9 +207,11 @@ pub(crate) fn can_draw_text(font: &Font) -> bool {
 /// Samples per pixel along each side of a pill's end.
 const CAP_SAMPLES: usize = 4;
 
-/// Draws the end of a pill: half an ellipse filling the cell, flat edge against the pill.
-fn cap(right: bool, metrics: Metrics) -> Glyph {
-    let (width, height) = (metrics.cell_width, metrics.cell_height);
+/// Draws the end of a pill: half an ellipse filling the cell, flat edge against the pill. A
+/// tall one reaches [`Metrics::bleed`] past the cell above and below.
+fn cap(right: bool, tall: bool, metrics: Metrics) -> Glyph {
+    let bleed = if tall { metrics.bleed() } else { 0 };
+    let (width, height) = (metrics.cell_width, metrics.cell_height + 2 * bleed);
     let samples = CAP_SAMPLES * CAP_SAMPLES;
     let part = |at: usize| (at as f32 + 0.5) / CAP_SAMPLES as f32;
     let mask = (0..width * height).map(|pixel| {
@@ -224,7 +226,7 @@ fn cap(right: bool, metrics: Metrics) -> Glyph {
     });
     Glyph {
         left: 0,
-        top: metrics.baseline,
+        top: metrics.baseline + bleed as i32,
         width,
         mask: mask.collect(),
         last_used: 0,
@@ -241,7 +243,7 @@ pub(crate) fn rasterize(
     (character, style): (char, u32),
 ) -> Glyph {
     if matches!(character, LEFT_CAP | RIGHT_CAP) {
-        return cap(character == RIGHT_CAP, metrics);
+        return cap(character == RIGHT_CAP, style & TALL != 0, metrics);
     }
     fonts.touched = true;
     let span = cell_span(character);
@@ -271,9 +273,19 @@ pub(crate) struct Metrics {
     pub cell_width: usize,
     pub cell_height: usize,
     pub baseline: i32,
+    /// Pixels to move text down on the row of tabs, to centre capitals in the cell.
+    pub tab_text_drop: i32,
 }
 
+/// A tab's pill reaches this fraction of a cell past its row, above and below.
+const BLEED_PART: usize = 5;
+
 impl Metrics {
+    /// Returns how far a tab's pill reaches past its row, above and below.
+    pub(crate) fn bleed(self) -> usize {
+        self.cell_height / BLEED_PART
+    }
+
     pub(crate) fn new(font: &Font, size: f32) -> Self {
         let face = font.face();
         let metrics = face.metrics(&[]).scale(size);
@@ -281,11 +293,20 @@ impl Metrics {
             .glyph_metrics(&[])
             .scale(size)
             .advance_width(face.charmap().map('M'));
+        let cell_height =
+            ((metrics.ascent + metrics.descent + metrics.leading).ceil() as usize).max(1);
+        let baseline = metrics.ascent.round() as i32;
+        let bleed = (cell_height / BLEED_PART) as i32;
+        let centred = cell_height as f32 / 2.0 + metrics.cap_height / 2.0 - baseline as f32;
         Self {
             cell_width: (advance.round() as usize).max(1),
-            cell_height: ((metrics.ascent + metrics.descent + metrics.leading).ceil() as usize)
-                .max(1),
-            baseline: metrics.ascent.round() as i32,
+            cell_height,
+            baseline,
+            tab_text_drop: if metrics.cap_height > 0.0 {
+                (centred.round() as i32).clamp(-bleed, bleed)
+            } else {
+                0
+            },
         }
     }
 }
@@ -435,6 +456,14 @@ mod tests {
         );
         assert_eq!(row(&right, middle)[0], 255);
         assert_eq!(row(&left, 0)[0], 0, "round at the corner");
+        let tall = cache.get(LEFT_CAP, TALL).unwrap();
+        let bleed = metrics.bleed();
+        assert!(bleed > 0);
+        assert_eq!(
+            tall.mask.len(),
+            metrics.cell_width * (metrics.cell_height + 2 * bleed)
+        );
+        assert_eq!(tall.top, metrics.baseline + bleed as i32);
         for y in 0..metrics.cell_height {
             let mut flipped = row(&right, y);
             flipped.reverse();
@@ -465,6 +494,15 @@ mod tests {
             cache.get(character, 0);
             assert_eq!(cache.fonts.untried(), 1, "{character} tried a fallback");
         }
+    }
+
+    #[test]
+    fn the_bundled_font_is_the_first_fallback() {
+        let mut fonts = Fonts::with_fallbacks(bundled(), &[]);
+        assert!(fonts.fallback('⌘').is_some());
+        assert_eq!(fonts.opened_count(), 1, "and it is opened once");
+        fonts.fallback(KANJI);
+        assert_eq!(fonts.opened_count(), 1);
     }
 
     #[test]
@@ -542,6 +580,7 @@ mod tests {
             cell_width: 3,
             cell_height: 6,
             baseline: 5,
+            tab_text_drop: 0,
         };
         let mut context = ScaleContext::new();
         let glyph = rasterize(&mut context, &mut fonts, 64.0, metrics, (KANJI, 0));

@@ -11,7 +11,7 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use pinfold_proto::{BOLD, Cell, DEFAULT_BACKGROUND, Frame, LEFT_CAP, RIGHT_CAP};
+use pinfold_proto::{BOLD, Cell, DEFAULT_BACKGROUND, Frame, LEFT_CAP, RIGHT_CAP, TALL};
 use pinfold_render::padding::Padding;
 use pinfold_sys::LocalTime;
 use unicode_width::UnicodeWidthChar;
@@ -265,7 +265,7 @@ fn strip(frame: &mut Frame, bar: &Bar<'_, impl AsRef<str>>, row: usize) {
     for span in spans(bar.tabs, bar.activity, columns) {
         button = span.end + 1;
         let (fill, text, key) = look(span.index, bar);
-        pill(frame, row, span.start..span.end, fill, CHROME);
+        pill(frame, row, span.start..span.end, fill | TALL, CHROME);
         let label = bar.tabs.get(span.index).map_or("", AsRef::as_ref);
         let Some(room) = span.room else {
             let shown = fit(label, (span.end - span.start).saturating_sub(2));
@@ -285,13 +285,13 @@ fn strip(frame: &mut Frame, bar: &Bar<'_, impl AsRef<str>>, row: usize) {
             write(frame, row, left + 1, &number, key);
         }
     }
-    pill(frame, row, button..button + NEW_TAB, QUIET, CHROME);
+    pill(frame, row, button..button + NEW_TAB, QUIET | TALL, CHROME);
     write(frame, row, button + 1, "+", NEW_TAB_TEXT);
 }
 
-/// Draws a pill over a span of the tabs' row, on `outside`.
+/// Draws a pill over a span of the tabs' row, on `outside`. `inside` can carry [`TALL`].
 fn pill(frame: &mut Frame, row: usize, span: std::ops::Range<usize>, inside: u32, outside: u32) {
-    fill(frame, row, span.clone(), inside);
+    fill(frame, row, span.clone(), inside & !TALL);
     put(frame, row, span.start, LEFT_CAP, inside, outside);
     put(frame, row, span.end - 1, RIGHT_CAP, inside, outside);
 }
@@ -585,14 +585,17 @@ mod tests {
         let row = strip_of(&frame);
         let cells = LEADING + "agent".len() + key_cells(0) + 1;
         assert_eq!(row[0].character, LEFT_CAP);
-        assert_eq!((row[0].foreground, row[0].background), (ACTIVE, CHROME));
+        assert_eq!(
+            (row[0].foreground, row[0].background),
+            (ACTIVE | TALL, CHROME)
+        );
         assert_eq!(row[2].character, 'a');
         assert_eq!(
             (row[2].foreground, row[2].background),
             (CHROME | BOLD, ACTIVE)
         );
         assert_eq!(row[cells - 1].character, RIGHT_CAP);
-        assert_eq!(row[cells - 1].foreground, ACTIVE);
+        assert_eq!(row[cells - 1].foreground, ACTIVE | TALL);
         let key_at = cells - key_cells(0);
         assert_eq!(row[key_at].character, LEFT_CAP);
         assert_eq!(
@@ -608,7 +611,7 @@ mod tests {
         assert_eq!(row[cells + 2].character, '+');
         assert_eq!(row[cells + 2].foreground, NEW_TAB_TEXT);
         assert_eq!(row[cells + 3].character, RIGHT_CAP);
-        assert_eq!(row[cells + 3].foreground, QUIET);
+        assert_eq!(row[cells + 3].foreground, QUIET | TALL);
         assert_eq!(
             row[cells + 4].background,
             CHROME,
@@ -621,7 +624,7 @@ mod tests {
         let frame = tabs(60, &["a", "b"], 0);
         let row = strip_of(&frame);
         let (start, cells) = tab_of(&["a", "b"], 1, 60);
-        assert_eq!(row[start].foreground, QUIET);
+        assert_eq!(row[start].foreground, QUIET | TALL);
         assert_eq!(row[start + 2].character, 'b');
         assert_eq!(
             (row[start + 2].foreground, row[start + 2].background),
@@ -717,7 +720,7 @@ mod tests {
         assert_eq!(frame.cells[43].foreground, UNFOCUSED_TITLE);
         assert_eq!(frame.cells[57].foreground, UNFOCUSED);
         let row = strip_of(&frame);
-        assert_eq!(row[0].foreground, QUIET);
+        assert_eq!(row[0].foreground, QUIET | TALL);
         assert_eq!(
             (row[2].foreground, row[2].background),
             (CHROME | BOLD, QUIET)
