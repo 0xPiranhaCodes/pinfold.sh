@@ -30,7 +30,7 @@ pub(crate) const LINK: Token = Token(usize::MAX - 1);
 
 /// Room for replies beside a frame: two selections of the longest kind.
 const REPLIES: usize = 4 * 1024 * 1024;
-/// Most bytes waiting for a window: the largest frame, its prefix, and [`REPLIES`].
+/// Most bytes waiting for a window: the largest frame, its prefix, and room for replies.
 pub const MAX_PENDING: usize = size_of::<u32>() + link::MAX_MESSAGE + REPLIES;
 /// Room for a notice around its text, which is well past the largest head.
 const NOTICE_HEAD: usize = 64;
@@ -721,8 +721,9 @@ mod tests {
     #[test]
     fn a_stalled_window_holds_one_frame_and_catches_up_on_the_newest() {
         let mut reactor = Reactor::new().unwrap();
-        let (rows, columns) = (40, 120);
-        let script = "yes | head -n 3000000; echo finished; sleep 30";
+        // One full frame of this is past any socket's buffer, so the first send stalls.
+        let (rows, columns) = (200, 400);
+        let script = "yes | head -n 30000; echo finished; sleep 30";
         let flood = reactor.spawn(shell(script), rows, columns).unwrap();
         let quiet = reactor.spawn(shell(ALIVE), 24, 80).unwrap();
         let mut peer = Peer::greet(&mut reactor);
@@ -739,12 +740,14 @@ mod tests {
         assert!(reactor.has_window());
         assert!(most > 0, "the socket took everything, so nothing stalled");
         assert!(most <= one_frame, "{most} bytes waiting");
-        assert!(capacity <= KEPT_OUTPUT, "{capacity} bytes of buffer");
+        assert!(capacity <= 2 * one_frame, "{capacity} bytes of buffer");
         assert_pty_lives(&mut reactor, quiet);
 
         serve(&mut reactor, &mut peer, |r, p| {
             p.matches(r, flood) && p.matches(r, quiet)
         });
+        let session = &reactor.host.window.as_ref().unwrap().session;
+        assert!(session.out.capacity() <= KEPT_OUTPUT);
     }
 
     #[test]
