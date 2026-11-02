@@ -62,6 +62,12 @@ pub const MAX_INPUT: usize = 1024 * 1024;
 /// than the core, and the core's whole budget is 4 MB, so this stays far below [`MAX_MESSAGE`].
 pub const MAX_REQUEST: usize = KIND + size_of::<u32>() + MAX_INPUT;
 
+/// Bytes of the markers around a bracketed paste, which share the input queue with it.
+const BRACKETS: usize = 12;
+
+/// The longest paste that fits the input queue with its brackets, for any program.
+pub const MAX_PASTE: usize = MAX_INPUT - BRACKETS;
+
 /// Room a [`Decoder`] keeps between messages, so one large paste does not stay in the core's
 /// budget. This holds a full frame of 200x80 cells.
 const KEEP: usize = 256 * 1024;
@@ -232,8 +238,10 @@ pub enum Request<'a> {
     Paste {
         /// The pane.
         pane: u32,
-        /// What to paste.
-        // shortcut: a paste over MAX_INPUT fails to encode, send it in parts if a person ever
+        /// What to paste, as the window read it. This format keeps any control character, and
+        /// `Reactor::paste` is what cleans them (T7 in the threat model), so a paste must reach
+        /// a program through that and never as [`Request::Input`].
+        // shortcut: a paste over MAX_PASTE fails to encode, send it in parts if a person ever
         // needs to paste more than 1 MiB, as the pane's input queue would refuse it anyway.
         text: &'a str,
     },
@@ -433,6 +441,45 @@ impl FrameUpdate<'_> {
         Ok(())
     }
 
+    /// Checks the rows, which a peer refuses as a whole.
+    fn check_records(&self) -> Result<(), Error> {
+        if self.full && self.changed != self.rows {
+            return Err(Error::OutOfBounds {
+                field: "rows in a full frame",
+                value: self.changed.into(),
+            });
+        }
+        let size = record_size(self.columns);
+        let expected = usize::from(self.changed)
+            .checked_mul(size)
+            .ok_or(Error::Truncated)?;
+        match self.records.len().checked_sub(expected) {
+            None => return Err(Error::Truncated),
+            Some(0) => {}
+            Some(bytes) => return Err(Error::Trailing { bytes }),
+        }
+        // Rows rise strictly, so a full frame's are exactly 0..rows and none is sent twice.
+        let mut lowest = 0;
+        for record in self.records.chunks_exact(size) {
+            let (number, cells) = record
+                .split_first_chunk::<ROW_NUMBER>()
+                .ok_or(Error::Truncated)?;
+            let row = u16::from_le_bytes(*number);
+            if row < lowest {
+                return Err(Error::OutOfBounds {
+                    field: "row order",
+                    value: row.into(),
+                });
+            }
+            check("row", row, 0..=self.rows - 1)?;
+            lowest = row + 1;
+            for cell in cells.as_chunks::<CELL>().0 {
+                read_cell(cell)?;
+            }
+        }
+        Ok(())
+    }
+
     fn write_head(&self, out: &mut Vec<u8>) {
         let flags = (u8::from(self.full) * FLAG_FULL)
             | (u8::from(self.cursor.is_some()) * FLAG_CURSOR)
@@ -465,7 +512,7 @@ impl Request<'_> {
             Self::Hello { version } => put!(out, HELLO, version),
             Self::Input { pane, bytes } => put_tail(out, start, MAX_REQUEST, INPUT, pane, bytes)?,
             Self::Paste { pane, text } => {
-                put_tail(out, start, MAX_REQUEST, PASTE, pane, text.as_bytes())?
+                put_tail(out, start, MAX_PASTE, PASTE, pane, text.as_bytes())?
             }
             Self::Resize {
                 pane,
@@ -480,6 +527,12 @@ impl Request<'_> {
                 direction,
                 query,
             } => {
+                if query.len() > MAX_REQUEST {
+                    out.truncate(start);
+                    return Err(Error::TooLarge {
+                        size: query.len() as u64,
+                    });
+                }
                 let mut head = Vec::with_capacity(HEAD + query.len());
                 put_position(&mut head, from);
                 head.push(direction as u8);
@@ -507,10 +560,16 @@ impl Request<'_> {
                 pane: body.u32()?,
                 bytes: body.rest(),
             },
-            PASTE => Request::Paste {
-                pane: body.u32()?,
-                text: body.text()?,
-            },
+            PASTE => {
+                let pane = body.u32()?;
+                let text = body.text()?;
+                if text.len() > MAX_PASTE {
+                    return Err(Error::TooLarge {
+                        size: text.len() as u64,
+                    });
+                }
+                Request::Paste { pane, text }
+            }
             RESIZE => {
                 let (pane, rows, columns) = (body.u32()?, body.u16()?, body.u16()?);
                 check("rows", rows, 1..=MAX_DIMENSION)?;
@@ -559,6 +618,10 @@ impl Notice<'_> {
         let kind = match self {
             Self::Hello { version } => put!(out, HELLO, version),
             Self::Frame(update) => {
+                if let Err(error) = update.check().and_then(|()| update.check_records()) {
+                    out.truncate(start);
+                    return Err(error);
+                }
                 update.write_head(out);
                 out.extend_from_slice(update.records);
                 FRAME
@@ -622,7 +685,8 @@ impl Notice<'_> {
 /// # Errors
 ///
 /// [`Error::OutOfBounds`] for a size outside 1 to [`MAX_DIMENSION`], a cursor off the screen or
-/// reversed `held` or `frame.cells` that do not fit its size.
+/// reversed `held` or `frame.cells` that do not fit its size, and [`Error::BadColour`] for a
+/// changed cell with bits a peer refuses.
 // shortcut: one changed cell sends its whole row, split rows into runs if typing costs too much.
 pub fn encode_frame(
     out: &mut Vec<u8>,
@@ -675,6 +739,10 @@ pub fn encode_frame(
         changed += 1;
         out.extend_from_slice(&number.to_le_bytes());
         for cell in cells {
+            if let Err(error) = check_colours(cell.foreground, cell.background) {
+                out.truncate(start);
+                return Err(error);
+            }
             out.extend_from_slice(&u32::from(cell.character).to_le_bytes());
             out.extend_from_slice(&cell.foreground.to_le_bytes());
             out.extend_from_slice(&cell.background.to_le_bytes());
@@ -814,6 +882,9 @@ impl Decoder {
     fn take_to(&mut self, target: usize, input: &mut &[u8]) -> bool {
         let held = self.buffer.len();
         let wanted = target.saturating_sub(held).min(input.len());
+        if wanted == 0 {
+            return held >= target;
+        }
         let (head, rest) = input.split_at(wanted);
         let room = self
             .buffer
@@ -903,13 +974,18 @@ const fn record_size(columns: u16) -> usize {
     ROW_NUMBER + columns as usize * CELL
 }
 
+fn check_colours(foreground: u32, background: u32) -> Result<(), Error> {
+    if foreground & !(COLOUR | BOLD | ITALIC) != 0 || background & !COLOUR != 0 {
+        return Err(Error::BadColour);
+    }
+    Ok(())
+}
+
 fn read_cell(bytes: &[u8; CELL]) -> Result<Cell, Error> {
     let mut cell = Reader(bytes);
     let character = char::from_u32(cell.u32()?).ok_or(Error::BadCharacter)?;
     let (foreground, background) = (cell.u32()?, cell.u32()?);
-    if foreground & !(COLOUR | BOLD | ITALIC) != 0 || background & !COLOUR != 0 {
-        return Err(Error::BadColour);
-    }
+    check_colours(foreground, background)?;
     Ok(Cell {
         character,
         foreground,
@@ -970,40 +1046,7 @@ fn read_frame<'a>(body: &mut Reader<'a>) -> Result<FrameUpdate<'a>, Error> {
         records: body.rest(),
     };
     update.check()?;
-    if update.full && changed != rows {
-        return Err(Error::OutOfBounds {
-            field: "rows in a full frame",
-            value: changed.into(),
-        });
-    }
-    let size = record_size(columns);
-    let expected = usize::from(changed)
-        .checked_mul(size)
-        .ok_or(Error::Truncated)?;
-    match update.records.len().checked_sub(expected) {
-        None => return Err(Error::Truncated),
-        Some(0) => {}
-        Some(bytes) => return Err(Error::Trailing { bytes }),
-    }
-    // Rows rise strictly, so a full frame's are exactly 0..rows and none is sent twice.
-    let mut lowest = 0;
-    for record in update.records.chunks_exact(size) {
-        let (number, cells) = record
-            .split_first_chunk::<ROW_NUMBER>()
-            .ok_or(Error::Truncated)?;
-        let row = u16::from_le_bytes(*number);
-        if row < lowest {
-            return Err(Error::OutOfBounds {
-                field: "row order",
-                value: row.into(),
-            });
-        }
-        check("row", row, 0..=rows - 1)?;
-        lowest = row + 1;
-        for cell in cells.as_chunks::<CELL>().0 {
-            read_cell(cell)?;
-        }
-    }
+    update.check_records()?;
     Ok(update)
 }
 
@@ -1441,20 +1484,35 @@ mod tests {
             Ok(None)
         );
 
-        let text = "x".repeat(MAX_INPUT);
+        let text = "x".repeat(MAX_PASTE);
         let mut wire = HELLO_WIRE.to_vec();
         let paste = Request::Paste {
             pane: 1,
             text: &text,
         };
         paste.encode(&mut wire).unwrap();
-        assert_eq!(wire.len(), HELLO_WIRE.len() + PREFIX + MAX_REQUEST);
+        assert_eq!(
+            wire.len(),
+            HELLO_WIRE.len() + PREFIX + MAX_REQUEST - BRACKETS
+        );
         let mut decoder = Decoder::default();
         let mut input = wire.as_slice();
         assert!(decoder.next_request(&mut input).unwrap().is_some());
         assert_eq!(decoder.next_request(&mut input), Ok(Some(paste)));
 
-        let text = "x".repeat(MAX_INPUT + 1);
+        let mut body = 1_u32.to_le_bytes().to_vec();
+        body.resize(4 + MAX_PASTE + 1, b'x');
+        let mut wire = HELLO_WIRE.to_vec();
+        wire.extend_from_slice(&raw(PASTE, &body));
+        let mut input = wire.as_slice();
+        let mut decoder = Decoder::default();
+        assert!(decoder.next_request(&mut input).unwrap().is_some());
+        assert!(matches!(
+            decoder.next_request(&mut input),
+            Err(Error::TooLarge { .. })
+        ));
+
+        let text = "x".repeat(MAX_PASTE + 1);
         let paste = Request::Paste {
             pane: 1,
             text: &text,
@@ -1463,6 +1521,72 @@ mod tests {
             paste.encode(&mut wire),
             Err(Error::TooLarge { .. })
         ));
+    }
+
+    #[test]
+    fn polling_with_nothing_new_allocates_nothing() {
+        let mut wire = (MAX_REQUEST as u32).to_le_bytes().to_vec();
+        wire.extend_from_slice(&[HELLO, 1]);
+        let mut decoder = Decoder::default();
+        assert_eq!(decoder.next_request(&mut wire.as_slice()), Ok(None));
+        let capacity = decoder.buffer.capacity();
+        for _ in 0..64 {
+            assert_eq!(decoder.next_request(&mut [].as_slice()), Ok(None));
+        }
+        assert_eq!(decoder.buffer.capacity(), capacity);
+    }
+
+    #[test]
+    fn a_search_over_the_limit_is_refused_before_it_is_copied() {
+        let query = "x".repeat(MAX_REQUEST + 1);
+        let mut out = vec![1];
+        let message = Request::Search {
+            pane: 0,
+            from: Position::default(),
+            direction: Direction::Backward,
+            query: &query,
+        };
+        assert!(matches!(
+            message.encode(&mut out),
+            Err(Error::TooLarge { .. })
+        ));
+        assert_eq!(out, [1]);
+    }
+
+    #[test]
+    fn nothing_a_peer_would_refuse_encodes() {
+        let mut frame = screen(2, 2);
+        frame.cells[3].background = 0xff00_0000;
+        let mut out = vec![1];
+        let result = encode_frame(&mut out, 0, &frame, 0, 0..2, None);
+        assert_eq!(result, Err(Error::BadColour));
+        assert_eq!(out, [1]);
+
+        let update = FrameUpdate {
+            pane: 0,
+            full: true,
+            top: 0,
+            held: 0..2,
+            rows: 2,
+            columns: 2,
+            cursor: None,
+            app_cursor: false,
+            mouse: MouseMode::Off,
+            mouse_encoding: MouseEncoding::Legacy,
+            alternate_scroll: false,
+            clipboard_writes: 0,
+            changed: 1,
+            records: &[],
+        };
+        assert!(Notice::Frame(update.clone()).encode(&mut out).is_err());
+        let held = FrameUpdate {
+            full: false,
+            changed: 0,
+            cursor: Some((9, 0)),
+            ..update
+        };
+        assert!(Notice::Frame(held).encode(&mut out).is_err());
+        assert_eq!(out, [1]);
     }
 
     #[test]

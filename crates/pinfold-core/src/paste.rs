@@ -38,6 +38,12 @@ pub fn encode(text: &str, bracketed: bool) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_longest_paste_fills_the_input_queue_with_its_brackets() {
+        let text = "x".repeat(pinfold_proto::link::MAX_PASTE);
+        assert_eq!(super::encode(&text, true).len(), crate::io::MAX_INPUT);
+    }
+
     use super::*;
 
     #[test]
