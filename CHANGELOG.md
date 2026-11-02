@@ -29,6 +29,7 @@ Entries are generated from Conventional Commits with git-cliff
 - Function keys, modifier combinations and application cursor mode, as xterm sends them.
 - Paste from the clipboard, with a confirmation for anything that ends a line.
 - A paste sanitizer in the core, and an input queue of 1 MiB so a large write is not cut.
+- A two-second flash in the row under the pane when a program's OSC 52 clipboard write is blocked.
 - Input method composition, drawn at the cursor.
 - Synchronized updates end on their own after 150 ms and hold at most 256 KiB per pane.
 - Limits on OSC strings, titles and hyperlinks, and replies only in fixed formats.
