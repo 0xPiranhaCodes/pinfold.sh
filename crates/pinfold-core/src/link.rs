@@ -76,6 +76,8 @@ struct PaneLink {
     /// Whether `cwd` needs checking without the pane having changed.
     named: bool,
     searching: bool,
+    /// Whether it printed something while no window showed it.
+    noisy: bool,
 }
 
 /// A copy, which takes a step per pass so a window cannot hold up PTYs with long ones.
@@ -101,6 +103,10 @@ struct Session {
     copying: Option<CopyJob>,
     /// The reactor's revision as of the last layout sent.
     laid: Option<u64>,
+    /// The tabs with news, as last sent.
+    activity: u32,
+    /// Whether that may be out of date.
+    activity_changed: bool,
     /// The latest command refused. Only the last matters, so a burst of them costs nothing.
     refused: Option<Refusal>,
 }
@@ -281,7 +287,38 @@ impl Session {
             .map_or(0, pinfold_mux::Tab::focused);
         let total = reactor.pane_count() as u16;
         encode_layout(&mut self.out, active, focused, total, &tabs, &shown).map_err(|_| Ended)?;
+        self.activity_changed = true;
         self.flush()
+    }
+
+    /// Says which tabs have news. The active tab has none, so showing a tab clears it. A layout
+    /// numbers the tabs anew, so this always follows one.
+    fn send_activity(&mut self, reactor: &Reactor) -> Result<(), Ended> {
+        if self.pending() > 0 || !mem::take(&mut self.activity_changed) {
+            return Ok(());
+        }
+        let mut activity = 0;
+        for (index, tab) in reactor.session.tabs().iter().enumerate() {
+            let shown = index == reactor.session.active();
+            let mut noisy = false;
+            for pane in tab.panes() {
+                let number = pane as usize;
+                let state = self.panes.iter_mut().find(|state| state.number == number);
+                if let Some(state) = state {
+                    state.noisy &= !shown;
+                    noisy |= state.noisy;
+                }
+            }
+            if noisy {
+                activity |= 1u32.checked_shl(index as u32).unwrap_or(0);
+            }
+        }
+        if activity != self.activity {
+            self.activity = activity;
+            self.notice(&Notice::Activity { tabs: activity })?;
+            self.flush()?;
+        }
+        Ok(())
     }
 
     /// Sends what changed, while the socket keeps up.
@@ -307,7 +344,7 @@ impl Session {
             }
             self.send_pane(index, reactor)?;
         }
-        Ok(())
+        self.send_activity(reactor)
     }
 
     fn send_pane(&mut self, index: usize, reactor: &mut Reactor) -> Result<(), Ended> {
@@ -316,6 +353,10 @@ impl Session {
         };
         let pane = state.number;
         let dirty = reactor.take_dirty(pane);
+        if dirty && !state.watched && !state.noisy {
+            state.noisy = true;
+            self.activity_changed = true;
+        }
         if state.watched && (dirty || !state.synced) {
             let Some(engine) = reactor.engine(pane) else {
                 return Ok(());
@@ -552,6 +593,8 @@ impl Reactor {
                 greeted: false,
                 copying: None,
                 laid: None,
+                activity: 0,
+                activity_changed: false,
                 refused: None,
             },
         };
@@ -617,6 +660,7 @@ mod tests {
         searched: Vec<Option<link::Selection>>,
         copied: Vec<String>,
         raises: usize,
+        activity: u32,
         layouts: usize,
         active: u16,
         focused: u32,
@@ -640,6 +684,7 @@ mod tests {
                 searched: Vec::new(),
                 copied: Vec::new(),
                 raises: 0,
+                activity: 0,
                 layouts: 0,
                 active: 0,
                 focused: 0,
@@ -703,6 +748,7 @@ mod tests {
                         Notice::Searched { found, .. } => self.searched.push(found),
                         Notice::Copied { text, .. } => self.copied.push(text.to_owned()),
                         Notice::Raise => self.raises += 1,
+                        Notice::Activity { tabs } => self.activity = tabs,
                         Notice::Layout(layout) => {
                             self.layouts += 1;
                             self.active = layout.active;
@@ -1447,6 +1493,29 @@ mod tests {
 
         peer.send(Request::SwitchTab { index: 0 });
         serve(&mut reactor, &mut peer, |r, p| p.matches(r, hidden));
+    }
+
+    #[test]
+    fn a_hidden_tab_that_prints_has_news_until_it_is_shown() {
+        let mut reactor = Reactor::new().unwrap();
+        let hidden = reactor
+            .open_tab(shell("read line; echo news; read line"), 24, 80)
+            .unwrap();
+        let mut peer = Peer::watching(&mut reactor, hidden);
+        serve(&mut reactor, &mut peer, |r, p| p.matches(r, hidden));
+
+        reactor.shell = || shell(ALIVE);
+        peer.send(Request::NewTab);
+        serve(&mut reactor, &mut peer, |_, p| p.active == 1);
+        assert_eq!(peer.activity, 0, "a shown tab has no news");
+
+        assert!(reactor.write(hidden, b"\n"));
+        serve(&mut reactor, &mut peer, |_, p| p.activity == 0b01);
+
+        peer.send(Request::SwitchTab { index: 0 });
+        serve(&mut reactor, &mut peer, |_, p| {
+            p.active == 0 && p.activity == 0
+        });
     }
 
     #[test]

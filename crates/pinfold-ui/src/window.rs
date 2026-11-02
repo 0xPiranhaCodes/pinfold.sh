@@ -107,6 +107,7 @@ struct Shown {
     screens: Vec<Screen>,
     tabs: Vec<Tab>,
     active: usize,
+    activity: u32,
     focused: u32,
     total: usize,
     /// Whether what is above, past the screens' contents, changed since the window read it.
@@ -145,6 +146,7 @@ fn publish(link: &mut Link, shown: &mut Shown) -> bool {
             ours.cwd.clone_from(&tab.cwd);
         }
         shown.active = link.active();
+        shown.activity = link.activity();
         shown.focused = link.focused();
         shown.total = link.total();
         shown.laid = true;
@@ -244,11 +246,19 @@ fn run_io(
 struct Open {
     window: Rc<Window>,
     renderer: Box<dyn Renderer>,
+    /// Whether the window filled the screen when it last changed size.
+    fullscreen: bool,
 }
 
 impl Open {
     fn padding(&self) -> Padding {
-        Padding::scaled(self.window.scale_factor())
+        let scale = self.window.scale_factor();
+        let padding = Padding::scaled(scale);
+        if self.fullscreen {
+            padding.in_fullscreen(scale)
+        } else {
+            padding
+        }
     }
 
     /// Applies the background settings. Winit can change a window's transparency at any time
@@ -333,6 +343,12 @@ struct App {
     /// The tabs' labels, made safe to draw.
     labels: Vec<String>,
     active: usize,
+    /// Which tabs have news, one bit each.
+    activity: u32,
+    /// The tab under the pointer.
+    over_tab: Option<usize>,
+    /// Whether the system says this window has the keyboard.
+    has_focus: bool,
     /// When the clock in the top bar next changes.
     minute: Instant,
     /// Whether the pointer is over the top bar.
@@ -409,7 +425,11 @@ impl App {
         window.set_ime_allowed(true);
         let size = self.config.font_size * font_scale(self.size, window.scale_factor());
         let renderer = renderer(&window, size, self.config.font_path.as_deref())?;
-        let mut open = Open { window, renderer };
+        let mut open = Open {
+            window,
+            renderer,
+            fullscreen: false,
+        };
         open.apply_background(&self.config);
         self.open = Some(open);
         Ok(())
@@ -417,12 +437,15 @@ impl App {
 
     fn resized(&mut self, size: PhysicalSize<u32>) {
         let Some(open) = &mut self.open else { return };
+        open.fullscreen = open.window.fullscreen().is_some();
         let padding = open.padding();
         open.renderer.resize(size.width, size.height, padding);
         let cell = open.renderer.cell_size();
         let (rows, columns) = padding.grid(size.width, size.height, cell);
         open.window.request_redraw();
-        let rows = rows.saturating_sub(top_bar::ROWS + CHROME_ROWS).max(1);
+        let rows = rows
+            .saturating_sub(padding.bar_rows() as u16 + CHROME_ROWS)
+            .max(1);
         self.area = (rows.min(MAX_DIMENSION), columns.clamp(1, MAX_DIMENSION));
         self.request(Request::Resize(rows, columns.max(1)));
     }
@@ -474,6 +497,7 @@ impl App {
             top_bar::label(&tab.cwd, label);
         }
         self.active = shown.active;
+        self.activity = shown.activity;
         self.total = shown.total;
         // Another pane may have closed under the question.
         if let Some(Prompt::Close { last, .. }) = &mut self.prompt {
@@ -561,7 +585,7 @@ impl App {
                     if let Some((row, column)) = self.composed.cursor {
                         let (width, height) = open.renderer.cell_size();
                         let padding = open.padding();
-                        let row = usize::from(row) + usize::from(top_bar::ROWS);
+                        let row = usize::from(row) + padding.bar_rows();
                         let x = padding.left + usize::from(column) * width;
                         let y = padding.row_top(row, height);
                         open.window.set_ime_cursor_area(
@@ -596,7 +620,17 @@ impl App {
             let cell_width = open.renderer.cell_size().0;
             let left = open.padding().left;
             let inset = top_bar::inset(top_bar::LEFT_POINTS, scale, left, cell_width);
-            top_bar::draw(&mut self.composed, &self.labels, self.active, time, inset);
+            let bar = top_bar::Bar {
+                tabs: &self.labels,
+                active: self.active,
+                activity: self.activity,
+                hovered: self.over_tab,
+                focused: self.has_focus,
+                title: !open.fullscreen,
+                time,
+                inset,
+            };
+            top_bar::draw(&mut self.composed, &bar);
             open.renderer.draw(&self.composed)?;
         }
         Ok(())
@@ -902,6 +936,11 @@ impl App {
         let (on_bar, pointer) = top_bar::locate(open.padding(), x, y, cell_size, grid);
         self.on_bar = on_bar;
         self.on_title = top_bar::on_title(open.padding(), y, cell_size.1);
+        let over = match top_bar::hit(pointer.1, &self.labels, self.activity, self.area.1) {
+            Some(Hit::Tab(tab)) if on_bar && !self.on_title => Some(tab),
+            _ => None,
+        };
+        self.hover(over);
         if self.pointer != pointer {
             self.pointer = pointer;
             let position = self.pointer_position();
@@ -918,6 +957,13 @@ impl App {
             if let Some(pane) = pane {
                 self.report(mouse::Event::Motion(held.map(|button| button as u8)), pane);
             }
+        }
+    }
+
+    fn hover(&mut self, tab: Option<usize>) {
+        if self.over_tab != tab {
+            self.over_tab = tab;
+            self.redraw_soon();
         }
     }
 
@@ -969,7 +1015,7 @@ impl App {
     fn bar_pressed(&mut self) {
         let Some(open) = &self.open else { return };
         if !self.on_title {
-            match top_bar::hit(self.pointer.1, self.labels.len(), self.area.1) {
+            match top_bar::hit(self.pointer.1, &self.labels, self.activity, self.area.1) {
                 Some(Hit::NewTab) => self.core(proto::Request::NewTab),
                 Some(Hit::Tab(tab)) => self.core(proto::Request::SwitchTab { index: tab as u16 }),
                 None => {}
@@ -1119,7 +1165,14 @@ impl ApplicationHandler<Notice> for App {
                 self.scale_changed(scale_factor);
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
-            WindowEvent::Focused(false) => self.prefix.cancel(),
+            WindowEvent::Focused(focused) => {
+                self.has_focus = focused;
+                self.redraw_soon();
+                if !focused {
+                    self.prefix.cancel();
+                }
+            }
+            WindowEvent::CursorLeft { .. } => self.hover(None),
             WindowEvent::Ime(event) => self.ime(event),
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer_moved(position.x, position.y);
@@ -1207,6 +1260,9 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
         composed: Frame::default(),
         labels: Vec::new(),
         active: 0,
+        activity: 0,
+        over_tab: None,
+        has_focus: true,
         on_title: false,
         minute: Instant::now(),
         on_bar: false,

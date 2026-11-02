@@ -107,7 +107,7 @@ pub trait VtEngine {
 }
 
 /// The "Graphite Grid" ground and text colours (`docs/design/ui/`).
-const BACKGROUND: u32 = 0x000e_1014;
+const BACKGROUND: u32 = 0x0012_1212;
 const FOREGROUND: u32 = 0x00e2_e5ea;
 
 // shortcut: the design has no ANSI palette, so this reuses its tokens, and magenta is a stand-in.

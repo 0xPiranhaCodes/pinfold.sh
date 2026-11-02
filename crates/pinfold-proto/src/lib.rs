@@ -10,7 +10,13 @@ pub const ITALIC: u32 = 1 << 25;
 ///
 /// shortcut: a copy of the core's own default, so after OSC 11 a program's new default counts
 /// as a cell colour and stays opaque, carry the live colour in `Frame` when the core next changes.
-pub const DEFAULT_BACKGROUND: u32 = 0x000e_1014;
+pub const DEFAULT_BACKGROUND: u32 = 0x0012_1212;
+
+/// The round left end of a pill, which the renderer draws to fill its cell in the foreground
+/// colour, as a font would not fit it to the grid.
+pub const LEFT_CAP: char = '\u{e0b6}';
+/// The round right end of a pill.
+pub const RIGHT_CAP: char = '\u{e0b4}';
 
 /// One character with its colours, as `0x00RRGGBB`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

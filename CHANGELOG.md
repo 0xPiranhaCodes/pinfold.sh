@@ -11,6 +11,8 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Added
 
+- Pill tabs in the top bar, with hover, a mark on a hidden tab that printed, a quiet look for an
+  unfocused window, and no title row in fullscreen.
 - Tabs and splits for real. The core owns the session, so a new window finds the same tabs and panes, and only the panes of the active tab are sent to the window, so a hidden tab costs no frame copies. A session holds at most 32 tabs and 64 panes, and past that a command is refused with a note under the pane. Panes are drawn in cells with cell-drawn borders, the focused pane's in the focus accent.
 - Prefix keys work: `Ctrl+a`, or `keys.prefix`, then `c`, `n`, `p`, `0` to `9`, `|`, `-`, the arrows, `z`, `d` and `x`. `x` asks first, and says so in red when it would end the session. On macOS Command+T opens a tab and Command+1 to Command+9 go to one. A click focuses a pane or picks a tab, and the `+` button opens one. Bindings are in [docs/configuration.md](docs/configuration.md).
 - `pinfold-core` runs as a hardened daemon with a private control socket that takes `hello` and `window.open`.
