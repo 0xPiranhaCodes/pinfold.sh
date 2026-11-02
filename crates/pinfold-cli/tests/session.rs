@@ -121,6 +121,7 @@ fn client(directory: &Path) -> Result {
     note("starts", &starts)?;
     note("core", &std::os::unix::process::parent_id().to_string())?;
     let mut link = Link::new(socket::take_link()?, 0)?;
+    assert!(link.resize(24, 80));
     if starts.lines().count() == 1 {
         assert!(link.write(b"echo mark-$((40+2)); seq 1 100\n"));
         until(&mut link, |link| shows(link.frame(), "100"))?;

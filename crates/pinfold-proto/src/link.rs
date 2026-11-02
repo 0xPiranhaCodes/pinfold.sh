@@ -127,7 +127,6 @@ const COPIED: u8 = 4;
 const LAYOUT: u8 = 5;
 const RAISE: u8 = 6;
 const REFUSED: u8 = 7;
-const EXITED: u8 = 8;
 
 const FLAG_FULL: u8 = 1;
 const FLAG_CURSOR: u8 = 1 << 1;
@@ -280,15 +279,19 @@ pub enum Side {
 }
 
 /// Why the core did not carry out a command. The link stays up.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
     /// The session holds [`MAX_TABS`].
+    #[error("This session has as many tabs as it can hold")]
     Tabs,
     /// The session holds [`MAX_PANES`].
+    #[error("This session has as many panes as it can hold")]
     Panes,
     /// The tab has no room for another pane.
+    #[error("No room for another pane here")]
     Room,
     /// The shell would not start.
+    #[error("The shell would not start")]
     Spawn,
 }
 
@@ -457,11 +460,6 @@ pub enum Notice<'a> {
         pane: u32,
         /// The text.
         text: &'a str,
-    },
-    /// A pane's program exited and the pane closed.
-    Exited {
-        /// The pane.
-        pane: u32,
     },
     /// The session's tabs and what the active one shows. [`encode_layout`] writes this one. A
     /// pane that left it has closed or is hidden, and no tabs at all means the session ended.
@@ -866,7 +864,6 @@ impl Notice<'_> {
             Self::Copied { pane, text } => {
                 put_tail(out, start, MAX_MESSAGE, COPIED, *pane, text.as_bytes())?
             }
-            Self::Exited { pane } => put!(out, EXITED, pane),
             Self::Layout(layout) => {
                 layout.write(out);
                 LAYOUT
@@ -903,7 +900,6 @@ impl Notice<'_> {
                 pane: body.u32()?,
                 text: body.text()?,
             },
-            EXITED => Notice::Exited { pane: body.u32()? },
             LAYOUT => Notice::Layout(read_layout(&mut body)?),
             RAISE => Notice::Raise,
             REFUSED => Notice::Refused {

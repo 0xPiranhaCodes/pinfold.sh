@@ -9,8 +9,9 @@
 //! nothing it was promised was lost. Replies cannot be merged like that, so one that would
 //! pass [`MAX_PENDING`] ends the link.
 //!
-//! A pane gets frames once the window asks for one, so a hidden pane costs no frame here or in
-//! the window. Replies and [`Notice::Exited`] reach the window for any pane.
+//! A pane gets frames while the active tab shows it, so a hidden pane costs no frame here or in
+//! the window, and its last frame is freed when it hides. Nothing is shown until the window has
+//! said how much room it has. Replies reach the window for any pane.
 
 use std::io::{self, ErrorKind, Read, Write};
 use std::mem;
@@ -22,7 +23,9 @@ use std::process::{Child, Command, Stdio};
 use mio::unix::SourceFd;
 use mio::{Interest, Token};
 use pinfold_proto::Frame;
-use pinfold_proto::link::{self, Decoder, Notice, Request, VERSION, encode_frame};
+use pinfold_proto::link::{
+    self, Decoder, Notice, Refusal, Request, VERSION, encode_frame, encode_layout,
+};
 use pinfold_sys::socket;
 
 use crate::io::{READ_BUDGET, Reactor};
@@ -59,15 +62,20 @@ struct Ended;
 /// What the link knows about one pane, which goes when the link does.
 #[derive(Default)]
 struct PaneLink {
+    number: usize,
     /// The last frame encoded, which the next one is a diff against.
     sent: Frame,
     /// Whether the window holds a frame to apply a diff to.
     synced: bool,
-    /// Whether the window has asked for this pane's frames.
+    /// Whether the active tab shows this pane.
     watched: bool,
+    /// Whether this pane has its tab's focus, so its directory names the tab.
+    naming: bool,
+    /// The directory the window last heard of, while `naming`.
     cwd: String,
+    /// Whether `cwd` needs checking without the pane having changed.
+    named: bool,
     searching: bool,
-    exited: bool,
 }
 
 /// A copy, which takes a step per pass so a window cannot hold up PTYs with long ones.
@@ -83,6 +91,7 @@ struct Session {
     out: Vec<u8>,
     /// How much of `out` the socket has taken.
     head: usize,
+    /// In order of number, as the reactor's are.
     panes: Vec<PaneLink>,
     /// The frame being read, swapped with a pane's `sent` once encoded.
     spare: Frame,
@@ -90,6 +99,10 @@ struct Session {
     next: usize,
     greeted: bool,
     copying: Option<CopyJob>,
+    /// The reactor's revision as of the last layout sent.
+    laid: Option<u64>,
+    /// The latest command refused. Only the last matters, so a burst of them costs nothing.
+    refused: Option<Refusal>,
 }
 
 impl Session {
@@ -140,11 +153,6 @@ impl Session {
             Request::Paste { pane, text } => {
                 reactor.paste(pane as usize, text);
             }
-            // A PTY that refuses a size is the pane's problem, not a reason to drop the link.
-            // The one pane of a window, until the core lays out tabs.
-            Request::Resize { rows, columns } => {
-                let _ = reactor.resize(0, rows, columns);
-            }
             Request::Scroll { pane, lines } => reactor.scroll(pane as usize, lines),
             Request::Reveal { pane, row } => reveal(reactor, pane as usize, row),
             Request::Search {
@@ -156,7 +164,7 @@ impl Session {
                 let pane = pane as usize;
                 reactor.search(pane, query, from, direction);
                 // One that could not start ends now, and `report` says so.
-                if let Some(state) = self.panes.get_mut(pane) {
+                if let Some(state) = self.state(pane) {
                     state.searching = true;
                 }
             }
@@ -164,41 +172,30 @@ impl Session {
             // if a window ever needs two at once.
             Request::Copy { pane, selection } => {
                 let pane = pane as usize;
-                self.copying = self.panes.get(pane).map(|_| CopyJob {
+                self.copying = reactor.engine(pane).map(|_| CopyJob {
                     pane,
                     copy: Copying::new(selection),
                     text: String::new(),
                 });
             }
-            // shortcut: asking for a pane that does not exist yet does nothing, as the daemon
-            // spawns its panes before a window. Keep the wish if a window can ever open first.
             Request::FullFrame { pane } => {
-                if let Some(state) = self.panes.get_mut(pane as usize) {
-                    state.watched = true;
+                if let Some(state) = self.state(pane as usize).filter(|state| state.watched) {
                     state.synced = false;
                 }
             }
             Request::Quit => return Err(Ended),
-            // Nothing owns tabs yet.
-            Request::NewTab
-            | Request::SwitchTab { .. }
-            | Request::StepTab { .. }
-            | Request::Split { .. }
-            | Request::ClosePane { .. }
-            | Request::Focus { .. }
-            | Request::MoveFocus { .. }
-            | Request::MoveBorder { .. }
-            | Request::Zoom => {}
+            command => self.refused = reactor.command(command).err().or(self.refused),
         }
         Ok(())
     }
 
     /// Sends what finished since the last pass: searches, and a step of any copy.
     fn report(&mut self, reactor: &mut Reactor) -> Result<(), Ended> {
-        for pane in 0..self.panes.len() {
-            let Some(state) = self.panes.get_mut(pane) else {
+        for index in 0..self.panes.len() {
+            let Some(state) = self.panes.get_mut(index) else {
                 continue;
             };
+            let pane = state.number;
             if !state.searching || reactor.is_searching(pane) {
                 continue;
             }
@@ -221,6 +218,10 @@ impl Session {
         if step == Some(CopyStep::Running) {
             return Ok(());
         }
+        // A pane closed halfway leaves part of a copy, and the clipboard should keep what it has.
+        if step.is_none() {
+            job.text.clear();
+        }
         if let Some(job) = self.copying.take() {
             self.notice(&Notice::Copied {
                 pane: job.pane as u32,
@@ -230,25 +231,89 @@ impl Session {
         Ok(())
     }
 
-    /// Sends each pane that changed, while the socket keeps up.
+    fn state(&mut self, pane: usize) -> Option<&mut PaneLink> {
+        let index = self.panes.binary_search_by_key(&pane, |state| state.number);
+        self.panes.get_mut(index.ok()?)
+    }
+
+    /// Forgets panes that closed and learns new ones, which always have higher numbers.
+    fn follow_panes(&mut self, reactor: &Reactor) {
+        self.panes
+            .retain(|state| reactor.engine(state.number).is_some());
+        let last = self.panes.last().map(|state| state.number);
+        let new = reactor.numbers().filter(|pane| last < Some(*pane));
+        self.panes.extend(new.map(|number| PaneLink {
+            number,
+            ..PaneLink::default()
+        }));
+    }
+
+    /// Sends a layout that changed, and applies it to what this link watches. A layout goes out
+    /// only behind everything before it, so a window that stops reading holds one at most, and
+    /// always gets it ahead of the frames it explains.
+    fn send_layout(&mut self, reactor: &Reactor) -> Result<(), Ended> {
+        if reactor.area.is_none() || self.laid == Some(reactor.revision) {
+            return Ok(());
+        }
+        self.laid = Some(reactor.revision);
+        let shown = reactor.shown();
+        let tabs: Vec<u32> = (reactor.session.tabs().iter())
+            .map(pinfold_mux::Tab::focused)
+            .collect();
+        for state in &mut self.panes {
+            let watched = shown.iter().any(|(pane, _)| *pane as usize == state.number);
+            if !watched {
+                state.sent = Frame::default();
+                state.synced = false;
+            }
+            state.watched = watched;
+            let naming = tabs.iter().any(|pane| *pane as usize == state.number);
+            if naming && !state.naming {
+                state.cwd.clear();
+                state.named = false;
+            }
+            state.naming = naming;
+        }
+        let active = reactor.session.active() as u16;
+        let focused = reactor
+            .session
+            .active_tab()
+            .map_or(0, pinfold_mux::Tab::focused);
+        encode_layout(&mut self.out, active, focused, &tabs, &shown).map_err(|_| Ended)?;
+        self.flush()
+    }
+
+    /// Sends what changed, while the socket keeps up.
     fn send_panes(&mut self, reactor: &mut Reactor) -> Result<(), Ended> {
         self.flush()?;
+        self.follow_panes(reactor);
+        if self.pending() > 0 {
+            return Ok(());
+        }
+        self.send_layout(reactor)?;
+        if self.pending() == 0 {
+            if let Some(reason) = self.refused.take() {
+                self.notice(&Notice::Refused { reason })?;
+                self.flush()?;
+            }
+        }
         let count = self.panes.len();
         for offset in 0..count {
-            let pane = (self.next + offset) % count;
+            let index = (self.next + offset) % count;
             if self.pending() > 0 {
-                self.next = pane;
+                self.next = index;
                 return Ok(());
             }
-            self.send_pane(pane, reactor)?;
+            self.send_pane(index, reactor)?;
         }
         Ok(())
     }
 
-    fn send_pane(&mut self, pane: usize, reactor: &mut Reactor) -> Result<(), Ended> {
-        let Some(state) = self.panes.get_mut(pane).filter(|state| !state.exited) else {
+    fn send_pane(&mut self, index: usize, reactor: &mut Reactor) -> Result<(), Ended> {
+        let Some(state) = self.panes.get_mut(index) else {
             return Ok(());
         };
+        let pane = state.number;
         let dirty = reactor.take_dirty(pane);
         if state.watched && (dirty || !state.synced) {
             let Some(engine) = reactor.engine(pane) else {
@@ -265,19 +330,19 @@ impl Session {
             self.spare.cells.clear();
             self.spare.cells.shrink_to(KEPT_CELLS);
             state.synced = true;
-
-            let cwd = engine.cwd().map_or("", |cwd| cwd.path.as_str());
+        }
+        if state.naming && (dirty || !state.named) {
+            state.named = true;
+            let engine = reactor.engine(pane);
+            let cwd = engine
+                .and_then(|engine| engine.cwd())
+                .map_or("", |cwd| cwd.path.as_str());
             if state.cwd != cwd {
                 cwd.clone_into(&mut state.cwd);
-                let path = &state.cwd;
-                let notice = Notice::Cwd { pane: number, path };
+                let (pane, path) = (pane as u32, state.cwd.as_str());
+                let notice = Notice::Cwd { pane, path };
                 notice.encode(&mut self.out).map_err(|_| Ended)?;
             }
-        }
-        if reactor.is_closed(pane) {
-            state.exited = true;
-            state.sent = Frame::default();
-            self.notice(&Notice::Exited { pane: pane as u32 })?;
         }
         self.flush()
     }
@@ -339,8 +404,7 @@ impl Window {
 
     /// One pass: reads requests, then sends what they and the panes produced.
     fn serve(&mut self, reactor: &mut Reactor) -> Result<(), Ended> {
-        let count = reactor.pane_count();
-        self.session.panes.resize_with(count, PaneLink::default);
+        self.session.follow_panes(reactor);
         if self.readable {
             self.read(reactor)?;
         }
@@ -486,6 +550,8 @@ impl Reactor {
                 next: 0,
                 greeted: false,
                 copying: None,
+                laid: None,
+                refused: None,
             },
         };
         let interest = Interest::READABLE | Interest::WRITABLE;
@@ -531,7 +597,8 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
-    use pinfold_proto::link::MAX_MESSAGE;
+    use pinfold_proto::link::{MAX_MESSAGE, MAX_PANES, MAX_TABS, Rect, Side, SplitWay};
+    use proptest::prelude::*;
 
     use super::*;
     use crate::search::MAX_SELECTION;
@@ -548,8 +615,13 @@ mod tests {
         cwd: String,
         searched: Vec<Option<link::Selection>>,
         copied: Vec<String>,
-        exited: Vec<u32>,
         raises: usize,
+        layouts: usize,
+        active: u16,
+        focused: u32,
+        tabs: Vec<u32>,
+        shown: Vec<(u32, Rect)>,
+        refused: Vec<Refusal>,
     }
 
     impl Peer {
@@ -566,8 +638,13 @@ mod tests {
                 cwd: String::new(),
                 searched: Vec::new(),
                 copied: Vec::new(),
-                exited: Vec::new(),
                 raises: 0,
+                layouts: 0,
+                active: 0,
+                focused: 0,
+                tabs: Vec::new(),
+                shown: Vec::new(),
+                refused: Vec::new(),
             }
         }
 
@@ -578,15 +655,17 @@ mod tests {
             peer
         }
 
-        /// Attaches, says hello and asks for `pane`, as a window does.
+        /// Attaches, says hello and gives the size of `pane`, as a window does.
         fn watching(reactor: &mut Reactor, pane: usize) -> Self {
             let peer = Self::greet(reactor);
-            peer.watch(pane);
+            peer.fit(reactor, pane);
             peer
         }
 
-        fn watch(&self, pane: usize) {
-            self.send(Request::FullFrame { pane: pane as u32 });
+        /// Gives the size of `pane` as the space for panes, so a lone pane keeps its size.
+        fn fit(&self, reactor: &Reactor, pane: usize) {
+            let (rows, columns) = reactor.engine(pane).unwrap().size();
+            self.send(Request::Resize { rows, columns });
         }
 
         fn send(&self, request: Request<'_>) {
@@ -622,9 +701,15 @@ mod tests {
                         Notice::Cwd { path, .. } => path.clone_into(&mut self.cwd),
                         Notice::Searched { found, .. } => self.searched.push(found),
                         Notice::Copied { text, .. } => self.copied.push(text.to_owned()),
-                        Notice::Exited { pane } => self.exited.push(pane),
                         Notice::Raise => self.raises += 1,
-                        Notice::Layout(_) | Notice::Refused { .. } => {}
+                        Notice::Layout(layout) => {
+                            self.layouts += 1;
+                            self.active = layout.active;
+                            self.focused = layout.focused;
+                            self.tabs = layout.tabs().collect();
+                            self.shown = layout.panes().collect();
+                        }
+                        Notice::Refused { reason } => self.refused.push(reason),
                     }
                 }
             }
@@ -680,21 +765,23 @@ mod tests {
     #[test]
     fn hello_goes_first_each_way_and_frames_wait_for_it() {
         let mut reactor = Reactor::new().unwrap();
-        let pane = reactor.spawn(shell("echo hi; sleep 30"), 24, 80).unwrap();
+        let pane = reactor
+            .open_tab(shell("echo hi; sleep 30"), 24, 80)
+            .unwrap();
         let mut peer = Peer::attach(&mut reactor);
         turn_until(&mut reactor, |r| on_screen(r, pane, "hi"));
         peer.read();
         assert_eq!(peer.hellos, 1);
         assert!(peer.frames.is_empty(), "a frame came before the hello");
         peer.send(Request::Hello { version: VERSION });
-        peer.watch(pane);
+        peer.fit(&reactor, pane);
         serve(&mut reactor, &mut peer, |r, p| p.matches(r, pane));
     }
 
     #[test]
     fn another_version_ends_the_link_and_the_pty_lives() {
         let mut reactor = Reactor::new().unwrap();
-        let pane = reactor.spawn(shell(ALIVE), 24, 80).unwrap();
+        let pane = reactor.open_tab(shell(ALIVE), 24, 80).unwrap();
         let peer = Peer::attach(&mut reactor);
         peer.raw(&[3, 0, 0, 0, 0, 9, 0]);
         assert_link_ends_and_pty_lives(&mut reactor, pane);
@@ -710,7 +797,7 @@ mod tests {
         ];
         for wire in wires {
             let mut reactor = Reactor::new().unwrap();
-            let pane = reactor.spawn(shell(ALIVE), 24, 80).unwrap();
+            let pane = reactor.open_tab(shell(ALIVE), 24, 80).unwrap();
             let peer = Peer::attach(&mut reactor);
             peer.raw(wire);
             assert_link_ends_and_pty_lives(&mut reactor, pane);
@@ -720,7 +807,7 @@ mod tests {
     #[test]
     fn garbage_after_a_good_hello_ends_the_link() {
         let mut reactor = Reactor::new().unwrap();
-        let pane = reactor.spawn(shell(ALIVE), 24, 80).unwrap();
+        let pane = reactor.open_tab(shell(ALIVE), 24, 80).unwrap();
         let peer = Peer::greet(&mut reactor);
         peer.raw(&[2, 0, 0, 0, 200, 1]);
         assert_link_ends_and_pty_lives(&mut reactor, pane);
@@ -729,7 +816,7 @@ mod tests {
     #[test]
     fn a_window_that_closes_mid_message_ends_the_link() {
         let mut reactor = Reactor::new().unwrap();
-        let pane = reactor.spawn(shell(ALIVE), 24, 80).unwrap();
+        let pane = reactor.open_tab(shell(ALIVE), 24, 80).unwrap();
         let peer = Peer::greet(&mut reactor);
         peer.raw(&[100, 0, 0, 0, 1, 0]);
         drop(peer);
@@ -741,7 +828,7 @@ mod tests {
         let mut reactor = Reactor::new().unwrap();
         let mut pane = Command::new("/bin/sh");
         pane.args(["-c", ALIVE]);
-        reactor.spawn(pane, 24, 80).unwrap();
+        reactor.open_tab(pane, 24, 80).unwrap();
         reactor.spawn_window(Path::new("/bin/cat")).unwrap();
         let window = reactor.host.window.as_ref().unwrap();
         window
@@ -757,7 +844,7 @@ mod tests {
     #[test]
     fn quit_ends_the_link() {
         let mut reactor = Reactor::new().unwrap();
-        let pane = reactor.spawn(shell(ALIVE), 24, 80).unwrap();
+        let pane = reactor.open_tab(shell(ALIVE), 24, 80).unwrap();
         let peer = Peer::greet(&mut reactor);
         peer.send(Request::Quit);
         assert_link_ends_and_pty_lives(&mut reactor, pane);
@@ -769,10 +856,9 @@ mod tests {
         // One full frame of this is past any socket's buffer, so the first send stalls.
         let (rows, columns) = (200, 400);
         let script = "yes | head -n 30000; echo finished; sleep 30";
-        let flood = reactor.spawn(shell(script), rows, columns).unwrap();
-        let quiet = reactor.spawn(shell(ALIVE), 24, 80).unwrap();
+        let flood = reactor.open_tab(shell(script), rows, columns).unwrap();
+        let quiet = reactor.split(flood, shell(ALIVE), SplitWay::Right).unwrap();
         let mut peer = Peer::watching(&mut reactor, flood);
-        peer.watch(quiet);
 
         let one_frame = 64 + usize::from(rows) * (2 + usize::from(columns) * 12);
         let (mut most, mut capacity) = (0, 0);
@@ -799,7 +885,7 @@ mod tests {
     #[test]
     fn a_blocked_turn_wakes_when_the_window_drains_the_socket() {
         let mut reactor = Reactor::new().unwrap();
-        let pane = reactor.spawn(shell("sleep 30"), 400, 400).unwrap();
+        let pane = reactor.open_tab(shell("sleep 30"), 400, 400).unwrap();
         let peer = Peer::watching(&mut reactor, pane);
         turn_until(&mut reactor, |r| {
             r.host
@@ -822,23 +908,25 @@ mod tests {
     }
 
     #[test]
-    fn the_clients_opening_works_with_or_without_a_pane_0() {
+    fn a_window_that_opens_on_no_panes_gets_them_once_they_exist() {
         let mut reactor = Reactor::new().unwrap();
         let mut peer = Peer::greet(&mut reactor);
         peer.send(Request::FullFrame { pane: 0 });
-        serve(&mut reactor, &mut peer, |_, p| p.hellos == 1);
+        peer.send(Request::Resize {
+            rows: 24,
+            columns: 80,
+        });
+        serve(&mut reactor, &mut peer, |_, p| p.layouts == 1);
         assert!(reactor.has_window(), "an unknown pane ended the link");
 
-        let pane = reactor.spawn(shell("sleep 30"), 24, 80).unwrap();
-        assert_eq!(pane, 0);
-        peer.send(Request::FullFrame { pane: 0 });
-        serve(&mut reactor, &mut peer, |r, p| p.matches(r, 0));
+        let pane = reactor.open_tab(shell("sleep 30"), 24, 80).unwrap();
+        serve(&mut reactor, &mut peer, |r, p| p.matches(r, pane));
     }
 
     #[test]
     fn a_rejected_query_is_answered_and_the_link_stays() {
         let mut reactor = Reactor::new().unwrap();
-        let pane = reactor.spawn(shell(ALIVE), 24, 80).unwrap();
+        let pane = reactor.open_tab(shell(ALIVE), 24, 80).unwrap();
         let mut peer = Peer::greet(&mut reactor);
         let long = "x".repeat(crate::search::MAX_QUERY + 1);
         for (asked, query) in ["", long.as_str()].into_iter().enumerate() {
@@ -879,7 +967,7 @@ mod tests {
     #[test]
     fn bad_pane_numbers_and_wild_values_change_nothing() {
         let mut reactor = Reactor::new().unwrap();
-        let pane = reactor.spawn(shell(ALIVE), 24, 80).unwrap();
+        let pane = reactor.open_tab(shell(ALIVE), 24, 80).unwrap();
         let mut peer = Peer::watching(&mut reactor, pane);
         serve(&mut reactor, &mut peer, |r, p| p.matches(r, pane));
 
@@ -917,7 +1005,14 @@ mod tests {
             });
             peer.send(Request::FullFrame { pane: bad });
             peer.send(search(bad, link::Direction::Forward, "x"));
+            peer.send(Request::ClosePane { pane: bad });
+            peer.send(Request::Focus { pane: bad });
+            peer.send(Request::Split {
+                pane: bad,
+                way: SplitWay::Down,
+            });
         }
+        peer.send(Request::SwitchTab { index: 31 });
         let number = pane as u32;
         for lines in [i32::MIN, i32::MAX] {
             peer.send(Request::Scroll {
@@ -949,7 +1044,7 @@ mod tests {
     fn a_paste_arrives_cleaned() {
         let mut reactor = Reactor::new().unwrap();
         let script = r"stty raw -echo; printf '\033[?2004h'; dd bs=1 count=20 2>/dev/null | od -An -c | tr -d ' \n' | sed 's/^/got-/'; sleep 30";
-        let pane = reactor.spawn(shell(script), 24, 80).unwrap();
+        let pane = reactor.open_tab(shell(script), 24, 80).unwrap();
         let peer = Peer::greet(&mut reactor);
         turn_until(&mut reactor, |r| r.engine(pane).unwrap().bracketed_paste());
         peer.send(Request::Paste {
@@ -963,7 +1058,7 @@ mod tests {
     #[test]
     fn input_reaches_the_program() {
         let mut reactor = Reactor::new().unwrap();
-        let pane = reactor.spawn(shell(ALIVE), 24, 80).unwrap();
+        let pane = reactor.open_tab(shell(ALIVE), 24, 80).unwrap();
         let peer = Peer::greet(&mut reactor);
         peer.send(Request::Input {
             pane: pane as u32,
@@ -976,7 +1071,7 @@ mod tests {
     fn frames_decode_to_the_same_frame_through_diffs_a_resize_and_history() {
         let mut reactor = Reactor::new().unwrap();
         let script = r"seq 1 100; printf '\033[1;31mred\033[0m'; read line; echo more; sleep 30";
-        let pane = reactor.spawn(shell(script), 10, 40).unwrap();
+        let pane = reactor.open_tab(shell(script), 10, 40).unwrap();
         let mut peer = Peer::watching(&mut reactor, pane);
         let number = pane as u32;
         serve(&mut reactor, &mut peer, |r, p| {
@@ -1020,18 +1115,18 @@ mod tests {
         let mut peer = Peer::greet(&mut reactor);
         serve(&mut reactor, &mut peer, |_, p| p.hellos == 1);
         let script = "echo later; sleep 30";
-        let pane = reactor.spawn(shell(script), 24, 80).unwrap();
+        let pane = reactor.open_tab(shell(script), 24, 80).unwrap();
         serve(&mut reactor, &mut peer, |r, _| on_screen(r, pane, "later"));
-        peer.watch(pane);
+        peer.fit(&reactor, pane);
         serve(&mut reactor, &mut peer, |r, p| p.matches(r, pane));
     }
 
     #[test]
     fn a_hidden_pane_costs_no_frame_and_still_answers() {
         let mut reactor = Reactor::new().unwrap();
-        let shown = reactor.spawn(shell(ALIVE), 24, 80).unwrap();
         let script = "echo needle; read line; exit 0";
-        let hidden = reactor.spawn(shell(script), 24, 80).unwrap();
+        let hidden = reactor.open_tab(shell(script), 24, 80).unwrap();
+        let shown = reactor.open_tab(shell(ALIVE), 24, 80).unwrap();
         let mut peer = Peer::watching(&mut reactor, shown);
         serve(&mut reactor, &mut peer, |r, p| {
             on_screen(r, hidden, "needle") && p.matches(r, shown)
@@ -1055,11 +1150,9 @@ mod tests {
             pane: number,
             bytes: b"\n",
         });
-        serve(&mut reactor, &mut peer, |_, p| p.exited == [number]);
+        serve(&mut reactor, &mut peer, |_, p| p.tabs == [shown as u32]);
 
         assert!(!peer.frames.contains_key(&number));
-        let session = &reactor.host.window.as_ref().unwrap().session;
-        assert_eq!(session.panes[hidden].sent.cells.capacity(), 0);
         assert!(peer.matches(&reactor, shown));
     }
 
@@ -1067,7 +1160,7 @@ mod tests {
     fn search_copy_cwd_and_exit_reach_the_window() {
         let mut reactor = Reactor::new().unwrap();
         let script = r"seq 1 200; echo needle; printf '\033]7;file:///tmp/where\033\\'; seq 1 50; read line; exit 0";
-        let pane = reactor.spawn(shell(script), 10, 40).unwrap();
+        let pane = reactor.open_tab(shell(script), 10, 40).unwrap();
         let mut peer = Peer::watching(&mut reactor, pane);
         let number = pane as u32;
         serve(&mut reactor, &mut peer, |_, p| p.cwd == "/tmp/where");
@@ -1106,14 +1199,16 @@ mod tests {
             pane: number,
             bytes: b"\n",
         });
-        serve(&mut reactor, &mut peer, |_, p| p.exited == [number]);
+        serve(&mut reactor, &mut peer, |_, p| {
+            p.layouts > 1 && p.tabs.is_empty()
+        });
         assert!(reactor.has_window(), "a pane ending is not the window");
     }
 
     #[test]
     fn buffers_shrink_back_after_a_large_frame() {
         let mut reactor = Reactor::new().unwrap();
-        let pane = reactor.spawn(shell("sleep 30"), 24, 80).unwrap();
+        let pane = reactor.open_tab(shell("sleep 30"), 24, 80).unwrap();
         let mut peer = Peer::watching(&mut reactor, pane);
         let number = pane as u32;
         for size in [400, 24] {
@@ -1222,7 +1317,7 @@ mod tests {
         let mut reactor = Reactor::new().unwrap();
         reactor.attach_window(ours, None).unwrap();
         let script = "ls -1 /dev/fd; echo checked; sleep 30";
-        let pane = reactor.spawn(shell(script), 24, 80).unwrap();
+        let pane = reactor.open_tab(shell(script), 24, 80).unwrap();
         assert!(turn_until(&mut reactor, |r| on_screen(r, pane, "checked")));
         let engine = reactor.engine(pane).unwrap();
         let open: Vec<i32> = (0..24)
@@ -1230,6 +1325,411 @@ mod tests {
             .collect();
         assert!(open.contains(&2), "{open:?}");
         assert!(ends.iter().all(|end| !open.contains(end)), "{open:?}");
+    }
+
+    /// A reactor whose new panes wait for input, with one tab, and a window over it.
+    fn session(rows: u16, columns: u16) -> (Reactor, Peer, u32) {
+        let mut reactor = Reactor::new().unwrap();
+        reactor.shell = || shell(ALIVE);
+        let pane = reactor.open_tab(shell(ALIVE), rows, columns).unwrap();
+        let mut peer = Peer::watching(&mut reactor, pane);
+        serve(&mut reactor, &mut peer, |_, p| p.layouts >= 1);
+        (reactor, peer, pane as u32)
+    }
+
+    fn right(x: u16, columns: u16, rows: u16) -> Rect {
+        Rect {
+            x,
+            y: 0,
+            columns,
+            rows,
+        }
+    }
+
+    #[test]
+    fn a_window_needs_no_pane_number_to_learn_the_layout() {
+        let (reactor, peer, pane) = session(24, 80);
+        assert_eq!(peer.tabs, [pane]);
+        assert_eq!((peer.active, peer.focused), (0, pane));
+        assert_eq!(peer.shown, [(pane, right(0, 80, 24))]);
+        assert!(peer.frames.contains_key(&pane) || reactor.has_window());
+    }
+
+    #[test]
+    fn a_split_shares_the_space_and_the_programs_see_their_sizes() {
+        let mut reactor = Reactor::new().unwrap();
+        reactor.shell = || shell("stty size; read line; exit 0");
+        let first = reactor.open_tab(reactor_shell(), 24, 80).unwrap() as u32;
+        let mut peer = Peer::watching(&mut reactor, 0);
+        peer.send(Request::Split {
+            pane: first,
+            way: SplitWay::Right,
+        });
+        serve(&mut reactor, &mut peer, |_, p| p.shown.len() == 2);
+        let second = peer.shown[1].0;
+        assert_eq!(peer.focused, second);
+        assert_eq!(
+            peer.shown,
+            [(first, right(0, 39, 24)), (second, right(40, 40, 24))]
+        );
+        assert!(turn_until(&mut reactor, |r| {
+            on_screen(r, second as usize, "24 40")
+        }));
+        serve(&mut reactor, &mut peer, |r, p| {
+            p.matches(r, first as usize) && p.matches(r, second as usize)
+        });
+        assert_eq!(reactor.engine(first as usize).unwrap().size(), (24, 39));
+    }
+
+    fn reactor_shell() -> Command {
+        shell("stty size; read line; exit 0")
+    }
+
+    #[test]
+    fn a_resize_lays_out_every_shown_pane_and_leaves_hidden_ones() {
+        let (mut reactor, mut peer, first) = session(24, 80);
+        peer.send(Request::Split {
+            pane: first,
+            way: SplitWay::Down,
+        });
+        serve(&mut reactor, &mut peer, |_, p| p.shown.len() == 2);
+        let second = peer.shown[1].0 as usize;
+        let hidden = reactor.open_tab(shell(ALIVE), 24, 80).unwrap();
+        peer.send(Request::SwitchTab { index: 0 });
+        serve(&mut reactor, &mut peer, |_, p| {
+            p.tabs.len() == 2 && p.active == 0
+        });
+
+        peer.send(Request::Resize {
+            rows: 41,
+            columns: 100,
+        });
+        serve(&mut reactor, &mut peer, |r, p| {
+            p.frames[&first].rows == 20 && p.matches(r, second)
+        });
+        assert_eq!(reactor.engine(first as usize).unwrap().size(), (20, 100));
+        assert_eq!(reactor.engine(second).unwrap().size(), (20, 100));
+        assert_eq!(reactor.engine(hidden).unwrap().size(), (24, 80));
+
+        peer.send(Request::StepTab { forward: false });
+        serve(&mut reactor, &mut peer, |r, p| p.matches(r, hidden));
+        assert_eq!(reactor.engine(hidden).unwrap().size(), (41, 100));
+    }
+
+    #[test]
+    fn a_hidden_tab_costs_no_frame_and_comes_back_whole() {
+        let script = r"read line; printf '\033]7;file:///tmp/away\033\\'; echo written; read line";
+        let mut reactor = Reactor::new().unwrap();
+        let hidden = reactor.open_tab(shell(script), 24, 80).unwrap();
+        let mut peer = Peer::watching(&mut reactor, hidden);
+        let number = hidden as u32;
+        serve(&mut reactor, &mut peer, |r, p| p.matches(r, hidden));
+
+        reactor.shell = || shell(ALIVE);
+        peer.send(Request::NewTab);
+        serve(&mut reactor, &mut peer, |_, p| {
+            p.shown.len() == 1 && p.shown[0].0 != number
+        });
+        let link = |r: &Reactor| -> (usize, usize, bool) {
+            let session = &r.host.window.as_ref().unwrap().session;
+            let state = &session.panes[0];
+            (state.number, state.sent.cells.capacity(), state.watched)
+        };
+        assert_eq!(link(&reactor), (hidden, 0, false));
+
+        let frames = peer.frames[&number].clone();
+        assert!(reactor.write(hidden, b"\n"));
+        serve(&mut reactor, &mut peer, |r, p| {
+            on_screen(r, hidden, "written") && p.cwd == "/tmp/away"
+        });
+        assert_eq!(peer.frames[&number], frames, "a hidden pane sent a frame");
+
+        peer.send(Request::SwitchTab { index: 0 });
+        serve(&mut reactor, &mut peer, |r, p| p.matches(r, hidden));
+    }
+
+    #[test]
+    fn a_new_window_finds_the_same_tabs_and_splits() {
+        let (mut reactor, mut peer, first) = session(24, 80);
+        peer.send(Request::Split {
+            pane: first,
+            way: SplitWay::Right,
+        });
+        peer.send(Request::NewTab);
+        peer.send(Request::SwitchTab { index: 0 });
+        peer.send(Request::Focus { pane: first });
+        serve(&mut reactor, &mut peer, |_, p| {
+            p.tabs.len() == 2 && p.active == 0 && p.focused == first
+        });
+        let (tabs, shown) = (peer.tabs.clone(), peer.shown.clone());
+        peer.send(Request::Quit);
+        assert!(turn_until(&mut reactor, |r| !r.has_window()));
+
+        let mut peer = Peer::greet(&mut reactor);
+        peer.send(Request::Resize {
+            rows: 24,
+            columns: 80,
+        });
+        serve(&mut reactor, &mut peer, |r, p| {
+            p.layouts == 1 && p.matches(r, first as usize)
+        });
+        assert_eq!((peer.tabs, peer.shown, peer.focused), (tabs, shown, first));
+    }
+
+    #[test]
+    fn focus_moves_by_pane_and_by_side_and_zoom_shows_one() {
+        let (mut reactor, mut peer, first) = session(24, 80);
+        peer.send(Request::Split {
+            pane: first,
+            way: SplitWay::Right,
+        });
+        serve(&mut reactor, &mut peer, |_, p| p.shown.len() == 2);
+        let second = peer.shown[1].0;
+
+        peer.send(Request::MoveFocus { side: Side::Left });
+        serve(&mut reactor, &mut peer, |_, p| p.focused == first);
+        peer.send(Request::MoveBorder {
+            side: Side::Right,
+            cells: 5,
+        });
+        serve(&mut reactor, &mut peer, |_, p| {
+            p.shown.first().is_some_and(|(_, rect)| rect.columns == 44)
+        });
+        peer.send(Request::Focus { pane: second });
+        serve(&mut reactor, &mut peer, |_, p| p.focused == second);
+
+        peer.send(Request::Zoom);
+        serve(&mut reactor, &mut peer, |r, p| {
+            p.shown == [(second, right(0, 80, 24))] && p.matches(r, second as usize)
+        });
+        let session = &reactor.host.window.as_ref().unwrap().session;
+        let unwatched = |state: &&PaneLink| state.number == first as usize;
+        let state = session.panes.iter().find(unwatched).unwrap();
+        assert_eq!(state.sent.cells.capacity(), 0, "a zoom hides the others");
+    }
+
+    #[test]
+    fn closing_ends_the_shell_frees_the_pane_and_spares_the_rest() {
+        let (mut reactor, mut peer, first) = session(24, 80);
+        let dir = std::env::temp_dir().join(format!("pinfold-close-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let (pid, hup) = (dir.join("pid"), dir.join("hup"));
+        let script = format!(
+            "echo $$ > '{}'; (trap 'echo hup > {}' HUP; while :; do sleep 0.05; done) & echo ready; read line",
+            pid.display(),
+            hup.display(),
+        );
+        let doomed = reactor
+            .split(first as usize, shell(&script), SplitWay::Down)
+            .unwrap();
+        serve(&mut reactor, &mut peer, |r, p| {
+            on_screen(r, doomed, "ready") && p.matches(r, doomed)
+        });
+        let pid = fs::read_to_string(&pid).unwrap();
+        let alive = || {
+            shell(&format!("kill -0 {}", pid.trim()))
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(alive());
+
+        peer.send(Request::ClosePane {
+            pane: doomed as u32,
+        });
+        serve(&mut reactor, &mut peer, |_, p| p.shown.len() == 1);
+        assert!(!alive(), "the shell outlived its pane");
+        assert!(
+            turn_until(&mut reactor, |_| hup.exists()),
+            "no hangup reached it"
+        );
+        assert!(reactor.engine(doomed).is_none());
+        assert_eq!(reactor.pane_count(), 1);
+        let session = &reactor.host.window.as_ref().unwrap().session;
+        assert!(session.panes.iter().all(|state| state.number != doomed));
+        assert_eq!(peer.shown, [(first, right(0, 80, 24))]);
+        assert_eq!(peer.focused, first);
+        assert_pty_lives(&mut reactor, first as usize);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_program_that_exits_closes_its_pane_then_its_tab_then_the_session() {
+        let (mut reactor, mut peer, first) = session(24, 80);
+        reactor.shell = || shell("read line; exit 0");
+        peer.send(Request::Split {
+            pane: first,
+            way: SplitWay::Right,
+        });
+        peer.send(Request::NewTab);
+        serve(&mut reactor, &mut peer, |_, p| p.tabs.len() == 2);
+        let (split, tab) = (1, 2);
+        assert_eq!(peer.tabs, [split, tab]);
+
+        reactor.write(tab as usize, b"\n");
+        serve(&mut reactor, &mut peer, |_, p| p.tabs == [split]);
+        assert_eq!(peer.active, 0);
+        reactor.write(split as usize, b"\n");
+        serve(&mut reactor, &mut peer, |_, p| {
+            p.focused == first && p.shown == [(first, right(0, 80, 24))]
+        });
+        reactor.write(first as usize, b"exit\n");
+        peer.send(Request::ClosePane { pane: first });
+        serve(&mut reactor, &mut peer, |_, p| p.tabs.is_empty());
+        assert_eq!(reactor.pane_count(), 0);
+        assert!(reactor.has_window(), "the window goes when it reads this");
+    }
+
+    #[test]
+    fn numbers_are_not_used_again_so_late_input_reaches_nobody() {
+        let (mut reactor, mut peer, first) = session(24, 80);
+        peer.send(Request::NewTab);
+        serve(&mut reactor, &mut peer, |_, p| p.tabs.len() == 2);
+        let second = peer.tabs[1];
+        peer.send(Request::ClosePane { pane: second });
+        peer.send(Request::NewTab);
+        serve(&mut reactor, &mut peer, |_, p| {
+            p.tabs.len() == 2 && p.tabs[1] != second
+        });
+        let third = peer.tabs[1] as usize;
+        peer.send(Request::Input {
+            pane: second,
+            bytes: b"late\n",
+        });
+        peer.send(Request::Input {
+            pane: third as u32,
+            bytes: b"mine\n",
+        });
+        assert!(turn_until(&mut reactor, |r| on_screen(
+            r, third, "got-mine"
+        )));
+        assert!(!on_screen(&reactor, third, "late"));
+        assert_pty_lives(&mut reactor, first as usize);
+    }
+
+    #[test]
+    fn past_the_caps_commands_are_refused_and_the_link_stays() {
+        let (mut reactor, mut peer, first) = session(1024, 1024);
+        for _ in 0..MAX_TABS + 8 {
+            peer.send(Request::NewTab);
+        }
+        serve(&mut reactor, &mut peer, |_, p| {
+            p.refused.contains(&Refusal::Tabs)
+        });
+        assert_eq!(reactor.session.tabs().len(), MAX_TABS);
+        assert_eq!(peer.tabs.len(), MAX_TABS);
+
+        peer.send(Request::SwitchTab { index: 0 });
+        for _ in 0..MAX_PANES {
+            peer.send(Request::Split {
+                pane: first,
+                way: SplitWay::Down,
+            });
+        }
+        serve(&mut reactor, &mut peer, |_, p| {
+            p.refused.contains(&Refusal::Panes)
+        });
+        assert_eq!(reactor.pane_count(), MAX_PANES);
+        assert!(reactor.has_window());
+        assert_pty_lives(&mut reactor, peer.tabs[1] as usize);
+    }
+
+    #[test]
+    fn a_split_with_no_room_is_refused_and_changes_nothing() {
+        let (mut reactor, mut peer, first) = session(1, 2);
+        let before = reactor.session.clone();
+        peer.send(Request::Split {
+            pane: first,
+            way: SplitWay::Right,
+        });
+        serve(&mut reactor, &mut peer, |_, p| p.refused == [Refusal::Room]);
+        assert_eq!(reactor.session, before);
+        assert_eq!(reactor.pane_count(), 1);
+    }
+
+    #[test]
+    fn a_shell_that_will_not_start_is_refused_and_changes_nothing() {
+        let (mut reactor, mut peer, first) = session(24, 80);
+        reactor.shell = || Command::new("/does/not/exist");
+        let before = reactor.session.clone();
+        peer.send(Request::NewTab);
+        peer.send(Request::Split {
+            pane: first,
+            way: SplitWay::Right,
+        });
+        serve(&mut reactor, &mut peer, |_, p| {
+            p.refused.contains(&Refusal::Spawn)
+        });
+        assert_eq!(reactor.session, before);
+        assert!(reactor.has_window());
+    }
+
+    #[test]
+    fn a_pane_closed_during_a_copy_leaves_the_clipboard_alone() {
+        let (mut reactor, mut peer, first) = session(24, 80);
+        peer.send(Request::NewTab);
+        serve(&mut reactor, &mut peer, |_, p| p.tabs.len() == 2);
+        let second = peer.tabs[1];
+        peer.send(Request::Copy {
+            pane: second,
+            selection: link::Selection::default(),
+        });
+        peer.send(Request::ClosePane { pane: second });
+        serve(&mut reactor, &mut peer, |_, p| p.copied.len() == 1);
+        assert_eq!(peer.copied, [""]);
+        assert_pty_lives(&mut reactor, first as usize);
+    }
+
+    fn sides() -> impl Strategy<Value = Side> {
+        prop::sample::select(&[Side::Left, Side::Right, Side::Up, Side::Down][..])
+    }
+
+    /// Any command, and the panes it can name, which include ones that have closed.
+    fn commands() -> impl Strategy<Value = Request<'static>> {
+        let way = prop::sample::select(&[SplitWay::Right, SplitWay::Down][..]);
+        let pane = 0..24_u32;
+        prop_oneof![
+            Just(Request::NewTab),
+            Just(Request::Zoom),
+            (0..MAX_TABS as u16).prop_map(|index| Request::SwitchTab { index }),
+            any::<bool>().prop_map(|forward| Request::StepTab { forward }),
+            (pane.clone(), way).prop_map(|(pane, way)| Request::Split { pane, way }),
+            pane.clone().prop_map(|pane| Request::ClosePane { pane }),
+            pane.clone().prop_map(|pane| Request::Focus { pane }),
+            pane.prop_map(|pane| Request::FullFrame { pane }),
+            sides().prop_map(|side| Request::MoveFocus { side }),
+            (sides(), 1..=link::MAX_DIMENSION)
+                .prop_map(|(side, cells)| Request::MoveBorder { side, cells }),
+            (1..=link::MAX_DIMENSION, 1..=link::MAX_DIMENSION)
+                .prop_map(|(rows, columns)| Request::Resize { rows, columns }),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(12))]
+
+        #[test]
+        fn any_commands_leave_a_core_that_matches_its_session(
+            commands in prop::collection::vec(commands(), 1..40),
+        ) {
+            let mut reactor = Reactor::new().unwrap();
+            reactor.shell = || Command::new("/bin/cat");
+            reactor.open_tab(Command::new("/bin/cat"), 24, 80).unwrap();
+            let mut peer = Peer::greet(&mut reactor);
+            for command in commands {
+                peer.send(command);
+                reactor.turn(Some(Duration::ZERO)).unwrap();
+                peer.read();
+            }
+            prop_assert!(reactor.has_window());
+            let held: Vec<usize> = reactor.numbers().collect();
+            let mut tabbed: Vec<usize> = (reactor.session.tabs().iter())
+                .flat_map(|tab| tab.panes().map(|pane| pane as usize))
+                .collect();
+            tabbed.sort_unstable();
+            prop_assert_eq!(held, tabbed);
+        }
     }
 
     #[test]

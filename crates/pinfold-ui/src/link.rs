@@ -132,7 +132,8 @@ impl State {
                 self.copying -= 1;
                 self.copied = Some(text.to_owned());
             }
-            Notice::Exited { pane } if pane == self.pane => self.exited = true,
+            // Until the window draws layouts: its one pane has gone.
+            Notice::Layout(layout) if layout.is_empty() => self.exited = true,
             Notice::Raise => self.raised = true,
             _ => {}
         }
@@ -456,7 +457,7 @@ mod tests {
     use std::time::Instant;
 
     use pinfold_proto::Cell;
-    use pinfold_proto::link::{MAX_MESSAGE, MAX_PASTE, encode_frame};
+    use pinfold_proto::link::{MAX_MESSAGE, MAX_PASTE, encode_frame, encode_layout};
 
     use super::*;
 
@@ -481,6 +482,12 @@ mod tests {
         fn frame(&mut self, frame: &Frame, top: usize, previous: Option<&Frame>) -> io::Result<()> {
             let mut wire = Vec::new();
             encode_frame(&mut wire, PANE, frame, top, 1..9, previous).map_err(io::Error::other)?;
+            self.stream.write_all(&wire)
+        }
+
+        fn no_tabs(&mut self) -> io::Result<()> {
+            let mut wire = Vec::new();
+            encode_layout(&mut wire, 0, 0, &[], &[]).map_err(io::Error::other)?;
             self.stream.write_all(&wire)
         }
 
@@ -814,8 +821,7 @@ mod tests {
         let mut wire = Vec::new();
         encode_frame(&mut wire, pane, &screen('a'), 0, 1..9, None).unwrap();
         peer.stream.write_all(&wire).unwrap();
-        peer.notices(&[Notice::Cwd { pane, path }, Notice::Exited { pane }])
-            .unwrap();
+        peer.notices(&[Notice::Cwd { pane, path }]).unwrap();
         let (pane, path) = (PANE, "/ours");
         peer.notices(&[Notice::Cwd { pane, path }]).unwrap();
         assert!(turn_until(&mut link, Link::take_dirty));
@@ -838,8 +844,8 @@ mod tests {
         assert_eq!(link.take_searched(), Some(found));
         assert_eq!(link.take_searched(), None);
 
-        peer.notices(&[Notice::Cwd { pane, path }, Notice::Exited { pane }])
-            .unwrap();
+        peer.notices(&[Notice::Cwd { pane, path }]).unwrap();
+        peer.no_tabs().unwrap();
         assert!(turn_until(&mut link, |link| link.is_closed()));
         assert!(!link.take_dirty(), "the same directory changes nothing");
         assert_eq!(link.disconnected(), None, "an exit is not a disconnect");
@@ -879,9 +885,9 @@ mod tests {
                 pane,
                 text: unasked,
             },
-            Notice::Exited { pane },
         ])
         .unwrap();
+        peer.no_tabs().unwrap();
         assert!(turn_until(&mut link, |link| link.is_closed()));
         assert_eq!(link.take_copied().as_deref(), Some(asked));
         assert_eq!(link.take_copied(), None);
