@@ -8,6 +8,7 @@ mod paste;
 mod reload;
 mod search_bar;
 mod selection;
+mod top_bar;
 mod window;
 
 pub use window::{Error, run};

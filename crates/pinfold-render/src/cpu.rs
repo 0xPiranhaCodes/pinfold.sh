@@ -149,7 +149,8 @@ where
                 continue;
             }
             self.painter.draw_row(&mut canvas, row, cells);
-            let top = u32::try_from(self.padding.top + row * cell_height).unwrap_or(u32::MAX);
+            let top = self.padding.row_top(row, cell_height);
+            let top = u32::try_from(top).unwrap_or(u32::MAX);
             if top < self.height {
                 let rows = (self.height - top).min(u32::try_from(cell_height).unwrap_or(u32::MAX));
                 if let Some(rows) = NonZeroU32::new(rows) {

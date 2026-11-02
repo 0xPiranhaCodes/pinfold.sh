@@ -5,6 +5,7 @@
 
 use std::env;
 use std::io;
+use std::ops::Range;
 use std::path::Path;
 use std::process::Command;
 use std::rc::Rc;
@@ -38,7 +39,8 @@ use crate::flash::Flash;
 use crate::paste::Prompt;
 use crate::search_bar::{Bar, Step};
 use crate::selection::Selecting;
-use crate::{ime, input, mouse, paste, reload, search_bar, selection};
+use crate::top_bar::Clicks;
+use crate::{ime, input, mouse, paste, reload, search_bar, selection, top_bar};
 
 const DEFAULT_SIZE: LogicalSize<u32> = LogicalSize::new(1000, 640);
 const PANE: usize = 0;
@@ -99,6 +101,8 @@ struct Latest {
     frame: Mutex<Frame>,
     /// The core's number for the first row of `frame`.
     top: AtomicUsize,
+    /// The last directory the pane reported, as program output wrote it. Empty if none.
+    cwd: Mutex<String>,
     pending: AtomicBool,
 }
 
@@ -156,6 +160,10 @@ fn run_io(
                 engine.frame(&mut frame);
                 let top = engine.position(0, 0).row;
                 latest.top.store(top, Ordering::Release);
+                if let Ok(mut cwd) = latest.cwd.lock() {
+                    cwd.clear();
+                    cwd.push_str(engine.cwd().map_or("", |cwd| cwd.path.as_str()));
+                }
             }
             latest.pending.store(true, Ordering::Release);
             if proxy.send_event(Notice::Frame).is_err() {
@@ -235,11 +243,20 @@ struct App {
     preedit: (String, usize),
     /// The core's number for the first row of `frame`.
     top: usize,
-    /// The screen with the selection, `preedit` and chrome over it. Empty until there are any.
+    /// The screen with the selection, `preedit` and chrome over it.
     composed: Frame,
+    /// The top bar's label, made safe to draw.
+    label: String,
+    /// The window columns the top bar's tab takes.
+    tab: Range<usize>,
+    /// When the clock in the top bar next changes.
+    minute: Instant,
+    /// Whether the pointer is over the top bar.
+    on_bar: bool,
+    clicks: Clicks,
     /// Where the input method's window was last told to go.
     ime_cursor: Option<(u16, u16)>,
-    /// The cell under the pointer, as `(row, column)`.
+    /// The pane cell under the pointer, as `(row, column)`. Over the top bar, its top row.
     pointer: (u16, u16),
     /// The buttons held, by their number in reports, lowest first.
     buttons: [bool; 3],
@@ -276,8 +293,6 @@ impl App {
             None => attributes.with_inner_size(DEFAULT_SIZE),
         };
         // Without this macOS hands over the composed character, such as ƒ for Option+f.
-        // shortcut: the first row's left cells sit under the traffic lights, which padding of 12
-        // does not clear, the top bar must take that row.
         #[cfg(target_os = "macos")]
         let attributes = attributes
             .with_option_as_alt(option_as_alt(&self.config))
@@ -301,7 +316,7 @@ impl App {
         let cell = open.renderer.cell_size();
         let (rows, columns) = padding.grid(size.width, size.height, cell);
         open.window.request_redraw();
-        let rows = rows.saturating_sub(CHROME_ROWS).max(1);
+        let rows = rows.saturating_sub(top_bar::ROWS + CHROME_ROWS).max(1);
         self.request(Request::Resize(rows, columns.max(1)));
     }
 
@@ -344,6 +359,9 @@ impl App {
                     .check((&latest, self.top), (&self.frame, top));
                 self.top = top;
             }
+            if let Ok(cwd) = self.latest.cwd.lock() {
+                top_bar::label(&cwd, &mut self.label);
+            }
             self.latest.pending.store(false, Ordering::Release);
             let _ = self.waker.wake();
         }
@@ -355,36 +373,41 @@ impl App {
                 if let Some((row, column)) = self.frame.cursor {
                     let (width, height) = open.renderer.cell_size();
                     let padding = open.padding();
+                    let row = usize::from(row) + usize::from(top_bar::ROWS);
                     let x = padding.left + usize::from(column) * width;
-                    let y = padding.top + usize::from(row) * height;
+                    let y = padding.row_top(row, height);
                     open.window.set_ime_cursor_area(
                         PhysicalPosition::new(x as u32, y as u32),
                         PhysicalSize::new(width as u32, height as u32),
                     );
                 }
             }
-            let selection = self.selecting.current;
-            let plain = self.prompt.is_none()
-                && self.flash.until().is_none()
-                && self.bar.is_none()
-                && selection.is_none();
-            if self.preedit.0.is_empty() && plain {
-                open.renderer.draw(&self.frame)?;
-            } else {
-                self.composed.clone_from(&self.frame);
-                if let Some(selection) = selection {
-                    selection::overlay(&mut self.composed, self.top, selection);
-                }
-                ime::overlay(&mut self.composed, &self.preedit.0, self.preedit.1);
-                if let Some(prompt) = &self.prompt {
-                    paste::banner(&mut self.composed, prompt);
-                } else if let Some(bar) = &self.bar {
-                    bar.draw(&mut self.composed);
-                } else {
-                    self.flash.banner(&mut self.composed);
-                }
-                open.renderer.draw(&self.composed)?;
+            // Frame's derived clone_from would allocate, and this runs on every redraw.
+            let mut cells = std::mem::take(&mut self.composed.cells);
+            cells.clone_from(&self.frame.cells);
+            self.composed = Frame {
+                cells,
+                ..self.frame
+            };
+            if let Some(selection) = self.selecting.current {
+                selection::overlay(&mut self.composed, self.top, selection);
             }
+            ime::overlay(&mut self.composed, &self.preedit.0, self.preedit.1);
+            if let Some(prompt) = &self.prompt {
+                paste::banner(&mut self.composed, prompt);
+            } else if let Some(bar) = &self.bar {
+                bar.draw(&mut self.composed);
+            } else {
+                self.flash.banner(&mut self.composed);
+            }
+            let (time, minute_left) = top_bar::now();
+            self.minute = Instant::now() + minute_left;
+            let scale = open.window.scale_factor();
+            let cell_width = open.renderer.cell_size().0;
+            let left = open.padding().left;
+            let inset = top_bar::inset(top_bar::LEFT_POINTS, scale, left, cell_width);
+            self.tab = top_bar::draw(&mut self.composed, &self.label, time, inset);
+            open.renderer.draw(&self.composed)?;
         }
         Ok(())
     }
@@ -499,6 +522,9 @@ impl App {
     }
 
     fn report(&self, event: mouse::Event) {
+        if !top_bar::reaches_program(event, self.on_bar) {
+            return;
+        }
         let frame = &self.frame;
         let report = mouse::encode(
             event,
@@ -515,9 +541,9 @@ impl App {
     fn pointer_moved(&mut self, x: f64, y: f64) {
         let Some(open) = &self.open else { return };
         let grid = (self.frame.rows, self.frame.columns);
-        let pointer = open
-            .padding()
-            .cell_at(x, y, open.renderer.cell_size(), grid);
+        let cell_size = open.renderer.cell_size();
+        let (on_bar, pointer) = top_bar::locate(open.padding(), x, y, cell_size, grid);
+        self.on_bar = on_bar;
         if self.pointer != pointer {
             self.pointer = pointer;
             if self.selecting.drag(self.pointer_position()) {
@@ -537,7 +563,17 @@ impl App {
             _ => return,
         };
         let down = state == ElementState::Pressed;
+        if down && self.on_bar {
+            if number == 0 {
+                self.bar_pressed();
+            }
+            return;
+        }
         if number == 0 && self.select(down) {
+            return;
+        }
+        // The press may have been on the bar, so the program never saw it.
+        if !down && !self.buttons[usize::from(number)] {
             return;
         }
         self.buttons[usize::from(number)] = down;
@@ -546,6 +582,20 @@ impl App {
         } else {
             mouse::Event::Release(number)
         });
+    }
+
+    /// Moves or zooms the window from a left press on the empty part of the top bar.
+    fn bar_pressed(&mut self) {
+        let Some(open) = &self.open else { return };
+        if self.tab.contains(&usize::from(self.pointer.1)) {
+            return;
+        }
+        // shortcut: always zooms in a fixed time, read the macOS double-click settings if asked.
+        if cfg!(target_os = "macos") && self.clicks.press(Instant::now()) {
+            open.window.set_maximized(!open.window.is_maximized());
+        } else {
+            let _ = open.window.drag_window();
+        }
     }
 
     /// Takes a left press or release for a selection, and returns whether it did.
@@ -562,7 +612,9 @@ impl App {
     }
 
     fn wheel(&mut self, delta: MouseScrollDelta) {
-        let Some(open) = &self.open else { return };
+        let Some(open) = self.open.as_ref().filter(|_| !self.on_bar) else {
+            return;
+        };
         self.wheel += match delta {
             MouseScrollDelta::LineDelta(_, lines) => lines,
             MouseScrollDelta::PixelDelta(position) => {
@@ -699,11 +751,11 @@ impl ApplicationHandler<Notice> for App {
                     self.result = Err(error);
                     event_loop.exit();
                 }
-                event_loop.set_control_flow(
-                    self.flash
-                        .until()
-                        .map_or(ControlFlow::Wait, ControlFlow::WaitUntil),
-                );
+                let wake = self
+                    .flash
+                    .until()
+                    .map_or(self.minute, |flash| flash.min(self.minute));
+                event_loop.set_control_flow(ControlFlow::WaitUntil(wake));
             }
             _ => {}
         }
@@ -765,6 +817,11 @@ pub fn run(size: Option<(u32, u32)>) -> Result<(), Error> {
         preedit: (String::new(), 0),
         top: 0,
         composed: Frame::default(),
+        label: String::new(),
+        tab: 0..0,
+        minute: Instant::now(),
+        on_bar: false,
+        clicks: Clicks::default(),
         ime_cursor: None,
         pointer: (0, 0),
         buttons: [false; 3],

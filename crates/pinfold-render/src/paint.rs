@@ -14,9 +14,8 @@ pub struct Canvas<'a> {
     pixels: &'a mut [u32],
     width: usize,
     height: usize,
-    /// The first cell's top-left corner.
-    left: usize,
-    top: usize,
+    /// Where the grid sits.
+    padding: Padding,
 }
 
 impl<'a> Canvas<'a> {
@@ -27,19 +26,14 @@ impl<'a> Canvas<'a> {
             pixels,
             width,
             height,
-            left: 0,
-            top: 0,
+            padding: Padding::default(),
         })
     }
 
     /// Moves the grid inside `padding`.
     #[must_use]
     pub fn inset(self, padding: Padding) -> Self {
-        Self {
-            left: padding.left,
-            top: padding.top,
-            ..self
-        }
+        Self { padding, ..self }
     }
 
     /// Fills every pixel.
@@ -153,14 +147,14 @@ impl Painter {
             cell_height,
             baseline,
         } = self.cache.metrics();
-        let top = row.saturating_mul(cell_height).saturating_add(canvas.top);
+        let top = canvas.padding.row_top(row, cell_height);
         if top >= canvas.height {
             return;
         }
         let bottom = (top + cell_height).min(canvas.height);
         // Backgrounds go first, so a wide glyph is not erased by the cell after it.
         for (column, cell) in cells.iter().enumerate() {
-            let left = column.saturating_mul(cell_width) + canvas.left;
+            let left = column.saturating_mul(cell_width) + canvas.padding.left;
             canvas.fill(
                 left,
                 top,
@@ -179,7 +173,7 @@ impl Painter {
             let Some(glyph) = self.cache.get(cell.character, cell.style()) else {
                 continue;
             };
-            let left = i64::try_from(column * cell_width + canvas.left).unwrap_or(i64::MAX)
+            let left = i64::try_from(column * cell_width + canvas.padding.left).unwrap_or(i64::MAX)
                 + i64::from(glyph.left);
             let first = i64::from(pen_y) - i64::from(glyph.top);
             for (line, mask) in glyph.mask.chunks(glyph.width.max(1)).enumerate() {
@@ -278,6 +272,7 @@ mod tests {
             top: 2,
             right: 1,
             bottom: 1,
+            gap: 0,
         };
         let (width, height) = (cell_width + 4, cell_height + 3);
         let mut buffer = vec![0; width * height];
