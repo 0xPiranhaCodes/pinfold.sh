@@ -1,6 +1,6 @@
 //! The search bar, drawn in the row under the pane so program output cannot fake it.
 
-use pinfold_core::search::{Direction, MAX_QUERY, Position, Selection};
+use pinfold_proto::link::{Direction, MAX_QUERY, Position, Selection};
 use pinfold_proto::{Cell, Frame};
 use unicode_width::UnicodeWidthChar;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
@@ -148,7 +148,9 @@ pub(crate) fn write(
 }
 
 /// Returns the rows to scroll a view of `rows` rows from row `top` to show row `row`, which
-/// is nothing if the view shows it already.
+/// is nothing if the view shows it already. The core does this for the window, so only the
+/// tests here that drive an engine directly need it.
+#[cfg(test)]
 pub fn scroll_to(row: usize, top: usize, rows: u16) -> i32 {
     let bottom = top.saturating_add(usize::from(rows).saturating_sub(1));
     let distance = |rows: usize| i32::try_from(rows).unwrap_or(i32::MAX);

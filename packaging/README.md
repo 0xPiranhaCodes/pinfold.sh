@@ -8,9 +8,13 @@ Pinfold logo, which [TRADEMARK.md](../TRADEMARK.md) covers.
 
 ```sh
 cargo build --release -p pinfold-cli
-sh packaging/macos/bundle.sh target/release/pinfold target/release/pinfold-core target/release
+sh packaging/macos/bundle.sh target/release/pinfold target/release/pinfold-core \
+  target/release/pinfold-window target/release
 open target/release/Pinfold.app
 ```
+
+`pinfold`, `pinfold-core` and `pinfold-window` must sit in one directory: the launcher and the
+core each find the next by looking beside themselves.
 
 Every package must ship `crates/pinfold-render/fonts/OFL.txt`, the license of the bundled font.
 

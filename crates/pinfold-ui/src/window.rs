@@ -1,10 +1,11 @@
 //! One window with one pane.
 //!
-//! The I/O thread owns the PTY and hands the window copies of the screen. M2 moves that
-//! thread into the core process, and until then a window crash ends the shell.
+//! The core owns the PTY, and the I/O thread here owns the link to it (ADR-0028). That thread
+//! hands the window copies of the screen, so a window that dies leaves the pane running.
 
 use std::io;
 use std::ops::Range;
+use std::os::fd::OwnedFd;
 use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -13,9 +14,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
 
+use mio::Waker;
 use pinfold_config::Config;
-use pinfold_core::io::{Reactor, Waker};
-use pinfold_core::search::{Direction, Position, Selection};
+use pinfold_proto::link::{Direction, Position, Selection};
 use pinfold_proto::{Frame, MouseMode};
 use pinfold_render::cpu::{CpuRenderer, Renderer};
 use pinfold_render::font::{Font, FontError};
@@ -33,18 +34,18 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::macos::{OptionAsAlt, WindowAttributesExtMacOS, WindowExtMacOS};
 use winit::window::{Window, WindowId};
 
-use crate::flash::Flash;
+use crate::flash::{self, Flash};
+use crate::link::Link;
 use crate::paste::Prompt;
 use crate::search_bar::{Bar, Step};
 use crate::selection::Selecting;
 use crate::top_bar::Clicks;
 use crate::vi::{Step as ViStep, Vi, View};
-use crate::{ime, input, mouse, paste, reload, search_bar, selection, shell, top_bar};
+use crate::{ime, input, mouse, paste, reload, selection, top_bar};
 
 const DEFAULT_SIZE: LogicalSize<u32> = LogicalSize::new(1000, 640);
-const PANE: usize = 0;
-const ROWS: u16 = 24;
-const COLUMNS: u16 = 80;
+/// The core starts this pane itself.
+const PANE: u32 = 0;
 /// Rows under the pane that belong to Pinfold, so program output cannot reach them.
 const CHROME_ROWS: u16 = 1;
 
@@ -63,7 +64,7 @@ pub enum Error {
     /// The drawing surface failed.
     #[error(transparent)]
     Render(#[from] pinfold_render::cpu::RenderError),
-    /// The PTY or poller failed.
+    /// The link or poller failed.
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -91,6 +92,10 @@ enum Notice {
     Searched(Option<Selection>),
     Copied(String),
     Exited,
+    /// The link ended, so the panes went with the core.
+    Ended,
+    /// Asked to come to the front.
+    Raise,
     /// The config file was saved, and this is what it now says.
     Config(Config),
 }
@@ -109,84 +114,84 @@ struct Latest {
     pending: AtomicBool,
 }
 
-/// Scrolls the pane's view just far enough to show `row`.
-fn reveal(reactor: &mut Reactor, row: usize) {
-    if let Some(engine) = reactor.engine(PANE) {
-        let top = engine.position(0, 0).row;
-        let lines = search_bar::scroll_to(row, top, engine.size().0);
-        reactor.scroll(PANE, lines);
-    }
+/// Copies `source` over `target`. Frame's derived clone_from would allocate, and this runs on
+/// every redraw.
+fn copy_frame(target: &mut Frame, source: &Frame) {
+    let mut cells = std::mem::take(&mut target.cells);
+    cells.clone_from(&source.cells);
+    *target = Frame { cells, ..*source };
 }
 
+/// Runs the link until it ends or the pane closes. The last screen stays in `latest`.
 fn run_io(
-    mut reactor: Reactor,
+    mut link: Link,
     requests: &Receiver<Request>,
     latest: &Latest,
     proxy: &EventLoopProxy<Notice>,
-) -> io::Result<()> {
-    let mut searching = false;
+) {
     loop {
-        reactor.turn(None)?;
+        // An error stays in `link`, which the end of this pass reads.
+        let _ = link.turn(None);
+        // shortcut: a request the link refuses while the core lags is lost, which a later resize
+        // or key puts right, retry them if a person ever sees one go.
         while let Ok(request) = requests.try_recv() {
             match request {
                 Request::Input(bytes) => {
-                    reactor.write(PANE, &bytes);
+                    link.write(&bytes);
                 }
                 Request::Paste(text) => {
-                    reactor.paste(PANE, &text);
+                    link.paste(&text);
                 }
-                Request::Resize(rows, columns) => reactor.resize(PANE, rows, columns)?,
-                Request::Scroll(lines) => reactor.scroll(PANE, lines),
-                Request::Reveal(row) => reveal(&mut reactor, row),
+                Request::Resize(rows, columns) => {
+                    link.resize(rows, columns);
+                }
+                Request::Scroll(lines) => {
+                    link.scroll(lines);
+                }
+                Request::Reveal(row) => {
+                    link.reveal(row);
+                }
                 Request::Search {
                     query,
                     from,
                     direction,
-                } => searching = reactor.search(PANE, &query, from, direction),
+                } => {
+                    link.search(&query, from, direction);
+                }
                 Request::Copy(selection) => {
-                    let mut text = String::new();
-                    if let Some(engine) = reactor.engine(PANE) {
-                        // shortcut: past MAX_SELECTION this copies the rows that fit without
-                        // saying so, tell the user in the chrome.
-                        engine.selection_text(selection, &mut text);
-                    }
-                    if proxy.send_event(Notice::Copied(text)).is_err() {
-                        return Ok(());
-                    }
+                    link.copy(selection);
                 }
             }
         }
-        if searching && !reactor.is_searching(PANE) {
-            searching = false;
-            let found = reactor.take_found(PANE);
-            if let Some(found) = found {
-                reveal(&mut reactor, found.anchor.row);
-            }
-            if proxy.send_event(Notice::Searched(found)).is_err() {
-                return Ok(());
+        let searched = link.take_searched().map(Notice::Searched);
+        let copied = link.take_copied().map(Notice::Copied);
+        let raised = link.take_raised().then_some(Notice::Raise);
+        for notice in [searched, copied, raised].into_iter().flatten() {
+            if proxy.send_event(notice).is_err() {
+                return;
             }
         }
-        if !latest.pending.load(Ordering::Acquire) && reactor.take_dirty(PANE) {
-            if let (Some(engine), Ok(mut frame)) = (reactor.engine(PANE), latest.frame.lock()) {
-                engine.frame(&mut frame);
-                let top = engine.position(0, 0).row;
-                latest.top.store(top, Ordering::Release);
+        if !latest.pending.load(Ordering::Acquire) && link.take_dirty() {
+            if let Ok(mut frame) = latest.frame.lock() {
+                copy_frame(&mut frame, link.frame());
+                latest.top.store(link.top(), Ordering::Release);
                 if let Ok(mut held) = latest.held.lock() {
-                    *held = engine.view_rows();
+                    *held = link.held();
                 }
                 if let Ok(mut cwd) = latest.cwd.lock() {
                     cwd.clear();
-                    cwd.push_str(engine.cwd().map_or("", |cwd| cwd.path.as_str()));
+                    cwd.push_str(link.cwd());
                 }
             }
             latest.pending.store(true, Ordering::Release);
             if proxy.send_event(Notice::Frame).is_err() {
-                return Ok(());
+                return;
             }
         }
-        if reactor.is_closed(PANE) {
-            let _ = proxy.send_event(Notice::Exited);
-            return Ok(());
+        if link.is_closed() {
+            let ended = link.disconnected().is_some();
+            let _ = proxy.send_event(if ended { Notice::Ended } else { Notice::Exited });
+            return;
         }
     }
 }
@@ -288,7 +293,20 @@ struct App {
     bar: Option<Bar>,
     /// Vi mode, while on. Keys go to this or the bar, and none to the program.
     vi: Option<Vi>,
+    /// Whether the core has gone. The last screen stays, under a row that says so.
+    ended: bool,
     result: Result<(), Error>,
+}
+
+/// The scale glyphs are drawn at. The gate's macOS budget names a Retina window, so a measured
+/// one draws at that scale on any display: a 1x runner would hold four times the cells.
+fn font_scale(measured: Option<(u32, u32)>, scale: f64) -> f32 {
+    let reference = if cfg!(target_os = "macos") && measured.is_some() {
+        scale.max(2.0)
+    } else {
+        scale
+    };
+    reference as f32
 }
 
 impl App {
@@ -319,7 +337,7 @@ impl App {
             .with_title_hidden(true);
         let window = Rc::new(event_loop.create_window(attributes)?);
         window.set_ime_allowed(true);
-        let size = self.config.font_size * window.scale_factor() as f32;
+        let size = self.config.font_size * font_scale(self.size, window.scale_factor());
         let renderer = renderer(&window, size, self.config.font_path.as_deref())?;
         let mut open = Open { window, renderer };
         open.apply_background(&self.config);
@@ -342,7 +360,7 @@ impl App {
     fn scale_changed(&mut self, scale: f64) {
         let Some(open) = &mut self.open else { return };
         open.renderer
-            .set_font_size(self.config.font_size * scale as f32);
+            .set_font_size(self.config.font_size * font_scale(self.size, scale));
         let size = open.window.inner_size();
         self.ime_cursor = None;
         self.resized(size);
@@ -410,13 +428,7 @@ impl App {
                     );
                 }
             }
-            // Frame's derived clone_from would allocate, and this runs on every redraw.
-            let mut cells = std::mem::take(&mut self.composed.cells);
-            cells.clone_from(&self.frame.cells);
-            self.composed = Frame {
-                cells,
-                ..self.frame
-            };
+            copy_frame(&mut self.composed, &self.frame);
             if let Some(selection) = self.selecting.current {
                 selection::overlay(&mut self.composed, self.top, selection);
             }
@@ -424,7 +436,9 @@ impl App {
             if let Some(vi) = &self.vi {
                 self.composed.cursor = vi.drawn(self.top, self.frame.rows);
             }
-            if let Some(prompt) = &self.prompt {
+            if self.ended {
+                flash::ended(&mut self.composed);
+            } else if let Some(prompt) = &self.prompt {
                 paste::banner(&mut self.composed, prompt);
             } else if let Some(bar) = &self.bar {
                 bar.draw(&mut self.composed);
@@ -801,6 +815,17 @@ impl ApplicationHandler<Notice> for App {
                 }
             }
             Notice::Exited => event_loop.exit(),
+            Notice::Ended => {
+                self.ended = true;
+                self.redraw_soon();
+            }
+            Notice::Raise => {
+                if let Some(open) = &self.open {
+                    // Winit will not focus a minimized window.
+                    open.window.set_minimized(false);
+                    open.window.focus_window();
+                }
+            }
             Notice::Config(config) => self.configure(config),
         }
     }
@@ -879,29 +904,24 @@ fn config() -> Config {
     })
 }
 
-/// Opens a window running the user's shell, and returns when either closes.
+/// Opens a window on the core at the other end of `link`, and returns when the window closes
+/// or the pane's program exits. A core that goes away leaves the window open and saying so.
 ///
 /// `size` is an optional inner size in physical pixels.
 ///
 /// # Errors
 ///
-/// Returns an error if the window, font, surface or shell cannot be set up.
-pub fn run(size: Option<(u32, u32)>) -> Result<(), Error> {
-    let mut reactor = Reactor::new()?;
-    reactor.spawn(shell::command(), ROWS, COLUMNS)?;
-    let waker = reactor.waker();
+/// Returns an error if the window, font, surface or link cannot be set up.
+pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
+    let link = Link::new(link, PANE)?;
+    let waker = link.waker();
     let (requests, received) = mpsc::channel();
     let latest = Arc::new(Latest::default());
     let event_loop = EventLoop::with_user_event().build()?;
     let (proxy, shared) = (event_loop.create_proxy(), latest.clone());
     thread::Builder::new()
         .name("pinfold-io".into())
-        .spawn(move || {
-            if let Err(error) = run_io(reactor, &received, &shared, &proxy) {
-                eprintln!("pinfold: I/O thread stopped: {error}");
-                let _ = proxy.send_event(Notice::Exited);
-            }
-        })?;
+        .spawn(move || run_io(link, &received, &shared, &proxy))?;
     // Before the file is first read, so a save between the two is not missed.
     let proxy = event_loop.create_proxy();
     reload::watch(move |config| proxy.send_event(Notice::Config(config)).is_ok())?;
@@ -933,8 +953,24 @@ pub fn run(size: Option<(u32, u32)>) -> Result<(), Error> {
         selecting: Selecting::default(),
         bar: None,
         vi: None,
+        ended: false,
         result: Ok(()),
     };
     event_loop.run_app(&mut app)?;
     app.result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[allow(clippy::float_cmp)]
+    fn only_a_measured_window_on_macos_changes_its_font_scale() {
+        assert_eq!(font_scale(None, 1.0), 1.0);
+        assert_eq!(font_scale(None, 2.0), 2.0);
+        assert_eq!(font_scale(Some((1, 1)), 3.0), 3.0);
+        let measured = if cfg!(target_os = "macos") { 2.0 } else { 1.0 };
+        assert_eq!(font_scale(Some((1, 1)), 1.0), measured);
+    }
 }

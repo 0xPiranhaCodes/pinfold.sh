@@ -5,6 +5,8 @@
 use std::io;
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::unix::process::CommandExt;
+use std::process::{Child, Command, Stdio};
 
 #[cfg(feature = "clipboard")]
 pub mod clipboard;
@@ -69,6 +71,39 @@ pub fn harden() -> io::Result<()> {
 /// ```
 pub fn peer_uid(socket: BorrowedFd<'_>) -> io::Result<u32> {
     platform::peer_uid(socket.as_raw_fd())
+}
+
+/// Starts `command` in a session of its own, with nothing on stdin, stdout or stderr, so it
+/// outlives the caller and the caller's terminal.
+///
+/// The caller exits soon after, and the system reaps the child from then on.
+///
+/// # Errors
+///
+/// Returns an error if the program cannot be started.
+///
+/// # Examples
+///
+/// ```
+/// use std::process::Command;
+///
+/// let mut child = pinfold_sys::spawn_detached(Command::new("/usr/bin/true"))?;
+/// assert!(child.wait()?.success());
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn spawn_detached(mut command: Command) -> io::Result<Child> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    // SAFETY: setsid is async-signal-safe, and the closure touches nothing else.
+    unsafe {
+        command.pre_exec(|| match libc::setsid() {
+            -1 => Err(io::Error::last_os_error()),
+            _ => Ok(()),
+        });
+    }
+    command.spawn()
 }
 
 /// A moment on the local clock.
@@ -214,6 +249,23 @@ mod tests {
         assert!((1..=31).contains(&time.day));
         let later = local_time(1_000_000_060).unwrap();
         assert_eq!((later.minute + 60 - time.minute) % 60, 1);
+    }
+
+    #[test]
+    fn a_detached_child_leads_its_own_session() {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30");
+        let mut child = spawn_detached(command).unwrap();
+        let pid = child.id() as libc::pid_t;
+        // The session is set before exec, so it holds from the moment spawn returns.
+        // SAFETY: getsid takes an integer and touches no memory.
+        let session = unsafe { libc::getsid(pid) };
+        // SAFETY: getsid takes an integer and touches no memory.
+        let ours = unsafe { libc::getsid(0) };
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(session, pid);
+        assert_ne!(session, ours);
     }
 
     #[test]

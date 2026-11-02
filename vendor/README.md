@@ -11,6 +11,9 @@ The patch does what history outside the grid needs (ADR-0006, #24):
   cleared. It is called directly, so hostile output cannot pile rows up in a buffer.
 - Rows that reflow off the top when the window narrows go to the sink.
 - A blank screen clears without scrolling once the sink holds rows, as stock does with history.
+- Growing the storage makes the rows it needs, not at least 1000. With no history in the grid
+  that cache only saved work on a resize, and one row of growth cost about 3.8 MB across both
+  grids at 80 columns. Freed pages still count on macOS, so the peak stayed in the footprint.
 - `CSI 3J` no longer depends on the grid holding history. The guard would otherwise skip
   the clear, and a shell's `clear` would leave its rows in the store.
 

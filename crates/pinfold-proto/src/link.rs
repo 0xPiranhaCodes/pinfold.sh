@@ -37,7 +37,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 1;
+pub const VERSION: u16 = 2;
 
 /// Most rows or columns a screen can have, which the core clamps its panes to.
 pub const MAX_DIMENSION: u16 = 1024;
@@ -103,6 +103,7 @@ const CWD: u8 = 2;
 const SEARCHED: u8 = 3;
 const COPIED: u8 = 4;
 const EXITED: u8 = 5;
+const RAISE: u8 = 6;
 
 const FLAG_FULL: u8 = 1;
 const FLAG_CURSOR: u8 = 1 << 1;
@@ -187,21 +188,29 @@ pub enum Error {
     RepeatedHello,
 }
 
-/// A cell of a row, as in the core's search types.
+/// Longest query, in characters, which bounds the work per cell and what a search carries.
+pub const MAX_QUERY: usize = 256;
+
+/// A cell, in numbers that survive output and eviction, though not a change of width.
 ///
 /// `column` has no bound on the link, as `u16::MAX` means the end of a row and reading a position
 /// clamps it to what is held.
-// shortcut: Position, Selection and Direction mirror pinfold_core::search, which depends on this
-// crate. Move them here when the window starts using the link.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Position {
-    /// The row's number.
+    /// The row's number at the pane's width. A new width reflows rows and numbers them back from
+    /// the same end, so a position taken before it names other text afterwards (ADR-0029).
     pub row: usize,
-    /// The column it was written at.
+    /// The column at that width.
     pub column: u16,
 }
 
-/// The cells of a match or selection, in either order, both ends included.
+/// The cells of a match, or of a selection in either order, both ends included.
+///
+/// This is a plain value: it holds nothing output can invalidate. Reading one clamps it to the
+/// rows still held.
+// shortcut: a screen row's number names whatever is there now, so text a program overwrites
+// after selection is copied as the new text, and the alternate screen shares its numbers with
+// the primary. Clear selections on damage when the window draws them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Selection {
     /// Where it started.
@@ -287,7 +296,8 @@ pub enum Request<'a> {
         /// What to copy.
         selection: Selection,
     },
-    /// Asks for a full frame, when the window has none to apply changes to.
+    /// Asks for a full frame, when the window has none to apply changes to. The core sends no
+    /// frames for a pane until the window asks, and from then on sends each change.
     FullFrame {
         /// The pane.
         pane: u32,
@@ -332,6 +342,8 @@ pub enum Notice<'a> {
         /// The pane.
         pane: u32,
     },
+    /// Someone asked for a window while this one is open, so it comes to the front (ADR-0028).
+    Raise,
 }
 
 /// A pane's screen as sent: its state, and the rows that changed since the last frame.
@@ -641,6 +653,7 @@ impl Notice<'_> {
                 put_tail(out, start, MAX_MESSAGE, COPIED, *pane, text.as_bytes())?
             }
             Self::Exited { pane } => put!(out, EXITED, pane),
+            Self::Raise => RAISE,
         };
         finish(out, start, MAX_MESSAGE, kind)
     }
@@ -669,6 +682,7 @@ impl Notice<'_> {
                 text: body.text()?,
             },
             EXITED => Notice::Exited { pane: body.u32()? },
+            RAISE => Notice::Raise,
             kind => return Err(Error::UnknownKind { kind }),
         };
         body.end()?;
@@ -1129,7 +1143,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 1, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 2, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -1960,6 +1974,11 @@ mod tests {
         #[test]
         fn quit_round_trips(chunk in chunks()) {
             prop_assert!(request_survives(Request::Quit, chunk), "changed on the link");
+        }
+
+        #[test]
+        fn raise_round_trips(chunk in chunks()) {
+            prop_assert!(notice_survives(&Notice::Raise, chunk), "changed on the link");
         }
 
         #[test]

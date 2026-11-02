@@ -34,6 +34,13 @@ const CJK_FONTS: [&str; 4] = ["Hiragino", "AppleSDGothicNeo", "NotoSansCJK", "wq
 /// ADR-0021 budgets with nothing to measure yet, and the issue that makes them measurable.
 const NOT_MEASURED: [(&str, &str); 1] = [("Window on Wayland", "a compositor in CI")];
 
+/// Which process of a core with a window to read.
+#[derive(Clone, Copy, PartialEq)]
+pub enum Side {
+    Core,
+    Window,
+}
+
 pub struct Budget<'a> {
     pub metric: &'a str,
     pub limit: u64,
@@ -44,8 +51,11 @@ pub struct Budget<'a> {
     pub settle: Duration,
     /// Starts the settle time when the process prints a line, not when it starts.
     pub wait_for_line: bool,
-    /// Runs this as the window's shell, and checks that the window opened a CJK font for it.
+    /// Runs this as the shell, and checks that the window opened a CJK font for it.
     pub screen: Option<&'a Path>,
+    /// The program prints a window's pid as its line, and this says which process to read. The
+    /// two are separate processes and neither count holds the other (ADR-0003).
+    pub window: Option<Side>,
 }
 
 /// Bytes, and whether a screen's CJK text went undrawn for want of a font.
@@ -74,28 +84,42 @@ fn measure_once(budget: &Budget, args: &[&str]) -> io::Result<Reading> {
     command.args(args).stdout(stdout);
     if let Some(screen) = budget.screen {
         command.env("SHELL", screen);
-    } else {
-        // A core takes its session's socket, which a core the user is running holds.
-        let runtime = std::env::temp_dir().join(format!("pinfold-gate-{}", std::process::id()));
-        std::fs::create_dir_all(&runtime)?;
-        command.env("XDG_RUNTIME_DIR", runtime);
     }
+    // A core takes its session's socket, which a core the user is running holds.
+    let runtime = std::env::temp_dir().join(format!("pinfold-gate-{}", std::process::id()));
+    std::fs::create_dir_all(&runtime)?;
+    command.env("XDG_RUNTIME_DIR", runtime);
     let mut child = command.spawn()?;
     // A process that dies closes the pipe, so this read cannot outlive it.
     let piped = child.stdout.take();
+    let mut line = String::new();
     if let Some(stdout) = piped {
-        BufReader::new(stdout).read_line(&mut String::new())?;
+        BufReader::new(stdout).read_line(&mut line)?;
     }
+    let window = budget.window.and_then(|_| line.trim().parse::<u32>().ok());
+    let target = match budget.window {
+        Some(Side::Window) => window,
+        _ => Some(child.id()),
+    };
     thread::sleep(budget.settle);
     let exited = child.try_wait()?.is_some();
-    let bytes = if exited {
-        Err(io::Error::other("exited before it could be measured"))
-    } else {
-        pinfold_sys::footprint(child.id())
+    let measured = target
+        .filter(|_| !exited)
+        .ok_or_else(|| io::Error::other("exited before it could be measured"))
+        .and_then(|pid| Ok((pinfold_sys::footprint(pid)?, pid)));
+    let no_font = match &measured {
+        Ok((_, pid)) if budget.screen.is_some() => !has_cjk_font(*pid)?,
+        _ => false,
     };
-    let no_font = !exited && budget.screen.is_some() && !has_cjk_font(child.id())?;
     let _ = child.kill();
     let _ = child.wait();
+    // Nothing tells a window that its core was killed to exit, as it stays to say so.
+    if let Some(pid) = window {
+        // The shell's builtin, as a slim image has no `kill` program.
+        let kill = format!("kill {pid}");
+        Command::new("/bin/sh").args(["-c", &kill]).status()?;
+    }
+    let bytes = measured.map(|(bytes, _)| bytes);
     match bytes {
         Ok(0) => Err(io::Error::other("measured zero bytes")),
         other => Ok((other?, no_font)),
@@ -190,6 +214,7 @@ mod tests {
             settle: SETTLE,
             wait_for_line: false,
             screen: None,
+            window: None,
         }
     }
 
@@ -219,6 +244,38 @@ mod tests {
             settle: SETTLE,
             wait_for_line: false,
             screen: None,
+            window: None,
+        };
+        assert!(!run(&[budget]));
+    }
+
+    #[test]
+    fn a_printed_pid_is_measured_and_killed_with_the_core() {
+        // Its footprint is far from the shell's, so the reading shows which was measured.
+        const SCRIPT: [&str; 2] = [
+            "-c",
+            "/bin/dd if=/dev/zero of=/dev/null bs=67108864 & echo $!; exec sleep 30",
+        ];
+        let budget = |side| Budget {
+            program: Path::new("/bin/sh"),
+            args: &SCRIPT,
+            wait_for_line: true,
+            window: Some(side),
+            ..sleep(u64::MAX, &[])
+        };
+        let shell = measure(&budget(Side::Core)).unwrap().0;
+        let window = measure(&budget(Side::Window)).unwrap().0;
+        assert!(window > shell + 32_000_000, "{window} and {shell}");
+    }
+
+    #[test]
+    fn a_window_that_never_says_its_pid_fails() {
+        let budget = Budget {
+            program: Path::new("/bin/sh"),
+            args: &["-c", "echo no-pid; exec sleep 30"],
+            wait_for_line: true,
+            window: Some(Side::Window),
+            ..sleep(u64::MAX, &[])
         };
         assert!(!run(&[budget]));
     }

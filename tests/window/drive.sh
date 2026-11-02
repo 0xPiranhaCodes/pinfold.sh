@@ -1,10 +1,26 @@
 #!/bin/sh
 # Runs inside the container. Types into a real shell under X11, and starts the window on Wayland.
 set -eu
-cargo build --quiet --locked --release --package pinfold-cli --bin pinfold
+cargo build --quiet --locked --release --package pinfold-cli \
+  --bin pinfold --bin pinfold-core --bin pinfold-window
 PINFOLD=/tmp/target/release/pinfold
+CORE=/tmp/target/release/pinfold-core
 export SHELL=/bin/bash
+export XDG_RUNTIME_DIR=/tmp/xdg
+mkdir -p -m 700 "$XDG_RUNTIME_DIR"
 pss() { awk '/^Pss:/ { printf "%.2f", $2 * 1024 / 1000000 }' "/proc/$1/smaps_rollup"; }
+# The X11 window and its process, once it shows. A hardened process still gives its parent.
+window_id() {
+  tries=0
+  until ID=$(xdotool search --name '^Pinfold$' | head -1) && [ -n "$ID" ]; do
+    tries=$((tries + 1))
+    [ "$tries" -lt 50 ] || { echo "FAIL: no window"; exit 1; }
+    sleep 0.1
+  done
+  WINDOW=$(xdotool getwindowpid "$ID")
+}
+parent() { awk '/^PPid:/ { print $2 }' "/proc/$1/status"; }
+gone() { ! kill -0 "$1" 2>/dev/null; }
 
 echo "fonts installed: $(find /usr/share/fonts -type f 2>/dev/null | wc -l)"
 
@@ -12,10 +28,10 @@ Xvfb :9 -screen 0 1280x800x24 >/dev/null 2>&1 &
 XPID=$!
 sleep 1
 export DISPLAY=:9
-"$PINFOLD" --size 1000x640 &
-WINDOW=$!
+"$PINFOLD"
+window_id
 sleep 2
-ID=$(xdotool search --name '^Pinfold$' | head -1)
+DAEMON=$(parent "$WINDOW")
 xdotool windowfocus "$ID"
 sleep 0.3
 xdotool type --delay 15 'echo sum-$((40+2))'
@@ -71,27 +87,84 @@ if [ "$paste" != '033[200~a[201~b\nc033[201~' ]; then
   exit 1
 fi
 echo "the paste reached the program as text, after confirmation"
-echo "X11 PSS at 1000x640: $(pss "$WINDOW") MB"
-xdotool key ctrl+d
-sleep 1
-if kill -0 "$WINDOW" 2>/dev/null; then
-  echo "FAIL: window outlived its shell"
+"$PINFOLD"
+sleep 0.5
+if [ "$(xdotool search --name '^Pinfold$' | wc -l)" != 1 ] || gone "$WINDOW"; then
+  echo "FAIL: a second pinfold did not keep to one window"
   exit 1
 fi
-echo "window exited with its shell"
+echo "a second pinfold kept to one window"
+# shellcheck disable=SC2016
+xdotool type --delay 15 'echo $$ > /tmp/before; seq 1 100'
+xdotool key Return
+sleep 0.5
+kill -9 "$WINDOW"
+sleep 0.5
+if gone "$DAEMON"; then
+  echo "FAIL: the core died with its window"
+  exit 1
+fi
+"$PINFOLD"
+window_id
+sleep 2
+xdotool windowfocus "$ID"
+sleep 0.3
+import -window root /out/reattached.png
+# shellcheck disable=SC2016
+xdotool type --delay 15 'echo $$ > /tmp/after'
+xdotool key Return
+sleep 0.5
+if [ ! -s /tmp/after ] || ! cmp -s /tmp/before /tmp/after; then
+  echo "FAIL: a new window did not find the same shell"
+  exit 1
+fi
+echo "a killed window left the pane running, and pinfold reattached"
+xdotool key ctrl+d
+sleep 1
+if ! gone "$WINDOW" || ! gone "$DAEMON"; then
+  echo "FAIL: window or core outlived the shell"
+  exit 1
+fi
+echo "window and core exited with the shell"
+"$PINFOLD"
+window_id
+sleep 2
+DAEMON=$(parent "$WINDOW")
+import -window root /tmp/alive.png
+kill -9 "$DAEMON"
+sleep 1
+import -window root /out/ended.png
+if gone "$WINDOW"; then
+  echo "FAIL: the window died with the core"
+  exit 1
+fi
+if compare -metric AE /tmp/alive.png /out/ended.png null: 2>/dev/null; then
+  echo "FAIL: the window did not say the session ended"
+  exit 1
+fi
+echo "a killed core left the window up, saying so"
+kill "$WINDOW"
+sleep 0.5
+# Measured apart from the rest, as a hardened window cannot be read from /proc.
+"$CORE" --window 1 1000x640 >/tmp/measured &
+MEASURED=$!
+sleep 3
+WINDOW=$(cat /tmp/measured)
+echo "X11 PSS at 1000x640: $(pss "$WINDOW") MB"
+kill -9 "$MEASURED" "$WINDOW"
 kill "$XPID"
 
-export XDG_RUNTIME_DIR=/tmp/xdg
-mkdir -p -m 700 "$XDG_RUNTIME_DIR"
 weston --backend=headless --width=1920 --height=1080 --socket=wl-window --idle-time=0 >/tmp/weston.log 2>&1 &
 WESTON=$!
 sleep 2
-env -u DISPLAY WAYLAND_DISPLAY=wl-window "$PINFOLD" --size 1920x1080 &
-WINDOW=$!
+env -u DISPLAY WAYLAND_DISPLAY=wl-window "$CORE" --window 1 1920x1080 >/tmp/measured &
+MEASURED=$!
 sleep 3
-if ! kill -0 "$WINDOW" 2>/dev/null; then
+WINDOW=$(cat /tmp/measured)
+if gone "$WINDOW"; then
   echo "FAIL: window did not start on Wayland"
   exit 1
 fi
 echo "Wayland PSS at 1920x1080: $(pss "$WINDOW") MB (budget 24.59)"
-kill "$WINDOW" "$WESTON"
+kill -9 "$MEASURED" "$WINDOW"
+kill "$WESTON"

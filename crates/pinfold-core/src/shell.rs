@@ -1,4 +1,4 @@
-//! The command that starts a window's shell.
+//! The command that starts a pane's shell.
 //!
 //! The Dock and Finder start an app in `/` with a bare environment, so on macOS the shell
 //! runs as a login shell, which reads the profile that sets `PATH`, as Terminal's does.

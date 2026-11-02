@@ -23,7 +23,7 @@
 
 use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::os::fd::AsFd;
+use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -45,6 +45,8 @@ const MAX_CONNECTION: u64 = 2 * MAX_LINE as u64;
 /// Longest stay of one peer, however it spaces its bytes, as this thread serves them one at a
 /// time.
 const TIMEOUT: Duration = Duration::from_secs(2);
+/// Longest a launcher waits for each answer, which includes a core that is still starting.
+const REPLY_WAIT: Duration = Duration::from_secs(5);
 
 const PARSE_ERROR: i64 = -32700;
 const NOT_A_REQUEST: i64 = -32600;
@@ -67,6 +69,15 @@ pub enum Error {
     /// Another core holds this session.
     #[error("a core is already running")]
     Running,
+    /// The socket's other end belongs to another user, so a launcher must not talk to it.
+    #[error("the core at the socket belongs to user {uid}")]
+    WrongPeer {
+        /// That user.
+        uid: u32,
+    },
+    /// The core answered with an error, or with nothing a launcher can read.
+    #[error("the core refused: {0}")]
+    Refused(String),
     /// The system refused.
     #[error(transparent)]
     Io(#[from] io::Error),
@@ -173,6 +184,53 @@ impl Control {
             let _ = serve_peer(&stream, &mut open);
         }
     }
+}
+
+/// Refuses a socket whose other end is not `user`.
+fn check_peer(socket: BorrowedFd<'_>, user: u32) -> Result<(), Error> {
+    match pinfold_sys::peer_uid(socket)? {
+        uid if uid == user => Ok(()),
+        uid => Err(Error::WrongPeer { uid }),
+    }
+}
+
+/// Sends one request and returns its result.
+fn call(stream: &UnixStream, request: &Value) -> Result<Value, Error> {
+    let mut bytes = request.to_string().into_bytes();
+    bytes.push(b'\n');
+    (&mut &*stream).write_all(&bytes)?;
+    let mut line = Vec::new();
+    BufReader::new(stream.take(MAX_LINE as u64)).read_until(b'\n', &mut line)?;
+    let reply: Value = serde_json::from_slice(&line)
+        .map_err(|_| Error::Refused("the reply is not JSON-RPC".to_owned()))?;
+    match reply.get("result") {
+        Some(result) => Ok(result.clone()),
+        None => {
+            let message = reply.pointer("/error/message").and_then(Value::as_str);
+            Err(Error::Refused(message.unwrap_or("no result").to_owned()))
+        }
+    }
+}
+
+/// Asks the core on `stream` for a window: a launcher's whole conversation. Refuses a peer that
+/// is not this user before saying anything to it, as a socket path alone proves nothing.
+///
+/// # Errors
+///
+/// [`Error::WrongPeer`] for another user's socket, [`Error::Refused`] if the core says no, and
+/// [`Error::Io`] if it does not answer.
+pub fn open_window(stream: &UnixStream) -> Result<(), Error> {
+    check_peer(stream.as_fd(), pinfold_sys::effective_uid())?;
+    stream.set_read_timeout(Some(REPLY_WAIT))?;
+    stream.set_write_timeout(Some(REPLY_WAIT))?;
+    let hello = json!({"version": VERSION});
+    let hello = json!({"jsonrpc": "2.0", "id": 1, "method": "hello", "params": hello});
+    call(stream, &hello)?;
+    call(
+        stream,
+        &json!({"jsonrpc": "2.0", "id": 2, "method": "window.open"}),
+    )?;
+    Ok(())
 }
 
 /// A connection that fails once a moment has passed, however often bytes arrive before it.
@@ -471,6 +529,35 @@ mod tests {
         BufReader::new(&peer).read_line(&mut reply).unwrap();
         assert!(reply.contains("hello comes first"), "{reply}");
         assert!(start.elapsed() < 2 * TIMEOUT);
+    }
+
+    #[test]
+    fn a_launcher_gets_its_window_and_hears_a_refusal() {
+        for (window, opened) in [(true, true), (false, false)] {
+            let directory = fresh();
+            let control = Control::bind(&directory).unwrap();
+            thread::spawn(move || control.serve(|| window));
+            let stream = UnixStream::connect(socket_path(&directory)).unwrap();
+            match open_window(&stream) {
+                Ok(()) => assert!(opened),
+                Err(error) => {
+                    assert!(!opened);
+                    assert_eq!(error.to_string(), "the core refused: no window can open");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_launcher_says_nothing_to_another_users_socket() {
+        let (ours, mut theirs) = UnixStream::pair().unwrap();
+        let other = pinfold_sys::effective_uid().wrapping_add(1);
+        assert!(matches!(
+            check_peer(ours.as_fd(), other),
+            Err(Error::WrongPeer { uid }) if uid == pinfold_sys::effective_uid()
+        ));
+        drop(ours);
+        assert_eq!(theirs.read(&mut [0; 8]).unwrap(), 0);
     }
 
     #[test]

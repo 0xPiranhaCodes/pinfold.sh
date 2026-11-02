@@ -72,6 +72,12 @@ them, and those rows prove nothing. On Linux it needs an X server, such as `xvfb
 The macOS window row means little on hosted CI, which reads about 30 MB where an M1 Pro with a
 Retina display reads about 51 MB. For a change that can affect it, run the gate on a real Mac.
 
+Window rows read a `pinfold-window` started by `pinfold-core --window <panes> <size>`, which is a
+core without hardening whose window has none either, as Linux hides a hardened process from
+`/proc`. So the window and the core are read as separate processes. A last row reads the core
+beside such a window, against the core's budget. Run the gate with `XDG_CONFIG_HOME` set to an
+empty directory, as your own config changes what a window costs.
+
 Each window has a second row, `with text`, against the same budget. It runs
 `tests/window/heavy-screen.sh` as the window's shell, which fills the screen from
 `heavy-screen.txt` with plain, bold and italic ASCII and CJK, then waits. The row needs a CJK
@@ -79,8 +85,10 @@ font: if the window opened none of the fallbacks in `pinfold-render`, its result
 `no CJK font` instead of `pass`, and the gate does not fail for that. Over budget still fails.
 The container in `tests/window/` installs no fonts, and the CI jobs install none either.
 
-`tests/window/run.sh` drives the real window in a container: it types into a shell under Xvfb
-and starts the window under headless Weston.
+`tests/window/run.sh` drives the real processes in a container: it types into a shell under
+Xvfb through `pinfold`, kills the window and reattaches, kills the core and checks that the window
+says so, and starts a window under headless Weston. `crates/pinfold-cli/tests/session.rs` covers
+the same session without a display, using a client on the real link in place of the window.
 
 Every number in the docs or a PR must come from committed code. If you cannot
 reproduce it with a script in this repository, leave it out.

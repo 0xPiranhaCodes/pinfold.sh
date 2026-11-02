@@ -2,13 +2,13 @@
 //!
 //! That row is outside pane text, so program output cannot fake it (T7 in the threat model).
 
-use pinfold_core::io::MAX_INPUT;
+use pinfold_proto::link::MAX_INPUT;
 use pinfold_proto::{Cell, Frame};
 
 const GROUND: u32 = 0x0012_151a;
 pub(crate) const TEXT: u32 = 0x00e2_e5ea;
 pub(crate) const AMBER: u32 = 0x00f5_b544;
-const RED: u32 = 0x00ff_8a8a;
+pub(crate) const RED: u32 = 0x00ff_8a8a;
 
 const SHELLS: [&str; 6] = ["sh", "bash", "zsh", "dash", "fish", "ksh"];
 

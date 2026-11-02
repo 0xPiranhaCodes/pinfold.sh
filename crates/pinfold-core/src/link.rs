@@ -8,6 +8,9 @@
 //! and when it drains it gets one frame of the newest state. That frame is still a diff, as
 //! nothing it was promised was lost. Replies cannot be merged like that, so one that would
 //! pass [`MAX_PENDING`] ends the link.
+//!
+//! A pane gets frames once the window asks for one, so a hidden pane costs no frame here or in
+//! the window. Replies and [`Notice::Exited`] reach the window for any pane.
 
 use std::io::{self, ErrorKind, Read, Write};
 use std::mem;
@@ -23,7 +26,7 @@ use pinfold_proto::link::{self, Decoder, Notice, Request, VERSION, encode_frame}
 use pinfold_sys::socket;
 
 use crate::io::{READ_BUDGET, Reactor};
-use crate::search::{CopyStep, Copying, Direction, Position, Selection};
+use crate::search::{CopyStep, Copying};
 
 /// Beyond any pane number, like the waker's token.
 pub(crate) const LINK: Token = Token(usize::MAX - 1);
@@ -50,46 +53,6 @@ pub enum WindowOpen {
     AlreadyOpen,
 }
 
-impl From<link::Position> for Position {
-    fn from(position: link::Position) -> Self {
-        Self {
-            row: position.row,
-            column: position.column,
-        }
-    }
-}
-
-impl From<link::Selection> for Selection {
-    fn from(selection: link::Selection) -> Self {
-        Self {
-            anchor: selection.anchor.into(),
-            focus: selection.focus.into(),
-        }
-    }
-}
-
-impl From<Selection> for link::Selection {
-    fn from(selection: Selection) -> Self {
-        let position = |at: Position| link::Position {
-            row: at.row,
-            column: at.column,
-        };
-        Self {
-            anchor: position(selection.anchor),
-            focus: position(selection.focus),
-        }
-    }
-}
-
-impl From<link::Direction> for Direction {
-    fn from(direction: link::Direction) -> Self {
-        match direction {
-            link::Direction::Forward => Self::Forward,
-            link::Direction::Backward => Self::Backward,
-        }
-    }
-}
-
 /// The link has ended. Why does not matter, as every cause is handled the same way.
 struct Ended;
 
@@ -100,6 +63,8 @@ struct PaneLink {
     sent: Frame,
     /// Whether the window holds a frame to apply a diff to.
     synced: bool,
+    /// Whether the window has asked for this pane's frames.
+    watched: bool,
     cwd: String,
     searching: bool,
     exited: bool,
@@ -192,7 +157,7 @@ impl Session {
                 query,
             } => {
                 let pane = pane as usize;
-                reactor.search(pane, query, from.into(), direction.into());
+                reactor.search(pane, query, from, direction);
                 // One that could not start ends now, and `report` says so.
                 if let Some(state) = self.panes.get_mut(pane) {
                     state.searching = true;
@@ -204,12 +169,15 @@ impl Session {
                 let pane = pane as usize;
                 self.copying = self.panes.get(pane).map(|_| CopyJob {
                     pane,
-                    copy: Copying::new(selection.into()),
+                    copy: Copying::new(selection),
                     text: String::new(),
                 });
             }
+            // shortcut: asking for a pane that does not exist yet does nothing, as the daemon
+            // spawns its panes before a window. Keep the wish if a window can ever open first.
             Request::FullFrame { pane } => {
                 if let Some(state) = self.panes.get_mut(pane as usize) {
+                    state.watched = true;
                     state.synced = false;
                 }
             }
@@ -234,7 +202,7 @@ impl Session {
             }
             self.notice(&Notice::Searched {
                 pane: pane as u32,
-                found: found.map(Into::into),
+                found,
             })?;
         }
         let Some(job) = self.copying.as_mut() else {
@@ -275,7 +243,7 @@ impl Session {
             return Ok(());
         };
         let dirty = reactor.take_dirty(pane);
-        if dirty || !state.synced {
+        if state.watched && (dirty || !state.synced) {
             let Some(engine) = reactor.engine(pane) else {
                 return Ok(());
             };
@@ -430,9 +398,10 @@ impl Drop for Host {
 impl Reactor {
     /// Starts `binary` as this session's window, with no arguments, on a new link.
     ///
-    /// A session has one window, so while one lives this starts nothing and says so. The
-    /// program finds the link on [`socket::LINK_FD`], and pane children never get it. A window
-    /// whose link ends is killed, and this can then start another.
+    /// A session has one window, so while one lives this starts nothing, asks it to come to
+    /// the front, and says so. The program finds the link on [`socket::LINK_FD`], and pane
+    /// children never get it. A window whose link ends is killed, and this can then start
+    /// another.
     ///
     /// # Errors
     ///
@@ -454,15 +423,27 @@ impl Reactor {
     /// # Ok::<(), std::io::Error>(())
     /// ```
     pub fn spawn_window(&mut self, binary: &Path) -> io::Result<WindowOpen> {
+        self.spawn_window_command(Command::new(binary))
+    }
+
+    /// Does what [`Reactor::spawn_window`] does with a prepared `command`. Only the core's
+    /// measuring mode uses this, as nothing from a control socket may reach a window's command.
+    ///
+    /// # Errors
+    ///
+    /// Returns what [`Reactor::spawn_window`] returns.
+    pub fn spawn_window_command(&mut self, mut command: Command) -> io::Result<WindowOpen> {
         self.host.reap();
-        if self.host.window.is_some() {
+        if let Some(window) = self.host.window.as_mut() {
+            // A window over the cap on replies, or one that has gone, is about to end anyway.
+            let _ = window.session.notice(&Notice::Raise);
+            let _ = window.session.flush();
             return Ok(WindowOpen::AlreadyOpen);
         }
-        if !binary.is_absolute() {
+        if !Path::new(command.get_program()).is_absolute() {
             return Err(io::Error::from(ErrorKind::InvalidInput));
         }
         let (ours, theirs) = socket::pair()?;
-        let mut command = Command::new(binary);
         command.stdin(Stdio::null());
         let child = socket::spawn_with_link(command, theirs)?;
         self.attach_window(ours, Some(child))?;
@@ -473,6 +454,12 @@ impl Reactor {
     #[must_use]
     pub fn has_window(&self) -> bool {
         self.host.window.is_some()
+    }
+
+    /// Returns the process id of a window this reactor started, while its link is open.
+    #[must_use]
+    pub fn window_pid(&self) -> Option<u32> {
+        self.host.window.as_ref()?.child.as_ref().map(Child::id)
     }
 
     /// Serves `socket` as the window, and sends the version check.
@@ -555,6 +542,7 @@ mod tests {
         searched: Vec<Option<link::Selection>>,
         copied: Vec<String>,
         exited: Vec<u32>,
+        raises: usize,
     }
 
     impl Peer {
@@ -572,6 +560,7 @@ mod tests {
                 searched: Vec::new(),
                 copied: Vec::new(),
                 exited: Vec::new(),
+                raises: 0,
             }
         }
 
@@ -580,6 +569,17 @@ mod tests {
             let peer = Self::attach(reactor);
             peer.send(Request::Hello { version: VERSION });
             peer
+        }
+
+        /// Attaches, says hello and asks for `pane`, as a window does.
+        fn watching(reactor: &mut Reactor, pane: usize) -> Self {
+            let peer = Self::greet(reactor);
+            peer.watch(pane);
+            peer
+        }
+
+        fn watch(&self, pane: usize) {
+            self.send(Request::FullFrame { pane: pane as u32 });
         }
 
         fn send(&self, request: Request<'_>) {
@@ -616,6 +616,7 @@ mod tests {
                         Notice::Searched { found, .. } => self.searched.push(found),
                         Notice::Copied { text, .. } => self.copied.push(text.to_owned()),
                         Notice::Exited { pane } => self.exited.push(pane),
+                        Notice::Raise => self.raises += 1,
                     }
                 }
             }
@@ -678,6 +679,7 @@ mod tests {
         assert_eq!(peer.hellos, 1);
         assert!(peer.frames.is_empty(), "a frame came before the hello");
         peer.send(Request::Hello { version: VERSION });
+        peer.watch(pane);
         serve(&mut reactor, &mut peer, |r, p| p.matches(r, pane));
     }
 
@@ -761,7 +763,8 @@ mod tests {
         let script = "yes | head -n 30000; echo finished; sleep 30";
         let flood = reactor.spawn(shell(script), rows, columns).unwrap();
         let quiet = reactor.spawn(shell(ALIVE), 24, 80).unwrap();
-        let mut peer = Peer::greet(&mut reactor);
+        let mut peer = Peer::watching(&mut reactor, flood);
+        peer.watch(quiet);
 
         let one_frame = 64 + usize::from(rows) * (2 + usize::from(columns) * 12);
         let (mut most, mut capacity) = (0, 0);
@@ -789,7 +792,7 @@ mod tests {
     fn a_blocked_turn_wakes_when_the_window_drains_the_socket() {
         let mut reactor = Reactor::new().unwrap();
         let pane = reactor.spawn(shell("sleep 30"), 400, 400).unwrap();
-        let peer = Peer::greet(&mut reactor);
+        let peer = Peer::watching(&mut reactor, pane);
         turn_until(&mut reactor, |r| {
             r.host
                 .window
@@ -869,7 +872,7 @@ mod tests {
     fn bad_pane_numbers_and_wild_values_change_nothing() {
         let mut reactor = Reactor::new().unwrap();
         let pane = reactor.spawn(shell(ALIVE), 24, 80).unwrap();
-        let mut peer = Peer::greet(&mut reactor);
+        let mut peer = Peer::watching(&mut reactor, pane);
         serve(&mut reactor, &mut peer, |r, p| p.matches(r, pane));
 
         let far = link::Position {
@@ -975,7 +978,7 @@ mod tests {
         let mut reactor = Reactor::new().unwrap();
         let script = r"seq 1 100; printf '\033[1;31mred\033[0m'; read line; echo more; sleep 30";
         let pane = reactor.spawn(shell(script), 10, 40).unwrap();
-        let mut peer = Peer::greet(&mut reactor);
+        let mut peer = Peer::watching(&mut reactor, pane);
         let number = pane as u32;
         serve(&mut reactor, &mut peer, |r, p| {
             on_screen(r, pane, "red") && p.matches(r, pane)
@@ -1014,15 +1017,52 @@ mod tests {
     }
 
     #[test]
-    fn a_pane_opened_later_gets_a_full_frame() {
+    fn a_pane_opened_later_gets_a_full_frame_once_asked() {
         let mut reactor = Reactor::new().unwrap();
         let mut peer = Peer::greet(&mut reactor);
         serve(&mut reactor, &mut peer, |_, p| p.hellos == 1);
         let script = "echo later; sleep 30";
         let pane = reactor.spawn(shell(script), 24, 80).unwrap();
+        serve(&mut reactor, &mut peer, |r, _| on_screen(r, pane, "later"));
+        peer.watch(pane);
+        serve(&mut reactor, &mut peer, |r, p| p.matches(r, pane));
+    }
+
+    #[test]
+    fn a_hidden_pane_costs_no_frame_and_still_answers() {
+        let mut reactor = Reactor::new().unwrap();
+        let shown = reactor.spawn(shell(ALIVE), 24, 80).unwrap();
+        let script = "echo needle; read line; exit 0";
+        let hidden = reactor.spawn(shell(script), 24, 80).unwrap();
+        let mut peer = Peer::watching(&mut reactor, shown);
         serve(&mut reactor, &mut peer, |r, p| {
-            on_screen(r, pane, "later") && p.matches(r, pane)
+            on_screen(r, hidden, "needle") && p.matches(r, shown)
         });
+
+        let number = hidden as u32;
+        peer.send(Request::Search {
+            pane: number,
+            from: link::Position::default(),
+            direction: link::Direction::Forward,
+            query: "needle",
+        });
+        serve(&mut reactor, &mut peer, |_, p| p.searched.len() == 1);
+        peer.send(Request::Copy {
+            pane: number,
+            selection: peer.searched[0].unwrap(),
+        });
+        serve(&mut reactor, &mut peer, |_, p| p.copied.len() == 1);
+        assert_eq!(peer.copied, ["needle"]);
+        peer.send(Request::Input {
+            pane: number,
+            bytes: b"\n",
+        });
+        serve(&mut reactor, &mut peer, |_, p| p.exited == [number]);
+
+        assert!(!peer.frames.contains_key(&number));
+        let session = &reactor.host.window.as_ref().unwrap().session;
+        assert_eq!(session.panes[hidden].sent.cells.capacity(), 0);
+        assert!(peer.matches(&reactor, shown));
     }
 
     #[test]
@@ -1030,7 +1070,7 @@ mod tests {
         let mut reactor = Reactor::new().unwrap();
         let script = r"seq 1 200; echo needle; printf '\033]7;file:///tmp/where\033\\'; seq 1 50; read line; exit 0";
         let pane = reactor.spawn(shell(script), 10, 40).unwrap();
-        let mut peer = Peer::greet(&mut reactor);
+        let mut peer = Peer::watching(&mut reactor, pane);
         let number = pane as u32;
         serve(&mut reactor, &mut peer, |_, p| p.cwd == "/tmp/where");
 
@@ -1076,7 +1116,7 @@ mod tests {
     fn buffers_shrink_back_after_a_large_frame() {
         let mut reactor = Reactor::new().unwrap();
         let pane = reactor.spawn(shell("sleep 30"), 24, 80).unwrap();
-        let mut peer = Peer::greet(&mut reactor);
+        let mut peer = Peer::watching(&mut reactor, pane);
         let number = pane as u32;
         for size in [400, 24] {
             peer.send(Request::Resize {
@@ -1124,7 +1164,7 @@ mod tests {
 
     #[test]
     fn a_second_open_starts_nothing_until_the_first_has_gone() {
-        let hello = r"printf '\003\000\000\000\000\001\000' >&3; exec cat <&3 >/dev/null";
+        let hello = r"printf '\003\000\000\000\000\002\000' >&3; exec cat <&3 >/dev/null";
         let (binary, log) = window_script("second-open", hello);
         let mut reactor = Reactor::new().unwrap();
         assert_eq!(spawn_window(&mut reactor, &binary), WindowOpen::Started);
@@ -1140,6 +1180,16 @@ mod tests {
         assert!(turn_until(&mut reactor, |_| starts(&log) == "0\n0\n"));
         drop(reactor);
         fs::remove_dir_all(binary.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn a_second_open_raises_the_window_it_finds() {
+        let mut reactor = Reactor::new().unwrap();
+        let mut peer = Peer::greet(&mut reactor);
+        let open = reactor.spawn_window(Path::new("/does/not/exist")).unwrap();
+        assert_eq!(open, WindowOpen::AlreadyOpen);
+        serve(&mut reactor, &mut peer, |_, p| p.raises == 1);
+        assert!(reactor.has_window());
     }
 
     #[test]

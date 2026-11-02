@@ -1,6 +1,6 @@
 diff -ruN a/Cargo.toml b/Cargo.toml
 --- a/Cargo.toml	2006-07-24 06:51:28
-+++ b/Cargo.toml	2026-11-01 12:26:11
++++ b/Cargo.toml	2026-11-02 17:07:19
 @@ -43,10 +43,6 @@
  name = "alacritty_terminal"
  path = "src/lib.rs"
@@ -14,7 +14,7 @@ diff -ruN a/Cargo.toml b/Cargo.toml
  
 diff -ruN a/src/grid/mod.rs b/src/grid/mod.rs
 --- a/src/grid/mod.rs	2006-07-24 06:51:28
-+++ b/src/grid/mod.rs	2026-11-01 12:26:11
++++ b/src/grid/mod.rs	2026-11-02 17:07:19
 @@ -1,7 +1,9 @@
  //! A specialized 2D grid implementation optimized for use in a terminal.
  
@@ -130,7 +130,7 @@ diff -ruN a/src/grid/mod.rs b/src/grid/mod.rs
          self.display_offset = 0;
 diff -ruN a/src/grid/resize.rs b/src/grid/resize.rs
 --- a/src/grid/resize.rs	2006-07-24 06:51:28
-+++ b/src/grid/resize.rs	2026-11-01 12:26:11
++++ b/src/grid/resize.rs	2026-11-02 17:07:19
 @@ -57,7 +57,10 @@
          // Move existing lines up for every line that couldn't be pulled from history.
          if from_history != lines_added {
@@ -153,9 +153,55 @@ diff -ruN a/src/grid/resize.rs b/src/grid/resize.rs
          self.raw.replace_inner(reversed);
  
          // Clamp display offset in case some lines went off.
+diff -ruN a/src/grid/storage.rs b/src/grid/storage.rs
+--- a/src/grid/storage.rs	2006-07-24 06:51:28
++++ b/src/grid/storage.rs	2026-11-02 17:07:19
+@@ -1,4 +1,3 @@
+-use std::cmp::max;
+ use std::mem;
+ use std::mem::MaybeUninit;
+ use std::ops::{Index, IndexMut};
+@@ -130,7 +129,8 @@
+         if self.len + additional_rows > self.inner.len() {
+             self.rezero();
+ 
+-            let realloc_size = self.inner.len() + max(additional_rows, MAX_CACHE_SIZE);
++            // Stock made at least MAX_CACHE_SIZE rows, so one row of growth cost 1000.
++            let realloc_size = self.inner.len() + additional_rows;
+             self.inner.resize_with(realloc_size, || Row::new(columns));
+         }
+ 
+@@ -366,7 +366,7 @@
+             visible_lines: 4,
+             len: 4,
+         };
+-        expected.inner.append(&mut vec![filled_row('\0'); MAX_CACHE_SIZE]);
++        expected.inner.push(filled_row('\0'));
+ 
+         assert_eq!(storage.visible_lines, expected.visible_lines);
+         assert_eq!(storage.inner, expected.inner);
+@@ -407,7 +407,7 @@
+             visible_lines: 4,
+             len: 4,
+         };
+-        expected.inner.append(&mut vec![filled_row('\0'); MAX_CACHE_SIZE]);
++        expected.inner.push(filled_row('\0'));
+ 
+         assert_eq!(storage.visible_lines, expected.visible_lines);
+         assert_eq!(storage.inner, expected.inner);
+@@ -738,8 +738,7 @@
+             filled_row('4'),
+             filled_row('5'),
+         ];
+-        let expected_init_size = std::cmp::max(init_size, MAX_CACHE_SIZE);
+-        expected_inner.append(&mut vec![filled_row('\0'); expected_init_size]);
++        expected_inner.append(&mut vec![filled_row('\0'); init_size]);
+         let expected_storage = Storage { inner: expected_inner, zero: 0, visible_lines: 0, len: 9 };
+ 
+         assert_eq!(storage.len, expected_storage.len);
 diff -ruN a/src/term/mod.rs b/src/term/mod.rs
 --- a/src/term/mod.rs	2006-07-24 06:51:28
-+++ b/src/term/mod.rs	2026-11-01 12:26:11
++++ b/src/term/mod.rs	2026-11-02 17:07:19
 @@ -39,13 +39,19 @@
  pub const MIN_SCREEN_LINES: usize = 1;
  

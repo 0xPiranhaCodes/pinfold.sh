@@ -7,7 +7,7 @@
 
 use std::ops::Range;
 
-use pinfold_core::search::{Position, Selection};
+use pinfold_proto::link::{Position, Selection};
 use pinfold_proto::{Cell, Frame};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
