@@ -44,6 +44,9 @@ jobs:
           mkdir universal
           lipo -create target/*-apple-darwin/release/pinfold -output universal/pinfold
           lipo -create target/*-apple-darwin/release-core/pinfold-core -output universal/pinfold-core
+          sh packaging/macos/bundle.sh universal/pinfold universal/pinfold-core universal
+          ditto -c -k --keepParent universal/Pinfold.app universal/Pinfold.app.zip
+          rm -rf universal/Pinfold.app
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pinfold-macos-universal
