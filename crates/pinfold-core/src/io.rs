@@ -14,6 +14,7 @@ use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token};
 use pinfold_sys::pty::Pty;
 
+use crate::link::{Host, LINK};
 use crate::paste;
 use crate::search::{Direction, Position, Search, SearchStep, Selection};
 use crate::vt::{AlacrittyEngine, VtEngine};
@@ -112,11 +113,12 @@ impl Pane {
 
 /// Every PTY and its terminal state, driven from a single thread.
 pub struct Reactor {
-    poll: Poll,
+    pub(crate) poll: Poll,
     waker: Arc<Waker>,
     events: Events,
     panes: Vec<Pane>,
     buffer: Vec<u8>,
+    pub(crate) host: Host,
 }
 
 impl Reactor {
@@ -134,6 +136,7 @@ impl Reactor {
             events: Events::with_capacity(EVENT_CAPACITY),
             panes: Vec::new(),
             buffer: vec![0; READ_BUDGET],
+            host: Host::default(),
         })
     }
 
@@ -178,7 +181,8 @@ impl Reactor {
         let unfinished = self
             .panes
             .iter()
-            .any(|pane| pane.readable || pane.search.is_some());
+            .any(|pane| pane.readable || pane.search.is_some())
+            || self.host.busy();
         let now = Instant::now();
         let deadline = self
             .panes
@@ -196,6 +200,9 @@ impl Reactor {
             result => result?,
         }
         for event in &self.events {
+            if event.token() == LINK {
+                self.host.wake();
+            }
             if let Some(pane) = self.panes.get_mut(event.token().0) {
                 pane.readable |= !pane.closed && (event.is_readable() || event.is_read_closed());
             }
@@ -234,6 +241,7 @@ impl Reactor {
             }
             pane.flush();
         }
+        self.serve_window();
         Ok(())
     }
 
@@ -331,6 +339,12 @@ impl Reactor {
     #[must_use]
     pub fn engine(&self, pane: usize) -> Option<&(dyn VtEngine + Send)> {
         self.panes.get(pane).map(|pane| pane.engine.as_ref())
+    }
+
+    /// Returns how many panes there are. Numbers run from 0, and a closed pane keeps its own.
+    #[must_use]
+    pub fn pane_count(&self) -> usize {
+        self.panes.len()
     }
 
     /// Returns whether a pane's child has closed the PTY. Unknown panes count as closed.
