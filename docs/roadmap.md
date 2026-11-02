@@ -10,5 +10,8 @@ Pinfold has no dates, because no schedule has been measured. The order comes fro
 | M1 Daily driver | VT, CPU renderer on Linux, Metal renderer on macOS, fonts, IME, selection, search, OSC 133 and 7, config, escape-sequence hardening, tiered scrollback with a byte cap, `mem-gate` | |
 | M2 Multiplexer | Core daemon, tabs, splits, prefix keys, detach and attach, reconnecting window, core hardening, reflow of cold scrollback | |
 | M3 Agent API | Protocol, `hello` handshake, `pinfold ctl`, `pinfold mcp`, scopes, approvals, protected panes, redaction, audit log, sandbox, status engine and alerts | |
-| M5 Sessions | Snapshots, restore rules, workspace trust, `pinfold up`, packaging, signed releases | v0.1 |
+| M5 Sessions | Snapshots, restore rules, workspace trust, `pinfold up`, packaging, signed releases | v0.1, macOS and Linux |
 | M4 Built-in tools | Markdown reader, file manager, diff viewer, each with its sanitizing and hardened git invocation | v0.2 |
+
+A beta for macOS only comes before v0.1 ([ADR-0031](adr/0031-macos-beta-first.md)). Linux stays in
+CI until then, and its desktop checks block v0.1 rather than the beta.

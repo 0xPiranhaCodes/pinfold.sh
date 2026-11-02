@@ -27,8 +27,8 @@ prefix = "C-b"
 `font_path` takes a TrueType or OpenType file, or the first font in a collection. PinFold
 draws bold and italic by thickening and slanting that one font, not from separate files, and
 without `font_path` it uses the bundled JetBrains Mono. A font file is treated as untrusted:
-if it cannot be read, is damaged, or cannot draw all of ASCII, PinFold prints why to stderr
-and uses the bundled font. `~` is not expanded.
+if it cannot be read, is damaged, or cannot draw all of ASCII, PinFold says why in its
+[log](#where-problems-are-reported) and uses the bundled font. `~` is not expanded.
 
 `background_opacity` applies only to the default background and the padding around the grid.
 Text and cells a program coloured stay opaque, so a program that paints its own background,
@@ -40,8 +40,8 @@ call that takes no radius from callers, and macOS may change that call.
 On Linux, and on a Mac with no Metal device, the window draws with the CPU and stays opaque:
 PinFold accepts both keys and ignores them.
 
-Every key is optional. PinFold always opens: if the file has a problem, it prints why to
-stderr and uses the defaults for every key. That covers an unknown key or a bad value
+Every key is optional. PinFold always opens: if the file has a problem, it says why in
+its [log](#where-problems-are-reported) and uses the defaults for every key. That covers an unknown key or a bad value
 (named with its line), a file that is not UTF-8 or is over 64 KiB, a directory in the
 file's place, a file it cannot read, and a file that another user owns or that group or
 others can write (the rule from the threat model). A symlink is followed, and those
@@ -77,8 +77,8 @@ Every key applies on save, with no restart. The window keeps its size, so a new 
 size changes how many rows and columns fit, and programs get a resize. Editors that write the
 file in place and editors that save by rename both work, and so does a symlink.
 
-A save gets the same checks as startup. If it has any of the problems above, PinFold prints
-why to stderr, once, and keeps the current settings rather than the defaults, until a later
+A save gets the same checks as startup. If it has any of the problems above, PinFold says
+why in its [log](#where-problems-are-reported), once, and keeps the current settings rather than the defaults, until a later
 save or `chmod` fixes it. A bad `font_path` file means the bundled font, as it does at startup.
 Deleting the file changes nothing until the next start.
 
@@ -110,3 +110,12 @@ The cursor stays on its text as output scrolls it, and the next motion brings it
 Word motions read the rows in view, so at the view's edge they stop on the next row. On the
 alternate screen, or under a program that reports the mouse, the view cannot leave the screen,
 so neither can the cursor. A copy stops at 2 MB, as any selection does.
+
+## Where problems are reported
+
+A core that `pinfold` starts, and each window it opens, writes problems to `default.log` in the
+runtime directory: `$XDG_RUNTIME_DIR/pinfold`, or `$TMPDIR/pinfold-<uid>` where that is unset, as
+on macOS. The file is private to you and starts empty each time a core starts, which is the only
+limit on its size. A failed `pinfold` names it. A core started some other way, as from a terminal,
+writes to its own stderr instead. A config problem quotes the bad line of the file, and a panic
+prints only its place in the code.

@@ -11,6 +11,7 @@ use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
+use pinfold_api::control;
 use pinfold_proto::link::{Request, VERSION};
 use pinfold_sys::socket;
 use pinfold_ui::link::{Disconnect, Link};
@@ -19,6 +20,8 @@ use pinfold_ui::link::{Disconnect, Link};
 const CLIENT: &str = "PINFOLD_TEST_CLIENT";
 /// Asks this test binary, in a process of its own, to harden itself twice.
 const HARDEN: &str = "PINFOLD_TEST_HARDEN";
+/// Set in a process that should panic.
+const PANIC: &str = "PINFOLD_TEST_PANIC";
 const PATIENCE: Duration = Duration::from_secs(30);
 
 type Result<T = ()> = std::result::Result<T, Box<dyn Error>>;
@@ -79,6 +82,15 @@ impl Session {
 
     fn start_launcher(&self) -> Result<Child> {
         Ok(self.launcher("/bin/sh").spawn()?)
+    }
+
+    /// The session's log, as a launcher names it.
+    fn log(&self) -> PathBuf {
+        control::log_path(&self.directory.join("run/pinfold"))
+    }
+
+    fn read_log(&self) -> String {
+        fs::read_to_string(self.log()).unwrap_or_default()
     }
 
     fn read(&self, name: &str) -> String {
@@ -155,7 +167,10 @@ fn client(directory: &Path) -> Result {
     assert!(link.resize(24, 80));
     until(&mut link, |link| !link.screens().is_empty())?;
     if starts.lines().count() == 1 {
-        assert!(type_in(&mut link, "echo mark-$((40+2)); seq 1 100\n"));
+        assert!(type_in(
+            &mut link,
+            "echo mark-$((40+2)); echo a-pane >&2; seq 1 100\n"
+        ));
         until(&mut link, |link| shows(link, "100"))?;
         note("typed", "yes")?;
         until(&mut link, Link::take_raised)?;
@@ -193,6 +208,11 @@ fn a_session_outlives_its_client_and_says_when_the_core_dies() {
 
     assert!(session.launch().unwrap().status.success());
     assert!(session.wait_for("typed"), "input did not come back");
+    assert!(session.log().exists());
+    assert!(
+        !session.read_log().contains("a-pane"),
+        "a pane reached the log"
+    );
 
     // The launcher has gone, and the core is alive to answer a second request.
     assert!(session.launch().unwrap().status.success());
@@ -256,19 +276,100 @@ fn two_launchers_at_once_share_one_core_and_one_window() {
 
 #[test]
 fn a_window_that_exits_during_start_fails_the_launcher() {
-    let session = Session::new("d", Some(&format!("{NOTE_CORE}\nexit 3"))).unwrap();
+    let window = format!("{NOTE_CORE}\necho why-it-ended >&2\nexit 3");
+    let session = Session::new("d", Some(&window)).unwrap();
     let error = launch_failure(&session).unwrap();
     assert!(
         error.contains("the window ended before it was ready"),
         "{error}"
     );
+    assert!(error.contains(session.log().to_str().unwrap()), "{error}");
+    assert!(session.read_log().contains("why-it-ended"));
+    use std::os::unix::fs::PermissionsExt;
+    let mode = fs::metadata(session.log()).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
 }
 
 #[test]
 fn a_window_that_never_says_hello_fails_the_launcher() {
     let session = Session::new("e", Some(&format!("{NOTE_CORE}\n{STAY}"))).unwrap();
+    let start = Instant::now();
     let error = launch_failure(&session).unwrap();
     assert!(error.contains("the window is not ready"), "{error}");
+    assert!(start.elapsed() >= control::FIRST_OPEN_WAIT);
+
+    // Only the first window of a core starts cold.
+    let start = Instant::now();
+    let error = launch_failure(&session).unwrap();
+    assert!(error.contains("the window is not ready"), "{error}");
+    assert!(start.elapsed() < control::FIRST_OPEN_WAIT);
+}
+
+#[test]
+fn a_first_window_may_take_longer_than_a_later_one() {
+    let wait = control::OPEN_WAIT.as_secs() + 1;
+    let hello = say_hello().unwrap();
+    let window = format!("{NOTE_CORE}\nsleep {wait}\n{hello}\n{STAY}");
+    let session = Session::new("g", Some(&window)).unwrap();
+    let launched = session.launch().unwrap();
+    let error = String::from_utf8_lossy(&launched.stderr);
+    assert!(launched.status.success(), "{error}");
+}
+
+#[test]
+fn a_new_core_empties_the_log_and_a_running_one_keeps_it() {
+    let window = format!(
+        "{NOTE_CORE}\necho this-core >&2\n{}\n{STAY}",
+        say_hello().unwrap()
+    );
+    let session = Session::new("h", Some(&window)).unwrap();
+    fs::create_dir_all(session.log().parent().unwrap()).unwrap();
+    fs::write(session.log(), "an-older-core").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let private = fs::Permissions::from_mode(0o700);
+    fs::set_permissions(session.log().parent().unwrap(), private).unwrap();
+    for _ in 0..2 {
+        assert!(session.launch().unwrap().status.success());
+        assert_eq!(session.read_log(), "this-core\n");
+    }
+}
+
+#[test]
+fn a_log_that_will_not_open_stops_nothing_and_a_symlink_is_not_followed() {
+    let window = format!("{NOTE_CORE}\n{}\n{STAY}", say_hello().unwrap());
+    let session = Session::new("i", Some(&window)).unwrap();
+    fs::create_dir_all(session.log().parent().unwrap()).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let private = fs::Permissions::from_mode(0o700);
+    fs::set_permissions(session.log().parent().unwrap(), private).unwrap();
+    let target = session.directory.join("target");
+    fs::write(&target, "keep").unwrap();
+    std::os::unix::fs::symlink(&target, session.log()).unwrap();
+    let launched = session.launch().unwrap();
+    let error = String::from_utf8_lossy(&launched.stderr);
+    assert!(launched.status.success(), "{error}");
+    assert_eq!(session.read("target"), "keep");
+}
+
+/// Not a test: the panic of [`a_panic_prints_its_place_and_not_its_text`].
+#[test]
+fn panic_process() {
+    if env::var_os(PANIC).is_some() {
+        pinfold_cli::panics_name_no_text();
+        let _ = std::panic::catch_unwind(|| std::panic::panic_any("text from a pane".to_owned()));
+    }
+}
+
+#[test]
+fn a_panic_prints_its_place_and_not_its_text() {
+    let output = Command::new(env::current_exe().unwrap())
+        .args(["--exact", "panic_process", "--nocapture"])
+        .env(PANIC, "yes")
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("session.rs"), "{said}");
+    assert!(!said.contains("from a pane"), "{said}");
 }
 
 #[test]

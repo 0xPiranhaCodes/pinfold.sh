@@ -1,5 +1,6 @@
 //! Fonts, memory-mapped and read lazily by `swash` (ADR-0025).
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::{fs, io};
 
@@ -113,9 +114,8 @@ impl Font {
         match path.map(Self::open_checked) {
             Some(Ok(font)) => Ok(font),
             Some(Err(error)) => {
-                // shortcut: stderr only, so a launch from the Dock shows nothing, draw it in the
-                // chrome.
-                eprintln!("pinfold: using the bundled font: {error}");
+                // shortcut: only the log hears this, so no one sees it, draw it in the chrome.
+                let _ = writeln!(io::stderr(), "pinfold: using the bundled font: {error}");
                 Self::bundled()
             }
             None => Self::bundled(),

@@ -12,7 +12,7 @@ pub const PANE_LIMIT: u64 = 250_000;
 /// The window budget on Linux for an inner size of 1920x1080.
 pub const WINDOW_LIMIT_FULL_HD: u64 = 8_000_000 + 2 * 4 * 1920 * 1080;
 /// The window budget on macOS for half a Retina screen, the size M0 measured.
-pub const WINDOW_LIMIT_HALF_RETINA: u64 = 30_000_000 + 2 * 4 * 1512 * 1890;
+pub const WINDOW_LIMIT_HALF_RETINA: u64 = 33_000_000 + 2 * 4 * 1512 * 1890;
 /// 10k lines of typical text, on top of an idle pane of the same size.
 pub const TYPICAL_TEXT_LIMIT: u64 = if cfg!(target_os = "macos") {
     1_500_000

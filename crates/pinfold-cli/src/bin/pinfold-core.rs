@@ -1,13 +1,12 @@
 //! The `pinfold-core` binary.
 
-use std::env;
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, SyncSender};
-use std::thread;
 use std::time::Duration;
+use std::{env, mem, thread};
 
 use pinfold_api::control::{self, Control};
 use pinfold_core::io::{Reactor, Waker};
@@ -15,8 +14,6 @@ use pinfold_core::shell;
 
 const ROWS: u16 = 24;
 const COLUMNS: u16 = 80;
-/// How long the API thread waits for a window to say hello. A launcher waits longer for the reply.
-const OPEN_WAIT: Duration = Duration::from_secs(2);
 const IDLE: Duration = Duration::from_secs(3600);
 
 /// The answer to `window.open`: why no window came, in words that are safe to hand a caller.
@@ -36,13 +33,14 @@ fn window_binary() -> io::Result<PathBuf> {
 fn listen(waker: Arc<Waker>) -> io::Result<Receiver<SyncSender<Opened>>> {
     let control = Control::bind(&control::runtime_dir()).map_err(io::Error::other)?;
     let (ask, asked) = mpsc::sync_channel(1);
+    let mut wait = control::FIRST_OPEN_WAIT;
     let open = move || {
         let (reply, answer) = mpsc::sync_channel(1);
         if ask.try_send(reply).is_err() || waker.wake().is_err() {
             return Err("the core is busy".to_owned());
         }
         answer
-            .recv_timeout(OPEN_WAIT)
+            .recv_timeout(mem::replace(&mut wait, control::OPEN_WAIT))
             .unwrap_or_else(|_| Err("the window is not ready and may still open".to_owned()))
     };
     let serve = move || control.serve(open);
@@ -138,6 +136,7 @@ fn run(args: &[&str]) -> io::Result<()> {
 }
 
 fn main() -> ExitCode {
+    pinfold_cli::panics_name_no_text();
     let args: Vec<String> = env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();
     match run(&args) {

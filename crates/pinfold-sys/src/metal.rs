@@ -1,5 +1,6 @@
 //! A safe layer over the Metal calls the renderer needs (ADR-0022).
 
+use std::cell::RefCell;
 use std::ffi::c_void;
 use std::mem::{size_of, size_of_val};
 use std::ptr::NonNull;
@@ -82,6 +83,7 @@ pub struct Instance {
 /// A window's Metal layer, with one 8-bit atlas texture.
 pub struct Gpu {
     layer: Retained<CAMetalLayer>,
+    instances: RefCell<Option<Retained<ProtocolObject<dyn MTLBuffer>>>>,
     device: Retained<ProtocolObject<dyn MTLDevice>>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
     pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
@@ -154,6 +156,7 @@ impl Gpu {
         layer.setOpaque(true);
         Some(Self {
             layer,
+            instances: RefCell::new(None),
             device,
             queue,
             pipeline,
@@ -221,6 +224,8 @@ impl Gpu {
         {
             commands.presentDrawable(ProtocolObject::<dyn MTLDrawable>::from_ref(&*drawable));
             commands.commit();
+            // The next frame writes the same instance buffer. This waits for the GPU, not vsync.
+            commands.waitUntilCompleted();
         }
     }
 
@@ -278,21 +283,36 @@ impl Gpu {
         Some(())
     }
 
-    // shortcut: a new buffer each frame is simple but churns, reuse a pair if frames get slow.
+    /// Copies `instances` into the one buffer frames share, which only grows. A new buffer per
+    /// frame leaves the driver holding more at idle, by an amount that varies from run to run.
     fn instance_buffer(
         &self,
         instances: &[Instance],
     ) -> Option<Retained<ProtocolObject<dyn MTLBuffer>>> {
-        let bytes = NonNull::new(instances.as_ptr().cast_mut().cast::<c_void>())?;
+        let bytes = NonNull::new(instances.as_ptr().cast_mut())?;
         if instances.is_empty() {
             return None;
         }
-        let options = MTLResourceOptions::StorageModeShared;
-        // SAFETY: `bytes` points to `size_of_val(instances)` readable bytes, which are copied.
-        unsafe {
-            self.device
-                .newBufferWithBytes_length_options(bytes, size_of_val(instances), options)
+        let length = size_of_val(instances);
+        let mut shared = self.instances.borrow_mut();
+        if shared
+            .as_ref()
+            .is_none_or(|buffer| buffer.length() < length)
+        {
+            *shared = self
+                .device
+                .newBufferWithLength_options(length * 2, MTLResourceOptions::StorageModeShared);
         }
+        let buffer = shared.clone()?;
+        // SAFETY: `bytes` holds `instances.len()` instances and the buffer at least as many, and
+        // `draw` waits for the GPU, so nothing else reads the buffer during this write.
+        unsafe {
+            buffer
+                .contents()
+                .cast::<Instance>()
+                .copy_from_nonoverlapping(bytes, instances.len());
+        }
+        Some(buffer)
     }
 }
 
@@ -414,6 +434,42 @@ mod tests {
         let pixels = pixels(&gpu, 0x0010_2030, &quads).unwrap();
         // Solid colours pass through unchanged, and the first pixel is `blend` in `pinfold-render`.
         assert_eq!(pixels, [0xffbc_bdbe, 0xffa0_b0c0, 0xff10_2030, 0xff10_2030]);
+    }
+
+    #[test]
+    fn frames_of_any_length_share_the_instance_buffer() {
+        let Some(gpu) = gpu() else {
+            eprintln!("skipped: no Metal device with readable pixels");
+            return;
+        };
+        const BACKGROUND: u32 = 0x0010_2030;
+        let mut quads = vec![solid(1.0, 1.0, SOLID); 64];
+        let first = pixels(&gpu, BACKGROUND, &quads[..1]).unwrap();
+        assert_eq!(pixels(&gpu, BACKGROUND, &quads).unwrap(), first);
+        let grown = gpu
+            .instances
+            .borrow()
+            .as_ref()
+            .map(|buffer| buffer.length());
+        quads[0] = solid(0.0, 0.0, SOLID);
+        let second = pixels(&gpu, BACKGROUND, &quads[..1]).unwrap();
+        // A short frame after a long one draws its own quads, not what is left in the buffer.
+        assert_eq!(
+            second,
+            [
+                first[3],
+                BACKGROUND | 0xff00_0000,
+                BACKGROUND | 0xff00_0000,
+                BACKGROUND | 0xff00_0000
+            ]
+        );
+        assert_eq!(
+            gpu.instances
+                .borrow()
+                .as_ref()
+                .map(|buffer| buffer.length()),
+            grown
+        );
     }
 
     #[test]
