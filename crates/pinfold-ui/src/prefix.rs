@@ -148,12 +148,14 @@ fn command(key: &Key, modifiers: ModifiersState) -> Option<Command> {
 /// The prefix key, and whether it is armed.
 // shortcut: a prefix is Ctrl and a letter as the layout reports it, so Ctrl+a on a Cyrillic layout
 // is not the prefix. Compare physical keys if people on those layouts miss it.
-// shortcut: each command needs the prefix again, with no repeat-time as in tmux, and the repeats
-// of a held command key reach the pane. Add it if resizing a step at a time grates.
+// shortcut: each command needs the prefix again, with no repeat-time as in tmux. Add it if
+// resizing a step at a time grates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Prefix {
     letter: char,
     armed: bool,
+    /// Whether the key last taken was the prefix's, so its repeats stay out of the pane.
+    consumed: bool,
 }
 
 impl Prefix {
@@ -163,6 +165,7 @@ impl Prefix {
         Self {
             letter,
             armed: false,
+            consumed: false,
         }
     }
 
@@ -192,27 +195,31 @@ impl Prefix {
     pub fn key(&mut self, key: &Key, modifiers: ModifiersState, repeat: bool) -> Step {
         let is_prefix = self.is_prefix(key, modifiers);
         // A held prefix would flip between arming and sending, and leave either at random.
-        if is_prefix && repeat {
+        // A held command key would run once and then type into the pane.
+        if repeat && (is_prefix || self.consumed) {
             return Step::Swallow;
         }
+        // Shift comes as a press of its own on the way to `%` or `|`.
+        if is_modifier(key) && (self.armed || self.consumed) {
+            return Step::Swallow;
+        }
+        self.consumed = false;
         if !self.armed {
             self.armed = is_prefix;
             return if is_prefix { Step::Swallow } else { Step::Pass };
-        }
-        // Shift comes as a press of its own on the way to `%` or `|`.
-        if is_modifier(key) {
-            return Step::Swallow;
         }
         self.armed = false;
         if is_prefix {
             return Step::Pass;
         }
+        self.consumed = true;
         command(key, modifiers).map_or(Step::Swallow, Step::Run)
     }
 
     /// Disarms, for when the window loses focus, so the first key back is not a command.
     pub const fn cancel(&mut self) {
         self.armed = false;
+        self.consumed = false;
     }
 }
 
@@ -380,6 +387,18 @@ mod tests {
     fn repeats_of_other_keys_pass() {
         let mut prefix = Prefix::new('a');
         assert_eq!(prefix.key(&text("q"), NONE, true), Step::Pass);
+    }
+
+    #[test]
+    fn repeats_of_a_key_the_prefix_took_stay_out_of_the_pane() {
+        for key in [text("c"), text("q"), Key::Named(NamedKey::ArrowUp)] {
+            let mut prefix = armed();
+            assert_ne!(prefix.key(&key, NONE, false), Step::Pass, "{key:?}");
+            assert_eq!(prefix.key(&key, NONE, true), Step::Swallow, "{key:?}");
+            assert_eq!(prefix.key(&key, NONE, true), Step::Swallow, "{key:?}");
+            assert_eq!(prefix.key(&key, NONE, false), Step::Pass, "{key:?}");
+            assert_eq!(prefix.key(&key, NONE, true), Step::Pass, "{key:?}");
+        }
     }
 
     #[test]
