@@ -348,7 +348,13 @@ mod tests {
             let mut view = Frame::default();
             engine.frame(&mut view);
             let plain = view.clone();
-            selection::overlay(&mut view, engine.position(0, 0).row, found);
+            let rect = pinfold_proto::link::Rect {
+                x: 0,
+                y: 0,
+                columns: view.columns,
+                rows: view.rows,
+            };
+            selection::overlay(&mut view, rect, engine.position(0, 0).row, found);
             let cells = plain.cells.iter().zip(&view.cells);
             let picked = cells.filter(|(plain, drawn)| plain != drawn);
             let inverted: String = picked.map(|(_, drawn)| drawn.character).collect();

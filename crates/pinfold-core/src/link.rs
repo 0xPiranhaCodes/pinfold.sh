@@ -279,7 +279,8 @@ impl Session {
             .session
             .active_tab()
             .map_or(0, pinfold_mux::Tab::focused);
-        encode_layout(&mut self.out, active, focused, &tabs, &shown).map_err(|_| Ended)?;
+        let total = reactor.pane_count() as u16;
+        encode_layout(&mut self.out, active, focused, total, &tabs, &shown).map_err(|_| Ended)?;
         self.flush()
     }
 
@@ -291,11 +292,11 @@ impl Session {
             return Ok(());
         }
         self.send_layout(reactor)?;
-        if self.pending() == 0 {
-            if let Some(reason) = self.refused.take() {
-                self.notice(&Notice::Refused { reason })?;
-                self.flush()?;
-            }
+        if self.pending() == 0
+            && let Some(reason) = self.refused.take()
+        {
+            self.notice(&Notice::Refused { reason })?;
+            self.flush()?;
         }
         let count = self.panes.len();
         for offset in 0..count {

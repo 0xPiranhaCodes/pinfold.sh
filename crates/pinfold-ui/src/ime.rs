@@ -6,13 +6,14 @@ use pinfold_proto::Frame;
 use unicode_width::UnicodeWidthChar;
 
 /// Draws `text` in inverse from the cursor, and moves the cursor to byte `caret` of `text`.
-/// Text past the end of the row is cut off, and a hidden cursor draws nothing.
-pub fn overlay(frame: &mut Frame, text: &str, caret: usize) {
+/// Text past column `end`, which is the pane's right edge, is cut off, and a hidden cursor draws
+/// nothing.
+pub fn overlay(frame: &mut Frame, end: u16, text: &str, caret: usize) {
     let Some((row, mut column)) = frame.cursor else {
         return;
     };
-    let columns = usize::from(frame.columns);
-    let start = usize::from(row) * columns;
+    let columns = usize::from(end);
+    let start = usize::from(row) * usize::from(frame.columns);
     let mut cursor = None;
     for (index, character) in text.char_indices() {
         if index == caret {
@@ -41,6 +42,19 @@ pub fn overlay(frame: &mut Frame, text: &str, caret: usize) {
 mod tests {
     use super::*;
     use pinfold_proto::Cell;
+
+    /// The pane as the whole grid.
+    fn overlay(frame: &mut Frame, text: &str, caret: usize) {
+        let end = frame.columns;
+        super::overlay(frame, end, text, caret);
+    }
+
+    #[test]
+    fn text_stops_at_the_panes_edge() {
+        let mut frame = frame();
+        super::overlay(&mut frame, 2, "abc", 3);
+        assert_eq!(text(&frame), "xxxxxaxx");
+    }
 
     fn frame() -> Frame {
         let cell = Cell {

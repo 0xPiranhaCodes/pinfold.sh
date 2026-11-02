@@ -483,6 +483,8 @@ pub struct Layout<'a> {
     pub active: u16,
     /// The pane keys go to. It can be missing from [`Layout::panes`] in a window too small for it.
     pub focused: u32,
+    /// How many panes the session holds, shown or not, up to [`MAX_PANES`].
+    pub total: u16,
     tabs: &'a [u8],
     panes: &'a [u8],
 }
@@ -491,14 +493,18 @@ impl Layout<'_> {
     /// Returns each tab's focused pane, in order. That pane's directory names the tab.
     pub fn tabs(&self) -> impl Iterator<Item = u32> + '_ {
         self.tabs
-            .chunks_exact(LAYOUT_TAB)
+            .as_chunks::<LAYOUT_TAB>()
+            .0
+            .iter()
             .filter_map(|tab| Reader(tab).u32().ok())
     }
 
     /// Returns each pane the active tab shows, and where.
     pub fn panes(&self) -> impl Iterator<Item = (u32, Rect)> + '_ {
         self.panes
-            .chunks_exact(LAYOUT_PANE)
+            .as_chunks::<LAYOUT_PANE>()
+            .0
+            .iter()
             .filter_map(|pane| read_pane(pane).ok())
     }
 
@@ -510,7 +516,7 @@ impl Layout<'_> {
 
     fn write(&self, out: &mut Vec<u8>) {
         let (tabs, panes) = (self.tabs.len() / LAYOUT_TAB, self.panes.len() / LAYOUT_PANE);
-        put!(out; self.active, self.focused, tabs as u16, panes as u16);
+        put!(out; self.active, self.focused, self.total, tabs as u16, panes as u16);
         out.extend_from_slice(self.tabs);
         out.extend_from_slice(self.panes);
     }
@@ -993,8 +999,8 @@ pub fn encode_frame(
     finish(out, start, MAX_MESSAGE, FRAME)
 }
 
-/// Appends a [`Notice::Layout`]. `tabs` holds each tab's focused pane, and `panes` what the
-/// active tab shows. On an error `out` is as it was.
+/// Appends a [`Notice::Layout`]. `tabs` holds each tab's focused pane, `panes` what the active
+/// tab shows, and `total` how many panes the session holds. On an error `out` is as it was.
 ///
 /// # Errors
 ///
@@ -1004,6 +1010,7 @@ pub fn encode_layout(
     out: &mut Vec<u8>,
     active: u16,
     focused: u32,
+    total: u16,
     tabs: &[u32],
     panes: &[(u32, Rect)],
 ) -> Result<(), Error> {
@@ -1014,7 +1021,7 @@ pub fn encode_layout(
     let tabs_count = u16::try_from(tabs.len()).map_err(|_| too_long(tabs.len()))?;
     let panes_count = u16::try_from(panes.len()).map_err(|_| too_long(panes.len()))?;
     let start = begin(out);
-    put!(out; active, focused, tabs_count, panes_count);
+    put!(out; active, focused, total, tabs_count, panes_count);
     for tab in tabs {
         put!(out; tab);
     }
@@ -1355,7 +1362,7 @@ fn repeats(records: &[u8], size: usize) -> bool {
 }
 
 fn read_layout<'a>(body: &mut Reader<'a>) -> Result<Layout<'a>, Error> {
-    let (active, focused) = (body.u16()?, body.u32()?);
+    let (active, focused, total) = (body.u16()?, body.u32()?, body.u16()?);
     let (tabs, panes) = (usize::from(body.u16()?), usize::from(body.u16()?));
     let bound = |field, value: usize, most: usize| {
         if value > most {
@@ -1367,11 +1374,12 @@ fn read_layout<'a>(body: &mut Reader<'a>) -> Result<Layout<'a>, Error> {
         Ok(())
     };
     bound("tabs", tabs, MAX_TABS)?;
-    bound("panes", panes, MAX_PANES)?;
+    bound("panes", panes, usize::from(total))?;
+    bound("session's panes", usize::from(total), MAX_PANES)?;
     bound("active tab", usize::from(active), tabs.saturating_sub(1))?;
     let tabs = body.take(tabs * LAYOUT_TAB)?;
     let panes = body.take(panes * LAYOUT_PANE)?;
-    for pane in panes.chunks_exact(LAYOUT_PANE) {
+    for pane in panes.as_chunks::<LAYOUT_PANE>().0 {
         read_pane(pane)?;
     }
     if repeats(tabs, LAYOUT_TAB) || repeats(panes, LAYOUT_PANE) {
@@ -1383,6 +1391,7 @@ fn read_layout<'a>(body: &mut Reader<'a>) -> Result<Layout<'a>, Error> {
     Ok(Layout {
         active,
         focused,
+        total,
         tabs,
         panes,
     })
@@ -1834,6 +1843,7 @@ mod tests {
     fn layout_body(active: u16, tabs: &[u32], panes: &[(u32, Rect)]) -> Vec<u8> {
         let mut body = active.to_le_bytes().to_vec();
         body.extend_from_slice(&7_u32.to_le_bytes());
+        body.extend_from_slice(&(MAX_PANES as u16).to_le_bytes());
         body.extend_from_slice(&(tabs.len() as u16).to_le_bytes());
         body.extend_from_slice(&(panes.len() as u16).to_le_bytes());
         for tab in tabs {
@@ -1857,10 +1867,11 @@ mod tests {
 
     #[test]
     fn a_layout_past_its_limits_is_refused_both_ways() {
+        type Bad<'a> = (u16, &'a [u32], &'a [(u32, Rect)], &'a str);
         let tabs: Vec<u32> = (0..=MAX_TABS as u32).collect();
         let panes: Vec<(u32, Rect)> = (0..=MAX_PANES as u32).map(|pane| (pane, CORNER)).collect();
         let off = |rect| [(1, rect)];
-        let bad: [(u16, &[u32], &[(u32, Rect)], &str); 8] = [
+        let bad: [Bad; 8] = [
             (0, &tabs, &[], "tabs"),
             (0, &[1], &panes, "panes"),
             (1, &[1], &[], "active tab"),
@@ -1888,7 +1899,8 @@ mod tests {
         ];
         for (active, tabs, panes, field) in bad {
             let mut out = vec![9];
-            let error = encode_layout(&mut out, active, 7, tabs, panes).unwrap_err();
+            let total = MAX_PANES as u16;
+            let error = encode_layout(&mut out, active, 7, total, tabs, panes).unwrap_err();
             assert!(matches!(error, Error::OutOfBounds { field: f, .. } if f == field));
             assert_eq!(out, [9]);
             let wire = raw(LAYOUT, &layout_body(active, tabs, panes));
@@ -1910,7 +1922,7 @@ mod tests {
     #[test]
     fn an_empty_session_is_a_layout() {
         let mut wire = HELLO_WIRE.to_vec();
-        encode_layout(&mut wire, 0, 0, &[], &[]).unwrap();
+        encode_layout(&mut wire, 0, 0, 0, &[], &[]).unwrap();
         let (mut decoder, mut input) = (Decoder::default(), wire.as_slice());
         decoder.next_notice(&mut input).unwrap();
         let notice = decoder.next_notice(&mut input).unwrap();
@@ -2454,7 +2466,7 @@ mod tests {
             let tabs: Vec<u32> = std::mem::take(&mut tabs).into_iter().collect();
             let panes: Vec<(u32, Rect)> = panes.into_iter().collect();
             let mut wire = Vec::new();
-            encode_layout(&mut wire, active, focused, &tabs, &panes).unwrap();
+            encode_layout(&mut wire, active, focused, MAX_PANES as u16, &tabs, &panes).unwrap();
             let mut decoder = Decoder::default();
             let hello = [HELLO_WIRE.as_slice(), wire.as_slice()].concat();
             let mut input = hello.as_slice();

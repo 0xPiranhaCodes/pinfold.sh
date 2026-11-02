@@ -45,7 +45,8 @@ fuzz_target!(|data: &[u8]| {
                     }
                     if let Notice::Layout(layout) = &notice {
                         assert!(layout.tabs().count() <= MAX_TABS);
-                        assert!(layout.panes().count() <= MAX_PANES);
+                        assert!(layout.panes().count() <= usize::from(layout.total));
+                        assert!(usize::from(layout.total) <= MAX_PANES);
                         assert!(usize::from(layout.active) < layout.tabs().count().max(1));
                         assert!(layout.panes().all(|(_, rect)| {
                             rect.x + rect.columns <= MAX_DIMENSION
