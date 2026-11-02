@@ -8,6 +8,8 @@ use std::{fs, io};
 
 mod mem_gate;
 
+use mem_gate::Side;
+
 const HELP: &str = "\
 Usage: cargo xtask <command>
 
@@ -119,11 +121,21 @@ fn write_corpora(dir: &Path) -> io::Result<()> {
     }
 }
 
+/// The core starts the window beside it, and the two profiles build into separate directories.
+fn beside_the_core(target: &Path) -> io::Result<()> {
+    fs::copy(
+        target.join("release/pinfold-window"),
+        target.join("release-core/pinfold-window"),
+    )?;
+    Ok(())
+}
+
 fn mem_gate_task() -> ExitCode {
     let target = std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into());
     let corpora = Path::new(&target).join("corpora");
     if let Err(error) = build("release-core", "pinfold-core", &["--no-default-features"])
-        .and_then(|()| build("release", "pinfold", &[]))
+        .and_then(|()| build("release", "pinfold-window", &[]))
+        .and_then(|()| beside_the_core(Path::new(&target)))
         .and_then(|()| write_corpora(&corpora))
     {
         eprintln!("mem-gate: {error}");
@@ -140,7 +152,6 @@ fn mem_gate_task() -> ExitCode {
     let replay_hostile = ["--replay", hostile.as_str()];
     let replay_baseline: &[&str] = &["--replay", "/dev/null"];
     let core = Path::new(&target).join("release-core/pinfold-core");
-    let window = Path::new(&target).join("release/pinfold");
     let mut budgets = vec![
         mem_gate::Budget {
             metric: "Core, 8 idle panes",
@@ -151,6 +162,7 @@ fn mem_gate_task() -> ExitCode {
             settle: mem_gate::SETTLE,
             wait_for_line: false,
             screen: None,
+            window: None,
         },
         mem_gate::Budget {
             metric: "10k lines of typical text",
@@ -161,6 +173,7 @@ fn mem_gate_task() -> ExitCode {
             settle: mem_gate::SETTLE,
             wait_for_line: true,
             screen: None,
+            window: None,
         },
         mem_gate::Budget {
             metric: "Scrollback at its cap",
@@ -171,6 +184,7 @@ fn mem_gate_task() -> ExitCode {
             settle: mem_gate::SETTLE,
             wait_for_line: true,
             screen: None,
+            window: None,
         },
         mem_gate::Budget {
             metric: "Each idle pane",
@@ -181,50 +195,77 @@ fn mem_gate_task() -> ExitCode {
             settle: mem_gate::SETTLE,
             wait_for_line: false,
             screen: None,
+            window: None,
         },
     ];
     if cfg!(target_os = "macos") {
         budgets.push(mem_gate::Budget {
             metric: "Window on macOS, 1512x1890",
             limit: mem_gate::WINDOW_LIMIT_HALF_RETINA,
-            program: &window,
-            args: &["--size", "1512x1890"],
+            program: &core,
+            args: &["--window", "1", "1512x1890"],
             per_pane_over: None,
             settle: mem_gate::WINDOW_SETTLE,
-            wait_for_line: false,
+            wait_for_line: true,
             screen: None,
+            window: Some(Side::Window),
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on macOS with text, 1512x1890",
             limit: mem_gate::WINDOW_LIMIT_HALF_RETINA,
-            program: &window,
-            args: &["--size", "1512x1890"],
+            program: &core,
+            args: &["--window", "1", "1512x1890"],
             per_pane_over: None,
             settle: mem_gate::WINDOW_SETTLE,
-            wait_for_line: false,
+            wait_for_line: true,
             screen: Some(Path::new(HEAVY_SCREEN)),
+            window: Some(Side::Window),
+        });
+        budgets.push(mem_gate::Budget {
+            metric: "Core beside that window, 8 idle panes",
+            limit: mem_gate::CORE_LIMIT,
+            program: &core,
+            args: &["--window", "8", "1512x1890"],
+            per_pane_over: None,
+            settle: mem_gate::WINDOW_SETTLE,
+            wait_for_line: true,
+            screen: None,
+            window: Some(Side::Core),
         });
     }
     if cfg!(target_os = "linux") {
         budgets.push(mem_gate::Budget {
             metric: "Window on X11, 1920x1080",
             limit: mem_gate::WINDOW_LIMIT_FULL_HD,
-            program: &window,
-            args: &["--size", "1920x1080"],
+            program: &core,
+            args: &["--window", "1", "1920x1080"],
             per_pane_over: None,
             settle: mem_gate::WINDOW_SETTLE,
-            wait_for_line: false,
+            wait_for_line: true,
             screen: None,
+            window: Some(Side::Window),
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on X11 with text, 1920x1080",
             limit: mem_gate::WINDOW_LIMIT_FULL_HD,
-            program: &window,
-            args: &["--size", "1920x1080"],
+            program: &core,
+            args: &["--window", "1", "1920x1080"],
             per_pane_over: None,
             settle: mem_gate::WINDOW_SETTLE,
-            wait_for_line: false,
+            wait_for_line: true,
             screen: Some(Path::new(HEAVY_SCREEN)),
+            window: Some(Side::Window),
+        });
+        budgets.push(mem_gate::Budget {
+            metric: "Core beside that window, 8 idle panes",
+            limit: mem_gate::CORE_LIMIT,
+            program: &core,
+            args: &["--window", "8", "1920x1080"],
+            per_pane_over: None,
+            settle: mem_gate::WINDOW_SETTLE,
+            wait_for_line: true,
+            screen: None,
+            window: Some(Side::Core),
         });
     }
     if mem_gate::run(&budgets) {
