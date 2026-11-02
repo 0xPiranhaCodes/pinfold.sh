@@ -36,6 +36,23 @@ pub struct Config {
     pub background_opacity: f32,
     /// Whether to blur what shows through a translucent background on macOS. Ignored elsewhere.
     pub background_blur: bool,
+    /// The `[keys]` table.
+    pub keys: Keys,
+}
+
+/// The `[keys]` table.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Keys {
+    /// The lowercase ASCII letter that, with Ctrl, is the prefix. The file writes it `C-a`.
+    #[serde(deserialize_with = "prefix")]
+    pub prefix: char,
+}
+
+impl Default for Keys {
+    fn default() -> Self {
+        Self { prefix: 'a' }
+    }
 }
 
 impl Default for Config {
@@ -47,6 +64,7 @@ impl Default for Config {
             // Opaque, because memory is the first goal.
             background_opacity: 1.0,
             background_blur: false,
+            keys: Keys::default(),
         }
     }
 }
@@ -84,6 +102,16 @@ fn font_path<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<PathBu
         Err(de::Error::custom(format!(
             "font_path must be an absolute path with no control characters, not {text:?}"
         )))
+    }
+}
+
+fn prefix<'de, D: Deserializer<'de>>(deserializer: D) -> Result<char, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    match text.strip_prefix("C-").map(str::as_bytes) {
+        Some(&[letter @ b'a'..=b'z']) => Ok(char::from(letter)),
+        _ => Err(de::Error::custom(format!(
+            "prefix must be C- and a lowercase letter, such as \"C-a\", not {text:?}"
+        ))),
     }
 }
 
@@ -313,6 +341,32 @@ mod tests {
             assert!(!text.chars().any(|c| c.is_control() && c != '\n'), "{text}");
         }
         assert!(message(b"font_path = 1").contains("font_path"));
+    }
+
+    #[test]
+    fn the_prefix_is_read() {
+        assert_eq!(parse(b"").unwrap().keys.prefix, 'a');
+        let config = parse(b"[keys]\nprefix = \"C-b\"\n").unwrap();
+        assert_eq!(config.keys.prefix, 'b');
+    }
+
+    #[test]
+    fn bad_prefixes_are_named_with_their_line() {
+        for value in [
+            r#""a""#,
+            r#""C-""#,
+            r#""C-A""#,
+            r#""C-ab""#,
+            r#""C-é""#,
+            r#""C-\u0001""#,
+            r#""M-a""#,
+        ] {
+            let text = message(format!("[keys]\nprefix = {value}\n").as_bytes());
+            assert!(text.contains("line 2"), "{value}: {text}");
+            assert!(text.contains("lowercase letter"), "{value}: {text}");
+            assert!(!text.chars().any(|c| c.is_control() && c != '\n'), "{text}");
+        }
+        assert!(message(b"[keys]\nsplit_right = \"prefix |\"").contains("split_right"));
     }
 
     #[test]
