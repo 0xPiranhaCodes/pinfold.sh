@@ -154,6 +154,12 @@ impl Font {
         }
     }
 
+    fn release_pages(&self) {
+        if let Data::Mapped(mapped) = &self.data {
+            mapped.release_pages();
+        }
+    }
+
     /// Returns the glyph for `character`, or 0 if this font lacks it.
     pub(crate) fn glyph(&self, character: char) -> u16 {
         self.face().charmap().map(character)
@@ -167,6 +173,8 @@ pub struct Fonts {
     /// Paths not tried yet. Each is tried once, so a bad file cannot cost a retry per glyph.
     untried: &'static [&'static str],
     opened: Vec<Font>,
+    /// Whether a glyph was drawn since pages were last released.
+    pub(crate) touched: bool,
 }
 
 impl From<Font> for Fonts {
@@ -181,6 +189,16 @@ impl Fonts {
             primary,
             untried,
             opened: Vec::new(),
+            touched: false,
+        }
+    }
+
+    /// Unmaps font pages once a frame's new glyphs are drawn. A CJK font is 20 MB, drawing
+    /// one screen touches over half of it, and those pages count against the window.
+    pub(crate) fn release_pages(&mut self) {
+        if std::mem::take(&mut self.touched) {
+            self.primary.release_pages();
+            self.opened.iter().for_each(Font::release_pages);
         }
     }
 

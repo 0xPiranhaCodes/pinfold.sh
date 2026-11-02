@@ -147,6 +147,7 @@ where
                 }
             }
         }
+        self.painter.release_font_pages();
         std::mem::swap(&mut self.drawn, &mut self.next);
         if full || damage.is_empty() {
             buffer.present()

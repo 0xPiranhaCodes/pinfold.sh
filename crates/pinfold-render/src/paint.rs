@@ -118,6 +118,11 @@ impl Painter {
         self.cache.set_font(font);
     }
 
+    /// Lets go of font pages. Call this once a frame's rows are drawn.
+    pub fn release_font_pages(&mut self) {
+        self.cache.release_font_pages();
+    }
+
     /// Returns the glyph cache.
     #[must_use]
     pub fn cache(&self) -> &GlyphCache {
