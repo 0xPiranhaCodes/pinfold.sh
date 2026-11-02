@@ -426,7 +426,7 @@ const NOTE_PANE: &str = "echo $$ > \"$PINFOLD_TEST_CLIENT/pane\"\nexec sleep 60"
 
 #[test]
 fn hardening_closes_the_core_and_leaves_its_panes_open() {
-    let session = Session::new("h", None).unwrap();
+    let session = Session::new("j", None).unwrap();
     let mut core = session.start_core(&[], NOTE_PANE).unwrap();
     assert!(session.wait_for("pane"), "the pane's shell did not start");
     let pane: u32 = session.read("pane").trim().parse().unwrap();
@@ -441,7 +441,7 @@ fn hardening_closes_the_core_and_leaves_its_panes_open() {
     core.wait().unwrap();
 
     // The same probe on the same binary without hardening, or the above proves nothing.
-    let session = Session::new("i", None).unwrap();
+    let session = Session::new("k", None).unwrap();
     let mut open = session.start_core(&["--idle", "1"], NOTE_PANE).unwrap();
     assert!(session.wait_for("pane"), "the pane's shell did not start");
     assert!(debuggable(open.id()).unwrap(), "the probe cannot tell");
