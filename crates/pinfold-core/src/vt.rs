@@ -15,7 +15,7 @@ use pinfold_proto::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode};
 
 use crate::marks::{Marks, ShellMarks, WorkingDirectory};
 use crate::scrollback::Scrollback;
-use crate::search::{self, Position, Search, SearchStep, Selection};
+use crate::search::{self, CopyStep, Copying, Position, Search, SearchStep, Selection};
 
 /// The slot Alacritty's colour table gives the default background.
 const BACKGROUND_SLOT: usize = 257;
@@ -74,8 +74,13 @@ pub trait VtEngine {
 
     /// Appends the text of `selection` to `text`, clamped to the rows still held. A wrapped
     /// line joins up and a wide character appears once. Returns false if it stopped at a row
-    /// boundary because the text would pass [`search::MAX_SELECTION`].
+    /// boundary because the text would pass [`search::MAX_SELECTION`]. All of it stays in one
+    /// allocation, so anything that can be large goes through [`Self::copy_step`].
     fn selection_text(&self, selection: Selection, text: &mut String) -> bool;
+
+    /// Runs one bounded step of `copy`, appending what it read to `text`. Taking that text
+    /// before the next step means a copy of any size costs one step's text.
+    fn copy_step(&self, copy: &mut Copying, text: &mut String) -> CopyStep;
 
     /// Returns whether the program has asked for pastes wrapped in brackets.
     fn bracketed_paste(&self) -> bool;
@@ -527,38 +532,28 @@ impl VtEngine for AlacrittyEngine {
         search.end_step(rows)
     }
 
-    // shortcut: one call, unlike search, since a person asks for it and output cannot repeat it.
-    // `benches/scrollback.rs` times a whole store. Split it into steps if that ever shows.
+    // shortcut: one call and one allocation, whose pages the allocator keeps after it is freed.
+    // Fine for small selections. `benches/scrollback.rs` measures a whole store this way.
     fn selection_text(&self, selection: Selection, text: &mut String) -> bool {
-        let held = self.held_rows();
-        let (mut start, mut end) = if selection.anchor <= selection.focus {
-            (selection.anchor, selection.focus)
-        } else {
-            (selection.focus, selection.anchor)
-        };
-        if start.row < held.start {
-            start = Position {
-                row: held.start,
-                column: 0,
-            };
+        let mut copy = Copying::new(selection);
+        copy.next_rows(&self.held_rows());
+        // Sized up front, since growing keeps the old copy and doubles what a copy costs.
+        let columns = self.term.grid().columns() + 1;
+        let size = copy.rows_left().saturating_mul(columns);
+        text.reserve(size.min(search::MAX_SELECTION));
+        loop {
+            match self.copy_step(&mut copy, text) {
+                CopyStep::Running => {}
+                CopyStep::Done => return true,
+                CopyStep::TooLong => return false,
+            }
         }
-        if end.row >= held.end {
-            end = Position {
-                row: held.end.saturating_sub(1),
-                column: u16::MAX,
-            };
-        }
-        let mut fits = true;
-        if start <= end && !held.is_empty() {
-            // Sized up front, since growing keeps the old copy and doubles what a copy costs.
-            let rows = end.row - start.row + 1;
-            let columns = self.term.grid().columns() + 1;
-            text.reserve(rows.saturating_mul(columns).min(search::MAX_SELECTION));
-            self.visit_rows(start.row..end.row + 1, |number, row| {
-                fits = fits && search::copy_row((start, end), number, row, text);
-            });
-        }
-        fits
+    }
+
+    fn copy_step(&self, copy: &mut Copying, text: &mut String) -> CopyStep {
+        let rows = copy.next_rows(&self.held_rows());
+        self.visit_rows(rows.clone(), |number, row| copy.row(number, row, text));
+        copy.end_step(rows)
     }
 
     fn bracketed_paste(&self) -> bool {

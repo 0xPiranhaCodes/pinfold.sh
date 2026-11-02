@@ -1,7 +1,9 @@
 //! Search and selection across a pane's scrollback store and screen.
 
 use pinfold_core::scrollback::LINE_CAP;
-use pinfold_core::search::{Direction, MAX_SELECTION, Position, Search, SearchStep, Selection};
+use pinfold_core::search::{
+    CopyStep, Copying, Direction, MAX_SELECTION, Position, Search, SearchStep, Selection,
+};
 use pinfold_core::vt::{AlacrittyEngine, VtEngine};
 use proptest::prelude::*;
 
@@ -447,6 +449,93 @@ fn selection_size_is_bounded_on_a_row() {
     assert!(!fits, "{} bytes", text.len());
     assert!(text.len() <= MAX_SELECTION);
     assert!(text.ends_with('\n'), "cut at a row boundary");
+}
+
+/// Copies `selection` a step at a time, taking each step's text as a caller would. Returns the
+/// steps' text and how the copy ended.
+fn in_steps(engine: &AlacrittyEngine, selection: Selection) -> (Vec<String>, CopyStep) {
+    let mut copy = Copying::new(selection);
+    let mut steps = Vec::new();
+    loop {
+        let mut text = String::new();
+        let step = engine.copy_step(&mut copy, &mut text);
+        steps.push(text);
+        if step != CopyStep::Running {
+            return (steps, step);
+        }
+    }
+}
+
+#[test]
+fn a_copy_in_steps_matches_one_call_and_never_holds_the_whole_text() {
+    let mut text = numbers(1, 2000);
+    text.push_str(&"wrapped ".repeat(20));
+    let engine = pane(text.as_bytes());
+    let whole = Selection {
+        anchor: Position::default(),
+        focus: at(usize::MAX, u16::MAX),
+    };
+    let (steps, end) = in_steps(&engine, whole);
+    assert_eq!(end, CopyStep::Done);
+    assert_eq!(steps.concat(), copied(&engine, whole));
+    assert!(steps.len() > 30, "{} steps", steps.len());
+    let largest = steps.iter().map(String::len).max().unwrap_or(0);
+    assert!(largest <= 64 * usize::from(COLUMNS + 1), "{largest} bytes");
+
+    let backwards = Selection {
+        anchor: at(1500, 2),
+        focus: at(100, 1),
+    };
+    assert_eq!(
+        in_steps(&engine, backwards).0.concat(),
+        copied(&engine, backwards)
+    );
+}
+
+#[test]
+fn the_limit_counts_every_step_of_a_copy() {
+    let mut engine = AlacrittyEngine::new(ROWS, 1024);
+    let row = "e\u{301}\u{301}\u{301}".repeat(1024) + "\r\n";
+    feed(&mut engine, row.repeat(400).as_bytes());
+    let selection = Selection {
+        anchor: Position::default(),
+        focus: at(usize::MAX, u16::MAX),
+    };
+    let (steps, end) = in_steps(&engine, selection);
+    assert_eq!(end, CopyStep::TooLong);
+    let text = steps.concat();
+    assert!(text.len() <= MAX_SELECTION, "{} bytes", text.len());
+    assert_eq!(text, copied(&engine, selection), "cut at the same row");
+}
+
+#[test]
+fn output_between_steps_can_neither_extend_nor_break_a_copy() {
+    let mut engine = pane(numbers(1, 200).as_bytes());
+    let mut copy = Copying::new(Selection {
+        anchor: Position::default(),
+        focus: at(usize::MAX, u16::MAX),
+    });
+    let mut text = String::new();
+    assert_eq!(engine.copy_step(&mut copy, &mut text), CopyStep::Running);
+    let last_row = engine.position(ROWS - 1, 0).row;
+    feed(&mut engine, numbers(201, 500).as_bytes());
+    let mut steps = 1;
+    while engine.copy_step(&mut copy, &mut text) == CopyStep::Running {
+        steps += 1;
+        assert!(steps <= last_row / 64 + 2, "output kept it running");
+    }
+    assert!(text.starts_with("1\n2\n"));
+    assert!(text.lines().count() <= last_row + 1);
+
+    feed(&mut engine, b"\x1b[3J\x1b[2J");
+    let mut copy = Copying::new(Selection {
+        anchor: Position::default(),
+        focus: at(1000, 0),
+    });
+    assert_eq!(
+        engine.copy_step(&mut copy, &mut String::new()),
+        CopyStep::Done
+    );
 }
 
 fn cells() -> impl Strategy<Value = String> {
