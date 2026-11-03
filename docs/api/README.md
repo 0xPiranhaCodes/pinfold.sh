@@ -41,6 +41,11 @@ The log is a 256 KiB ring in memory, which is the source of truth; `api.audit_lo
 the newest entries and whether the chain verifies. Only a terminal outside any pane may call it,
 so an agent in a pane cannot read what other agents did.
 
+`pinfold ctl log` prints `audit.read` a line per entry, `--json` its result, `-n <count>` the
+newest entries and `--pane <pane>` only calls by or to that pane. `pinfold ctl log --verify
+<file>` checks a written log and its rotated `.1`, and fails if the chain is broken. A chain
+cannot show entries cut from its end.
+
 `pinfold ctl list` prints `pane.list` as plain text, with `*` by the caller's own pane, and
 `pinfold ctl list --json` prints its result. Its title, directory and status come from what
 programs print, which can fake them: read them as hints, not facts. `pinfold ctl send <pane>
