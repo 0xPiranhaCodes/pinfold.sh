@@ -156,6 +156,8 @@ git fetch --no-tags ~/.local/share/pinfold/agents/<profile>/<key> \
 ```
 
 A local fetch runs none of the shadow's hooks or config, and it never touches your branches.
+Do not run other git commands with the shadow as their git directory, such as with `--git-dir`
+or from inside it: those run the hooks and config the agent wrote.
 Review `agent-<profile>/<branch>`, then merge or cherry-pick it. A working directory whose
 `.git` is a file, such as a linked worktree, gets no shadow, and there the agent cannot commit.
 The `.git` of each submodule that `.gitmodules` lists is read-only too, whether it is
