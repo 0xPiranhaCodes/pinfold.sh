@@ -67,6 +67,8 @@ pub const OPEN_WAIT: Duration = Duration::from_secs(2);
 /// [`OPEN_WAIT`] for the first window of a core, which starts with nothing warm, so that a slow
 /// Mac does not report failure for a window that opens (`docs/spikes/m2-cold-start`).
 pub const FIRST_OPEN_WAIT: Duration = Duration::from_secs(10);
+/// Longest reply a client reads, the threat model's request limit.
+const MAX_REPLY: u64 = 1_000_000;
 /// Longest a launcher waits for each answer. It can queue behind one peer's first window, then
 /// have its own.
 const REPLY_WAIT: Duration = Duration::from_secs(FIRST_OPEN_WAIT.as_secs() + OPEN_WAIT.as_secs());
@@ -113,6 +115,9 @@ pub enum Error {
     /// The core answered with an error, or with nothing a launcher can read.
     #[error("the core refused: {0}")]
     Refused(String),
+    /// The core refuses this client's `hello` version, as a core older than `pinfold ctl` does.
+    #[error("the running PinFold does not speak this version: quit PinFold so a new core starts")]
+    Old,
     /// The system refused.
     #[error(transparent)]
     Io(#[from] io::Error),
@@ -408,11 +413,12 @@ fn call(stream: &UnixStream, request: &Value) -> Result<Value, Error> {
     bytes.push(b'\n');
     (&mut &*stream).write_all(&bytes)?;
     let mut line = Vec::new();
-    BufReader::new(stream.take(MAX_LINE as u64)).read_until(b'\n', &mut line)?;
+    BufReader::new(stream.take(MAX_REPLY)).read_until(b'\n', &mut line)?;
     let reply: Value = serde_json::from_slice(&line)
         .map_err(|_| Error::Refused("the reply is not JSON-RPC".to_owned()))?;
     match reply.get("result") {
         Some(result) => Ok(result.clone()),
+        None if reply.pointer("/error/code") == Some(&json!(BAD_VERSION)) => Err(Error::Old),
         None => {
             let message = reply.pointer("/error/message").and_then(Value::as_str);
             Err(Error::Refused(message.unwrap_or("no result").to_owned()))
@@ -439,6 +445,24 @@ pub fn open_window(stream: &UnixStream) -> Result<(), Error> {
         &json!({"jsonrpc": "2.0", "id": 2, "method": "window.open"}),
     )?;
     Ok(())
+}
+
+/// Asks the core on `stream` for its panes and returns the `hello` and `pane.list` results:
+/// `pinfold ctl list`'s whole conversation. Refuses another user's socket, as [`open_window`]
+/// does.
+///
+/// # Errors
+///
+/// [`Error::Old`] for a core that refuses `hello` version 2, and as [`open_window`] otherwise.
+pub fn list_panes(stream: &UnixStream) -> Result<(Value, Value), Error> {
+    check_peer(stream.as_fd(), pinfold_sys::effective_uid())?;
+    stream.set_read_timeout(Some(REPLY_WAIT))?;
+    stream.set_write_timeout(Some(REPLY_WAIT))?;
+    let hello = json!({"version": VERSION});
+    let hello = json!({"jsonrpc": "2.0", "id": 1, "method": "hello", "params": hello});
+    let hello = call(stream, &hello)?;
+    let list = json!({"jsonrpc": "2.0", "id": 2, "method": "pane.list"});
+    Ok((hello, call(stream, &list)?))
 }
 
 /// One connection on the API thread.
@@ -744,6 +768,32 @@ mod tests {
             answer(list, &mut greeted),
             Step::Ask(json!(2), Method::PaneList)
         );
+    }
+
+    #[test]
+    fn ctl_hears_the_reactors_answers_and_is_told_to_restart_an_old_core() {
+        let directory = fresh();
+        let control = Control::bind(&directory).unwrap();
+        thread::spawn(move || {
+            control.serve(|request| match request.method() {
+                Method::Hello => request.answer(Ok(json!({"pane": null}))),
+                _ => request.answer(Ok(json!({"panes": []}))),
+            })
+        });
+        let stream = UnixStream::connect(socket_path(&directory)).unwrap();
+        let (hello, list) = list_panes(&stream).unwrap();
+        assert_eq!((hello, list), (json!({"pane": null}), json!({"panes": []})));
+
+        let (old, core) = UnixStream::pair().unwrap();
+        thread::spawn(move || {
+            let mut line = String::new();
+            BufReader::new(&core).read_line(&mut line).unwrap();
+            let refusal = json!({"jsonrpc": "2.0", "id": 1, "error": {"code": BAD_VERSION}});
+            (&core)
+                .write_all(format!("{refusal}\n").as_bytes())
+                .unwrap();
+        });
+        assert!(matches!(list_panes(&old), Err(Error::Old)));
     }
 
     #[test]

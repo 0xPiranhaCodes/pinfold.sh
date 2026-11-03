@@ -16,3 +16,7 @@ Every connection starts with `hello`:
 | ------------- | ------------------------ | ---------------------------------------------- |
 | `window.open` | Any `hello`              | Takes nothing, returns `{}`                    |
 | `pane.list`   | Version 2 and a terminal | [`pane.list.schema.json`](pane.list.schema.json) |
+
+`pinfold ctl list` prints `pane.list` as plain text, with `*` by the caller's own pane, and
+`pinfold ctl list --json` prints its result. A core that refuses version 2 is older than the
+client, and `pinfold ctl` says to quit PinFold so that a new core starts.

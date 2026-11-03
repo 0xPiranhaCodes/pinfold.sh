@@ -459,6 +459,63 @@ fn harden_process() {
 }
 
 #[test]
+fn ctl_lists_the_sessions_panes_inside_and_outside_a_pane_and_not_without_a_terminal() {
+    let session = Session::new("l", None).unwrap();
+    let ctl = format!("'{}' ctl list", session.directory.join("pinfold").display());
+    let to = |name: &str| format!("> \"$PINFOLD_TEST_CLIENT/{name}\"");
+    let inside = format!(
+        "{ctl} {}; {ctl} --json {}; exec sleep 30",
+        to("in"),
+        to("json")
+    );
+    let mut core = session.start_core(&["--idle", "1"], &inside).unwrap();
+    assert!(session.wait_for("json"), "{}", session.read_log());
+
+    // In its pane, the caller is pane 0 and sees itself marked.
+    let text = session.read("in");
+    assert!(
+        text.lines().nth(1).unwrap().starts_with("0*    idle"),
+        "{text}"
+    );
+    let list: serde_json::Value = serde_json::from_str(&session.read("json")).unwrap();
+    let pane = &list["panes"][0];
+    assert_eq!((&pane["id"], &pane["status"]), (&0.into(), &"idle".into()));
+    assert!(
+        pane["command"].as_str().unwrap().ends_with("/shell"),
+        "{list}"
+    );
+    assert_eq!(list["panes"].as_array().unwrap().len(), 1);
+
+    let outside = |name: &str| {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", &format!("{ctl} {} 2>&1", to(name))])
+            .env("XDG_RUNTIME_DIR", session.directory.join("run"))
+            .env(CLIENT, &session.directory);
+        command
+    };
+    // In a terminal that is no pane, it sees the same panes, none of them its own.
+    let _terminal = pinfold_sys::pty::Pty::spawn(outside("out"), 24, 80).unwrap();
+    assert!(session.wait_for("out"));
+    let text = session.read("out");
+    assert!(
+        text.lines().nth(1).unwrap().starts_with("0     idle"),
+        "{text}"
+    );
+
+    // With no terminal at all it is unidentified and refused.
+    let detached = pinfold_sys::spawn_detached(outside("none"), Stdio::null());
+    assert!(!detached.unwrap().wait().unwrap().success());
+    let refused = session.read("none");
+    assert!(
+        refused.contains("needs a caller in a terminal"),
+        "{refused}"
+    );
+    core.kill().unwrap();
+    core.wait().unwrap();
+}
+
+#[test]
 fn hardening_twice_is_harmless() {
     let status = Command::new(env::current_exe().unwrap())
         .args(["--exact", "harden_process"])
