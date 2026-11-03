@@ -47,6 +47,9 @@ is inside the window, where cells can.
 
 ## Consequences
 
+The maintainer decided on 2026-11-03 that all three menus block the macOS beta, so ADR-0031's
+list names them.
+
 The menu bar costs the window memory, and the macOS window has about 1 MB of margin at
 1512x1890 (ADR-0030). Each menu PR includes the `mem-gate` table, and a menu that breaks the
 budget is cut down before it lands.
