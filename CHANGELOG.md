@@ -28,6 +28,7 @@ Entries are generated from Conventional Commits with git-cliff
 ### Added
 
 - A per-pane status state machine combines OSC 133 marks with authoritative API reports and rate-limited alerts.
+- The release dry run builds Linux x86_64 and aarch64 tarballs with licenses and the font license, writes a SHA-256 file per artifact, and ships Homebrew formula and cask templates.
 - Agent profiles in `[agents.<name>]` may set `sandbox`, which runs the agent under `sandbox-exec` on macOS or bubblewrap on Linux, inside its pane's session, with `~/.ssh`, PinFold's config and state, and other panes' terminals hidden.
 - `pinfold agent <name> [--right | --down | --tab]` and the API's `agent.launch` open a pane running an `[agents.<name>]` profile by name, sandboxed if it says so, as a child of the caller (ADR-0036).
 - On Linux a sandboxed agent's bubblewrap gets a seccomp filter that fails `ioctl(TIOCSTI)` with `EPERM`, so the agent cannot type into its pane's terminal; on architectures other than x86_64 and aarch64 the agent does not start.
