@@ -5,6 +5,13 @@
 //! an eight-byte big-endian byte length followed by UTF-8 bytes; and outcomes have a one-byte
 //! variant tag followed by their reason as a string. Thus no two field sequences are ambiguous.
 //!
+//! The chain detects changed, reordered, inserted and head-dropped entries, but not entries cut
+//! from the tail: a shortened chain is still a valid chain, and only a copy of the last hash kept
+//! elsewhere could tell the two apart.
+//!
+//! A failed disk write is cut back off the file where the system allows, and the log then stops
+//! mirroring to disk for the rest of the run, so the file never holds a gap in the chain.
+//!
 //! ```
 //! use pinfold_api::{Log, Outcome, Record};
 //!
@@ -20,8 +27,8 @@
 
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
-use std::io::{self, BufRead, BufReader, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -30,6 +37,9 @@ use sha2::{Digest, Sha256};
 const RING_BYTES: usize = 256 * 1024;
 const FILE_BYTES: u64 = 5 * 1024 * 1024;
 const HASH_BYTES: usize = 32;
+/// Longest legal line: JSON escapes a string byte to at most six bytes (`\u001f`), and a legal
+/// entry holds under [`RING_BYTES`] of strings, plus a margin for field names, hashes and numbers.
+const LINE_BYTES: u64 = 6 * RING_BYTES as u64 + 1024;
 
 /// The result of an audited call, with a short explanatory reason.
 ///
@@ -95,7 +105,7 @@ pub struct Entry {
     pub prev: [u8; HASH_BYTES],
     /// SHA-256 of `prev` and the canonical record bytes.
     pub hash: [u8; HASH_BYTES],
-    encoded_len: usize,
+    cost: usize,
 }
 
 /// Location of a broken link or invalid record hash.
@@ -125,7 +135,7 @@ pub enum Error {
     /// One record alone cannot fit in the bounded ring.
     #[error("audit entry needs {bytes} bytes, over the 256 KiB limit")]
     EntryTooLarge {
-        /// Canonical record bytes plus its two hashes.
+        /// Memory the entry would hold: the entry itself plus its strings' capacities.
         bytes: usize,
     },
     /// A persisted line is not in the audit format.
@@ -172,13 +182,14 @@ impl Log {
         }
     }
 
-    /// Creates a log mirrored to `path`, creating it with mode 0600 when absent. An
+    /// Creates a log mirrored to `path`, with mode 0600 whether it is new or not. An
     /// existing file is verified first and the chain continues from its last entry, so a
     /// restarted core does not break it.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Io`] when the file cannot be opened, and [`Error::Malformed`] or
+    /// Returns [`Error::Io`] when the file cannot be opened or `path` is a symlink, and
+    /// [`Error::Malformed`] or
     /// [`Error::Broken`] when the existing file fails verification.
     pub fn with_file(path: impl AsRef<Path>) -> Result<Self, Error> {
         let path = path.as_ref().to_path_buf();
@@ -197,39 +208,41 @@ impl Log {
     /// Appends a record and then mirrors it to disk when configured.
     ///
     /// A disk error is returned after the authoritative in-memory entry has been retained.
+    /// After one, the log stops mirroring to disk and keeps only the in-memory ring.
     ///
     /// # Errors
     ///
     /// Returns [`Error::EntryTooLarge`] without appending, or [`Error::Io`] after appending.
     pub fn append(&mut self, mut record: Record) -> Result<(), Error> {
         record.seq = self.next_seq;
-        let canonical = encode_record(&record);
-        let encoded_len = 2 * HASH_BYTES + canonical.len();
-        if encoded_len > RING_BYTES {
-            return Err(Error::EntryTooLarge { bytes: encoded_len });
+        let cost = cost(&record);
+        if cost > RING_BYTES {
+            return Err(Error::EntryTooLarge { bytes: cost });
         }
         let prev = self.tail;
-        let hash = digest(&prev, &canonical);
+        let hash = digest(&prev, &encode_record(&record));
         let entry = Entry {
             record,
             prev,
             hash,
-            encoded_len,
+            cost,
         };
         self.tail = hash;
         self.next_seq = self.next_seq.saturating_add(1);
-        self.bytes += encoded_len;
+        self.bytes += cost;
         self.entries.push_back(entry);
         while self.bytes > RING_BYTES {
             if let Some(oldest) = self.entries.pop_front() {
-                self.bytes -= oldest.encoded_len;
+                self.bytes -= oldest.cost;
             }
         }
         if let Some(disk) = &mut self.disk {
-            write_entry(
-                disk,
-                self.entries.back().ok_or(Error::Malformed { line: 0 })?,
-            )?;
+            let entry = self.entries.back().ok_or(Error::Malformed { line: 0 })?;
+            if let Err(error) = write_entry(disk, entry) {
+                // Later lines would follow a gap, and a later rotation could drop the only file.
+                self.disk = None;
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -290,10 +303,12 @@ pub fn verify_file(path: impl AsRef<Path>) -> Result<u64, Error> {
 fn chain_state(path: &Path) -> Result<VerifyState, Error> {
     let old = rotated_path(path);
     let mut state = VerifyState::default();
-    if old.exists() {
-        verify_one(&old, &mut state)?;
+    // Rotation drops the oldest entries, so only an unrotated log must start at the head.
+    let rotated = old.exists();
+    if rotated {
+        verify_one(&old, &mut state, false)?;
     }
-    verify_one(path, &mut state)?;
+    verify_one(path, &mut state, !rotated)?;
     Ok(state)
 }
 
@@ -304,13 +319,14 @@ struct VerifyState {
     count: u64,
 }
 
-fn verify_one(path: &Path, state: &mut VerifyState) -> Result<(), Error> {
+fn verify_one(path: &Path, state: &mut VerifyState, head: bool) -> Result<(), Error> {
     let mut reader = BufReader::new(File::open(path)?);
     let mut line = String::new();
     let mut line_no = 0_u64;
     loop {
         line.clear();
-        if reader.read_line(&mut line)? == 0 {
+        // A line past the limit ends without its newline, so it is reported as malformed.
+        if reader.by_ref().take(LINE_BYTES).read_line(&mut line)? == 0 {
             break;
         }
         line_no = line_no.saturating_add(1);
@@ -319,7 +335,9 @@ fn verify_one(path: &Path, state: &mut VerifyState) -> Result<(), Error> {
         }
         line.pop();
         let entry = parse_line(&line, line_no)?;
-        if state.hash.is_some_and(|hash| hash != entry.prev)
+        let first = head && line_no == 1;
+        if (first && (entry.record.seq != 0 || entry.prev != [0; HASH_BYTES]))
+            || state.hash.is_some_and(|hash| hash != entry.prev)
             || state
                 .seq
                 .is_some_and(|seq| seq.checked_add(1) != Some(entry.record.seq))
@@ -377,32 +395,75 @@ fn digest(prev: &[u8; HASH_BYTES], canonical: &[u8]) -> [u8; HASH_BYTES] {
     hasher.finalize().into()
 }
 
+/// The memory an entry holds: its own size plus the heap capacity of its strings.
+fn cost(record: &Record) -> usize {
+    let (Outcome::Ok(reason) | Outcome::Refused(reason) | Outcome::Error(reason)) = &record.outcome;
+    size_of::<Entry>() + record.method.capacity() + record.scope.capacity() + reason.capacity()
+}
+
 fn open_file(path: &Path) -> io::Result<File> {
-    OpenOptions::new()
+    // shortcut: a symlink swapped in between this check and the open is still followed; use
+    // O_NOFOLLOW if this crate ever depends on libc or rustix.
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "audit log path is a symlink",
+            ));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    let file = OpenOptions::new()
         .create(true)
         .append(true)
         .mode(0o600)
-        .open(path)
+        .open(path)?;
+    // The mode above applies only to a new file.
+    file.set_permissions(fs::Permissions::from_mode(0o600))?;
+    Ok(file)
 }
 
 fn write_entry(disk: &mut Disk, entry: &Entry) -> Result<(), Error> {
     let line = format_line(entry);
     let line_bytes = line.len() as u64;
     if disk.bytes > 0 && disk.bytes.saturating_add(line_bytes) > FILE_BYTES {
-        let old = rotated_path(&disk.path);
-        match fs::remove_file(&old) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error.into()),
-        }
-        fs::rename(&disk.path, old)?;
-        disk.file = open_file(&disk.path)?;
-        disk.bytes = 0;
+        rotate(disk)?;
     }
-    disk.file.write_all(line.as_bytes())?;
-    disk.file.flush()?;
+    if let Err(error) = disk
+        .file
+        .write_all(line.as_bytes())
+        .and_then(|()| disk.file.flush())
+    {
+        // Best effort: cut a partial line, which would end the disk chain with a malformed line.
+        disk.file.set_len(disk.bytes).ok();
+        return Err(error.into());
+    }
     disk.bytes = disk.bytes.saturating_add(line_bytes);
     Ok(())
+}
+
+fn rotate(disk: &mut Disk) -> io::Result<()> {
+    let old = rotated_path(&disk.path);
+    match fs::remove_file(&old) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    fs::rename(&disk.path, &old)?;
+    match open_file(&disk.path) {
+        Ok(file) => {
+            disk.file = file;
+            disk.bytes = 0;
+            Ok(())
+        }
+        Err(error) => {
+            // Put the only file back; the caller stops mirroring either way.
+            fs::rename(&old, &disk.path).ok();
+            Err(error)
+        }
+    }
 }
 
 fn rotated_path(path: &Path) -> PathBuf {
@@ -468,12 +529,12 @@ fn parse_line(line: &str, line_no: u64) -> Result<Entry, Error> {
         scope: text("scope")?,
         outcome,
     };
-    let encoded_len = 2 * HASH_BYTES + encode_record(&record).len();
+    let cost = cost(&record);
     Ok(Entry {
         record,
         prev,
         hash,
-        encoded_len,
+        cost,
     })
 }
 
@@ -603,8 +664,125 @@ mod tests {
         });
         assert!(matches!(log.append(record(0)), Err(Error::Io(_))));
         assert_eq!(log.iter().count(), 1);
+        assert!(log.disk.is_none());
+        log.append(record(1))?;
+        assert_eq!(log.iter().count(), 2);
         log.verify()?;
+        assert_eq!(fs::metadata(&path)?.len(), 0);
         fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn an_existing_file_is_made_private() -> Result<(), Error> {
+        let path = path("broad");
+        fs::write(&path, [])?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))?;
+        drop(Log::with_file(&path)?);
+        assert_eq!(fs::metadata(&path)?.permissions().mode() & 0o777, 0o600);
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_symlinked_path_is_refused() -> Result<(), Error> {
+        let target = path("target");
+        fs::write(&target, [])?;
+        let link = path("link");
+        std::os::unix::fs::symlink(&target, &link)?;
+        assert!(matches!(
+            Log::with_file(&link),
+            Err(Error::Io(error)) if error.kind() == io::ErrorKind::InvalidInput
+        ));
+        assert_eq!(fs::metadata(&target)?.len(), 0);
+        fs::remove_file(link)?;
+        fs::remove_file(target)?;
+        Ok(())
+    }
+
+    #[test]
+    fn the_largest_entry_fits_a_line_and_longer_lines_are_malformed() -> Result<(), Error> {
+        let path = path("long");
+        let mut log = Log::with_file(&path)?;
+        let mut largest = record(0);
+        let free = RING_BYTES - cost(&largest) + "sent 12 bytes".len();
+        // Control bytes take the longest JSON escape.
+        largest.outcome = Outcome::Ok("\u{1}".repeat(free));
+        log.append(largest)?;
+        drop(log);
+        assert!(fs::metadata(&path)?.len() <= LINE_BYTES);
+        assert_eq!(verify_file(&path)?, 1);
+        fs::write(&path, "x".repeat(LINE_BYTES as usize + 1))?;
+        assert!(matches!(
+            verify_file(&path),
+            Err(Error::Malformed { line: 1 })
+        ));
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn an_unrotated_log_must_start_at_the_head() -> Result<(), Error> {
+        let path = path("head");
+        let mut log = Log::with_file(&path)?;
+        for seq in 0..3 {
+            log.append(record(seq))?;
+        }
+        drop(log);
+        let original = fs::read_to_string(&path)?;
+        let rest: String = original
+            .lines()
+            .skip(1)
+            .map(|line| format!("{line}\n"))
+            .collect();
+        fs::write(&path, rest)?;
+        assert!(matches!(
+            verify_file(&path),
+            Err(Error::Broken(Broken { seq: 1 }))
+        ));
+        assert!(Log::with_file(&path).is_err());
+        fs::remove_file(path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn the_ring_counts_string_capacity() -> Result<(), Error> {
+        let mut log = Log::new();
+        for seq in 0..1_000 {
+            let mut item = record(seq);
+            let mut method = String::with_capacity(4096);
+            method.push_str("pane.send");
+            item.method = method;
+            log.append(item)?;
+        }
+        let each = size_of::<Entry>() + 4096 + "children".len() + "sent 12 bytes".len();
+        assert_eq!(log.bytes, each * log.iter().count());
+        assert!(log.bytes <= RING_BYTES);
+        log.verify()?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_failed_rotation_keeps_the_file_and_stops_mirroring() -> Result<(), Error> {
+        let dir = path("dir");
+        fs::create_dir(&dir)?;
+        let path = dir.join("audit.log");
+        let mut log = Log::with_file(&path)?;
+        log.append(record(0))?;
+        if let Some(disk) = &mut log.disk {
+            disk.bytes = FILE_BYTES;
+        }
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o500))?;
+        let rotated = log.append(record(1));
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+        // Root ignores the directory's mode, so the rotation cannot be made to fail there.
+        if rotated.is_err() {
+            assert!(log.disk.is_none());
+            log.append(record(2))?;
+            assert!(!rotated_path(&path).exists());
+            assert_eq!(verify_file(&path)?, 1);
+        }
+        fs::remove_dir_all(dir)?;
         Ok(())
     }
 
@@ -670,7 +848,7 @@ mod tests {
 
     #[test]
     fn reports_typical_capacity() -> Result<(), Error> {
-        let typical_bytes = 2 * HASH_BYTES + encode_record(&record(0)).len();
+        let typical_bytes = cost(&record(0));
         let mut log = Log::new();
         let mut seq = 0;
         while log.bytes + typical_bytes <= RING_BYTES {

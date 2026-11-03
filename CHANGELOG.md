@@ -20,7 +20,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Added
 
-- A 256 KiB hash-chained API audit log with optional private, rotating persistence.
+- A 256 KiB hash-chained API audit log with optional private, rotating persistence. The file must not be a symlink, and after a failed write the log stops mirroring to disk and keeps only memory.
 - Right-click in a pane opens a menu drawn in cells: Copy, Paste, Select All, Find, Split Right, Split Down, New Tab, Zoom and Close Pane. Arrows, Enter and Esc work it as well as the mouse. When a program has turned on mouse reporting, the click goes to it, and `Shift`+right-click opens the menu (ADR-0033).
 - ADR-0033: a native menu bar and Dock menu on macOS, and a right-click menu drawn in cells, all running the same commands as the keys.
 - The core serves up to 16 callers of its control socket at once on one `mio` thread, so a caller waiting for a window holds up no one (ADR-0032).
