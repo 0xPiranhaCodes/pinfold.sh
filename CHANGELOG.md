@@ -22,7 +22,6 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Added
 
-- A spike measures what waiting for each Metal frame costs: a median 0.44 to 0.47 ms on a full 200x60 grid on an M1 Pro, so the wait stays rather than spending about 750 KB on more instance buffers.
 - A per-pane status state machine combines OSC 133 marks with authoritative API reports and rate-limited alerts.
 - A spike that answers the macOS Dock menu by adding `applicationDockMenu:` to winit's app delegate, in `docs/spikes/m3-dock-menu`.
 - Right-click in a pane opens a menu drawn in cells: Copy, Paste, Select All, Find, Split Right, Split Down, New Tab, Zoom and Close Pane. Arrows, Enter and Esc work it as well as the mouse. When a program has turned on mouse reporting, the click goes to it, and `Shift`+right-click opens the menu (ADR-0033).
@@ -32,6 +31,7 @@ Entries are generated from Conventional Commits with git-cliff
 - ADR-0032: the agent API gets one `mio` thread of its own, and M3 lands in eight steps. M1 and M2 are done.
 - Tests that fail if the core stops refusing a debugger, or a pane's shell starts refusing one, and `tests/hardening/audit.sh`, which attacks real binaries by hand and is where the threat model's table comes from.
 - ADR-0031: a macOS beta comes before v0.1, which covers macOS and Linux.
+- A spike measures what waiting for each Metal frame costs: a median 0.44 to 0.47 ms on a full 200x60 grid on an M1 Pro, so the wait stays rather than spending about 750 KB on more instance buffers.
 - The app is called PinFold: `PinFold.app`, the window's title and the Dock.
 - Tab pills stand a little taller than a cell, with their text centred, in any font. A chosen font without `⌘` takes it from the bundled font.
 - Pill tabs in the top bar, with hover, a mark on a hidden tab that printed, a quiet look for an
