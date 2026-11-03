@@ -78,8 +78,8 @@ fn list(json: bool) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// The panes as plain text, a line each, with `*` by the caller's own. Every field is from the
-/// core, whose OSC 7 parser lets no control character into a directory.
+/// The panes as plain text, a line each, with `*` by the caller's own. A program chooses its own
+/// command and directory, so each field goes through [`printable`] before it reaches a terminal.
 fn table(hello: &Value, list: &Value) -> String {
     let mut text = format!(
         "{:<5} {:<8} {:<16} {:<24} CWD\n",
@@ -87,7 +87,7 @@ fn table(hello: &Value, list: &Value) -> String {
     );
     let panes = list["panes"].as_array().map_or(&[][..], Vec::as_slice);
     for pane in panes {
-        let field = |name: &str| pane[name].as_str().unwrap_or("-").to_owned();
+        let field = |name: &str| printable(pane[name].as_str().unwrap_or("-"));
         let own = if pane["id"] == hello["pane"] { "*" } else { "" };
         let id = format!("{}{own}", pane["id"]);
         let (status, title) = (field("status"), field("title"));
@@ -95,6 +95,22 @@ fn table(hello: &Value, list: &Value) -> String {
         text += &format!("{id:<5} {status:<8} {title:<16} {command:<24} {cwd}\n");
     }
     text
+}
+
+/// `text` with each control, bidi or zero-width character as `?`, so a pane's fields cannot
+/// move the cursor, recolour or reorder what the person reads (threat T6).
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|character| match character {
+            '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2069}'
+            | '\u{061c}'
+            | '\u{feff}' => '?',
+            _ if character.is_control() => '?',
+            _ => character,
+        })
+        .collect()
 }
 
 fn main() -> ExitCode {
@@ -141,5 +157,15 @@ ID    STATUS   TITLE            COMMAND                  CWD
         assert_eq!(table(&json!({"pane": 3}), &list), expected);
         // Outside a pane none is the caller's.
         assert!(!table(&json!({"pane": null}), &list).contains('*'));
+    }
+
+    #[test]
+    fn a_table_prints_no_control_bidi_or_zero_width_characters() {
+        let list = json!({"panes": [{
+            "id": 1, "title": "a\u{202e}b", "cwd": "/x\u{1b}]0;y\u{7}", "command": "s\u{200b}h\r", "status": "idle"
+        }]});
+        let text = table(&json!({"pane": null}), &list);
+        assert!(text.contains("a?b") && text.contains("/x?]0;y?") && text.contains("s?h?"));
+        assert!(text.lines().count() == 2);
     }
 }
