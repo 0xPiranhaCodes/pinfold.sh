@@ -191,6 +191,10 @@ nothing.
 | Window  | Minimize `⌘M`, Next Tab `⇧⌘]`, Previous Tab `⇧⌘[`, Tab 1 to 9 `⌘1`–`⌘9`      |
 | Help    | PinFold Help `⌘?` (opens this page)                                         |
 
+Right-clicking the Dock icon offers New Tab, Split Right, Split Down and Detach, then each
+tab with its agent state as glyph and word, such as `● api  running`; choosing a tab goes to
+it.
+
 Bigger and Smaller last until the file is next saved. Elsewhere, Ctrl+Shift+C, V and F copy,
 paste and find.
 
