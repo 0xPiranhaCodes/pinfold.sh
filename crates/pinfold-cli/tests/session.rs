@@ -1664,10 +1664,12 @@ fn up_runs_a_trusted_workspace_and_a_restore_runs_it_again_until_its_file_change
     let exe = env::current_exe().unwrap();
     let window = format!("exec '{}' --exact up_trust_window_process", exe.display());
     let session = Session::new("ut", Some(&window)).unwrap();
-    let (project, state) = (
-        session.directory.join("project"),
-        session.directory.join("state"),
-    );
+    // A restore runs a line only in a directory no one else can write, which Linux's sticky
+    // `/tmp` is not, so the project lives in the target directory.
+    let project =
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("up-{}", std::process::id()));
+    let state = session.directory.join("state");
+    let _ = fs::remove_dir_all(&project);
     fs::create_dir_all(project.join(".pinfold")).unwrap();
     fs::create_dir_all(&state).unwrap();
     let layout = r#"[[tabs]]
@@ -1756,6 +1758,7 @@ run = "echo work''space-ran | tee -a \"$PINFOLD_TEST_CLIENT/ran\""
     )
     .unwrap();
     restore("workspace-ran\nworkspace-ran\nprobe\nprobe\n");
+    fs::remove_dir_all(&project).unwrap();
 }
 
 fn probes(ran: &str) -> usize {
