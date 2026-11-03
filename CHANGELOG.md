@@ -11,6 +11,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Fixed
 
+- The core now applies `api.protect` from the config file; before, only the default patterns protected panes.
 - `past_its_identitys_cap_a_peer_is_closed_unread` no longer fails on macOS when the core closes the extra peer before the test sets its read timeout.
 - The link test that fills every tab and pane uses 128 by 128 panes instead of 1024 by 1024, so it no longer runs past its 20 second limit on CI's Intel Mac.
 - Session and control tests wait for observable events instead of idle-machine timing under load.
@@ -52,6 +53,7 @@ Entries are generated from Conventional Commits with git-cliff
 - Tabs and splits for real. The core owns the session, so a new window finds the same tabs and panes, and only the panes of the active tab are sent to the window, so a hidden tab costs no frame copies. A session holds at most 32 tabs and 64 panes, and past that a command is refused with a note under the pane. Panes are drawn in cells with cell-drawn borders, the focused pane's in the focus accent.
 - `pinfold mcp` serves the API's pane tools over MCP on stdio, so an agent in a pane can list, read, wait on and type into its own pane.
 - `pinfold mcp` can spawn and close child panes through versioned MCP tools.
+- `pinfold mcp` has `events_next_v1`, which waits up to 30 seconds by default for the next pane opened, closed or status event, so an MCP client need not poll (ADR-0035).
 - Prefix keys work: `Ctrl+a`, or `keys.prefix`, then `c`, `n`, `p`, `0` to `9`, `|`, `-`, the arrows, `z`, `d` and `x`. `x` asks first, and says so in red when it would end the session. On macOS Command+T opens a tab and Command+1 to Command+9 go to one. A click focuses a pane or picks a tab, and the `+` button opens one. Bindings are in [docs/configuration.md](docs/configuration.md).
 - `pinfold-core` runs as a hardened daemon with a private control socket that takes `hello` and `window.open`.
 - The core records each API request that reaches it in a hash-chained audit log, never pane contents or sent text; `audit.read`, `pinfold ctl log` and `pinfold ctl log --verify` read and check it, and `api.audit_log = true` also writes it to disk.

@@ -88,8 +88,8 @@ replaces it. An empty pattern is refused as a bad value.
 protect = ["kubectl exec", "docker exec", "psql", "aws ssm", "mysql -h prod-db"]
 ```
 
-The window checks `api.protect` now, but the core does not read this file yet, so until it
-does the default list applies.
+The core reads the list when it starts. Copy the defaults into your list to keep them, as the
+example does.
 
 ## Keys
 

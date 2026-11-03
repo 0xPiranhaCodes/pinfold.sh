@@ -7,6 +7,7 @@
 use std::io::{self, BufRead, ErrorKind, Read, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
+use std::time::Duration;
 
 use pinfold_api::control;
 use serde_json::{Value, json};
@@ -20,8 +21,36 @@ const NOT_A_REQUEST: i64 = -32600;
 const NO_METHOD: i64 = -32601;
 const BAD_PARAMS: i64 = -32602;
 
+/// How long `events_next_v1` waits when no `timeout_ms` is given.
+const EVENT_WAIT: Duration = Duration::from_secs(30);
+
+/// `events_next_v1`'s schema, in the API schemas' shape. MCP has no stream a client must take,
+/// so the tool waits for one event instead (ADR-0035).
+const EVENTS_NEXT: &str = r#"{
+  "description": "Subscribes to events for every pane in the session, as pane.list sees them, and waits for the next one or the timeout. Returns the event, {\"event\", \"pane\"} with status and exit except for pane.closed, or {\"timeout\": true}. Events carry pane numbers, status and exit status only, never screen contents or titles. Events between two calls are not kept.",
+  "properties": {
+    "params": {
+      "type": "object",
+      "required": ["events"],
+      "properties": {
+        "events": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "enum": ["pane.opened", "pane.closed", "pane.status"] }
+        },
+        "timeout_ms": {
+          "description": "How long to wait, 30000 if not given.",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 600000
+        }
+      }
+    }
+  }
+}"#;
+
 /// Each tool, the API method it calls, and that method's schema.
-const TOOLS: [(&str, &str, &str); 7] = [
+const TOOLS: [(&str, &str, &str); 8] = [
     (
         "pane_list_v1",
         "pane.list",
@@ -57,6 +86,7 @@ const TOOLS: [(&str, &str, &str); 7] = [
         "pane.wait",
         include_str!("../../../docs/api/pane.wait.schema.json"),
     ),
+    ("events_next_v1", "events.subscribe", EVENTS_NEXT),
 ];
 
 /// Answers MCP requests from `input` on `output` until `input` ends, calling the core at
@@ -178,10 +208,31 @@ fn tools() -> Vec<Value> {
         .collect()
 }
 
+/// `events_next_v1`'s wait: `timeout_ms`, or [`EVENT_WAIT`], at most `pane.wait`'s.
+fn event_wait(arguments: &Value) -> Result<Duration, String> {
+    match arguments.get("timeout_ms") {
+        None => Ok(EVENT_WAIT),
+        Some(ms) => ms
+            .as_u64()
+            .map(Duration::from_millis)
+            .filter(|wait| *wait <= control::MAX_WAIT)
+            .ok_or_else(|| "timeout_ms must be an integer from 0 to 600000".to_owned()),
+    }
+}
+
 /// Calls `method` on the core at `socket`, as a tool result: the method's result as JSON text,
-/// or its error as `isError`.
+/// or its error as `isError`. `events.subscribe` returns the next event instead.
 fn call(socket: &Path, method: &str, arguments: &Value) -> Value {
     let asked = match UnixStream::connect(socket) {
+        Ok(stream) if method == "events.subscribe" => event_wait(arguments).and_then(|wait| {
+            let topics = json!({"events": arguments.get("events").cloned().unwrap_or_default()});
+            let event = control::next_event(&stream, &topics, wait);
+            let event = event.map_err(|error| error.to_string())?;
+            Ok((
+                Value::Null,
+                event.unwrap_or_else(|| json!({"timeout": true})),
+            ))
+        }),
         Ok(stream) => control::ask(&stream, method, arguments).map_err(|error| error.to_string()),
         Err(error)
             if matches!(
@@ -250,6 +301,7 @@ mod tests {
             "pane_spawn_v1",
             "pane_close_v1",
             "pane_wait_v1",
+            "events_next_v1",
         ];
         assert_eq!(names, expected);
         for tool in tools {
@@ -263,6 +315,22 @@ mod tests {
             tools[6]["inputSchema"]["required"],
             json!(["pane", "until", "timeout_ms"])
         );
+        assert_eq!(tools[7]["inputSchema"]["required"], json!(["events"]));
+    }
+
+    #[test]
+    fn events_next_waits_30_seconds_unless_told_and_at_most_pane_waits_cap() {
+        assert_eq!(event_wait(&json!({"events": []})), Ok(EVENT_WAIT));
+        let wait = event_wait(&json!({"timeout_ms": 600_000}));
+        assert_eq!(wait, Ok(control::MAX_WAIT));
+        assert_eq!(event_wait(&json!({"timeout_ms": 0})), Ok(Duration::ZERO));
+        for bad in [json!(600_001), json!(-1), json!(1.5), json!("1")] {
+            assert!(event_wait(&json!({"timeout_ms": bad})).is_err(), "{bad}");
+        }
+        let replies = replies(
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"events_next_v1\",\"arguments\":{\"events\":[\"pane.closed\"]}}}\n",
+        );
+        assert_eq!(replies[0]["result"]["isError"], true);
     }
 
     #[test]
