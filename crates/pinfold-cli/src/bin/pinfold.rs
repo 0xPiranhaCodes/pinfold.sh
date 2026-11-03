@@ -85,6 +85,49 @@ fn send(pane: &str, text: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// `pinfold ctl wait <pane> --until <what> [--pattern <regex>] [--idle-ms <n>] --timeout <s>`:
+/// waits on a pane, `self` or a number, and prints how the wait ended. Returns whether what it
+/// waited for happened, rather than a timeout or the pane closing. It starts no core.
+fn wait(args: &[&str]) -> Result<bool, Box<dyn Error>> {
+    let [pane, flags @ ..] = args else {
+        return Err(USAGE.into());
+    };
+    let pane = match *pane {
+        "self" => json!("self"),
+        pane => json!(
+            pane.parse::<usize>()
+                .map_err(|_| "the pane must be a number or self")?
+        ),
+    };
+    let mut params = json!({"pane": pane});
+    for pair in flags.chunks(2) {
+        let (key, value) = match *pair {
+            ["--until", until] => ("until", json!(until)),
+            ["--pattern", pattern] => ("pattern", json!(pattern)),
+            ["--idle-ms", idle] => ("idle_ms", json!(idle.parse::<u64>()?)),
+            ["--timeout", seconds] => (
+                "timeout_ms",
+                json!(seconds.parse::<u64>()?.saturating_mul(1000)),
+            ),
+            _ => return Err(USAGE.into()),
+        };
+        params[key] = value;
+    }
+    let timeout = params["timeout_ms"]
+        .as_u64()
+        .ok_or("--timeout is required")?;
+    let longer = Duration::from_millis(timeout);
+    let (_, result) = control::ask_longer(&running()?, "pane.wait", &params, longer)?;
+    let outcome = result["outcome"].as_str().unwrap_or_default();
+    let text = match (outcome, &result["exit"], result["line"].as_str()) {
+        ("exit", Value::Number(exit), _) => format!("exit {exit}"),
+        ("match", _, Some(line)) => format!("match {line}"),
+        _ => outcome.to_owned(),
+    };
+    std::io::stdout().write_all(format!("{}\n", printable(&text)).as_bytes())?;
+    Ok(!matches!(outcome, "timeout" | "closed"))
+}
+
 /// Connects to the running core, and starts none.
 fn running() -> Result<UnixStream, Box<dyn Error>> {
     let path = control::socket_path(&control::runtime_dir());
@@ -126,6 +169,9 @@ fn printable(text: &str) -> String {
         .collect()
 }
 
+const USAGE: &str = "usage: pinfold [ctl list [--json] | ctl send <pane> <text> | ctl wait <pane> \
+    --until exit|prompt|output|match|idle [--pattern <regex>] [--idle-ms <n>] --timeout <s>]";
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
@@ -133,8 +179,18 @@ fn main() -> ExitCode {
         ["ctl", "list"] => list(false),
         ["ctl", "list", "--json"] => list(true),
         ["ctl", "send", pane, text] => send(pane, text),
+        // 0 once what it waited for happened, 1 if not, and 2 on an error.
+        ["ctl", "wait", ref wait_args @ ..] => {
+            return match wait(wait_args) {
+                Ok(happened) => ExitCode::from(u8::from(!happened)),
+                Err(error) => {
+                    eprintln!("pinfold: {error}");
+                    ExitCode::from(2)
+                }
+            };
+        }
         _ => {
-            eprintln!("usage: pinfold [ctl list [--json] | ctl send <pane> <text>]");
+            eprintln!("{USAGE}");
             return ExitCode::FAILURE;
         }
     };

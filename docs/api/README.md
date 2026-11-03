@@ -32,12 +32,17 @@ its parent. Reads return at most 2,000,000 bytes, keeping the newest. A send car
 bytes, and a pane takes at most 20 sends a second.
 
 `pane.wait` waits on a pane in reach for at most 10 minutes, and the core parks at most 64
-waits. `events.subscribe` sends `event` notifications on its connection. A connection with a
+waits. It waits for a command to exit, a prompt, any output, a later line that matches a regex
+of at most 1 KiB (`match`), or a quiet spell (`idle`). `events.subscribe` sends `event`
+notifications on its connection. Its `pane.output` events carry what a pane in reach printed, up
+to 4 KiB each, redacted unless the pane is the caller's own, and never another pane's. A connection with a
 wait or a subscription stays open past the usual limit, and is closed if 2 MiB of replies
 queue unread.
 
 `pinfold ctl list` prints `pane.list` as plain text, with `*` by the caller's own pane, and
 `pinfold ctl list --json` prints its result. Its title, directory and status come from what
 programs print, which can fake them: read them as hints, not facts. `pinfold ctl send <pane>
-<text>` types into a pane. A core that refuses version 2 is older than the client, and
+<text>` types into a pane. `pinfold ctl wait <pane> --until exit|prompt|output|match|idle
+[--pattern <regex>] [--idle-ms <n>] --timeout <s>` prints how the wait ended, and exits 0 if
+what it waited for happened, 1 on a timeout or a closed pane, and 2 on an error. A core that refuses version 2 is older than the client, and
 `pinfold ctl` says to quit PinFold so that a new core starts.
