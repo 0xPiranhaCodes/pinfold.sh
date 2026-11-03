@@ -6,6 +6,10 @@
 //! rules out control and bidi characters and every state glyph, and it is always drawn in
 //! one neutral colour. A state is glyph, colour and word, so the most a label can show is
 //! the word (T4 and T6 in the threat model). Only the row under the pane asks anything.
+//!
+//! A tab whose pane is not idle shows its state's glyph in its colour, as the design's tabs
+//! do, and the title row gives the active tab's state as glyph, colour and word, with the
+//! agent's message or "from output" when marks, which output can fake, gave it.
 
 use std::ffi::OsStr;
 use std::path::Path;
@@ -64,19 +68,41 @@ const KEY: &str = if cfg!(target_os = "macos") { "⌘" } else { "" };
 const KEYED: usize = 9;
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
 
+/// Each agent state by its number on the link: glyph, word and colour, from
+/// `docs/design/ui/Foundations.dc.html` (CLAUDE.md, UI).
+pub const STATES: [(char, &str, u32); 5] = [
+    ('◆', "needs you", 0x00f5_b544),
+    ('●', "running", 0x007a_a7ff),
+    ('✓', "done", 0x0063_d29a),
+    ('✕', "error", 0x00ff_8a8a),
+    ('○', "idle", 0x009a_a1ac),
+];
+const NEEDS_YOU: u8 = 0;
+const IDLE: u8 = 4;
+/// Widest message in cells, so it cannot crowd out the clock for long.
+const MAX_MESSAGE: usize = 48;
+
 const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const MONTHS: [&str; 12] = [
     "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
+
+/// Whether chrome may draw a character from a program or an agent: letters, digits, ASCII
+/// punctuation and spaces, which rules out control, bidi and format characters and every state
+/// glyph (T4, T6).
+fn safe(character: char) -> bool {
+    character.is_alphanumeric() || character.is_ascii_punctuation() || character == ' '
+}
 
 /// Writes the label for a working directory into `label`, without allocating once it has
 /// room. An empty `cwd` means none was reported.
 pub fn label(cwd: &str, label: &mut String) {
     label.clear();
     let name = Path::new(cwd).file_name().and_then(OsStr::to_str);
-    let safe = name.unwrap_or_default().chars().filter(|&character| {
-        character.is_alphanumeric() || character.is_ascii_punctuation() || character == ' '
-    });
+    let safe = name
+        .unwrap_or_default()
+        .chars()
+        .filter(|&character| safe(character));
     let mut width = 0;
     for character in safe.skip_while(|&character| character == ' ') {
         width += character.width().unwrap_or(0);
@@ -89,6 +115,30 @@ pub fn label(cwd: &str, label: &mut String) {
     if label.is_empty() {
         label.push_str(FALLBACK);
     }
+}
+
+/// Returns the state a tab's pill shows: needs you if it alerted while hidden, else that of the
+/// pane that names it, and idle before the core says.
+pub fn tab_state(status: Option<(u8, bool)>, alerts: u32, index: usize) -> u8 {
+    if has_news(alerts, index) {
+        NEEDS_YOU
+    } else {
+        status.map_or(IDLE, |(state, _)| state.min(IDLE))
+    }
+}
+
+/// Returns a bit for each tab whose state is not idle, which takes a mark as news does.
+pub fn marked(states: &[u8]) -> u32 {
+    let busy = states
+        .iter()
+        .enumerate()
+        .filter(|(_, state)| **state != IDLE);
+    busy.fold(0, |bits, (index, _)| {
+        bits | u32::try_from(index)
+            .ok()
+            .and_then(|index| 1u32.checked_shl(index))
+            .unwrap_or(0)
+    })
 }
 
 /// Returns the left inset in cells: `LEFT_POINTS` at the display's `scale`, less the padding
@@ -104,8 +154,12 @@ pub struct Bar<'a, L> {
     pub tabs: &'a [L],
     /// The index of the active tab.
     pub active: usize,
-    /// Which tabs have news, one bit each, lowest first.
+    /// Which tabs have a mark, news or a state, one bit each, lowest first.
     pub activity: u32,
+    /// Each tab's state from [`tab_state`], which its mark shows unless idle.
+    pub states: &'a [u8],
+    /// The active tab's state, whether its agent reported it, and the message, for the title.
+    pub status: Option<(u8, bool, &'a str)>,
     /// The tab under the pointer.
     pub hovered: Option<usize>,
     /// Whether the window has the keyboard.
@@ -144,12 +198,48 @@ pub fn draw(frame: &mut Frame, bar: &Bar<'_, impl AsRef<str>>) {
     if bar.title {
         let title = bar.tabs.get(bar.active).map_or("", AsRef::as_ref);
         let colour = if bar.focused { TITLE } else { UNFOCUSED_TITLE };
-        let end = write(frame, 0, bar.inset, title, colour);
+        let mut end = write(frame, 0, bar.inset, title, colour);
+        if let Some(status) = bar.status {
+            end = state_line(frame, end + GAP, status, colour);
+        }
         if let Some(time) = bar.time {
             clock(frame, time, end, bar.focused);
         }
     }
     strip(frame, bar, cells - usize::from(frame.columns));
+}
+
+/// Writes a state as glyph and word in its colour from `column` of the title row, then where it
+/// came from in `colour`: the agent's message, or "from output" for marks. Nothing for an idle
+/// shell. Returns the column after it.
+fn state_line(frame: &mut Frame, column: usize, status: (u8, bool, &str), colour: u32) -> usize {
+    let (state, reported, message) = status;
+    let Some(&(glyph, word, tint)) = STATES.get(usize::from(state)) else {
+        return column;
+    };
+    if state == IDLE && !reported {
+        return column;
+    }
+    let end = write(frame, 0, column, &format!("{glyph} {word}"), tint | BOLD);
+    // The core cleaned it too, but the window draws only what it allows itself.
+    let message: String = message
+        .chars()
+        .filter(|&character| safe(character))
+        .collect();
+    let source = if !reported {
+        "from output"
+    } else if message.trim().is_empty() {
+        return end;
+    } else {
+        message.trim()
+    };
+    write(
+        frame,
+        0,
+        end,
+        &format!(" · {}", fit(source, MAX_MESSAGE)),
+        colour,
+    )
 }
 
 /// Returns how many cells `text` takes.
@@ -275,7 +365,12 @@ fn strip(frame: &mut Frame, bar: &Bar<'_, impl AsRef<str>>, row: usize) {
         };
         let mut at = span.start + LEADING;
         if has_news(bar.activity, span.index) {
-            put(frame, row, at, ACTIVITY_MARK, ACCENT, fill);
+            let state = bar.states.get(span.index).copied().unwrap_or(IDLE);
+            let (mark, tint) = match STATES.get(usize::from(state)) {
+                Some(&(glyph, _, tint)) if state != IDLE => (glyph, tint),
+                _ => (ACTIVITY_MARK, ACCENT),
+            };
+            put(frame, row, at, mark, tint, fill);
             at += ACTIVITY;
         }
         write(frame, row, at, &fit(label, room), text);
@@ -516,12 +611,95 @@ mod tests {
             tabs: names,
             active,
             activity: 0,
+            states: &[],
+            status: None,
             hovered: None,
             focused: true,
             title: true,
             time: None,
             inset: 1,
         }
+    }
+
+    #[test]
+    fn states_match_the_core_and_the_contributor_rule() {
+        use pinfold_core::status::Status;
+        let all = [
+            Status::NeedsYou,
+            Status::Running,
+            Status::Done,
+            Status::Error,
+            Status::Idle,
+        ];
+        assert_eq!(STATES.len(), usize::from(pinfold_proto::link::STATES));
+        for status in all {
+            let (glyph, word, _) = STATES[status as usize];
+            assert_eq!((glyph, word), (status.glyph(), status.word()));
+        }
+        assert_eq!(STATES[usize::from(NEEDS_YOU)].2, 0x00f5_b544, "amber");
+        assert_eq!(STATES[usize::from(IDLE)].0, '○');
+    }
+
+    #[test]
+    fn a_tab_shows_its_state_and_a_hidden_alert_shows_needs_you() {
+        let status = [Some((1, false)), None, Some((3, true)), Some((9, true))];
+        let states: Vec<u8> = (0..4).map(|i| tab_state(status[i], 0b10, i)).collect();
+        assert_eq!(states, [1, NEEDS_YOU, 3, IDLE]);
+        assert_eq!(marked(&states), 0b111);
+
+        let names = ["a", "b", "c", "d"];
+        let mut frame = pane(2, 60);
+        let bar = Bar {
+            activity: marked(&states),
+            states: &states,
+            ..shown(&names, 3)
+        };
+        draw(&mut frame, &bar);
+        let strip = strip_of(&frame);
+        for (index, state) in [(0, 1), (1, NEEDS_YOU), (2, 3)] {
+            let start = spans(&names, bar.activity, 60).nth(index).unwrap().start;
+            let mark = strip[start + LEADING];
+            let (glyph, _, tint) = STATES[usize::from(state)];
+            assert_eq!(
+                (mark.character, mark.foreground),
+                (glyph, tint),
+                "tab {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_title_gives_glyph_colour_word_and_where_it_came_from() {
+        let title = |status| {
+            let mut frame = pane(2, 70);
+            draw(
+                &mut frame,
+                &Bar {
+                    status,
+                    ..shown(&["work"], 0)
+                },
+            );
+            let glyph = frame.cells.iter().find(|cell| cell.character == '◆');
+            let tint = glyph.map(|cell| cell.foreground);
+            (text(&frame, 0).trim_end().to_owned(), tint)
+        };
+        let (line, tint) = title(Some((NEEDS_YOU, true, "approve the diff?")));
+        assert_eq!(line, " work  ◆ needs you · approve the diff?");
+        assert_eq!(tint, Some(STATES[0].2 | BOLD));
+        assert_eq!(title(Some((2, false, ""))).0, " work  ✓ done · from output");
+        assert_eq!(title(Some((IDLE, false, ""))).0, " work");
+        assert_eq!(title(Some((IDLE, true, ""))).0, " work  ○ idle");
+        // A hostile message keeps no control, bidi or glyph, so it cannot fake a state.
+        let hostile = "ok\u{202e} \u{1b}[31m◆ needs you\u{2066}";
+        let (line, _) = title(Some((1, true, hostile)));
+        assert_eq!(line, " work  ● running · ok [31m needs you");
+        assert!(
+            !line.contains(['\u{202e}', '\u{1b}', '\u{2066}', '◆']),
+            "{line}"
+        );
+        let long = "x".repeat(200);
+        let (line, _) = title(Some((1, true, long.as_str())));
+        assert!(line.ends_with('…') && line.len() < 80, "{line}");
     }
 
     fn bar(columns: u16, name: &str, time: Option<LocalTime>) -> (Frame, String) {
