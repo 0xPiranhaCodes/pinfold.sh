@@ -16,6 +16,7 @@ Entries are generated from Conventional Commits with git-cliff
 - The core now applies `api.protect` from the config file; before, only the default patterns protected panes.
 - `past_its_identitys_cap_a_peer_is_closed_unread` no longer fails on macOS when the core closes the extra peer before the test sets its read timeout.
 - The link test that fills every tab and pane uses 128 by 128 panes instead of 1024 by 1024, so it no longer runs past its 20 second limit on CI's Intel Mac.
+- The sandbox test keeps its API socket in a short directory under `/tmp`, so it no longer fails with "path must be shorter than SUN_LEN" from a checkout with a long path. Binding a socket path that is too long returns an error, never a panic.
 - Session and control tests wait for observable events instead of idle-machine timing under load.
 - Missing file and status icons now use installed fallback fonts while preserving the selected text font and terminal cell size.
 - macOS title text and the grid's left edge align with the actual native window buttons, accounting for font size and display scale.

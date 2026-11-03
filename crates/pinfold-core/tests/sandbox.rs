@@ -8,7 +8,7 @@ use std::io::{ErrorKind, Read};
 use std::os::fd::AsFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -49,7 +49,13 @@ fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
     for dir in [&home, &work] {
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let socket = home.join("api.sock");
+    // A socket's path must fit `sun_path`, which a long checkout path under the target overruns.
+    // Made here, so the guard removes only what this test created.
+    let api_dir = Path::new("/tmp").join(format!("pf{}", std::process::id()));
+    fs::create_dir(&api_dir).unwrap();
+    let api_dir = Removed(api_dir);
+    fs::set_permissions(&api_dir.0, fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = api_dir.0.join("api.sock");
     let listener = UnixListener::bind(&socket).unwrap();
     listener.set_nonblocking(true).unwrap();
     // Other programs' sockets, such as ssh-agent's, where they usually live.
@@ -220,6 +226,15 @@ fn planted_child() {
     match result {
         Ok(command) => assert_ne!(command.get_program(), planted),
         Err(error) => assert_eq!(error.kind(), ErrorKind::NotFound),
+    }
+}
+
+/// A directory removed when the test ends, passed or not.
+struct Removed(PathBuf);
+
+impl Drop for Removed {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
     }
 }
 

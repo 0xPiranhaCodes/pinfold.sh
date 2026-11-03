@@ -1963,6 +1963,16 @@ mod tests {
     }
 
     #[test]
+    fn a_socket_path_too_long_for_the_system_is_an_error() {
+        // Longer than `sun_path` holds on any supported system.
+        let directory = fresh().with_file_name("d".repeat(120));
+        match Control::bind(&directory) {
+            Err(Error::Io(error)) => assert_eq!(error.kind(), io::ErrorKind::InvalidInput),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn a_session_has_one_core_and_a_dead_one_leaves_no_owner() {
         let directory = fresh();
         let first = Control::bind(&directory).unwrap();
