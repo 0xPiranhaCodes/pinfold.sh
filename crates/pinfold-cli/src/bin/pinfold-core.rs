@@ -299,6 +299,9 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
     let mut known = Seen::new();
     // Read once: the core takes no hot reload.
     let config = pinfold_cli::config();
+    if let Some(patterns) = config.api.protect.clone() {
+        reactor.set_patterns(patterns);
+    }
     let mut log = audit::open(&config.api);
     loop {
         let wait = waits
