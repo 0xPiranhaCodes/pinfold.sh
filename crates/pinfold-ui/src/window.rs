@@ -33,6 +33,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::macos::{OptionAsAlt, WindowAttributesExtMacOS, WindowExtMacOS};
 use winit::window::{Window, WindowId};
 
+use crate::context_menu::{self as menu, Choice, Menu};
 use crate::flash::{self, Flash};
 use crate::link::{self, Link, Screen, Tab};
 use crate::outbox::{self, Inbox, Outbox, Request};
@@ -319,6 +320,8 @@ struct App {
     clipboard: Option<Clipboard>,
     /// A question for the user. Every key goes to this until it is answered.
     prompt: Option<Prompt>,
+    /// The right-click menu, while open. Every key and press goes to it.
+    menu: Option<Menu>,
     prefix: Prefix,
     flash: Flash,
     selecting: Selecting,
@@ -477,6 +480,7 @@ impl App {
         }
         self.bar = None;
         self.prompt = None;
+        self.menu = None;
         self.selecting = Selecting::default();
         self.preedit.0.clear();
         self.ime_cursor = None;
@@ -560,6 +564,10 @@ impl App {
                 if let Some(vi) = &self.vi {
                     self.composed.cursor = panes::cursor(rect, vi.drawn(top, rect.rows));
                 }
+            }
+            if let Some(menu) = &self.menu {
+                menu.draw(&mut self.composed);
+                self.composed.cursor = None;
             }
             if self.ended {
                 flash::ended(&mut self.composed);
@@ -645,6 +653,28 @@ impl App {
             Command::Zoom => proto::Request::Zoom,
             // The session stays in the core for the next window.
             Command::Detach => return event_loop.exit(),
+            // Only a key or the menu copies, so output alone can never reach the clipboard.
+            Command::Copy => {
+                if let Some(selection) = self.selecting.current {
+                    self.request(Request::Copy(pane, selection));
+                }
+                return;
+            }
+            Command::Paste => return self.paste(),
+            Command::SelectAll => {
+                // Reading a selection clamps it to the rows held.
+                let focus = Position {
+                    row: usize::MAX,
+                    column: u16::MAX,
+                };
+                let anchor = Position::default();
+                self.selecting.current = Some(Selection { anchor, focus });
+                return self.redraw_soon();
+            }
+            Command::Find => {
+                self.bar.get_or_insert_default();
+                return self.redraw_soon();
+            }
             // A program dies with its pane, so this asks first as tmux does.
             Command::ClosePane => {
                 let last = self.total == 1;
@@ -659,22 +689,19 @@ impl App {
     /// it did. These come before the prefix, so that an armed prefix cannot swallow a paste.
     fn window_key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) -> bool {
         let key = &event.logical_key;
-        if input::is_paste(key, self.modifiers) {
+        let edit = if input::is_paste(key, self.modifiers) {
+            Some(Command::Paste)
+        } else if input::is_copy(key, self.modifiers) {
+            Some(Command::Copy)
+        } else if input::is_find(key, self.modifiers) {
+            Some(Command::Find)
+        } else {
+            None
+        };
+        if let Some(command) = edit {
             if !event.repeat {
-                self.paste();
+                self.command(event_loop, command);
             }
-            return true;
-        }
-        // Only this key copies, so output alone can never reach the clipboard.
-        if input::is_copy(key, self.modifiers) {
-            if let Some(selection) = self.selecting.current.filter(|_| !event.repeat) {
-                self.request(Request::Copy(self.focused, selection));
-            }
-            return true;
-        }
-        if input::is_find(key, self.modifiers) {
-            self.bar.get_or_insert_default();
-            self.redraw_soon();
             return true;
         }
         if input::is_vi(key, self.modifiers) {
@@ -905,6 +932,12 @@ impl App {
         self.hover(over);
         if self.pointer != pointer {
             self.pointer = pointer;
+            if let Some(menu) = &mut self.menu {
+                if !on_bar && menu.hover(pointer) {
+                    self.redraw_soon();
+                }
+                return;
+            }
             let position = self.pointer_position();
             if position.is_some_and(|at| self.selecting.drag(at)) {
                 self.redraw_soon();
@@ -929,7 +962,24 @@ impl App {
         }
     }
 
-    fn pressed(&mut self, button: MouseButton, state: ElementState) {
+    /// Carries out what a key or press did to the open menu.
+    fn menu_step(&mut self, step: menu::Step, event_loop: &ActiveEventLoop) {
+        match step {
+            menu::Step::Stay => {}
+            menu::Step::Close => self.menu = None,
+            menu::Step::Chose(choice) => {
+                self.menu = None;
+                match choice {
+                    Choice::Run(command) => self.command(event_loop, command),
+                    // Not offered yet: see where the menu opens.
+                    Choice::OpenLink(_) | Choice::CopyLink(_) => {}
+                }
+            }
+        }
+        self.redraw_soon();
+    }
+
+    fn pressed(&mut self, button: MouseButton, state: ElementState, event_loop: &ActiveEventLoop) {
         let number = match button {
             MouseButton::Left => 0,
             MouseButton::Middle => 1,
@@ -937,6 +987,10 @@ impl App {
             _ => return,
         };
         let down = state == ElementState::Pressed;
+        if let Some(menu) = self.menu.as_mut().filter(|_| down) {
+            let step = menu.click((!self.on_bar).then_some(self.pointer));
+            return self.menu_step(step, event_loop);
+        }
         if down && self.on_bar {
             if number == 0 {
                 self.bar_pressed();
@@ -956,6 +1010,19 @@ impl App {
         }
         if number == 0 && self.select(down) {
             return;
+        }
+        // With mouse reporting on, the program gets the press unless Shift is held.
+        let mode = find(&self.panes, self.focused).map(|pane| pane.frame.mouse);
+        // A prompt keeps every key until it is answered, so no menu opens over one.
+        if down
+            && number == 2
+            && self.prompt.is_none()
+            && mode.is_some_and(|mode| selection::owns_press(mode, self.modifiers))
+        {
+            // shortcut: frames say nothing of hyperlinks, so Open Link and Copy Link never show.
+            // Pass the cell's link here once the core can report it.
+            self.menu = Some(Menu::open(self.pointer, self.area, None));
+            return self.redraw_soon();
         }
         // The press may have been on the bar, so the program never saw it.
         if !down && !self.buttons[usize::from(number)] {
@@ -1140,8 +1207,16 @@ impl ApplicationHandler<Notice> for App {
             WindowEvent::CursorMoved { position, .. } => {
                 self.pointer_moved(position.x, position.y);
             }
-            WindowEvent::MouseInput { state, button, .. } => self.pressed(button, state),
+            WindowEvent::MouseInput { state, button, .. } => {
+                self.pressed(button, state, event_loop)
+            }
             WindowEvent::MouseWheel { delta, .. } => self.wheel(delta),
+            WindowEvent::KeyboardInput { event, .. } if self.menu.is_some() => {
+                if let Some(menu) = self.menu.as_mut().filter(|_| event.state.is_pressed()) {
+                    let step = menu.key(&event.logical_key);
+                    self.menu_step(step, event_loop);
+                }
+            }
             // A held key repeating must not answer a prompt it did not see.
             WindowEvent::KeyboardInput { event, .. } if self.prompt.is_some() => {
                 if event.state == ElementState::Pressed && !event.repeat {
@@ -1237,6 +1312,7 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
         wheel: 0.0,
         clipboard: None,
         prompt: None,
+        menu: None,
         flash: Flash::default(),
         selecting: Selecting::default(),
         bar: None,

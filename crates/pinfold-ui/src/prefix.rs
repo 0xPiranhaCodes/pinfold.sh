@@ -66,6 +66,14 @@ pub enum Command {
     Zoom,
     /// Close the window and leave the session running.
     Detach,
+    /// Put the selection on the clipboard.
+    Copy,
+    /// Paste the clipboard into the focused pane, through the paste checks.
+    Paste,
+    /// Select the focused pane's history and screen.
+    SelectAll,
+    /// Open the search bar.
+    Find,
 }
 
 /// What to do with a key.
