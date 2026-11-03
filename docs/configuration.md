@@ -30,6 +30,19 @@ without `font_path` it uses the bundled JetBrains Mono. A font file is treated a
 if it cannot be read, is damaged, or cannot draw all of ASCII, PinFold says why in its
 [log](#where-problems-are-reported) and uses the bundled font. `~` is not expanded.
 
+Missing characters use the bundled font, the standard CJK fallbacks, then fonts installed
+in the usual user and system font directories. Installed Nerd Fonts and symbol fonts are
+tried first within that last group, so you can keep a text font such as Consolas and still
+use file and status icons. Fallback glyphs fit the selected font's cells; they do not change
+the terminal's spacing. Install a font containing the symbols your shell uses if none of
+your fonts provides them. Restart the window after installing a new fallback font.
+
+Discovery is lazy, bounded to 4,096 directory entries and eight nested levels, and skips
+directory symlinks and special files. It uses `~/Library/Fonts`, `/Library/Fonts`, and
+`/System/Library/Fonts` on macOS; on Linux it uses `~/.fonts`,
+`$XDG_DATA_HOME/fonts` (default `~/.local/share/fonts`), `/usr/local/share/fonts`, and
+`/usr/share/fonts`. Rasterization remains outline-based; this does not add colour emoji.
+
 `background_opacity` applies only to the default background and the padding around the grid.
 Text and cells a program coloured stay opaque, so a program that paints its own background,
 such as an editor with a colour scheme, covers the glass. A program that changes the default
