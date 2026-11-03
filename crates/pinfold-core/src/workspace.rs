@@ -1,8 +1,8 @@
 //! Which tabs a project's workspace opened, for `pinfold up` (ADR-0034 step 10).
 //!
 //! The layout comes from an untrusted repository, so every directory and cap is checked again
-//! here, before anything opens. Each pane runs the user's shell and nothing else: `run` lines
-//! wait for workspace trust. The record lives in memory only.
+//! here, before anything opens. Each pane runs the user's shell and nothing else: the caller
+//! types trusted `run` lines into it. The record lives in memory and in snapshots.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,22 +11,27 @@ use pinfold_mux::PaneId;
 use pinfold_proto::link::{MAX_PANES, MAX_TABS, SplitWay};
 
 use crate::io::Reactor;
+use crate::snapshot::Workspace;
 use crate::tabs::FIRST_SIZE;
 
 /// One pane of a workspace tab: no way for the tab's first pane, and for each later one the way
 /// it splits the pane before it, with the absolute directory its shell starts in.
 pub type Pane = (Option<SplitWay>, String);
 
+/// An open workspace: its canonical project directory, its layout's hash if the caller gave
+/// one, and the panes it opened in the layout's order, none for one a restore could not keep.
+pub type Opened = (PathBuf, Option<String>, Vec<Option<usize>>);
+
 /// The panes each open workspace opened, keyed by its canonical project directory.
 #[derive(Debug, Default)]
 pub struct Workspaces {
-    opened: Vec<(PathBuf, Vec<usize>)>,
+    opened: Vec<Opened>,
 }
 
 impl Workspaces {
     /// Opens `tabs` for the project at `root` and focuses the first, or, if tabs of that
-    /// project are still open, focuses the first of them and opens nothing. Returns how many
-    /// panes it opened.
+    /// project are still open, focuses the first of them and opens nothing. Returns the panes it
+    /// opened, in the layout's order.
     ///
     /// # Errors
     ///
@@ -37,17 +42,19 @@ impl Workspaces {
         &mut self,
         reactor: &mut Reactor,
         root: &str,
+        sha256: Option<&str>,
         tabs: &[Vec<Pane>],
-    ) -> Result<usize, String> {
+    ) -> Result<Vec<usize>, String> {
         let root = directory(root).ok_or("root must be an existing directory's absolute path")?;
-        let held = |pane: &usize| holding(reactor, *pane).is_some();
-        for (_, panes) in &mut self.opened {
-            panes.retain(held);
-        }
-        self.opened.retain(|(_, panes)| !panes.is_empty());
-        if let Some((_, panes)) = self.opened.iter().find(|(open, _)| *open == root) {
-            focus(reactor, panes[0]);
-            return Ok(0);
+        // Pane ids are never reused, so a closed pane keeps its place in the layout's order.
+        let held = |pane: &Option<usize>| pane.is_some_and(|pane| holding(reactor, pane).is_some());
+        self.opened.retain(|(_, _, panes)| panes.iter().any(held));
+        let open = self.opened.iter().find(|(open, _, _)| *open == root);
+        if let Some(&Some(pane)) =
+            open.and_then(|(_, _, panes)| panes.iter().find(|pane| held(pane)))
+        {
+            focus(reactor, pane);
+            return Ok(Vec::new());
         }
         let room = (
             MAX_TABS.saturating_sub(reactor.session.tabs().len()),
@@ -62,9 +69,48 @@ impl Workspaces {
             return Err(reason);
         }
         focus(reactor, panes[0]);
-        let count = panes.len();
-        self.opened.push((root, panes));
-        Ok(count)
+        let sha256 = sha256.map(str::to_owned);
+        self.opened
+            .push((root, sha256, panes.iter().copied().map(Some).collect()));
+        Ok(panes)
+    }
+
+    /// The hashed workspaces, for a snapshot, each pane by its index in `reactor`'s layout.
+    #[must_use]
+    pub fn saved(&self, reactor: &Reactor) -> Vec<Workspace> {
+        let (_, ids) = reactor.session.to_tree();
+        let index = |pane: &Option<usize>| ids.iter().position(|id| Some(*id as usize) == *pane);
+        let saved = self.opened.iter().filter_map(|(root, sha256, panes)| {
+            Some(Workspace {
+                root: root.to_str()?.to_owned(),
+                sha256: sha256.clone()?,
+                panes: panes.iter().map(index).collect(),
+            })
+        });
+        saved.collect()
+    }
+
+    /// Notes the workspaces of a snapshot `reactor` just restored, and returns them with each
+    /// pane's new id.
+    pub fn restored(&mut self, reactor: &Reactor, saved: &[Workspace]) -> &[Opened] {
+        let (_, ids) = reactor.session.to_tree();
+        let id = |index: &Option<usize>| {
+            index
+                .and_then(|index| ids.get(index))
+                .map(|id| *id as usize)
+        };
+        self.opened = saved
+            .iter()
+            .map(|saved| {
+                let panes = saved.panes.iter().map(id).collect();
+                (
+                    PathBuf::from(&saved.root),
+                    Some(saved.sha256.clone()),
+                    panes,
+                )
+            })
+            .collect();
+        &self.opened
     }
 }
 
@@ -173,13 +219,23 @@ mod tests {
         let mine = reactor.open_tab(waiting(), 24, 80).unwrap();
         let mut workspaces = Workspaces::default();
         let tabs = [tab("/", &[]), tab("/tmp", &[SplitWay::Down])];
-        assert_eq!(workspaces.open(&mut reactor, "/", &tabs), Ok(3));
+        assert_eq!(
+            workspaces
+                .open(&mut reactor, "/", None, &tabs)
+                .map(|panes| panes.len()),
+            Ok(3)
+        );
         assert_eq!(reactor.session.tabs().len(), 3);
         assert_eq!(reactor.session.active(), 1);
 
         // Attaching focuses the workspace's first tab and opens nothing.
         reactor.session.switch_tab(0).unwrap();
-        assert_eq!(workspaces.open(&mut reactor, "/usr/..", &tabs), Ok(0));
+        assert_eq!(
+            workspaces
+                .open(&mut reactor, "/usr/..", None, &tabs)
+                .map(|panes| panes.len()),
+            Ok(0)
+        );
         assert_eq!(
             (reactor.session.tabs().len(), reactor.session.active()),
             (3, 1)
@@ -189,7 +245,44 @@ mod tests {
         for pane in [mine + 1, mine + 2, mine + 3] {
             assert!(reactor.close_pane(pane));
         }
-        assert_eq!(workspaces.open(&mut reactor, "/", &tabs), Ok(3));
+        assert_eq!(
+            workspaces
+                .open(&mut reactor, "/", None, &tabs)
+                .map(|panes| panes.len()),
+            Ok(3)
+        );
+    }
+
+    #[test]
+    fn a_snapshot_keeps_each_hashed_workspace_pane_by_place_and_a_restore_maps_it_back() {
+        let mut reactor = Reactor::new().unwrap();
+        reactor.shell = waiting;
+        let mut workspaces = Workspaces::default();
+        let sha256 = "0".repeat(64);
+        let tabs = [tab("/", &[SplitWay::Right, SplitWay::Down])];
+        let panes = workspaces.open(&mut reactor, "/", Some(&sha256), &tabs);
+        let panes = panes.unwrap();
+        workspaces
+            .open(&mut reactor, "/tmp", None, &[tab("/tmp", &[])])
+            .unwrap();
+        assert!(reactor.close_pane(panes[1]));
+        let saved = workspaces.saved(&reactor);
+        let expected = Workspace {
+            root: "/".to_owned(),
+            sha256,
+            panes: vec![Some(0), None, Some(1)],
+        };
+        assert_eq!(saved, [expected]);
+
+        let mut restored = Reactor::new().unwrap();
+        restored.shell = waiting;
+        restored.restore(&reactor.snapshot()).unwrap();
+        let mut again = Workspaces::default();
+        let opened = again.restored(&restored, &saved);
+        let first = restored.session.to_tree().1[0] as usize;
+        assert_eq!(opened[0].2, [Some(first), None, Some(first + 1)]);
+        // Restored, it attaches rather than opening again.
+        assert_eq!(again.open(&mut restored, "/", None, &tabs), Ok(Vec::new()));
     }
 
     #[test]
@@ -198,7 +291,7 @@ mod tests {
         reactor.shell = waiting;
         let mut workspaces = Workspaces::default();
         let refused = |workspaces: &mut Workspaces, reactor: &mut Reactor, root, tabs: &[_]| {
-            assert!(workspaces.open(reactor, root, tabs).is_err());
+            assert!(workspaces.open(reactor, root, None, tabs).is_err());
             assert_eq!(reactor.pane_count(), 0);
         };
         let good = [tab("/", &[])];
@@ -225,7 +318,7 @@ mod tests {
         // Within the caps alone, but not beside the pane already open.
         reactor.open_tab(waiting(), 24, 80).unwrap();
         let full = vec![tab("/", &[]); MAX_TABS];
-        assert!(workspaces.open(&mut reactor, "/", &full).is_err());
+        assert!(workspaces.open(&mut reactor, "/", None, &full).is_err());
         assert_eq!(reactor.pane_count(), 1);
     }
 
@@ -246,14 +339,19 @@ mod tests {
         ] {
             assert!(
                 workspaces
-                    .open(&mut reactor, &at, &[tab(&cwd, &[])])
+                    .open(&mut reactor, &at, None, &[tab(&cwd, &[])])
                     .is_err(),
                 "{cwd}"
             );
             assert_eq!(reactor.pane_count(), 0);
         }
         let inside = [tab(&text(root.join("inside")), &[])];
-        assert_eq!(workspaces.open(&mut reactor, &at, &inside), Ok(1));
+        assert_eq!(
+            workspaces
+                .open(&mut reactor, &at, None, &inside)
+                .map(|panes| panes.len()),
+            Ok(1)
+        );
         fs::remove_dir_all(&root).unwrap();
     }
 }
