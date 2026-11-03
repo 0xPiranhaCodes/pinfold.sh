@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "pane.close",
+  "description": "Closes a pane the caller spawned, or one they spawned, which ends its program (the children scope). The caller's own pane and every other pane are refused. Panes the closed one spawned stay open and stay in the caller's reach. Needs hello version 2 and a caller in a pane.",
+  "type": "object",
+  "properties": {
+    "params": {
+      "type": "object",
+      "required": ["pane"],
+      "properties": {
+        "pane": { "type": "integer", "minimum": 0, "description": "The pane's number, which the caller must have spawned." }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

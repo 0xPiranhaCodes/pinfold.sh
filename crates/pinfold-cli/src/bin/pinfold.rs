@@ -1,5 +1,6 @@
 //! The `pinfold` launcher: starts the core if none answers, asks it for a window, and exits.
-//! `pinfold ctl` is a thin client of the core's API (ADR-0032).
+//! `pinfold ctl` and `pinfold mcp` are thin clients of the core's API (ADR-0032), and `pinfold
+//! up` opens a project's workspace through it.
 
 use std::error::Error;
 use std::io::{ErrorKind, Write};
@@ -10,11 +11,15 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use pinfold_api::control;
+use pinfold_config::workspace::{self, Layout, Split};
 use serde_json::{Value, json};
 
 /// How long a core that was just started gets to answer.
 const START_WAIT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(20);
+const USAGE: &str = "usage: pinfold [up [dir] | ctl list [--json] | ctl send <pane> <text> | \
+    ctl grants [--json | revoke <id>] | ctl log [--json] [-n <count>] [--pane <pane>] | \
+    ctl log --verify <file> | ctl session save | mcp]";
 
 /// Connects to a core at `path`. Nothing listening is no error, as that is what starts one.
 fn connect(path: &Path) -> std::io::Result<Option<UnixStream>> {
@@ -64,6 +69,52 @@ fn launch() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// `pinfold up [dir]`: opens `dir`'s `.pinfold/layout.toml` as shells in a window, or focuses
+/// its tabs if they are open. The file is untrusted, so its `run` lines wait for workspace trust.
+fn up(dir: Option<&str>) -> Result<(), Box<dyn Error>> {
+    let root = std::fs::canonicalize(dir.unwrap_or("."))?;
+    let layout = workspace::load(&root.join(".pinfold/layout.toml"), &root)?;
+    let (params, waiting) = request(&root, &layout)?;
+    control::open_window(&core(&control::runtime_dir())?)?;
+    control::ask(&running()?, "workspace.open", &params)?;
+    let commands = if waiting == 1 {
+        "command waits"
+    } else {
+        "commands wait"
+    };
+    if waiting > 0 {
+        eprintln!("pinfold: {waiting} {commands} for workspace trust (not yet available)");
+    }
+    Ok(())
+}
+
+/// `workspace.open`'s parameters for `layout`, with each pane's cwd, or `root` for none, and
+/// without its `run` lines, and how many `run` lines there are.
+fn request(root: &Path, layout: &Layout) -> Result<(Value, usize), Box<dyn Error>> {
+    let text = |path: &Path| {
+        path.to_str()
+            .map(str::to_owned)
+            .ok_or("a path is not UTF-8")
+    };
+    let mut tabs = Vec::new();
+    for tab in &layout.tabs {
+        let mut panes = Vec::new();
+        for (index, pane) in tab.panes.iter().enumerate() {
+            let cwd = text(pane.cwd.as_deref().unwrap_or(root))?;
+            panes.push(match (index, pane.split.unwrap_or(Split::Right)) {
+                (0, _) => json!({"cwd": cwd}),
+                (_, Split::Right) => json!({"split": "right", "cwd": cwd}),
+                (_, Split::Down) => json!({"split": "down", "cwd": cwd}),
+            });
+        }
+        tabs.push(json!({"panes": panes}));
+    }
+    let panes = layout.tabs.iter().flat_map(|tab| &tab.panes);
+    let waiting = panes.filter(|pane| pane.run.is_some()).count();
+    let params = json!({"root": text(root)?, "layout": {"tabs": tabs}});
+    Ok((params, waiting))
+}
+
 /// `pinfold ctl list`: prints the session's panes, as JSON with `json`. It starts no core.
 fn list(json: bool) -> Result<(), Box<dyn Error>> {
     let (hello, list) = control::list_panes(&running()?)?;
@@ -94,6 +145,105 @@ fn save() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Lists lasting cross-pane grants. The core accepts this only from a terminal outside panes.
+fn grants(json_output: bool) -> Result<(), Box<dyn Error>> {
+    let (_, listed) = control::ask(&running()?, "grants.list", &json!({}))?;
+    let text = if json_output {
+        format!("{listed}\n")
+    } else {
+        grants_table(&listed)
+    };
+    std::io::stdout().write_all(text.as_bytes())?;
+    Ok(())
+}
+
+fn revoke(id: &str) -> Result<(), Box<dyn Error>> {
+    let id: u64 = id.parse().map_err(|_| "the grant id must be a number")?;
+    let (_, result) = control::ask(&running()?, "grants.revoke", &json!({"id": id}))?;
+    if result["revoked"] == Value::Bool(false) {
+        return Err(format!("no active grant {id}").into());
+    }
+    Ok(())
+}
+
+/// `pinfold ctl log [--json] [-n <count>] [--pane <pane>]`: prints the newest audit entries,
+/// which only a terminal outside any pane may read. `pinfold ctl log --verify <file>` checks a
+/// written audit log instead. Neither starts a core.
+fn log(args: &[&str]) -> Result<(), Box<dyn Error>> {
+    let mut out = std::io::stdout();
+    if let ["--verify", file] = args {
+        let count = pinfold_api::verify_file(file)?;
+        writeln!(out, "{}: {count} entries, chain intact", printable(file))?;
+        return Ok(());
+    }
+    let (mut params, mut json) = (json!({}), false);
+    let mut args = args.iter();
+    while let Some(&arg) = args.next() {
+        let name = match arg {
+            "--json" => {
+                json = true;
+                continue;
+            }
+            "-n" => "count",
+            "--pane" => "pane",
+            _ => return Err(USAGE.into()),
+        };
+        let value = args.next().and_then(|value| value.parse::<u64>().ok());
+        params[name] = value.ok_or("-n and --pane take a number")?.into();
+    }
+    let (_, read) = control::ask(&running()?, "audit.read", &params)?;
+    let text = if json {
+        format!("{read}\n")
+    } else {
+        entries(&read)
+    };
+    out.write_all(text.as_bytes())?;
+    Ok(())
+}
+
+/// The audit entries as plain text, a line each, every field through [`printable`].
+fn entries(read: &Value) -> String {
+    let mut text = String::new();
+    for entry in read["entries"].as_array().map_or(&[][..], Vec::as_slice) {
+        let field = |name: &str| printable(entry[name].as_str().unwrap_or("-"));
+        let caller = match (entry["caller"].as_u64(), entry["terminal"].as_bool()) {
+            (Some(pane), _) => format!("pane {pane}"),
+            (None, Some(true)) => "outside a pane".to_owned(),
+            (None, _) => "unidentified".to_owned(),
+        };
+        let target = entry["target"].as_u64();
+        let target = target.map_or("-".to_owned(), |pane| format!("pane {pane}"));
+        let (method, outcome, reason) = (field("method"), field("outcome"), field("reason"));
+        let at = utc(entry["at_ms"].as_u64().unwrap_or_default());
+        let seq = entry["seq"].as_u64().unwrap_or_default();
+        text += &format!("{seq} {at} {caller} {method} {target} {outcome}: {reason}\n");
+    }
+    if read["verified"] != true {
+        text += &format!("chain broken at sequence {}\n", read["broken_at"]);
+    }
+    text
+}
+
+/// Unix milliseconds as `YYYY-MM-DD hh:mm:ss UTC`, by Howard Hinnant's `civil_from_days`.
+fn utc(ms: u64) -> String {
+    let seconds = ms / 1000;
+    let z = seconds / 86_400 + 719_468;
+    let day_of_era = z % 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted + 2) / 5 + 1;
+    let month = if shifted < 10 {
+        shifted + 3
+    } else {
+        shifted - 9
+    };
+    let year = year_of_era + z / 146_097 * 400 + u64::from(month <= 2);
+    let (hour, minute, second) = (seconds / 3600 % 24, seconds / 60 % 60, seconds % 60);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} UTC")
+}
+
 /// Connects to the running core, and starts none.
 fn running() -> Result<UnixStream, Box<dyn Error>> {
     let path = control::socket_path(&control::runtime_dir());
@@ -119,6 +269,26 @@ fn table(hello: &Value, list: &Value) -> String {
     text
 }
 
+fn grants_table(list: &Value) -> String {
+    let mut text = format!(
+        "{:<8} {:<8} {:<8} {:<8} EXPIRES\n",
+        "ID", "CALLER", "TARGET", "ACTION"
+    );
+    let grants = list["grants"].as_array().map_or(&[][..], Vec::as_slice);
+    for grant in grants {
+        let seconds = grant["expires_ms"].as_u64().unwrap_or_default() / 1000;
+        let id = grant["id"].to_string();
+        let caller = grant["caller"].to_string();
+        let target = grant["target"].to_string();
+        let action = grant["action"].as_str().unwrap_or("-");
+        text += &format!(
+            "{:<8} {:<8} {:<8} {:<8} {seconds}s\n",
+            id, caller, target, action
+        );
+    }
+    text
+}
+
 /// `text` with each control, bidi or zero-width character as `?`, so a pane's fields cannot
 /// move the cursor, recolour or reorder what the person reads (threat T6).
 fn printable(text: &str) -> String {
@@ -139,14 +309,23 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         [] => launch(),
+        ["up"] => up(None),
+        ["up", dir] => up(Some(dir)),
         ["ctl", "list"] => list(false),
         ["ctl", "list", "--json"] => list(true),
         ["ctl", "send", pane, text] => send(pane, text),
         ["ctl", "session", "save"] => save(),
+        ["ctl", "log", ref rest @ ..] => log(rest),
+        ["mcp"] => {
+            let socket = control::socket_path(&control::runtime_dir());
+            pinfold_cli::mcp::serve(std::io::stdin().lock(), std::io::stdout().lock(), &socket)
+                .map_err(Into::into)
+        }
+        ["ctl", "grants"] => grants(false),
+        ["ctl", "grants", "--json"] => grants(true),
+        ["ctl", "grants", "revoke", id] => revoke(id),
         _ => {
-            eprintln!(
-                "usage: pinfold [ctl list [--json] | ctl send <pane> <text> | ctl session save]"
-            );
+            eprintln!("{USAGE}");
             return ExitCode::FAILURE;
         }
     };
@@ -156,7 +335,7 @@ fn main() -> ExitCode {
             eprintln!("pinfold: {error}");
             // A core started from a terminal logs there, so this may be an older core's.
             let log = control::log_path(&control::runtime_dir());
-            if args.is_empty() && log.exists() {
+            if (args.is_empty() || args[0] == "up") && log.exists() {
                 eprintln!("pinfold: see {}", log.display());
             }
             ExitCode::FAILURE
@@ -167,6 +346,22 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_request_holds_tabs_splits_and_cwds_and_counts_run_lines_without_sending_them() {
+        let root = std::env::temp_dir().canonicalize().unwrap();
+        let toml = b"[[tabs]]\n[[tabs.panes]]\nrun = 'make'\n\
+            [[tabs]]\n[[tabs.panes]]\ncwd = '.'\n[[tabs.panes]]\nsplit = 'down'\nrun = 'ls'\n\
+            [[tabs.panes]]\n";
+        let layout = workspace::parse(toml, &root).unwrap();
+        let (params, waiting) = request(&root, &layout).unwrap();
+        let cwd = root.to_str().unwrap();
+        let expected = json!({"root": cwd, "layout": {"tabs": [
+            {"panes": [{"cwd": cwd}]},
+            {"panes": [{"cwd": cwd}, {"split": "down", "cwd": cwd}, {"split": "right", "cwd": cwd}]},
+        ]}});
+        assert_eq!((params, waiting), (expected, 2));
+    }
 
     #[test]
     fn a_table_marks_the_callers_pane_and_dashes_what_is_unknown() {
@@ -185,6 +380,23 @@ ID    STATUS   TITLE            COMMAND                  CWD
     }
 
     #[test]
+    fn a_log_prints_a_line_per_entry_with_no_control_characters() {
+        let read = json!({"verified": false, "broken_at": 8, "entries": [
+            {"seq": 7, "at_ms": 1_700_000_000_123_u64, "caller": 1, "terminal": true,
+             "method": "pane.send", "target": 0, "outcome": "refused", "reason": "no\u{1b}[2J, 5 bytes"},
+            {"seq": 8, "at_ms": 0, "caller": null, "terminal": false, "method": "pane.list",
+             "target": null, "outcome": "ok", "reason": "allowed"},
+        ]});
+        let expected = "\
+7 2023-11-14 22:13:20 UTC pane 1 pane.send pane 0 refused: no?[2J, 5 bytes
+8 1970-01-01 00:00:00 UTC unidentified pane.list - ok: allowed
+chain broken at sequence 8
+";
+        assert_eq!(entries(&read), expected);
+        assert_eq!(utc(951_825_600_000), "2000-02-29 12:00:00 UTC");
+    }
+
+    #[test]
     fn a_table_prints_no_control_bidi_or_zero_width_characters() {
         let list = json!({"panes": [{
             "id": 1, "title": "a\u{202e}b", "cwd": "/x\u{1b}]0;y\u{7}", "command": "s\u{200b}h\r", "status": "idle"
@@ -192,5 +404,17 @@ ID    STATUS   TITLE            COMMAND                  CWD
         let text = table(&json!({"pane": null}), &list);
         assert!(text.contains("a?b") && text.contains("/x?]0;y?") && text.contains("s?h?"));
         assert!(text.lines().count() == 2);
+    }
+
+    #[test]
+    fn a_grants_table_names_the_triple_and_time_left() {
+        let listed = json!({"grants": [{"id": 7, "caller": 1, "target": 2,
+            "action": "send", "expires_ms": 90_000}]});
+        let text = grants_table(&listed);
+        assert!(text.contains("ID       CALLER   TARGET   ACTION"), "{text}");
+        assert!(
+            text.contains("7        1        2        send     90s"),
+            "{text}"
+        );
     }
 }

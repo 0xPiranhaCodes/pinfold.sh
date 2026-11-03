@@ -39,6 +39,18 @@ impl Reactor {
         rows: u16,
         columns: u16,
     ) -> Result<usize, Refusal> {
+        self.open_tab_with(command, rows, columns, true)
+    }
+
+    /// [`Reactor::open_tab`], which leaves the active tab as it is unless `focus`. A pane the
+    /// API spawns must not take the keyboard from the person.
+    pub(crate) fn open_tab_with(
+        &mut self,
+        command: Command,
+        rows: u16,
+        columns: u16,
+        focus: bool,
+    ) -> Result<usize, Refusal> {
         if self.session.tabs().len() >= MAX_TABS {
             return Err(Refusal::Tabs);
         }
@@ -47,7 +59,11 @@ impl Reactor {
             .spawn(command, rows, columns)
             .map_err(|_| Refusal::Spawn)?;
         // A number that was never used cannot be a duplicate.
+        let active = self.session.active();
         let _ = self.session.new_tab(pane as PaneId);
+        if !focus {
+            let _ = self.session.switch_tab(active);
+        }
         self.lay_out();
         Ok(pane)
     }
@@ -64,6 +80,17 @@ impl Reactor {
         command: Command,
         way: SplitWay,
     ) -> Result<usize, Refusal> {
+        self.split_with(pane, command, way, true)
+    }
+
+    /// [`Reactor::split`], which leaves focus where it was unless `focus`.
+    pub(crate) fn split_with(
+        &mut self,
+        pane: usize,
+        command: Command,
+        way: SplitWay,
+        focus: bool,
+    ) -> Result<usize, Refusal> {
         self.check_pane_room()?;
         let new = self.next_pane as PaneId;
         let direction = match way {
@@ -73,6 +100,15 @@ impl Reactor {
         let before = self.session.clone();
         if self.session.split(pane as PaneId, new, direction).is_err() {
             return Err(Refusal::Room);
+        }
+        let holds = |tab: &&pinfold_mux::Tab| tab.panes().any(|held| held == pane as PaneId);
+        let kept = before
+            .tabs()
+            .iter()
+            .find(holds)
+            .map(pinfold_mux::Tab::focused);
+        if let Some(kept) = kept.filter(|_| !focus) {
+            let _ = self.session.focus_in_tab(kept);
         }
         let spawned = self.place_of(new).and_then(|size| {
             self.spawn(command, size.rows, size.cols)
