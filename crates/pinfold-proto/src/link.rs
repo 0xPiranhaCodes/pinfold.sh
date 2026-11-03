@@ -37,7 +37,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 5;
+pub const VERSION: u16 = 6;
 
 /// Most rows or columns a screen can have, which the core clamps its panes to.
 pub const MAX_DIMENSION: u16 = 1024;
