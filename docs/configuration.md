@@ -132,7 +132,8 @@ that directory is yours, writable by no other user or group, under directories o
 can change, not `/`, your home directory or above it, not a dot-directory of your home such as
 `~/.config` or `~/.local/bin` or inside one, not in `~/Library` on macOS, not inside a `.git`
 directory, not a directory on your `PATH` or above one, and does not hold or sit inside a hidden
-directory.
+directory. A relative `PATH` entry, such as `.` or an empty one, counts from the working
+directory, so it refuses every launch, and so does a `PATH` entry that is a dangling symlink.
 
 Git runs what a repository's hooks and config name outside the sandbox, so the agent cannot
 change them. On Linux the working directory's whole `.git` is read-only: a sandboxed agent

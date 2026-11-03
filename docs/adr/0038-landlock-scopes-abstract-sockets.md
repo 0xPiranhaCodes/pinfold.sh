@@ -30,9 +30,11 @@ from `linux/landlock.h`.
   runs unsandboxed.
 - Below ABI 6 the launch goes ahead as before, and the core's log says once that abstract
   sockets stay reachable. `docs/configuration.md` documents the gap.
-- The working directory check also refuses a directory that is an absolute `PATH` entry or
+- The working directory check also refuses a directory that is a `PATH` entry or
   holds one, as given or resolved, so a program the agent writes there never runs from the
-  user's `PATH`. Relative entries name no one directory and are ignored.
+  user's `PATH`. A relative entry counts from the working directory, as a shell there searches
+  it, and an entry through a dangling symlink counts as held, as the agent could make its
+  target.
 
 ## Consequences
 

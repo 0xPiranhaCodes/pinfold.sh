@@ -168,12 +168,18 @@ pub fn working_directory(path: &Path, hidden: &[PathBuf]) -> io::Result<WorkingD
     Ok(WorkingDirectory(dir))
 }
 
-/// Whether `dir` is or holds an absolute entry of `path`, as given or resolved, where a program
-/// the agent writes would run for the user. A relative entry names no one directory.
+/// Whether `dir` is or holds an entry of `path`, as given or resolved, where a program the agent
+/// writes would run for the user. A relative entry counts from `dir`, as a shell there searches
+/// it, and a dangling symlink as held, as the agent could make where it leads.
 fn holds_path(dir: &Path, path: &OsStr) -> bool {
     std::env::split_paths(path)
-        .filter(|entry| entry.is_absolute())
-        .any(|entry| entry.starts_with(dir) || resolve(&entry).starts_with(dir))
+        .map(|entry| dir.join(entry))
+        .any(|entry| {
+            let dangling = entry
+                .ancestors()
+                .any(|above| above.is_symlink() && !above.exists());
+            dangling || entry.starts_with(dir) || resolve(&entry).starts_with(dir)
+        })
 }
 
 /// `path` resolved through symlinks as far as it exists, as a hidden directory may not yet.
@@ -734,6 +740,10 @@ mod tests {
         fs::create_dir_all(&bin).unwrap();
         std::os::unix::fs::symlink(&bin, &link).unwrap();
         let real = work.canonicalize().unwrap();
+        // Outside the working directory, leading to where the agent could make a directory.
+        let away = project("pinfold-path-away", 0o700);
+        let dangling = away.join("bin");
+        std::os::unix::fs::symlink(real.join("later"), &dangling).unwrap();
         let path = |entries: &[&Path]| std::env::join_paths(entries).unwrap();
         let other = Path::new("/usr/bin");
         let held = [
@@ -741,13 +751,19 @@ mod tests {
             holds_path(&real, &path(&[&bin])),
             holds_path(&real.join("bin"), &path(&[&link])),
             holds_path(&real, &path(&[&work.join("missing/bin")])),
+            holds_path(&real, &path(&[other, Path::new("")])),
+            holds_path(&real, &path(&[Path::new(".")])),
+            holds_path(&real, &path(&[Path::new("bin")])),
+            holds_path(&real, &path(&[&dangling])),
+            holds_path(&real, &path(&[&dangling.join("sub")])),
         ];
         let free = [
             holds_path(&real.join("bin"), &path(&[&work])),
-            holds_path(&real, &path(&[other, Path::new("bin"), Path::new("")])),
+            holds_path(&real, &path(&[other, &away])),
         ];
         fs::remove_dir_all(&work).unwrap();
-        assert_eq!(held, [true; 4]);
+        fs::remove_dir_all(&away).unwrap();
+        assert_eq!(held, [true; 9]);
         assert_eq!(free, [false; 2]);
     }
 
