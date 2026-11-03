@@ -71,6 +71,10 @@ this API. Its stdout carries only newline-delimited JSON-RPC, and a line over 1,
 refused. Its tools are `pane_list_v1`, `pane_read_v1`, `pane_last_output_v1`, `pane_send_v1`,
 `pane_spawn_v1`, `pane_close_v1` and `pane_wait_v1`, named with their version as ADR-0009 asks,
 each taking its method's params and returning the method's result as JSON text.
+`events_next_v1` takes `events.subscribe`'s `events` and an optional `timeout_ms` (default
+30,000, at most 600,000), and returns the next such event, or `{"timeout": true}`. MCP
+clients rarely pass notifications to the model, so it waits rather than streams (ADR-0035), and
+events between two calls are not kept.
 `pane_list_v1` adds `caller_pane`, the caller's own pane. A refusal, or no running core, is a tool
 result with `isError`. Each call opens its own connection, so the core identifies the caller by
 the server's controlling terminal: start it from an agent running in a PinFold pane, as Claude
