@@ -42,7 +42,7 @@ const CHUNK_BYTES: usize = 64 * 1024;
 /// Longer links are dropped from history, so one cell cannot hold megabytes.
 const MAX_LINK: usize = 2048;
 /// Combining marks kept per cell.
-const MAX_ZEROWIDTH: usize = 16;
+pub(crate) const MAX_ZEROWIDTH: usize = 16;
 /// The most a block can inflate to. Anything claiming more is not a block.
 const MAX_INFLATED: usize = 16 * 1024 * 1024;
 /// The most a store's blocks can inflate to in all, which bounds what a new width reads. Bytes
