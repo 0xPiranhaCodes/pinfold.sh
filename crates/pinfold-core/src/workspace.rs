@@ -49,7 +49,11 @@ impl Workspaces {
             focus(reactor, panes[0]);
             return Ok(0);
         }
-        let tabs = check(&root, tabs)?;
+        let room = (
+            MAX_TABS.saturating_sub(reactor.session.tabs().len()),
+            MAX_PANES.saturating_sub(reactor.pane_count()),
+        );
+        let tabs = check(&root, tabs, room)?;
         let mut panes = Vec::new();
         if let Err(reason) = open_all(reactor, &tabs, &mut panes) {
             for pane in panes {
@@ -72,13 +76,17 @@ fn directory(path: &str) -> Option<PathBuf> {
 }
 
 /// Refuses a layout with no tab, an empty tab, a tab that does not start a tab and then split,
-/// more than the caps, or a cwd that is not a directory under `root`. Returns the tabs with each
+/// more tabs or panes than the session has `room` for, or a cwd that is not a directory under `root`. Returns the tabs with each
 /// cwd canonical, as checked, so a later swap of the caller's path cannot redirect a shell.
-fn check(root: &Path, tabs: &[Vec<Pane>]) -> Result<Vec<Vec<Checked>>, String> {
+fn check(
+    root: &Path,
+    tabs: &[Vec<Pane>],
+    (free_tabs, free_panes): (usize, usize),
+) -> Result<Vec<Vec<Checked>>, String> {
     let count: usize = tabs.iter().map(Vec::len).sum();
-    if tabs.is_empty() || tabs.len() > MAX_TABS || count > MAX_PANES {
+    if tabs.is_empty() || tabs.len() > free_tabs || count > free_panes {
         return Err(format!(
-            "a workspace opens 1 to {MAX_TABS} tabs and at most {MAX_PANES} panes"
+            "a workspace opens 1 tab or more, and room is left for {free_tabs} tabs and {free_panes} panes"
         ));
     }
     for tab in tabs {
@@ -213,6 +221,12 @@ mod tests {
         );
         let wide = vec![tab("/", &[SplitWay::Right; MAX_PANES]); 1];
         refused(&mut workspaces, &mut reactor, "/", &wide);
+
+        // Within the caps alone, but not beside the pane already open.
+        reactor.open_tab(waiting(), 24, 80).unwrap();
+        let full = vec![tab("/", &[]); MAX_TABS];
+        assert!(workspaces.open(&mut reactor, "/", &full).is_err());
+        assert_eq!(reactor.pane_count(), 1);
     }
 
     #[test]
