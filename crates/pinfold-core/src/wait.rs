@@ -31,10 +31,6 @@ const COMPILED: usize = 64 * 1024;
 /// Most of the unfinished line a match tries, the newest, once per settle if it grew.
 const MAX_TAIL: usize = 4096;
 
-/// Rewrites a line before it is matched and returned, as redaction does for a pane that is not
-/// the caller's own, so a pattern cannot probe what it hides.
-pub type Scrub = fn(&str) -> String;
-
 /// What ends a wait, besides its pane closing or its deadline.
 #[derive(Clone, Debug)]
 pub enum Until {
@@ -44,17 +40,16 @@ pub enum Until {
     Prompt,
     /// The program writes anything.
     Output,
-    /// A line printed after the wait began matches, as plain text without escapes, after the
-    /// scrub if any. Each finished line is tried once, keeping its newest 64 KiB, and the
-    /// newest 4 KiB of the line being printed once a settle if it grew.
-    Match(Regex, Option<Scrub>),
+    /// A line printed after the wait began matches, as plain text without escapes. Each
+    /// finished line is tried once, keeping its newest 64 KiB, and the newest 4 KiB of the line
+    /// being printed once a settle if it grew.
+    Match(Regex),
     /// The program writes nothing for this long.
     Idle(Duration),
 }
 
 impl Until {
-    /// Compiles `pattern` for [`Until::Match`], with `scrub` run on each line first. Matching
-    /// takes time linear in the text.
+    /// Compiles `pattern` for [`Until::Match`]. Matching takes time linear in the text.
     ///
     /// # Errors
     ///
@@ -65,16 +60,16 @@ impl Until {
     /// ```
     /// use pinfold_core::wait::Until;
     ///
-    /// assert!(Until::matching(r"^done \d+$", None).is_ok());
-    /// assert!(Until::matching("(", None).is_err());
-    /// assert!(Until::matching(r"\w{1000}", None).is_err());
+    /// assert!(Until::matching(r"^done \d+$").is_ok());
+    /// assert!(Until::matching("(").is_err());
+    /// assert!(Until::matching(r"\w{1000}").is_err());
     /// ```
-    pub fn matching(pattern: &str, scrub: Option<Scrub>) -> Result<Self, String> {
+    pub fn matching(pattern: &str) -> Result<Self, String> {
         let mut builder = RegexBuilder::new(pattern);
         builder.size_limit(COMPILED).dfa_size_limit(COMPILED);
         builder
             .build()
-            .map(|regex| Self::Match(regex, scrub))
+            .map(Self::Match)
             .map_err(|error| match error {
                 regex::Error::CompiledTooBig(_) => "the pattern compiles too large".to_owned(),
                 _ => "the pattern is not a valid regex".to_owned(),
@@ -190,11 +185,11 @@ impl<T> Waits<T> {
     /// The unfinished line is tried at the next settle, which settles a match.
     pub fn feed(&mut self, pane: usize, text: &str) {
         for parked in &mut self.parked {
-            if let (Until::Match(regex, scrub), None) = (&parked.until, &parked.matched)
+            if let (Until::Match(regex), None) = (&parked.until, &parked.matched)
                 && parked.pane == pane
             {
                 parked.grew |= !text.is_empty() && !text.ends_with('\n');
-                parked.matched = finished(regex, *scrub, &mut parked.line, text);
+                parked.matched = finished(regex, &mut parked.line, text);
             }
         }
     }
@@ -215,13 +210,13 @@ impl<T> Waits<T> {
 
 /// Adds `text` to the unfinished `line` so far, and returns the first line it finishes that
 /// matches. Each byte is looked at a bounded number of times, however small the pieces.
-fn finished(regex: &Regex, scrub: Option<Scrub>, line: &mut String, text: &str) -> Option<String> {
+fn finished(regex: &Regex, line: &mut String, text: &str) -> Option<String> {
     line.push_str(text);
     let unfinished = text
         .rfind('\n')
         .map_or(0, |end| line.len() - text.len() + end + 1);
     let mut lines = line[..unfinished].split_terminator('\n');
-    let found = lines.find_map(|each| check(regex, scrub, each));
+    let found = lines.find_map(|each| check(regex, each));
     line.drain(..unfinished);
     // Trimmed only past twice the cap, so a line fed a byte at a time is not copied each time.
     if line.len() > 2 * MAX_TAPPED {
@@ -230,12 +225,11 @@ fn finished(regex: &Regex, scrub: Option<Scrub>, line: &mut String, text: &str) 
     found
 }
 
-/// Returns `line`, scrubbed, if it matches.
-fn check(regex: &Regex, scrub: Option<Scrub>, line: &str) -> Option<String> {
+/// Returns `line` if it matches.
+fn check(regex: &Regex, line: &str) -> Option<String> {
     // A terminal's line ends are `\r\n`, or `\r\r\n` from a program that wrote `\r\n`.
     let line = line.trim_end_matches('\r');
-    let line = scrub.map_or_else(|| line.to_owned(), |scrub| scrub(line));
-    regex.is_match(&line).then_some(line)
+    regex.is_match(line).then(|| line.to_owned())
 }
 
 /// The newest `most` bytes of `text`, or a little less, on a character boundary.
@@ -248,11 +242,11 @@ fn newest(text: &str, most: usize) -> &str {
 }
 
 fn outcome<T>(parked: &mut Parked<T>, now_at: Option<Progress>, now: Instant) -> Option<Outcome> {
-    if let Until::Match(regex, scrub) = &parked.until
+    if let Until::Match(regex) = &parked.until
         && parked.matched.is_none()
         && std::mem::take(&mut parked.grew)
     {
-        parked.matched = check(regex, *scrub, newest(&parked.line, MAX_TAIL));
+        parked.matched = check(regex, newest(&parked.line, MAX_TAIL));
     }
     if let Some(line) = parked.matched.take() {
         return Some(Outcome::Matched(line));
@@ -336,7 +330,7 @@ mod tests {
         let script = r"stty -echo; echo ok 1; read line; printf 'ok 2\r\nok 3\nask> '; sleep 1";
         let pane = reactor.spawn(shell(script), 24, 80).unwrap();
         let mut waits = Waits::default();
-        let until = |pattern| Until::matching(pattern, None).unwrap();
+        let until = |pattern| Until::matching(pattern).unwrap();
         // Printed before the waits began, "ok 1" matches neither.
         while !reactor
             .read(pane, None)
@@ -371,19 +365,16 @@ mod tests {
 
     #[test]
     fn a_pattern_too_large_is_refused_and_a_line_keeps_its_newest_bytes() {
-        assert!(Until::matching(r"(?i)\w+ \d+$", None).is_ok());
-        let refused = Until::matching(r"\w{500}", None).unwrap_err();
+        assert!(Until::matching(r"(?i)\w+ \d+$").is_ok());
+        let refused = Until::matching(r"\w{500}").unwrap_err();
         assert_eq!(refused, "the pattern compiles too large");
         let regex = Regex::new("^b").unwrap();
         let mut line = String::new();
         let long = "a".repeat(2 * MAX_TAPPED + 1);
-        assert_eq!(finished(&regex, None, &mut line, &long), None);
+        assert_eq!(finished(&regex, &mut line, &long), None);
         assert_eq!(line.len(), MAX_TAPPED);
-        assert_eq!(finished(&regex, None, &mut line, "a\nb"), None);
-        assert_eq!(
-            finished(&regex, None, &mut line, "\n"),
-            Some("b".to_owned())
-        );
+        assert_eq!(finished(&regex, &mut line, "a\nb"), None);
+        assert_eq!(finished(&regex, &mut line, "\n"), Some("b".to_owned()));
         assert!(line.is_empty());
     }
 
@@ -393,7 +384,7 @@ mod tests {
         let pane = reactor.spawn(shell("sleep 30"), 24, 80).unwrap();
         let mut waits = Waits::default();
         let later = Instant::now() + Duration::from_secs(30);
-        let until = Until::matching("b", None).unwrap();
+        let until = Until::matching("b").unwrap();
         assert!(waits.park(&reactor, 0, pane, until, later).is_ok());
         let start = Instant::now();
         for _ in 0..1024 * 1024 {
@@ -412,27 +403,6 @@ mod tests {
             settled,
             [(0, Outcome::Matched("a".repeat(MAX_TAIL - 1) + "b"))]
         );
-    }
-
-    #[test]
-    fn a_scrubbed_match_sees_and_returns_only_the_scrubbed_line() {
-        let mut reactor = Reactor::new().unwrap();
-        let pane = reactor.spawn(shell("sleep 30"), 24, 80).unwrap();
-        let mut waits = Waits::default();
-        let later = Instant::now() + Duration::from_secs(30);
-        let scrub: Scrub = |line| line.replace("hunter2", "«redacted»");
-        for (ticket, pattern) in [(0, "hunter"), (1, "pass=«")] {
-            let until = Until::matching(pattern, Some(scrub)).unwrap();
-            assert!(waits.park(&reactor, ticket, pane, until, later).is_ok());
-        }
-        // Finished, then unfinished.
-        waits.feed(pane, "pass=hunter2\r\npass=hunter2");
-        let settled = waits.settle(&reactor, Instant::now());
-        assert_eq!(
-            settled,
-            [(1, Outcome::Matched("pass=«redacted»".to_owned()))]
-        );
-        assert_eq!(waits.settle(&reactor, Instant::now()), []);
     }
 
     #[test]

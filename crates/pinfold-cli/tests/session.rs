@@ -833,8 +833,8 @@ exec sleep 30"#
 /// Names the directory of a run, in the pane that subscribes to output.
 const OUTPUT: &str = "PINFOLD_TEST_OUTPUT";
 
-/// Not a test: the first pane of [`output_events_reach_only_the_callers_panes_redacted`]. It
-/// subscribes to output, spawns a child, and notes what it hears from whom.
+/// Not a test: the first pane of [`output_events_and_match_waits_reach_only_the_callers_pane`].
+/// It subscribes to output, spawns a child, and notes what it hears from whom.
 #[test]
 fn output_process() {
     let Some(directory) = env::var_os(OUTPUT) else {
@@ -850,18 +850,29 @@ fn output_process() {
     next(&mut events, || Ok(())).unwrap();
     let spawned = ask("pane.spawn", serde_json::json!({"where": "split-right"})).unwrap();
     let child = spawned["result"]["pane"].clone();
+    let wait =
+        serde_json::json!({"pane": child, "until": "match", "pattern": "x", "timeout_ms": 1});
+    let refused = ask("pane.wait", wait).unwrap();
     let text = "child password=hunter2\n";
-    ask(
-        "pane.send",
-        serde_json::json!({"pane": child, "text": text}),
-    )
-    .unwrap();
+    let send = serde_json::json!({"pane": child, "text": text});
+    ask("pane.send", send).unwrap();
+    // The child has printed before the caller does, so its events would come first.
+    let start = Instant::now();
+    while start.elapsed() < PATIENCE {
+        let read = ask("pane.read", serde_json::json!({"pane": child})).unwrap();
+        if read["result"]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("child")
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
     let mut tty = fs::OpenOptions::new().write(true).open("/dev/tty").unwrap();
     std::io::Write::write_all(&mut tty, b"own password=hunter2\n").unwrap();
-    let mut heard = format!("{own} {child}\n");
-    while !(heard.contains("child password=«redacted:password»")
-        && heard.contains("own password=hunter2"))
-    {
+    let mut heard = format!("{own}\n{refused}\n");
+    while !heard.contains("own password=hunter2") {
         let event = next(&mut events, || Ok(())).unwrap();
         writeln!(heard, "{}", event["params"]).unwrap();
     }
@@ -869,7 +880,7 @@ fn output_process() {
 }
 
 #[test]
-fn output_events_reach_only_the_callers_panes_redacted() {
+fn output_events_and_match_waits_reach_only_the_callers_pane() {
     let session = Session::new("o", None).unwrap();
     let exe = env::current_exe().unwrap();
     // The second pane is another of the person's, printing all along.
@@ -883,19 +894,16 @@ fn output_events_reach_only_the_callers_panes_redacted() {
     assert!(session.wait_for("heard"), "{}", session.read_log());
     let heard = session.read("heard");
     let mut lines = heard.lines();
-    let panes: Vec<u64> = lines
-        .next()
-        .unwrap()
-        .split(' ')
-        .map(|pane| pane.parse().unwrap())
-        .collect();
+    let own: u64 = lines.next().unwrap().parse().unwrap();
+    let refused = lines.next().unwrap();
+    assert!(
+        refused.contains("a match wait needs the caller's own pane"),
+        "{heard}"
+    );
     for line in lines {
         let event: serde_json::Value = serde_json::from_str(line).unwrap();
         assert_eq!(event["event"], "pane.output", "{heard}");
-        let pane = event["pane"].as_u64().unwrap();
-        assert!(panes.contains(&pane), "another pane was heard: {heard}");
-        let text = event["text"].as_str().unwrap();
-        assert!(pane == panes[0] || !text.contains("hunter2"), "{heard}");
+        assert_eq!(event["pane"], own, "another pane was heard: {heard}");
     }
     core.kill().unwrap();
     core.wait().unwrap();

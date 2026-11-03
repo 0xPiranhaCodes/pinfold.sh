@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "events.subscribe",
-  "description": "Subscribes the connection to events for every pane in the session, as pane.list sees them, and to pane.output for the caller's own pane and the panes it spawned only; other panes' output is never sent. Needs hello version 2 and a caller with a controlling terminal. One subscription per connection; a second is refused. After the result the core sends notifications, {\"jsonrpc\": \"2.0\", \"method\": \"event\", \"params\": <event>}, with no id. A subscriber that lets 2 MiB of them queue unread is closed.",
+  "description": "Subscribes the connection to events for every pane in the session, as pane.list sees them, and to pane.output for the caller's own pane only; other panes' output, its children's included, is never sent, and asking for it is no error. Needs hello version 2 and a caller with a controlling terminal. One subscription per connection; a second is refused. After the result the core sends notifications, {\"jsonrpc\": \"2.0\", \"method\": \"event\", \"params\": <event>}, with no id. A subscriber that lets 2 MiB of them queue unread is closed.",
   "type": "object",
   "properties": {
     "params": {
@@ -37,7 +37,7 @@
         "text": {
           "type": "string",
           "maxLength": 4096,
-          "description": "With pane.output only: what the pane printed, as plain text without escape sequences, at most 4096 bytes an event. The caller's own pane's text comes as it is printed. Another pane's comes redacted and in whole lines, an unfinished line going out once it passes 4 KiB, and a PEM block whole once its END line comes; a block over 64 KiB is dropped and sent as one [redacted] line."
+          "description": "With pane.output only: what the pane printed, as plain text without escape sequences, at most 4096 bytes an event. Only for the caller's own pane, as it is printed."
         }
       }
     }

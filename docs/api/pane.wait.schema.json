@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "pane.wait",
-  "description": "Waits on the caller's own pane, or one it spawned, until its shell finishes a command, draws its next prompt, its program writes anything, a later line matches a pattern or the program is quiet for a while, or the pane closes, or the timeout passes. Needs hello version 2 and a caller in a pane; a pane it did not spawn is refused. At most 64 waits are parked in the core at once, and past that a wait is refused as busy. A wait whose connection closes is dropped.",
+  "description": "Waits on the caller's own pane, or one it spawned, until its shell finishes a command, draws its next prompt, its program writes anything, a later line matches a pattern or the program is quiet for a while, or the pane closes, or the timeout passes. Needs hello version 2 and a caller in a pane; a pane it did not spawn is refused, and match and idle waits take only the caller's own pane. At most 64 waits are parked in the core at once, and past that a wait is refused as busy. A wait whose connection closes is dropped.",
   "type": "object",
   "properties": {
     "params": {
@@ -14,7 +14,7 @@
         },
         "until": {
           "enum": ["exit", "prompt", "output", "match", "idle"],
-          "description": "exit: OSC 133 D. prompt: OSC 133 A. output: any bytes from the program. match: a line printed after the wait began, as plain text without escape sequences, matches pattern. Each finished line is tried once, keeping its newest 64 KiB, and the newest 4 KiB of the line being printed is tried as it grows. On a pane other than the caller's own, the pattern sees only the redacted line, so it cannot probe a secret. idle: the program writes nothing for idle_ms. Output can fake the marks."
+          "description": "exit: OSC 133 D. prompt: OSC 133 A. output: any bytes from the program. match: a line printed after the wait began, as plain text without escape sequences, matches pattern. Each finished line is tried once, keeping its newest 64 KiB, and the newest 4 KiB of the line being printed is tried as it grows. idle: the program writes nothing for idle_ms. match and idle are refused on any pane but the caller's own, as streamed text from another pane would need redaction across reads. Output can fake the marks."
         },
         "pattern": {
           "type": "string",
@@ -47,7 +47,7 @@
         },
         "line": {
           "type": "string",
-          "description": "With match only: the line that matched, without its line end. Redacted, as it was matched, unless the pane is the caller's own."
+          "description": "With match only: the line that matched, without its line end."
         }
       }
     }

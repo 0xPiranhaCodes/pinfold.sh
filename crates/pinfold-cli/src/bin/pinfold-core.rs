@@ -124,8 +124,8 @@ fn answer(reactor: &mut Reactor, family: &mut Family, request: &Request) -> Resu
     }
 }
 
-/// Parks a wait on the caller's own pane or one it spawned, or refuses it. A match on a pane
-/// not the caller's own sees and returns only redacted lines.
+/// Parks a wait on the caller's own pane or one it spawned, or refuses it. Match and idle waits
+/// take only the caller's own pane.
 fn park(
     reactor: &Reactor,
     family: &mut Family,
@@ -139,18 +139,24 @@ fn park(
         Ok(pane) => pane,
         Err(reason) => return request.answer(Err(reason.to_owned())),
     };
+    // shortcut: streamed output and match waits are self-only because redacting a stream needs whole-block state; extend to children with an ADR on streamed redaction.
+    let refusal = match wait.until {
+        Until::Match(_) => "a match wait needs the caller's own pane",
+        Until::Idle(_) => "an idle wait needs the caller's own pane",
+        _ => "",
+    };
+    if !refusal.is_empty() && own != Some(pane) {
+        return request.answer(Err(refusal.to_owned()));
+    }
     let until = match wait.until {
         Until::Exit => pinfold_core::wait::Until::Exit,
         Until::Prompt => pinfold_core::wait::Until::Prompt,
         Until::Output => pinfold_core::wait::Until::Output,
         Until::Idle(quiet) => pinfold_core::wait::Until::Idle(quiet),
-        Until::Match(pattern) => {
-            let scrub = (own != Some(pane)).then_some(output::scrub as fn(&str) -> String);
-            match pinfold_core::wait::Until::matching(&pattern, scrub) {
-                Ok(until) => until,
-                Err(reason) => return request.answer(Err(reason)),
-            }
-        }
+        Until::Match(pattern) => match pinfold_core::wait::Until::matching(&pattern) {
+            Ok(until) => until,
+            Err(reason) => return request.answer(Err(reason)),
+        },
     };
     let deadline = Instant::now() + wait.timeout;
     if let Err(request) = waits.park(reactor, request, pane, until, deadline) {
@@ -235,7 +241,6 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
     // and hears nothing.
     let mut waiting = Vec::new();
     let mut waits: Waits<Request> = Waits::default();
-    let mut held = output::Held::default();
     let mut family = Family::default();
     let mut subscribers: Vec<(Subscriber, Topics)> = Vec::new();
     let mut known = Seen::new();
@@ -243,15 +248,9 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
         let wait = waits
             .deadline()
             .map(|at| at.saturating_duration_since(Instant::now()));
-        output::tap(&mut reactor, &mut family, &waits, &subscribers);
+        output::tap(&mut reactor, &waits, &subscribers);
         reactor.turn(Some(wait.unwrap_or(IDLE)))?;
-        output::hand_out(
-            &mut reactor,
-            &mut family,
-            &mut waits,
-            &subscribers,
-            &mut held,
-        );
+        output::hand_out(&mut reactor, &mut waits, &subscribers);
         waits.retain(|request| !request.is_gone());
         subscribers.retain(|(subscriber, _)| !subscriber.is_gone());
         while let Ok(request) = asked.try_recv() {
