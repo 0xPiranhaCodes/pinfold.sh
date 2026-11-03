@@ -12,6 +12,7 @@ variable is unset. Saving the file applies it to the running window within about
 | `background_opacity`  | number | `1`     | Default background opacity, from 0 to 1. macOS only      |
 | `background_blur`     | bool   | `false` | Blur what shows through the background. macOS only       |
 | `keys.prefix`         | string | `"C-a"` | Prefix, `C-` and a lowercase letter                      |
+| `api.protect`         | list   | below   | Command-line text that protects a pane from API sends    |
 
 ```toml
 font_size = 14
@@ -59,6 +60,22 @@ its [log](#where-problems-are-reported) and uses the defaults for every key. Tha
 file's place, a file it cannot read, and a file that another user owns or that group or
 others can write (the rule from the threat model). A symlink is followed, and those
 checks apply to its target.
+
+## Protected panes
+
+A pane refuses `pane.send` from the API, even with a grant, while its foreground process is
+`ssh`, `mosh`, `mosh-client`, `sudo`, `su` or `doas`, runs as root, reads a password (echo off
+with input in lines), or has one of the `api.protect` texts in its command line, the
+arguments joined by spaces. The default list is `["kubectl exec", "docker exec", "psql",
+"aws ssm"]`, and a list you set replaces it. An empty text is refused as a bad value.
+
+```toml
+[api]
+protect = ["kubectl exec", "docker exec", "psql", "aws ssm", "mysql -h prod"]
+```
+
+The window checks `api.protect` now, but the core does not read this file yet, so until it
+does the default list applies.
 
 ## Keys
 
