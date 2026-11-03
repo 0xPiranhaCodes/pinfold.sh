@@ -572,7 +572,7 @@ pub struct Subscriber {
 
 impl Subscriber {
     /// Sends `{"method": "event", "params": params}`, which must carry no pane contents. It never
-    /// blocks: past [`EVENTS_EACH`] queued, the connection missed an event and is closed.
+    /// blocks: past `EVENTS_EACH` (64) queued, the connection missed an event and is closed.
     pub fn send(&self, params: Value) {
         let room = self.queued.fetch_add(1, Ordering::Relaxed) < EVENTS_EACH;
         let sent = room.then(|| {
