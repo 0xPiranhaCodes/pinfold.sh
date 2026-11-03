@@ -8,16 +8,19 @@ use std::sync::mpsc::{self, Receiver, TrySendError};
 use std::time::{Duration, Instant};
 use std::{env, thread};
 
+use pinfold_api::Log;
 use pinfold_api::control::{
     self, Control, Method, Request, Subscriber, Topics, Until, Wait, Workspace,
 };
 use pinfold_api::redact;
 use pinfold_api::spawn::Place;
 use pinfold_api::trust::{self, State};
+use pinfold_cli::audit;
 use pinfold_core::family::{self, Family, SplitWay};
 use pinfold_core::grants::{Decision, Grants, Released};
 use pinfold_core::io::{Reactor, Waker};
 use pinfold_core::shell;
+use pinfold_core::status::Status;
 use pinfold_core::wait::{Outcome, Waits};
 use pinfold_proto::link::{ApprovalAction, ApprovalAnswer};
 use serde_json::{Value, json};
@@ -136,11 +139,13 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                     "pane.spawn",
                     "pane.close",
                     "events.subscribe",
+                    "pane.status",
                 ],
                 (true, None) => &[
                     "window.open",
                     "pane.list",
                     "events.subscribe",
+                    "audit.read",
                     "grants.list",
                     "grants.revoke",
                     "workspace.trust_state",
@@ -149,6 +154,21 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                 (false, _) => &["window.open"],
             };
             Ok(json!({"version": control::VERSION, "methods": methods, "pane": own}))
+        }
+        Method::PaneStatus {
+            pane,
+            state,
+            message,
+        } => {
+            let status = Status::from_name(state).ok_or("unknown state")?;
+            let set = reactor.report_status(
+                own.filter(|own| own == pane)
+                    .ok_or("only the caller's own pane can report its status")?,
+                status,
+                message,
+                Instant::now(),
+            );
+            set.map(|()| json!({})).map_err(str::to_owned)
         }
         Method::PaneSpawn(spawn) => {
             let own = own.ok_or("pane.spawn needs a caller in a pane")?;
@@ -167,8 +187,11 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
         }
         Method::PaneList if identified => {
             let panes = reactor.list().map(|pane| {
+                // A message is the caller's own business: other panes' stay in the window.
+                let message = (pane.reported && own == Some(pane.id)).then_some(pane.message);
                 json!({"id": pane.id, "title": pane.title, "cwd": pane.cwd,
-                       "command": pane.command, "status": pane.status})
+                       "command": pane.command, "status": pane.status.name(),
+                       "source": source(pane.reported), "message": message})
             });
             Ok(json!({"panes": panes.collect::<Vec<_>>()}))
         }
@@ -193,7 +216,8 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
         | Method::EventsSubscribe(_)
         | Method::PaneRead { .. }
         | Method::PaneLastOutput { .. }
-        | Method::PaneSend { .. } => Err("not here".to_owned()),
+        | Method::PaneSend { .. }
+        | Method::AuditRead { .. } => Err("not here".to_owned()),
     }
 }
 
@@ -215,34 +239,38 @@ fn canonical(workspace: &Workspace) -> Result<String, String> {
 }
 
 /// Parks a trust prompt for a caller in a terminal outside every pane. It runs nothing.
-fn ask_trust(reactor: &mut Reactor, grants: &mut Grants<Request>, request: Request) {
+fn ask_trust(reactor: &mut Reactor, grants: &mut Grants<Request>, log: &mut Log, request: Request) {
     let Method::WorkspaceAskTrust(workspace, runs) = request.method() else {
         return;
     };
     let own = request.caller().and_then(|caller| reactor.pane_of(caller));
     if request.caller().is_none() || own.is_some() {
         let reason = "workspace trust needs a terminal outside every pane";
-        return request.answer(Err(reason.to_owned()));
+        return audit::reply(log, reactor, request, Err(reason.to_owned()));
     }
     let checked = trust_path().and_then(|path| Ok((path, canonical(workspace)?)));
     let (path, root) = match checked {
         Ok(checked) => checked,
-        Err(reason) => return request.answer(Err(reason)),
+        Err(reason) => return audit::reply(log, reactor, request, Err(reason)),
     };
     let changed = trust::state(&path, &root, &workspace.sha256) == State::Changed;
     let texts = std::iter::once(root).chain(runs.iter().cloned()).collect();
     match grants.ask_trust(request, texts, changed, reactor.is_window_ready()) {
         Decision::Ask(prompt) if reactor.ask_approval(&prompt) => {}
         Decision::Ask(prompt) => {
-            answer_released(reactor, grants.answer(prompt.id, ApprovalAnswer::Deny));
+            answer_released(reactor, log, grants.answer(prompt.id, ApprovalAnswer::Deny));
         }
-        Decision::Refuse(request, reason) => request.answer(Err(reason.to_owned())),
+        Decision::Refuse(request, reason) => {
+            audit::reply(log, reactor, request, Err(reason.to_owned()));
+        }
         // A trust prompt is never allowed before it is asked.
-        Decision::Allow(request) => request.answer(Err("not asked".to_owned())),
+        Decision::Allow(request) => {
+            audit::reply(log, reactor, request, Err("not asked".to_owned()))
+        }
     }
 }
 
-fn answer_released(reactor: &mut Reactor, released: Vec<Released<Request>>) {
+fn answer_released(reactor: &mut Reactor, log: &mut Log, released: Vec<Released<Request>>) {
     for released in released {
         let answer = match released.ticket.method() {
             Method::WorkspaceAskTrust(workspace, _) if released.allowed => {
@@ -255,7 +283,7 @@ fn answer_released(reactor: &mut Reactor, released: Vec<Released<Request>>) {
             method if released.allowed => pane_action(reactor, method, true),
             _ => Err(released.reason.to_owned()),
         };
-        released.ticket.answer(answer);
+        audit::reply(log, reactor, released.ticket, answer);
     }
 }
 
@@ -265,23 +293,29 @@ fn decide(
     reactor: &mut Reactor,
     family: &mut Family,
     grants: &mut Grants<Request>,
+    log: &mut Log,
     request: Request,
 ) {
     let own = request.caller().and_then(|caller| reactor.pane_of(caller));
     let Some((target, action, text)) = cross_pane(request.method()) else {
         let answer = immediate(reactor, family, grants, &request);
-        return request.answer(answer);
+        return audit::reply(log, reactor, request, answer);
     };
     let Some(caller) = own else {
-        return request.answer(Err("cross-pane actions need a caller pane".to_owned()));
+        return audit::reply(
+            log,
+            reactor,
+            request,
+            Err("cross-pane actions need a caller pane".to_owned()),
+        );
     };
     if reactor.engine(target).is_none() {
-        return request.answer(Err("no such pane".to_owned()));
+        return audit::reply(log, reactor, request, Err("no such pane".to_owned()));
     }
     if family.reach(reactor, own, target).is_ok() {
         // Text from any pane but the caller's own is redacted (threat model, Secret redaction).
         let answer = pane_action(reactor, request.method(), caller != target);
-        return request.answer(answer);
+        return audit::reply(log, reactor, request, answer);
     }
     match grants.decide(
         request,
@@ -293,13 +327,15 @@ fn decide(
     ) {
         Decision::Allow(request) => {
             let answer = pane_action(reactor, request.method(), true);
-            request.answer(answer);
+            audit::reply(log, reactor, request, answer);
         }
-        Decision::Refuse(request, reason) => request.answer(Err(reason.to_owned())),
+        Decision::Refuse(request, reason) => {
+            audit::reply(log, reactor, request, Err(reason.to_owned()));
+        }
         Decision::Ask(prompt) if reactor.ask_approval(&prompt) => {}
         // Fail closed for this prompt alone, so one oversized batch cannot drop the others.
         Decision::Ask(prompt) => {
-            answer_released(reactor, grants.answer(prompt.id, ApprovalAnswer::Deny));
+            answer_released(reactor, log, grants.answer(prompt.id, ApprovalAnswer::Deny));
         }
     }
 }
@@ -309,6 +345,7 @@ fn park(
     reactor: &Reactor,
     family: &mut Family,
     waits: &mut Waits<Request>,
+    log: &mut Log,
     request: Request,
     wait: Wait,
 ) {
@@ -316,7 +353,7 @@ fn park(
     let target = wait.pane.or(own).ok_or(family::NOT_YOURS);
     let pane = match target.and_then(|pane| family.reach(reactor, own, pane)) {
         Ok(pane) => pane,
-        Err(reason) => return request.answer(Err(reason.to_owned())),
+        Err(reason) => return audit::reply(log, reactor, request, Err(reason.to_owned())),
     };
     let until = match wait.until {
         Until::Exit => pinfold_core::wait::Until::Exit,
@@ -325,7 +362,7 @@ fn park(
     };
     let deadline = Instant::now() + wait.timeout;
     if let Err(request) = waits.park(reactor, request, pane, until, deadline) {
-        request.answer(Err("the core is busy".to_owned()));
+        audit::reply(log, reactor, request, Err("the core is busy".to_owned()));
     }
 }
 
@@ -340,8 +377,13 @@ fn ended(outcome: Outcome) -> Value {
     }
 }
 
-/// Each pane's number, status and exit status, which is all an event tells.
-type Seen = Vec<(usize, &'static str, Option<u8>)>;
+/// Where a status came from: output's marks, which it can fake, or its agent's report (T4).
+fn source(reported: bool) -> &'static str {
+    if reported { "reported" } else { "marks" }
+}
+
+/// Each pane's number, status, its source and exit status, which is all an event tells.
+type Seen = Vec<(usize, &'static str, &'static str, Option<u8>)>;
 
 fn seen(reactor: &Reactor) -> Seen {
     let exit = |pane| {
@@ -351,7 +393,10 @@ fn seen(reactor: &Reactor) -> Seen {
     };
     let panes = reactor.list();
     panes
-        .map(|pane| (pane.id, pane.status, exit(pane.id)))
+        .map(|pane| {
+            let status = pane.status.name();
+            (pane.id, status, source(pane.reported), exit(pane.id))
+        })
         .collect()
 }
 
@@ -363,13 +408,15 @@ fn changes(before: &Seen, after: &Seen) -> Vec<Value> {
     let mut events: Vec<Value> = gone
         .map(|&(id, ..)| json!({"event": "pane.closed", "pane": id}))
         .collect();
-    for &(id, status, exit) in after {
+    for &(id, status, source, exit) in after {
         let event = match before.iter().find(|was| was.0 == id) {
             None => "pane.opened",
-            Some(&was) if was != (id, status, exit) => "pane.status",
+            Some(&was) if was != (id, status, source, exit) => "pane.status",
             Some(_) => continue,
         };
-        events.push(json!({"event": event, "pane": id, "status": status, "exit": exit}));
+        let event = json!({"event": event, "pane": id, "status": status, "source": source,
+                           "exit": exit});
+        events.push(event);
     }
     events
 }
@@ -408,6 +455,9 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
     let mut family = Family::default();
     let mut subscribers: Vec<(Subscriber, Topics)> = Vec::new();
     let mut known = Seen::new();
+    // Read once: the core takes no hot reload.
+    let config = pinfold_cli::config();
+    let mut log = audit::open(&config.api);
     loop {
         let deadline = waits.deadline().into_iter().chain(grants.deadline()).min();
         let wait = deadline.map(|at| at.saturating_duration_since(Instant::now()));
@@ -416,12 +466,12 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
         grants.retain(|request| !request.is_gone());
         subscribers.retain(|(subscriber, _)| !subscriber.is_gone());
         while let Some((id, answer)) = reactor.take_approval_answer() {
-            answer_released(&mut reactor, grants.answer(id, answer));
+            answer_released(&mut reactor, &mut log, grants.answer(id, answer));
         }
         if !reactor.has_window() && grants.deadline().is_some() {
-            answer_released(&mut reactor, grants.window_closed());
+            answer_released(&mut reactor, &mut log, grants.window_closed());
         }
-        answer_released(&mut reactor, grants.expire());
+        answer_released(&mut reactor, &mut log, grants.expire());
         while let Ok(request) = asked.try_recv() {
             // Its peer has been told the core is busy, so acting now would surprise a retry.
             if *request.method() != Method::WindowOpen && request.is_late() {
@@ -432,30 +482,39 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
                     Ok(_) => waiting.push(request),
                     // The system's words alone, which name no pane, secret or variable.
                     Err(error) => {
-                        request.answer(Err(format!("cannot start pinfold-window: {error}")));
+                        let reason = format!("cannot start pinfold-window: {error}");
+                        audit::reply(&mut log, &reactor, request, Err(reason));
                     }
                 },
-                Method::PaneWait(wait) => park(&reactor, &mut family, &mut waits, request, wait),
+                Method::PaneWait(wait) => {
+                    park(&reactor, &mut family, &mut waits, &mut log, request, wait);
+                }
                 // Every pane of the session, as for pane.list.
                 Method::EventsSubscribe(topics) if request.caller().is_some() => {
                     if subscribers.is_empty() {
                         known = seen(&reactor);
                     }
                     subscribers.push((request.subscriber(), topics));
-                    request.answer(Ok(json!({})));
+                    audit::reply(&mut log, &reactor, request, Ok(json!({})));
                 }
                 Method::EventsSubscribe(_) => {
                     let reason = "events.subscribe needs a caller in a terminal";
-                    request.answer(Err(reason.to_owned()));
+                    audit::reply(&mut log, &reactor, request, Err(reason.to_owned()));
                 }
-                Method::WorkspaceAskTrust(..) => ask_trust(&mut reactor, &mut grants, request),
+                Method::AuditRead { .. } => {
+                    let read = audit::read(&log, &reactor, &request);
+                    audit::reply(&mut log, &reactor, request, read);
+                }
+                Method::WorkspaceAskTrust(..) => {
+                    ask_trust(&mut reactor, &mut grants, &mut log, request);
+                }
                 _ => {
-                    decide(&mut reactor, &mut family, &mut grants, request);
+                    decide(&mut reactor, &mut family, &mut grants, &mut log, request);
                 }
             }
         }
         for (request, outcome) in waits.settle(&reactor, Instant::now()) {
-            request.answer(Ok(ended(outcome)));
+            audit::reply(&mut log, &reactor, request, Ok(ended(outcome)));
         }
         if !subscribers.is_empty() {
             let now = seen(&reactor);
@@ -471,11 +530,12 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
         if ended || reactor.is_window_ready() {
             for request in waiting.drain(..) {
                 let reason = "the window ended before it was ready";
-                request.answer(if ended {
+                let result = if ended {
                     Err(reason.to_owned())
                 } else {
                     Ok(json!({}))
-                });
+                };
+                audit::reply(&mut log, &reactor, request, result);
             }
         }
         if reactor.pane_count() == 0 && !reactor.has_window() {

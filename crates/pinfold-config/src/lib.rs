@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, de};
 
+pub mod workspace;
+
 /// The largest file read. A file written by hand is a few KiB, and this bounds startup.
 pub const MAX_BYTES: u64 = 64 * 1024;
 
@@ -48,6 +50,9 @@ pub struct Config {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Api {
+    /// Whether the audit log is also written to `audit.log` in [`state_dir`], not only kept in
+    /// memory.
+    pub audit_log: bool,
     /// Text that protects a pane when it appears in its foreground command line, with the
     /// arguments joined by spaces. Nothing means the core's defaults.
     #[serde(deserialize_with = "protect")]
@@ -494,6 +499,21 @@ mod tests {
         }
         assert_eq!(path_from(None, None), None);
         assert_eq!(path_from(None, some("")), None);
+    }
+
+    #[test]
+    fn the_state_dir_is_application_support_on_macos_and_xdg_elsewhere() {
+        let some = |dir: &str| Some(OsString::from(dir));
+        let found = state_dir_from(some("/xdg"), some("/home/me"));
+        let expected = if cfg!(target_os = "macos") {
+            "/home/me/Library/Application Support/PinFold"
+        } else {
+            "/xdg/pinfold"
+        };
+        assert_eq!(found, Some(PathBuf::from(expected)));
+        assert_eq!(state_dir_from(None, some("relative")), None);
+        let config = parse(b"[api]\naudit_log = true").unwrap();
+        assert!(config.api.audit_log && !Config::default().api.audit_log);
     }
 
     #[test]
