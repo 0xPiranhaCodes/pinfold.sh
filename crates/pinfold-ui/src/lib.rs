@@ -3,6 +3,7 @@
 mod approval;
 mod context_menu;
 mod flash;
+mod hyperlink;
 mod ime;
 mod input;
 pub mod link;

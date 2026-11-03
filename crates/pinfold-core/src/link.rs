@@ -133,6 +133,7 @@ impl Session {
     fn notice(&mut self, notice: &Notice<'_>) -> Result<(), Ended> {
         let text = match notice {
             Notice::Copied { text, .. } => text.len(),
+            Notice::Linked { uri, .. } => uri.len(),
             _ => 0,
         };
         if self.pending() + NOTICE_HEAD + text > MAX_PENDING {
@@ -198,6 +199,15 @@ impl Session {
                     copy: Copying::new(selection),
                     text: String::new(),
                 });
+            }
+            Request::Link { pane, at } => {
+                let engine = reactor.engine(pane as usize);
+                let uri = engine.and_then(|engine| engine.hyperlink(at));
+                self.notice(&Notice::Linked {
+                    pane,
+                    at,
+                    uri: uri.as_deref().unwrap_or_default(),
+                })?;
             }
             Request::FullFrame { pane } => {
                 if let Some(state) = self.state(pane as usize).filter(|state| state.watched) {
@@ -773,6 +783,7 @@ mod tests {
         cwd: String,
         searched: Vec<Option<link::Selection>>,
         copied: Vec<String>,
+        linked: Vec<String>,
         raises: usize,
         activity: u32,
         alerts: u32,
@@ -801,6 +812,7 @@ mod tests {
                 cwd: String::new(),
                 searched: Vec::new(),
                 copied: Vec::new(),
+                linked: Vec::new(),
                 raises: 0,
                 activity: 0,
                 alerts: 0,
@@ -868,6 +880,7 @@ mod tests {
                         Notice::Cwd { path, .. } => path.clone_into(&mut self.cwd),
                         Notice::Searched { found, .. } => self.searched.push(found),
                         Notice::Copied { text, .. } => self.copied.push(text.to_owned()),
+                        Notice::Linked { uri, .. } => self.linked.push(uri.to_owned()),
                         Notice::Raise => self.raises += 1,
                         Notice::Activity { tabs, alerts } => {
                             (self.activity, self.alerts) = (tabs, alerts);
@@ -967,7 +980,8 @@ mod tests {
         let mut reactor = Reactor::new().unwrap();
         let pane = reactor.open_tab(shell(ALIVE), 24, 80).unwrap();
         let peer = Peer::attach(&mut reactor);
-        peer.raw(&[3, 0, 0, 0, 0, 9, 0]);
+        let [low, high] = (VERSION + 1).to_le_bytes();
+        peer.raw(&[3, 0, 0, 0, 0, low, high]);
         assert_link_ends_and_pty_lives(&mut reactor, pane);
     }
 
@@ -1378,6 +1392,34 @@ mod tests {
     }
 
     #[test]
+    fn the_window_learns_the_hyperlink_under_a_cell() {
+        let mut reactor = Reactor::new().unwrap();
+        let script = r"printf '\033]8;;https://pinfold.sh/a\033\\here\033]8;;\033\\ plain\n'; while read line; do echo got-$line; done";
+        let pane = reactor.open_tab(shell(script), 24, 80).unwrap();
+        let mut peer = Peer::watching(&mut reactor, pane);
+        serve(&mut reactor, &mut peer, |r, _| {
+            on_screen(r, pane, "here plain")
+        });
+        let engine = reactor.engine(pane).unwrap();
+        let (linked, plain) = (engine.position(0, 3), engine.position(0, 6));
+        let number = pane as u32;
+        for (pane, at) in [(number, linked), (number, plain), (9, linked)] {
+            peer.send(Request::Link { pane, at });
+        }
+        let far = link::Position {
+            row: usize::MAX,
+            column: u16::MAX,
+        };
+        peer.send(Request::Link {
+            pane: number,
+            at: far,
+        });
+        serve(&mut reactor, &mut peer, |_, p| p.linked.len() == 4);
+        assert_eq!(peer.linked, ["https://pinfold.sh/a", "", "", ""]);
+        assert_pty_lives(&mut reactor, pane);
+    }
+
+    #[test]
     fn a_hidden_pane_costs_no_frame_and_still_answers() {
         let mut reactor = Reactor::new().unwrap();
         let script = "echo needle; read line; exit 0";
@@ -1512,7 +1554,7 @@ mod tests {
 
     #[test]
     fn a_second_open_starts_nothing_until_the_first_has_gone() {
-        let hello = r"printf '\003\000\000\000\000\010\000' >&3; exec cat <&3 >/dev/null";
+        let hello = r"printf '\003\000\000\000\000\011\000' >&3; exec cat <&3 >/dev/null";
         let (binary, log) = window_script("second-open", hello);
         let mut reactor = Reactor::new().unwrap();
         assert_eq!(spawn_window(&mut reactor, &binary), WindowOpen::Started);

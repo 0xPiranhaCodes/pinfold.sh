@@ -80,6 +80,18 @@ impl Menu {
         menu
     }
 
+    /// Adds Open Link and Copy Link for `link`, once, keeping the same item selected and the
+    /// menu inside a grid of `area`.
+    pub fn link(&mut self, link: String, area: (u16, u16)) {
+        if self.link.is_some() {
+            return;
+        }
+        self.link = Some(link);
+        self.selected += LINK_ITEMS.len();
+        let height = self.len() as u16 + 2;
+        self.corner.0 = self.corner.0.min(area.0.saturating_sub(height));
+    }
+
     fn len(&self) -> usize {
         ITEMS.len() + self.links()
     }
@@ -337,6 +349,25 @@ mod tests {
         let mut menu = Menu::open((0, 0), (24, 80), Some(LINK.into()));
         let copy = Step::Chose(Choice::Run(Command::Copy));
         assert_eq!(menu.click(Some((3, 4))), copy);
+    }
+
+    #[test]
+    fn a_link_learned_late_adds_its_items_and_keeps_the_selection() {
+        let mut menu = Menu::open((20, 0), (24, 80), None);
+        named(&mut menu, NamedKey::ArrowDown);
+        menu.link(LINK.into(), (24, 80));
+        menu.link("https://other".into(), (24, 80));
+        assert_eq!(menu.corner, (11, 0), "moved up to fit");
+        let rows = drawn(&menu, 24, 80);
+        assert_eq!(text(&rows[12], 0..15), "│ Open Link   │");
+        assert_eq!(text(&rows[13], 0..15), "│ Copy Link   │");
+        let paste = Step::Chose(Choice::Run(Command::Paste));
+        assert_eq!(named(&mut menu, NamedKey::Enter), paste);
+        let mut menu = Menu::open((0, 0), (24, 80), None);
+        menu.link(LINK.into(), (24, 80));
+        named(&mut menu, NamedKey::Home);
+        let open = Step::Chose(Choice::OpenLink(LINK.into()));
+        assert_eq!(named(&mut menu, NamedKey::Enter), open);
     }
 
     /// The window opens the menu on a right press only when the press is not the program's.

@@ -29,6 +29,8 @@ pub enum Prompt {
         /// Whether it is the session's last pane, so the session ends with it.
         last: bool,
     },
+    /// A hyperlink to open whose scheme is not `http` or `https` (`hyperlink::check`).
+    OpenLink(String),
 }
 
 fn lines(text: &str) -> usize {
@@ -105,6 +107,7 @@ pub fn banner(frame: &mut Frame, prompt: &Prompt) {
             ("Close the last pane and end the session?".to_owned(), RED),
             ("  Enter closes, Esc cancels".to_owned(), TEXT),
         ],
+        Prompt::OpenLink(uri) => return crate::hyperlink::banner(frame, uri),
     };
     row(frame, &spans);
 }

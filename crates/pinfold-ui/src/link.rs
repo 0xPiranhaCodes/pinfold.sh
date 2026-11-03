@@ -35,8 +35,8 @@ use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
 use pinfold_proto::Frame;
 use pinfold_proto::link::{
-    ApprovalAction, Decoder, Error, Layout, MAX_DIMENSION, MAX_PANES, MAX_REQUEST, Notice, Rect,
-    Refusal, Request, Selection, VERSION,
+    ApprovalAction, Decoder, Error, Layout, MAX_DIMENSION, MAX_PANES, MAX_REQUEST, Notice,
+    Position, Rect, Refusal, Request, Selection, VERSION,
 };
 
 /// Most bytes read per turn, so a flooding core cannot hold the window's thread.
@@ -164,6 +164,8 @@ struct State {
     over: bool,
     searched: Option<(u32, Option<Selection>)>,
     copied: Option<String>,
+    /// The latest answer to a [`Request::Link`]: the pane, the cell and the URI, empty for none.
+    linked: Option<(u32, Position, String)>,
     /// Copies asked for and not answered.
     copying: u32,
     raised: bool,
@@ -231,6 +233,7 @@ impl State {
                 self.copying -= 1;
                 self.copied = Some(text.to_owned());
             }
+            Notice::Linked { pane, at, uri } => self.linked = Some((pane, at, uri.to_owned())),
             Notice::Raise => self.raised = true,
             Notice::Activity { tabs, alerts } => {
                 (self.activity, self.alerts) = (tabs, alerts);
@@ -601,6 +604,12 @@ impl Link {
     /// Returns the text of the last copy asked for, once.
     pub fn take_copied(&mut self) -> Option<String> {
         self.state.copied.take()
+    }
+
+    /// Returns the latest answer to a [`Request::Link`], once: the pane, the cell and the URI,
+    /// which is empty if the cell had no hyperlink.
+    pub fn take_linked(&mut self) -> Option<(u32, Position, String)> {
+        self.state.linked.take()
     }
 
     /// Returns whether someone asked to bring this window to the front since the last call.
@@ -1197,6 +1206,23 @@ mod tests {
         assert!(turn_until(&mut link, |link| link.state.raised));
         assert!(link.take_raised());
         assert!(!link.take_raised());
+    }
+
+    #[test]
+    fn a_link_answer_is_reported_once() {
+        let (mut link, mut peer) = linked().unwrap();
+        peer.greet().unwrap();
+        let uri = "https://pinfold.sh";
+        let at = Position { row: 7, column: 3 };
+        let notice = Notice::Linked {
+            pane: PANE,
+            at,
+            uri,
+        };
+        peer.notices(&[notice]).unwrap();
+        assert!(turn_until(&mut link, |link| link.state.linked.is_some()));
+        assert_eq!(link.take_linked(), Some((PANE, at, uri.to_owned())));
+        assert_eq!(link.take_linked(), None);
     }
 
     #[test]
