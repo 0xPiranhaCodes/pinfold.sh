@@ -17,7 +17,8 @@ const START_WAIT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(20);
 const USAGE: &str = "usage: pinfold [ctl list [--json] | ctl send <pane> <text> | ctl wait <pane> \
     --until exit|prompt|output|match|idle [--pattern <regex>] [--idle-ms <n>] --timeout <s> | \
-    ctl log [--json] [-n <count>] [--pane <pane>] | ctl log --verify <file> | mcp]";
+    ctl grants [--json | revoke <id>] | ctl log [--json] [-n <count>] [--pane <pane>] | \
+    ctl log --verify <file> | mcp]";
 
 /// Connects to a core at `path`. Nothing listening is no error, as that is what starts one.
 fn connect(path: &Path) -> std::io::Result<Option<UnixStream>> {
@@ -130,6 +131,27 @@ fn wait(args: &[&str]) -> Result<bool, Box<dyn Error>> {
     Ok(!matches!(outcome, "timeout" | "closed"))
 }
 
+/// Lists lasting cross-pane grants. The core accepts this only from a terminal outside panes.
+fn grants(json_output: bool) -> Result<(), Box<dyn Error>> {
+    let (_, listed) = control::ask(&running()?, "grants.list", &json!({}))?;
+    let text = if json_output {
+        format!("{listed}\n")
+    } else {
+        grants_table(&listed)
+    };
+    std::io::stdout().write_all(text.as_bytes())?;
+    Ok(())
+}
+
+fn revoke(id: &str) -> Result<(), Box<dyn Error>> {
+    let id: u64 = id.parse().map_err(|_| "the grant id must be a number")?;
+    let (_, result) = control::ask(&running()?, "grants.revoke", &json!({"id": id}))?;
+    if result["revoked"] == Value::Bool(false) {
+        return Err(format!("no active grant {id}").into());
+    }
+    Ok(())
+}
+
 /// `pinfold ctl log [--json] [-n <count>] [--pane <pane>]`: prints the newest audit entries,
 /// which only a terminal outside any pane may read. `pinfold ctl log --verify <file>` checks a
 /// written audit log instead. Neither starts a core.
@@ -233,6 +255,26 @@ fn table(hello: &Value, list: &Value) -> String {
     text
 }
 
+fn grants_table(list: &Value) -> String {
+    let mut text = format!(
+        "{:<8} {:<8} {:<8} {:<8} EXPIRES\n",
+        "ID", "CALLER", "TARGET", "ACTION"
+    );
+    let grants = list["grants"].as_array().map_or(&[][..], Vec::as_slice);
+    for grant in grants {
+        let seconds = grant["expires_ms"].as_u64().unwrap_or_default() / 1000;
+        let id = grant["id"].to_string();
+        let caller = grant["caller"].to_string();
+        let target = grant["target"].to_string();
+        let action = grant["action"].as_str().unwrap_or("-");
+        text += &format!(
+            "{:<8} {:<8} {:<8} {:<8} {seconds}s\n",
+            id, caller, target, action
+        );
+    }
+    text
+}
+
 /// `text` with each control, bidi or zero-width character as `?`, so a pane's fields cannot
 /// move the cursor, recolour or reorder what the person reads (threat T6).
 fn printable(text: &str) -> String {
@@ -272,6 +314,9 @@ fn main() -> ExitCode {
             pinfold_cli::mcp::serve(std::io::stdin().lock(), std::io::stdout().lock(), &socket)
                 .map_err(Into::into)
         }
+        ["ctl", "grants"] => grants(false),
+        ["ctl", "grants", "--json"] => grants(true),
+        ["ctl", "grants", "revoke", id] => revoke(id),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::FAILURE;
@@ -336,5 +381,17 @@ chain broken at sequence 8
         let text = table(&json!({"pane": null}), &list);
         assert!(text.contains("a?b") && text.contains("/x?]0;y?") && text.contains("s?h?"));
         assert!(text.lines().count() == 2);
+    }
+
+    #[test]
+    fn a_grants_table_names_the_triple_and_time_left() {
+        let listed = json!({"grants": [{"id": 7, "caller": 1, "target": 2,
+            "action": "send", "expires_ms": 90_000}]});
+        let text = grants_table(&listed);
+        assert!(text.contains("ID       CALLER   TARGET   ACTION"), "{text}");
+        assert!(
+            text.contains("7        1        2        send     90s"),
+            "{text}"
+        );
     }
 }

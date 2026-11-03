@@ -24,10 +24,12 @@ use mio::unix::SourceFd;
 use mio::{Interest, Token};
 use pinfold_proto::Frame;
 use pinfold_proto::link::{
-    self, Decoder, Notice, Refusal, Request, VERSION, encode_frame, encode_layout,
+    self, Approval, ApprovalAnswer, Decoder, Notice, Refusal, Request, VERSION, encode_frame,
+    encode_layout,
 };
 use pinfold_sys::socket;
 
+use crate::grants::{MAX_PENDING as MAX_APPROVALS, Prompt};
 use crate::io::{READ_BUDGET, Reactor};
 use crate::search::{CopyStep, Copying};
 use crate::status::Status;
@@ -198,6 +200,11 @@ impl Session {
             Request::FullFrame { pane } => {
                 if let Some(state) = self.state(pane as usize).filter(|state| state.watched) {
                     state.synced = false;
+                }
+            }
+            Request::ApprovalAnswer { id, answer } => {
+                if reactor.approval_answers.len() < MAX_APPROVALS {
+                    reactor.approval_answers.push((id, answer));
                 }
             }
             Request::Quit => return Err(Ended),
@@ -631,6 +638,38 @@ impl Reactor {
         self.host.window.as_ref()?.child.as_ref().map(Child::id)
     }
 
+    /// Sends or updates a prompt over the inherited window link.
+    ///
+    /// Returns false when no ready window can show it or its bounded queue is full.
+    pub fn ask_approval(&mut self, prompt: &Prompt) -> bool {
+        let (Ok(caller), Ok(target)) = (u32::try_from(prompt.caller), u32::try_from(prompt.target))
+        else {
+            return false;
+        };
+        let Some(window) = self
+            .host
+            .window
+            .as_mut()
+            .filter(|window| window.session.greeted)
+        else {
+            return false;
+        };
+        let texts = prompt.texts.iter().map(String::as_str).collect();
+        let notice = Notice::Approval(Approval {
+            id: prompt.id,
+            caller,
+            target,
+            action: prompt.action,
+            texts,
+        });
+        window.session.notice(&notice).is_ok() && window.session.flush().is_ok()
+    }
+
+    /// Takes one answer that arrived over the inherited window link.
+    pub fn take_approval_answer(&mut self) -> Option<(u64, ApprovalAnswer)> {
+        self.approval_answers.pop()
+    }
+
     /// Serves `socket` as the window, and sends the version check.
     fn attach_window(&mut self, socket: UnixStream, child: Option<Child>) -> io::Result<()> {
         let fd = socket.as_raw_fd();
@@ -827,6 +866,7 @@ mod tests {
                             self.shown = layout.panes().collect();
                         }
                         Notice::Refused { reason } => self.refused.push(reason),
+                        Notice::Approval(_) => {}
                     }
                 }
             }
@@ -1372,7 +1412,7 @@ mod tests {
 
     #[test]
     fn a_second_open_starts_nothing_until_the_first_has_gone() {
-        let hello = r"printf '\003\000\000\000\000\005\000' >&3; exec cat <&3 >/dev/null";
+        let hello = r"printf '\003\000\000\000\000\006\000' >&3; exec cat <&3 >/dev/null";
         let (binary, log) = window_script("second-open", hello);
         let mut reactor = Reactor::new().unwrap();
         assert_eq!(spawn_window(&mut reactor, &binary), WindowOpen::Started);

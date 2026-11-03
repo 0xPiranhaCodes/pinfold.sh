@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token};
 use pinfold_mux::{Session, Size};
+use pinfold_proto::link::ApprovalAnswer;
 use pinfold_sys::Terminal;
 use pinfold_sys::pty::Pty;
 
@@ -192,6 +193,8 @@ pub struct Reactor {
     pub(crate) shell: fn() -> Command,
     buffer: Vec<u8>,
     pub(crate) host: Host,
+    /// Answers accepted only from the inherited window link.
+    pub(crate) approval_answers: Vec<(u64, ApprovalAnswer)>,
     pub(crate) protect: Protect,
 }
 
@@ -216,6 +219,7 @@ impl Reactor {
             shell: shell::command,
             buffer: vec![0; READ_BUDGET],
             host: Host::default(),
+            approval_answers: Vec::new(),
             protect: Protect::default(),
         })
     }

@@ -2,8 +2,9 @@
 //! `pinfold ctl` lists panes.
 //!
 //! It takes `hello`, `window.open` and, after `hello` version 2, `pane.list`, `pane.read`,
-//! `pane.last_output`, `pane.send`, `pane.wait`, `events.subscribe` and `audit.read`, as newline-delimited
-//! JSON-RPC 2.0 (ADR-0009, ADR-0028, ADR-0032). `window.open` takes no arguments, so a caller
+//! `pane.last_output`, `pane.send`, `pane.wait`, `events.subscribe`, `audit.read`,
+//! `grants.list` and `grants.revoke`, as newline-delimited JSON-RPC 2.0 (ADR-0009,
+//! ADR-0028, ADR-0032). `window.open` takes no arguments, so a caller
 //! cannot name a program. This only checks a request's shape: the reactor answers every
 //! [`Request`], checks its scope, parks waits and sends events, so nothing here reaches a pane.
 //! Same-user controls are guardrails (threat model).
@@ -90,14 +91,15 @@ const EVENTS: usize = MAX_PEERS * EVENTS_EACH;
 /// How long the core waits for a window to say hello. Past it a launcher reports the window as
 /// not ready, so a hung one is heard of, and the window may still open.
 pub const OPEN_WAIT: Duration = Duration::from_secs(2);
+/// Longest a cross-pane request may stay parked for a window answer.
+pub const APPROVAL_WAIT: Duration = Duration::from_secs(60);
 /// [`OPEN_WAIT`] for the first window of a core, which starts with nothing warm, so that a slow
 /// Mac does not report failure for a window that opens (`docs/spikes/m2-cold-start`).
 pub const FIRST_OPEN_WAIT: Duration = Duration::from_secs(10);
 /// Longest reply a client reads: the core closes a peer whose queue reaches [`MAX_OUTPUT`].
 const MAX_REPLY: u64 = MAX_OUTPUT as u64;
-/// Longest a launcher waits for each answer. It can queue behind one peer's first window, then
-/// have its own.
-const REPLY_WAIT: Duration = Duration::from_secs(FIRST_OPEN_WAIT.as_secs() + OPEN_WAIT.as_secs());
+/// Longest a client waits for an answer, including a cross-pane approval prompt.
+const REPLY_WAIT: Duration = Duration::from_secs(APPROVAL_WAIT.as_secs() + OPEN_WAIT.as_secs());
 
 const PARSE_ERROR: i64 = -32700;
 const NOT_A_REQUEST: i64 = -32600;
@@ -164,6 +166,13 @@ pub enum Method {
     PaneClose {
         /// The pane's number.
         pane: usize,
+    },
+    /// `grants.list`, accepted only from a terminal outside every pane.
+    GrantsList,
+    /// `grants.revoke`, accepted only from a terminal outside every pane.
+    GrantsRevoke {
+        /// Stable grant id.
+        id: u64,
     },
 }
 
@@ -454,6 +463,9 @@ impl Control {
                         Method::WindowOpen => mem::replace(&mut wait, OPEN_WAIT),
                         // The reactor answers at the timeout, so this only catches one that cannot.
                         Method::PaneWait(Wait { timeout, .. }) => *timeout + OPEN_WAIT,
+                        Method::PaneRead { .. }
+                        | Method::PaneLastOutput { .. }
+                        | Method::PaneSend { .. } => APPROVAL_WAIT + OPEN_WAIT,
                         _ => OPEN_WAIT,
                     };
                     ask(Request {
@@ -1096,7 +1108,7 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
         Some("window.open") => Step::Ask(id.clone(), Method::WindowOpen),
         Some(
             method @ ("pane.list" | "pane.read" | "pane.last_output" | "pane.send" | "pane.spawn"
-            | "pane.close"),
+            | "pane.close" | "grants.list" | "grants.revoke"),
         ) if *greeted < VERSION => refuse(
             Some(id),
             NO_METHOD,
@@ -1142,6 +1154,15 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
         ) => match pane_method(method, request.get("params")) {
             Ok(method) => Step::Ask(id.clone(), method),
             Err(reason) => refuse(Some(id), BAD_PARAMS, reason),
+        },
+        Some("grants.list") => Step::Ask(id.clone(), Method::GrantsList),
+        Some("grants.revoke") => match request.pointer("/params/id").and_then(Value::as_u64) {
+            Some(grant @ 1..) => Step::Ask(id.clone(), Method::GrantsRevoke { id: grant }),
+            None | Some(0) => refuse(
+                Some(id),
+                BAD_PARAMS,
+                "grants.revoke takes a positive numeric id",
+            ),
         },
         _ => refuse(Some(id), NO_METHOD, "unknown method"),
     }
@@ -1446,6 +1467,13 @@ mod tests {
         let line = pane_request("pane.send", &json!({"pane": 1}));
         let (reply, _) = replied(line.as_bytes(), &mut VERSION.clone());
         assert_eq!(code(&reply), Some(BAD_PARAMS));
+    }
+
+    #[test]
+    fn no_api_method_can_answer_an_approval_prompt() {
+        let line = br#"{"jsonrpc":"2.0","id":2,"method":"approval.answer","params":{"id":1,"answer":"allow"}}"#;
+        let (reply, go_on) = replied(line, &mut VERSION.clone());
+        assert_eq!((code(&reply), go_on), (Some(NO_METHOD), false));
     }
 
     #[test]

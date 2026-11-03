@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "grants.revoke",
+  "description": "Revokes one lasting cross-pane grant. Needs hello version 2 and an identified terminal outside every pane.",
+  "type": "object",
+  "properties": {
+    "params": {
+      "type": "object",
+      "required": ["id"],
+      "properties": {
+        "id": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "result": {
+      "type": "object",
+      "required": ["revoked"],
+      "additionalProperties": false,
+      "properties": {
+        "revoked": { "type": "boolean" }
+      }
+    }
+  }
+}
