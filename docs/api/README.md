@@ -68,8 +68,9 @@ programs print, which can fake them: read them as hints, not facts. `pinfold ctl
 
 `pinfold mcp` is an MCP server over stdio (protocol version 2025-06-18) and a thin client of
 this API. Its stdout carries only newline-delimited JSON-RPC, and a line over 1,000,000 bytes is
-refused. Its tools are `pane_list_v1`, `pane_read_v1`, `pane_last_output_v1`, `pane_send_v1` and
-`pane_wait_v1`, named with their version as ADR-0009 asks, each taking its method's params and returning the method's result as JSON text.
+refused. Its tools are `pane_list_v1`, `pane_read_v1`, `pane_last_output_v1`, `pane_send_v1`,
+`pane_spawn_v1`, `pane_close_v1` and `pane_wait_v1`, named with their version as ADR-0009 asks,
+each taking its method's params and returning the method's result as JSON text.
 `pane_list_v1` adds `caller_pane`, the caller's own pane. A refusal, or no running core, is a tool
 result with `isError`. Each call opens its own connection, so the core identifies the caller by
 the server's controlling terminal: start it from an agent running in a PinFold pane, as Claude
