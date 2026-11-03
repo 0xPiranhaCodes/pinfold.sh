@@ -31,7 +31,11 @@ a fetch.
   A profile name that is not one plain path component gets no shadow.
 - At the first launch the core makes it mode 0700. It starts at the real `HEAD`, with the
   branch's commit from a loose or packed ref, or the detached commit, and with a copy of the
-  real index. `objects/info/alternates` names the real objects, so nothing is copied. The core
+  real index. The core reads those only from files that really are inside the working
+  directory's `.git`, as the open file's path in `/proc/self/fd` shows. An agent can make a
+  `.git` where there was none, with links to hidden files, and the shadow must not show it
+  their text. `objects/info/alternates` names the real objects, unresolved, so nothing is
+  copied. The core
   never writes into an existing shadow, which the agent may have changed. It refuses the launch
   if the shadow is a symlink, not a directory, another user's, or open to group or others.
 - The user fetches into remote-tracking refs, never into local branches:
@@ -52,7 +56,9 @@ unless the user runs git with the shadow as its git directory. The shadow is not
 other sandboxed agents can read, but not write, each other's shadows. Those hold the project
 data the agents can already read from the projects themselves. A shadow starts at the commit of
 its first launch and is kept after that: the user deletes it to start again from a newer
-commit. A working directory whose `.git` is a file, such as a linked worktree, gets no shadow,
+commit. The fetch reads a repository the agent controls, like any untrusted remote: git's handling
+of its refs, objects and `alternates` is the exposure, and what it brings lands only in
+remote-tracking refs for review, never in the agent's view. A working directory whose `.git` is a file, such as a linked worktree, gets no shadow,
 and the agent there cannot commit. A real index in split-index form refers to a shared index
 that the shadow lacks, and the agent must rebuild its index with `git reset`. Revisit this if
 git gains per-file lock locations, or if a core-assisted fetch is approved.

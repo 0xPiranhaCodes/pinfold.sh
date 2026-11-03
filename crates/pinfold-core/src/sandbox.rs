@@ -302,7 +302,8 @@ pub fn command(
 }
 
 /// Makes `dir` the agent's own git directory for `work`, if it does not exist yet, and returns it
-/// resolved (ADR-0039). It starts at the commit and index of `work`'s `.git`, and borrows its
+/// resolved (ADR-0039). On Linux it starts at the commit and index of `work`'s `.git`, read only
+/// from files really inside it; elsewhere, and without them, at an unborn `main`. It borrows the
 /// objects through `objects/info/alternates`, so nothing is copied. Agent commits stay there,
 /// whose hooks and config only the sandbox runs, until the user fetches them. An existing one is
 /// left as it is: the core never writes where the agent has.
@@ -323,12 +324,13 @@ pub fn command(
 /// std::fs::write(temp.join("work/.git/HEAD"), "ref: refs/heads/main\n")?;
 /// let shadow = sandbox::shadow(&temp.join("work"), &temp.join("data/shadow"))?;
 /// assert_eq!(std::fs::read_to_string(shadow.join("HEAD"))?, "ref: refs/heads/main\n");
+/// assert!(shadow.join("objects/info/alternates").is_file());
 /// std::fs::remove_dir_all(&temp)?;
 /// # Ok::<(), std::io::Error>(())
 /// ```
 pub fn shadow(work: &Path, dir: &Path) -> io::Result<PathBuf> {
     use std::os::unix::fs::DirBuilderExt;
-    let git = work.join(".git");
+    let git = work.canonicalize()?.join(".git");
     let mut builder = fs::DirBuilder::new();
     builder.mode(0o700);
     if let Some(parent) = dir.parent() {
@@ -354,13 +356,14 @@ pub fn shadow(work: &Path, dir: &Path) -> io::Result<PathBuf> {
     for sub in ["objects/info", "refs/heads", "refs/tags"] {
         builder.recursive(true).create(dir.join(sub))?;
     }
-    let mut objects = git.join("objects").canonicalize()?.into_os_string();
+    // Not resolved: the agent's git and the user's fetch each resolve it as they see it.
+    let mut objects = git.join("objects").into_os_string();
     objects.push("\n");
     fs::write(
         dir.join("objects/info/alternates"),
         objects.as_encoded_bytes(),
     )?;
-    let head = fs::read_to_string(git.join("HEAD")).unwrap_or_default();
+    let head = read_inside(&git, "HEAD").unwrap_or_default();
     let branch = head.strip_prefix("ref: ").map(str::trim).filter(|name| {
         let name = Path::new(name);
         name.starts_with("refs/heads")
@@ -385,16 +388,37 @@ pub fn shadow(work: &Path, dir: &Path) -> io::Result<PathBuf> {
         },
     }
     // Without it, the agent's git would see every tracked file as newly deleted.
-    let _ = fs::copy(git.join("index"), dir.join("index"));
+    if let Some(mut index) = open_inside(&git, "index") {
+        io::copy(&mut index, &mut fs::File::create_new(dir.join("index"))?)?;
+    }
     dir.canonicalize()
+}
+
+/// `name` in `git`, opened only if it is a file that really is inside `git`, as the open file's
+/// path in `/proc` shows, which no later swap of a link or directory changes. On Linux the agent
+/// may have made `.git` itself, with links to hidden files whose text the shadow would show it.
+fn open_inside(git: &Path, name: &str) -> Option<fs::File> {
+    let file = fs::File::open(git.join(name)).ok()?;
+    let real = fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).ok()?;
+    let plain = file.metadata().is_ok_and(|meta| meta.is_file());
+    (plain && real.starts_with(git)).then_some(file)
+}
+
+/// The text of `name` in `git`, from [`open_inside`], up to 1 MiB.
+fn read_inside(git: &Path, name: &str) -> Option<String> {
+    use std::io::Read;
+    let mut text = String::new();
+    let file = open_inside(git, name)?;
+    file.take(1 << 20).read_to_string(&mut text).ok()?;
+    Some(text)
 }
 
 /// The commit `name` points at in `git`, loose or packed.
 fn commit(git: &Path, name: &str) -> Option<String> {
-    if let Ok(text) = fs::read_to_string(git.join(name)) {
+    if let Some(text) = read_inside(git, name) {
         return object_id(text.trim());
     }
-    let packed = fs::read_to_string(git.join("packed-refs")).ok()?;
+    let packed = read_inside(git, "packed-refs")?;
     packed.lines().find_map(|line| {
         let (id, other) = line.split_once(' ')?;
         (other == name).then(|| object_id(id)).flatten()
@@ -904,6 +928,7 @@ mod tests {
         assert_eq!(free, [false; 2]);
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn a_shadow_starts_at_the_branch_and_is_then_left_alone() {
         let temp = std::env::temp_dir().join(format!("pinfold-shadow-{}", std::process::id()));
@@ -942,8 +967,22 @@ mod tests {
         let odd = temp.join("data/odd");
         fs::write(git.join("HEAD"), "ref: refs/heads/../../x\n").unwrap();
         let odd = fs::read_to_string(shadow(&temp.join("work"), &odd).unwrap().join("HEAD"));
-        let objects = git.join("objects").canonicalize().unwrap();
+        // A `.git` the agent made, with links out to a hidden file, shows none of it.
+        let secret = temp.join("secret");
+        fs::write(&secret, format!("{one}\n")).unwrap();
+        fs::remove_dir_all(&git).unwrap();
+        fs::create_dir_all(git.join("refs/heads")).unwrap();
+        fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::os::unix::fs::symlink(&secret, git.join("index")).unwrap();
+        std::os::unix::fs::symlink(&secret, git.join("refs/heads/main")).unwrap();
+        let planted = shadow(&temp.join("work"), &temp.join("data/planted")).unwrap();
+        let leaked = [
+            planted.join("index").exists(),
+            planted.join("refs/heads/main").exists(),
+        ];
+        let objects = temp.canonicalize().unwrap().join("work/.git/objects");
         fs::remove_dir_all(&temp).unwrap();
+        assert_eq!(leaked, [false, false]);
         assert_eq!(
             first,
             [
