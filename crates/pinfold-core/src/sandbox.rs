@@ -7,7 +7,10 @@
 //! own terminal, can type into sandboxed programs alone.
 //!
 //! The agent writes only to its [`WorkingDirectory`] and temporary directories: a fresh `/tmp` on
-//! Linux, and `/private/tmp` and the user's temporary directory on macOS.
+//! Linux, and `/private/tmp` and the user's temporary directory on macOS. Its git hooks and
+//! config, and its submodules', stay read-only, as git runs what they name outside the sandbox.
+//! Of other
+//! programs' Unix sockets, such as ssh-agent's, it reaches only PinFold's API socket.
 //!
 //! A missing tool is an error: a pane that asked for a sandbox never runs without one.
 
@@ -22,6 +25,13 @@ use std::process::Command;
 /// next launch.
 const BWRAP: [&str; 3] = ["/usr/bin/bwrap", "/usr/local/bin/bwrap", "/bin/bwrap"];
 
+/// Variables that name other programs' sockets, which the agent does not get.
+const SOCKET_VARS: [&str; 3] = [
+    "SSH_AUTH_SOCK",
+    "GPG_AGENT_INFO",
+    "DBUS_SESSION_BUS_ADDRESS",
+];
+
 /// The macOS rules: everything is allowed but the hidden directories, every terminal by name and
 /// TIOCSTI (`0x80017472`). A pane's own terminal is already open, and `/dev/tty` still reaches it.
 const PROFILE: &str = "(version 1)(allow default)\
@@ -33,6 +43,20 @@ const PROFILE: &str = "(version 1)(allow default)\
 const WRITES: &str = "(deny file-write* (require-all (require-not (subpath (param \"W\")))\
 (require-not (subpath (param \"T\"))) (require-not (subpath \"/private/tmp\"))\
 (require-not (subpath \"/dev\"))))";
+
+/// The macOS git rule for `.git` itself, `G`: it cannot be made, rewritten or moved away and
+/// back. What git runs code from inside it gets a rule each.
+const GIT: &str = "(deny file-write* (literal (param \"G\")))";
+
+/// The most directories [`git_controls`] looks at before it refuses the launch.
+const GIT_DIRS: usize = 4096;
+
+/// The macOS socket rule: no Unix socket but the API's `S`, as given and resolved `SR`, and the
+/// system's name lookup.
+const SOCKETS: &str = "(deny network-outbound (require-all (remote unix-socket)\
+(require-not (remote unix-socket (path-literal (param \"S\"))))\
+(require-not (remote unix-socket (path-literal (param \"SR\"))))\
+(require-not (remote unix-socket (path-literal \"/private/var/run/mDNSResponder\")))))";
 
 /// A directory a sandboxed agent may write to, from [`working_directory`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -47,7 +71,9 @@ impl WorkingDirectory {
 
 /// Checks `path` as a sandboxed agent's writable directory. It comes from a pane's OSC 7 report,
 /// which any program can print, so it must resolve to a directory of this user's that no one else
-/// can write to, and must not be `/`, `$HOME` or above it, or hold or sit inside a `hidden` one.
+/// can write to, under directories that only it or root can change. It must not be `/`, `$HOME`
+/// or above it, a dot-directory of `$HOME` such as `~/.config` or inside one, `~/Library` or
+/// inside it, inside a `.git` directory, or hold or sit inside a `hidden` one.
 ///
 /// # Errors
 ///
@@ -61,7 +87,8 @@ impl WorkingDirectory {
 /// use std::path::Path;
 /// use pinfold_core::sandbox::working_directory;
 ///
-/// let project = std::env::temp_dir().join(format!("pinfold-project-{}", std::process::id()));
+/// let home = std::env::var_os("HOME").unwrap();
+/// let project = Path::new(&home).join(format!("pinfold-project-{}", std::process::id()));
 /// std::fs::DirBuilder::new().mode(0o700).create(&project)?;
 /// assert!(working_directory(&project, &[]).is_ok());
 /// assert!(working_directory(&project, &[project.join(".ssh")]).is_err());
@@ -90,8 +117,29 @@ pub fn working_directory(path: &Path, hidden: &[PathBuf]) -> io::Result<WorkingD
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return refuse("cannot be checked without HOME");
     };
-    if home.starts_with(&dir) || resolve(&home).starts_with(&dir) {
+    let home = resolve(&home);
+    if home.starts_with(&dir) {
         return refuse("is the home directory or above it");
+    }
+    // What runs at login, from PATH or from git lives here, such as ~/.local/bin and ~/.config.
+    let first = dir
+        .strip_prefix(&home)
+        .ok()
+        .and_then(|rest| rest.iter().next());
+    let library = cfg!(target_os = "macos") && first.is_some_and(|name| name == "Library");
+    if library || first.is_some_and(|name| name.as_encoded_bytes().starts_with(b".")) {
+        return refuse("is or is inside a dot-directory of home or ~/Library");
+    }
+    if dir.iter().any(|name| name == ".git") {
+        return refuse("is inside a .git directory");
+    }
+    // A directory above it that another user can change could be swapped before the launch.
+    for above in dir.ancestors().skip(1) {
+        let meta = fs::metadata(above)?;
+        let owner = meta.uid() == 0 || meta.uid() == pinfold_sys::effective_uid();
+        if !owner || meta.mode() & 0o022 != 0 {
+            return refuse("is under a directory another user can change");
+        }
     }
     for hidden in hidden {
         let real = resolve(hidden);
@@ -115,8 +163,9 @@ fn resolve(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
-/// Returns the command that runs `program` with `hidden` unreadable and only `work` and temporary
-/// directories writable, for [`Reactor::spawn`](crate::io::Reactor::spawn).
+/// Returns the command that runs `program` with `hidden` unreadable, only `work` and temporary
+/// directories writable and, of Unix sockets, only the API's at `api` reachable, for
+/// [`Reactor::spawn`](crate::io::Reactor::spawn).
 ///
 /// # Errors
 ///
@@ -127,13 +176,16 @@ fn resolve(path: &Path) -> PathBuf {
 ///
 /// ```
 /// use std::os::unix::fs::DirBuilderExt;
+/// use std::path::Path;
 /// use pinfold_core::sandbox;
 ///
-/// let project = std::env::temp_dir().join(format!("pinfold-agent-{}", std::process::id()));
+/// let home = std::env::var_os("HOME").unwrap();
+/// let project = Path::new(&home).join(format!("pinfold-agent-{}", std::process::id()));
 /// std::fs::DirBuilder::new().mode(0o700).create(&project)?;
 /// let work = sandbox::working_directory(&project, &[])?;
 /// let program = ["/bin/echo".to_owned(), "hi".to_owned()];
-/// match sandbox::command(&program, &[], &work) {
+/// let api = std::env::temp_dir().join("pinfold/pinfold.sock");
+/// match sandbox::command(&program, &[], &work, &api) {
 ///     Ok(command) => assert_ne!(command.get_program(), "/bin/echo"),
 ///     // No bubblewrap here: the pane does not start.
 ///     Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
@@ -145,6 +197,7 @@ pub fn command(
     program: &[String],
     hidden: &[PathBuf],
     work: &WorkingDirectory,
+    api: &Path,
 ) -> io::Result<Command> {
     // `sandbox-exec` would read a leading dash as its own option.
     if program
@@ -156,9 +209,13 @@ pub fn command(
             "a sandboxed agent needs a program that does not start with -",
         ));
     }
+    let controls = git_controls(work.path())?;
     let (tool, args) = if cfg!(target_os = "macos") {
         let tool = PathBuf::from("/usr/bin/sandbox-exec");
-        (tool, macos_args(hidden, program, work.path()))
+        (
+            tool,
+            macos_args(hidden, program, work.path(), api, &controls),
+        )
     } else if cfg!(target_os = "linux") {
         let tool = bwrap().ok_or_else(|| {
             io::Error::new(
@@ -167,24 +224,50 @@ pub fn command(
                  change, so the sandboxed agent does not start",
             )
         })?;
-        (tool, linux_args(hidden, program, work.path()))
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+        let runtime = runtime.as_deref();
+        let args = linux_args(hidden, program, work.path(), api, runtime, &controls);
+        (tool, args)
     } else {
         return Err(io::ErrorKind::Unsupported.into());
     };
     let mut command = Command::new(tool);
     command.args(args);
+    for name in SOCKET_VARS {
+        command.env_remove(name);
+    }
     Ok(command)
 }
 
 /// `sandbox-exec`'s arguments. Paths go in as parameters, so no path is quoted into the rules.
-fn macos_args(hidden: &[PathBuf], program: &[String], work: &Path) -> Vec<OsString> {
-    let mut profile = format!("{PROFILE}{WRITES}");
+fn macos_args(
+    hidden: &[PathBuf],
+    program: &[String],
+    work: &Path,
+    api: &Path,
+    controls: &[PathBuf],
+) -> Vec<OsString> {
+    let mut profile = format!("{PROFILE}{WRITES}{GIT}{SOCKETS}");
     let temp = std::env::temp_dir();
     let temp = temp.canonicalize().unwrap_or(temp);
+    let git = work.join(".git");
     let mut args = Vec::new();
-    for (name, path) in [("W", work), ("T", &temp)] {
+    let params = [
+        ("W", work),
+        ("T", &temp),
+        ("G", &git),
+        ("S", api),
+        ("SR", &resolve(api)),
+    ];
+    for (name, path) in params {
         let mut define = OsString::from(format!("{name}="));
         define.push(path);
+        args.extend([OsString::from("-D"), define]);
+    }
+    for (index, path) in controls.iter().enumerate() {
+        profile += &format!("(deny file-write* (subpath (param \"C{index}\")))");
+        let mut define = OsString::from(format!("C{index}="));
+        define.push(resolve(path));
         args.extend([OsString::from("-D"), define]);
     }
     for (index, path) in hidden.iter().enumerate() {
@@ -201,10 +284,19 @@ fn macos_args(hidden: &[PathBuf], program: &[String], work: &Path) -> Vec<OsStri
     all
 }
 
-/// `bwrap`'s arguments: the real root read-only, a private `/dev`, `/proc` and `/tmp`, `work`
-/// writable, and an empty directory over each hidden one. A missing directory is skipped, as bwrap would make it outside the sandbox, and
-/// so is one inside another hidden directory, which that one's mount already covers.
-fn linux_args(hidden: &[PathBuf], program: &[String], work: &Path) -> Vec<OsString> {
+/// `bwrap`'s arguments: the real root read-only, private `/dev`, `/proc`, `/tmp` and IPC, an
+/// empty `runtime` directory but for the API socket's, `work` writable but its git `controls`
+/// and a `.git` file, and an empty directory over each hidden one. A missing directory is skipped, as bwrap
+/// would make it outside the sandbox, and so is one inside another hidden directory, which that
+/// one's mount already covers.
+fn linux_args(
+    hidden: &[PathBuf],
+    program: &[String],
+    work: &Path,
+    api: &Path,
+    runtime: Option<&Path>,
+    controls: &[PathBuf],
+) -> Vec<OsString> {
     let fixed = [
         "--ro-bind",
         "/",
@@ -212,13 +304,36 @@ fn linux_args(hidden: &[PathBuf], program: &[String], work: &Path) -> Vec<OsStri
         "--dev",
         "/dev",
         "--unshare-pid",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--unshare-cgroup-try",
+        "--die-with-parent",
         "--proc",
         "/proc",
         "--tmpfs",
         "/tmp",
     ];
     let mut args: Vec<OsString> = fixed.map(OsString::from).into();
-    args.extend(["--bind".into(), work.into(), work.into()]);
+    // Where ssh-agent, the session bus and other programs keep their sockets.
+    if let Some(runtime) = runtime.filter(|runtime| runtime.is_absolute()) {
+        args.extend(["--tmpfs".into(), runtime.into()]);
+    }
+    let mut mount = |kind: &str, path: &Path| args.extend([kind.into(), path.into(), path.into()]);
+    if let Some(dir) = api.parent() {
+        mount("--ro-bind", dir);
+    }
+    mount("--bind", work);
+    let git = work.join(".git");
+    match fs::symlink_metadata(&git) {
+        // A mount point cannot be renamed, so `.git` cannot be moved away and back.
+        Ok(meta) if meta.is_dir() => mount("--bind", &git),
+        // A worktree's or submodule's pointer to its repository.
+        Ok(_) => mount("--ro-bind", &git),
+        Err(_) => {}
+    }
+    for path in controls.iter().filter(|path| path.exists()) {
+        mount("--ro-bind", path);
+    }
     let mounted: Vec<&PathBuf> = hidden.iter().filter(|path| path.is_dir()).collect();
     for path in &mounted {
         if mounted
@@ -234,28 +349,104 @@ fn linux_args(hidden: &[PathBuf], program: &[String], work: &Path) -> Vec<OsStri
     args
 }
 
+/// What git runs code from in `work`'s `.git` directory: the hooks, config and worktree config of
+/// the repository and of each submodule and linked worktree in it, whether they exist or not, so
+/// that macOS denies making them. Symlinks are not followed.
+///
+/// Refuses if the repository or a submodule has no hooks directory or no config, which an agent
+/// could then make on Linux, if any of them is a symlink, or if `.git` holds more than
+/// [`GIT_DIRS`] directories.
+fn git_controls(work: &Path) -> io::Result<Vec<PathBuf>> {
+    let git = work.join(".git");
+    let mut controls = Vec::new();
+    if !fs::symlink_metadata(&git).is_ok_and(|meta| meta.is_dir()) {
+        return Ok(controls);
+    }
+    let refuse = |why: &str| {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{git:?} {why}, so the sandboxed agent does not start"),
+        ))
+    };
+    // Each directory, whether git keeps a repository there and whether that is a submodule's or
+    // the top one's, which need their own hooks and config.
+    let mut pending = vec![(git.clone(), true, true)];
+    let mut seen = 0;
+    while let Some((dir, repository, module)) = pending.pop() {
+        seen += 1;
+        if seen > GIT_DIRS {
+            return refuse("holds too many directories to check");
+        }
+        if repository {
+            let (hooks, config) = (dir.join("hooks"), dir.join("config"));
+            if module && !(hooks.is_dir() && config.is_file()) {
+                return refuse("has a repository without hooks or config");
+            }
+            let found = [hooks, config, dir.join("config.worktree")];
+            // A link could be swapped for a directory of the agent's, as `.git` stays writable.
+            let link = |path: &PathBuf| {
+                fs::symlink_metadata(path).is_ok_and(|meta| meta.file_type().is_symlink())
+            };
+            if found.iter().any(link) {
+                return refuse("links its hooks or config elsewhere");
+            }
+            controls.extend(found);
+            pending.push((dir.join("modules"), false, true));
+            if dir == git {
+                pending.push((dir.join("worktrees"), false, false));
+            }
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                let path = entry.path();
+                let repository = path.join("HEAD").is_file();
+                pending.push((path, repository, module));
+            }
+        }
+    }
+    Ok(controls)
+}
+
 /// The first of [`BWRAP`] that is [`trusted`].
 fn bwrap() -> Option<PathBuf> {
     BWRAP.iter().map(PathBuf::from).find(|tool| trusted(tool))
 }
 
-/// Whether `file` is a file that only root can change: it and every directory above it are owned
-/// by root, writable by no one else and not symlinks.
+/// Whether `file` is a file that only root can change, as it and every directory above it are
+/// [`root_only`].
 fn trusted(file: &Path) -> bool {
-    file.is_file()
-        && file.ancestors().all(|path| {
-            fs::symlink_metadata(path).is_ok_and(|meta| {
-                !meta.file_type().is_symlink() && meta.uid() == 0 && meta.mode() & 0o022 == 0
-            })
-        })
+    file.is_file() && file.ancestors().all(root_only)
+}
+
+/// Whether `path` is owned by root, writable by no one else and not a symlink.
+fn root_only(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| {
+        !meta.file_type().is_symlink() && meta.uid() == 0 && meta.mode() & 0o022 == 0
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
 
     fn strings(args: &[OsString]) -> Vec<&str> {
         args.iter().map(|arg| arg.to_str().unwrap()).collect()
+    }
+
+    /// A new directory in `$HOME`, where a working directory may be, with `mode`.
+    fn project(name: &str, mode: u32) -> PathBuf {
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let dir = home.join(format!("{name}-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(mode)).unwrap();
+        dir
     }
 
     #[test]
@@ -264,25 +455,34 @@ mod tests {
             PathBuf::from("/nowhere/.ssh"),
             PathBuf::from("/nowhere/a\"b"),
         ];
-        let work = Path::new("/nowhere/work");
-        let args = macos_args(&hidden, &["agent".to_owned(), "-v".to_owned()], work);
+        let (work, api) = (Path::new("/nowhere/work"), Path::new("/nowhere/api.sock"));
+        let controls = [work.join(".git/hooks")];
+        let program = ["agent".to_owned(), "-v".to_owned()];
+        let args = macos_args(&hidden, &program, work, api, &controls);
         let args = strings(&args);
         assert_eq!(args[0], "-p");
-        assert!(args[1].starts_with(&format!("{PROFILE}{WRITES}")));
+        assert!(args[1].starts_with(&format!("{PROFILE}{WRITES}{GIT}{SOCKETS}")));
         assert!(args[1].ends_with(
-            "(deny file-read* file-write* (subpath (param \"H0\")))\
+            "(deny file-write* (subpath (param \"C0\")))\
+             (deny file-read* file-write* (subpath (param \"H0\")))\
              (deny file-read* file-write* (subpath (param \"H1\")))"
         ));
+        let temp = std::env::temp_dir().canonicalize().unwrap();
         assert_eq!(
             args[2..],
             [
                 "-D",
                 "W=/nowhere/work",
                 "-D",
-                &format!(
-                    "T={}",
-                    std::env::temp_dir().canonicalize().unwrap().display()
-                ),
+                &format!("T={}", temp.display()),
+                "-D",
+                "G=/nowhere/work/.git",
+                "-D",
+                "S=/nowhere/api.sock",
+                "-D",
+                "SR=/nowhere/api.sock",
+                "-D",
+                "C0=/nowhere/work/.git/hooks",
                 "-D",
                 "H0=/nowhere/.ssh",
                 "-D",
@@ -297,47 +497,130 @@ mod tests {
     fn linux_covers_existing_paths_and_keeps_the_session() {
         let root = std::env::temp_dir();
         let inner = root.join(format!("pinfold-nested-{}", std::process::id()));
-        std::fs::create_dir_all(&inner).unwrap();
+        let work = project("pinfold-git", 0o700);
+        for path in [inner.clone(), work.join(".git/hooks")] {
+            fs::create_dir_all(path).unwrap();
+        }
+        fs::write(work.join(".git/config"), "").unwrap();
+        let controls = git_controls(&work).unwrap();
         // A directory inside another hidden one, before or after it, needs no mount of its own.
         let hidden = [inner.clone(), root.clone(), PathBuf::from("/nowhere/.ssh")];
-        let args = linux_args(&hidden, &["agent".to_owned()], Path::new("/work"));
-        std::fs::remove_dir(&inner).unwrap();
+        let api = Path::new("/run/user/7/pinfold/pinfold.sock");
+        let runtime = Some(Path::new("/run/user/7"));
+        let args = linux_args(
+            &hidden,
+            &["agent".to_owned()],
+            &work,
+            api,
+            runtime,
+            &controls,
+        );
+        fs::remove_dir(&inner).unwrap();
+        fs::remove_dir_all(&work).unwrap();
         let args = strings(&args);
         let tmpfs = ["--tmpfs", root.to_str().unwrap(), "--", "agent"];
         assert_eq!(args[args.len() - 4..], tmpfs);
-        // /tmp and the outer hidden directory.
-        assert_eq!(args.iter().filter(|arg| **arg == "--tmpfs").count(), 2);
+        // /tmp, the runtime directory and the outer hidden directory.
+        assert_eq!(args.iter().filter(|arg| **arg == "--tmpfs").count(), 3);
         assert!(!args.contains(&"/nowhere/.ssh"));
         assert!(!args.contains(&"--new-session"));
+        assert!(!args.contains(&"--unshare-net"));
         assert_eq!(args[..3], ["--ro-bind", "/", "/"]);
-        assert!(
-            args.windows(3)
-                .any(|three| three == ["--bind", "/work", "/work"])
+        let has = |want: &[&str]| args.windows(want.len()).any(|got| got == want);
+        let (work, git) = (work.to_str().unwrap(), work.join(".git"));
+        let (hooks, config) = (git.join("hooks"), git.join("config"));
+        let (git, hooks, config) = (
+            git.to_str().unwrap(),
+            hooks.to_str().unwrap(),
+            config.to_str().unwrap(),
         );
-        assert!(args.windows(2).any(|pair| pair == ["--tmpfs", "/tmp"]));
+        assert!(has(&["--tmpfs", "/tmp"]));
+        assert!(has(&["--tmpfs", "/run/user/7"]));
+        let dir = "/run/user/7/pinfold";
+        assert!(has(&["--ro-bind", dir, dir]));
+        assert!(has(&["--bind", work, work]));
+        assert!(has(&["--bind", git, git]));
+        assert!(has(&["--ro-bind", hooks, hooks]));
+        assert!(has(&["--ro-bind", config, config]));
+        for flag in ["--die-with-parent", "--unshare-ipc", "--unshare-uts"] {
+            assert!(args.contains(&flag), "{flag}");
+        }
+    }
+
+    #[test]
+    fn git_runs_nothing_the_agent_can_change() {
+        let work = project("pinfold-controls", 0o700);
+        let git = work.join(".git");
+        let module = git.join("modules/libs/sub");
+        let worktree = git.join("worktrees/wt");
+        for dir in [git.join("hooks"), module.join("hooks"), worktree.clone()] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        for file in [
+            git.join("HEAD"),
+            git.join("config"),
+            module.join("HEAD"),
+            module.join("config"),
+            worktree.join("HEAD"),
+        ] {
+            fs::write(file, "").unwrap();
+        }
+        let controls = git_controls(&work);
+        fs::remove_dir_all(module.join("hooks")).unwrap();
+        let hookless = git_controls(&work);
+        std::os::unix::fs::symlink(&work, module.join("hooks")).unwrap();
+        let linked = git_controls(&work);
+        fs::remove_dir_all(&git).unwrap();
+        let none = git_controls(&work);
+        fs::write(&git, "gitdir: /elsewhere\n").unwrap();
+        let gitfile = git_controls(&work);
+        fs::remove_dir_all(&work).unwrap();
+        let controls = controls.unwrap();
+        for path in [
+            git.join("hooks"),
+            git.join("config"),
+            git.join("config.worktree"),
+            module.join("hooks"),
+            module.join("config"),
+            worktree.join("config.worktree"),
+        ] {
+            assert!(controls.contains(&path), "{path:?} in {controls:?}");
+        }
+        assert!(hookless.is_err() && linked.is_err());
+        assert_eq!((none.unwrap(), gitfile.unwrap()), (vec![], vec![]));
     }
 
     #[test]
     fn only_a_file_root_alone_can_change_is_trusted() {
-        assert!(trusted(Path::new("/usr/bin/env")));
+        // Resolved, as some systems link /usr/bin/env to a multi-call binary.
+        let system = fs::canonicalize("/usr/bin/env").unwrap();
+        assert!(trusted(&system), "{system:?}");
         let dir = std::env::temp_dir().join(format!("pinfold-planted-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let planted = dir.join("bwrap");
         fs::write(&planted, "").unwrap();
         let link = dir.join("link");
-        std::os::unix::fs::symlink("/usr/bin/env", &link).unwrap();
-        let (file, symlink) = (trusted(&planted), trusted(&link));
+        std::os::unix::fs::symlink(&system, &link).unwrap();
+        // Each fails on its own, not for the user's directories above it.
+        let (file, symlink) = (root_only(&planted), root_only(&link));
+        let whole = (trusted(&planted), trusted(&link));
         fs::remove_dir_all(&dir).unwrap();
         assert!(!file && !symlink);
+        assert_eq!(whole, (false, false));
     }
 
     #[test]
     fn a_working_directory_must_be_a_private_project() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = std::env::temp_dir().join(format!("pinfold-work-{}", std::process::id()));
-        let (open, inner) = (dir.join("open"), dir.join("inner"));
-        for (path, mode) in [(&dir, 0o700), (&open, 0o777), (&inner, 0o700)] {
+        let dir = project("pinfold-work", 0o700);
+        let (open, inner, git) = (dir.join("open"), dir.join("inner"), dir.join(".git/sub"));
+        let under = open.join("under");
+        let dot = project(".pinfold-dot", 0o700);
+        for (path, mode) in [
+            (&open, 0o777),
+            (&under, 0o700),
+            (&inner, 0o700),
+            (&git, 0o700),
+        ] {
             fs::create_dir_all(path).unwrap();
             fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
         }
@@ -351,10 +634,15 @@ mod tests {
             working_directory(&dir, &[dir.join(".ssh")]),
             working_directory(&inner, std::slice::from_ref(&dir)),
             working_directory(&open, &[]),
+            working_directory(&under, &[]),
+            working_directory(&git, &[]),
+            working_directory(&dot, &[]),
             working_directory(&dir.join("missing"), &[]),
         ];
         let root = working_directory(Path::new("/usr/bin"), &[]);
+        let library = working_directory(&home.join("Library"), &[]);
         fs::remove_dir_all(&dir).unwrap();
+        fs::remove_dir_all(&dot).unwrap();
         assert_eq!(work.unwrap().path(), real);
         for refusal in refused {
             assert!(refusal.is_err(), "{refusal:?}");
@@ -362,13 +650,39 @@ mod tests {
         if pinfold_sys::effective_uid() != 0 {
             assert!(root.is_err());
         }
+        if cfg!(target_os = "macos") {
+            assert!(library.is_err());
+        }
+    }
+
+    #[test]
+    fn the_agent_gets_no_other_programs_sockets() {
+        let dir = project("pinfold-env", 0o700);
+        let work = working_directory(&dir, &[]).unwrap();
+        let result = command(
+            &["agent".to_owned()],
+            &[],
+            &work,
+            Path::new("/nowhere/api.sock"),
+        );
+        fs::remove_dir(&dir).unwrap();
+        // Linux without bubblewrap refuses before it builds a command.
+        if let Ok(command) = result {
+            let removed: Vec<_> = command
+                .get_envs()
+                .filter(|(_, value)| value.is_none())
+                .collect();
+            for name in SOCKET_VARS {
+                assert!(removed.iter().any(|(key, _)| *key == name), "{name}");
+            }
+        }
     }
 
     #[test]
     fn an_empty_program_or_an_option_is_refused() {
         for program in [&[][..], &[String::new()], &["-p".to_owned()]] {
             let work = WorkingDirectory(PathBuf::from("/nowhere"));
-            let error = command(program, &[], &work).unwrap_err();
+            let error = command(program, &[], &work, Path::new("/nowhere/api.sock")).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         }
     }

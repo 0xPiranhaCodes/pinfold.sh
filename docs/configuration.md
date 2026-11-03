@@ -125,8 +125,27 @@ A sandboxed agent writes only to its working directory and temporary directories
 empty `/tmp` on Linux, and `/private/tmp` and your temporary directory on macOS. Everything else
 it can read but not change, so it cannot edit `~/.zshrc` or put programs on your `PATH`. The
 working directory is the pane's, as its shell reports it, and the agent does not start unless
-that directory is yours, writable by no other user or group, not `/`, your home directory or
-above it, and does not hold or sit inside a hidden directory.
+that directory is yours, writable by no other user or group, under directories only you or root
+can change, not `/`, your home directory or above it, not a dot-directory of your home such as
+`~/.config` or `~/.local/bin` or inside one, not in `~/Library` on macOS, not inside a `.git`
+directory, and does not hold or sit inside a hidden directory.
+
+In the working directory, git's hooks, config and worktree config stay read-only, for the
+repository and for each submodule and linked worktree in `.git`, and `.git` itself cannot be
+moved or rewritten, because git runs what they name outside the sandbox. The agent does not
+start if the repository or a submodule has no hooks directory or config, or links one
+elsewhere. On Linux, an agent in a directory with no `.git` yet can still make one. A
+`core.hooksPath` or other config setting that names a file inside the working directory, such as
+a `.husky` directory, points at files the agent can change. So do other project files, such as a
+`Makefile`, `.envrc` or a `package.json` script. These run with your full rights when you run
+them, so review an agent's changes before you run git or the project's tools.
+
+The agent gets no `SSH_AUTH_SOCK`, `GPG_AGENT_INFO` or `DBUS_SESSION_BUS_ADDRESS`, and reaches no
+Unix socket but PinFold's API socket, so it cannot sign with your ssh-agent without reading
+`~/.ssh`. On macOS the system's name lookup socket also stays reachable. On Linux the agent's
+`$XDG_RUNTIME_DIR` and `/tmp` are empty but for the API socket's directory, which is read-only.
+Abstract sockets stay reachable there, as the agent keeps the network. The agent also gets its
+own IPC, host name and cgroup namespaces, and ends when the core does.
 
 ## Keys
 
