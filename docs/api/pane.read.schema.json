@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "pane.read",
-  "description": "Returns a pane's history and screen as plain text, with no escape sequences, newest last and with no line ends after the last text. At most 2,000,000 bytes: past that the oldest text goes, cut at a character. Needs hello version 2, and for now the pane must be the caller's own (the self scope). Reads of the caller's own pane are not redacted.",
+  "description": "Returns a pane's history and screen as plain text, with no escape sequences, newest last and with no line ends after the last text. At most 2,000,000 bytes: past that the oldest text goes, cut at a character. Needs hello version 2, and the pane must be the caller's own or one it spawned, or one they spawned (the self and children scopes). Reads of the caller's own pane are not redacted.",
   "type": "object",
   "properties": {
     "params": {
       "type": "object",
       "required": ["pane"],
       "properties": {
-        "pane": { "type": "integer", "minimum": 0, "description": "The pane's number, which must be the caller's own." },
+        "pane": { "type": "integer", "minimum": 0, "description": "The pane's number, which must be the caller's own or one it spawned." },
         "lines": { "type": ["integer", "null"], "minimum": 0, "description": "Only the last this many lines. Wrapped rows join into one line." }
       }
     },

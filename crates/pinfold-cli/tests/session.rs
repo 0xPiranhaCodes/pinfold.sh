@@ -693,3 +693,107 @@ fn a_caller_waits_on_its_pane_and_hears_panes_open_and_close() {
     let closed = serde_json::json!({"event": "pane.closed", "pane": 1});
     assert_eq!(events.next(), Some(closed));
 }
+
+/// Names the directory of a run, in the pane that spawns others.
+const SPAWN: &str = "PINFOLD_TEST_SPAWN";
+
+fn call(id: u32, method: &str, params: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+}
+
+/// Asks once on a new connection, as a refusal closes it, and returns the reply.
+fn ask(method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+    let mut lines = api(&[call(2, method, params)])?;
+    next(&mut lines, || Ok(()))?;
+    next(&mut lines, || Ok(()))
+}
+
+/// Not a test: the first pane of [`a_pane_spawns_children_and_reaches_only_them`]. It spawns,
+/// sends, reads and closes, and notes each reply.
+#[test]
+fn spawn_process() {
+    let Some(directory) = env::var_os(SPAWN) else {
+        return;
+    };
+    let directory = Path::new(&directory);
+    // Started with no terminal, the caller is unidentified.
+    if directory.join("spawned").exists() {
+        let refused = ask("pane.spawn", serde_json::json!({"where": "tab"})).unwrap();
+        fs::write(directory.join("outside"), refused.to_string()).unwrap();
+        return;
+    }
+    let mut lines = api(&[
+        call(2, "pane.spawn", serde_json::json!({"where": "split-right"})),
+        call(
+            3,
+            "pane.spawn",
+            serde_json::json!({"where": "tab", "cwd": "/"}),
+        ),
+        call(
+            4,
+            "pane.send",
+            serde_json::json!({"pane": 1, "text": "typed\n"}),
+        ),
+        call(5, "pane.close", serde_json::json!({"pane": 2})),
+    ])
+    .unwrap();
+    let mut heard = String::new();
+    for _ in 0..5 {
+        writeln!(heard, "{}", next(&mut lines, || Ok(())).unwrap()).unwrap();
+    }
+    // A closed child is out of reach, and the caller cannot close itself.
+    let read = ask("pane.read", serde_json::json!({"pane": 2})).unwrap();
+    let close = ask("pane.close", serde_json::json!({"pane": 0})).unwrap();
+    writeln!(heard, "{read}\n{close}").unwrap();
+    // The tty echoes the line and `cat` prints it again.
+    let start = Instant::now();
+    while start.elapsed() < PATIENCE {
+        let read = ask("pane.read", serde_json::json!({"pane": 1})).unwrap();
+        let text = read["result"]["text"].as_str().unwrap_or_default();
+        if text.matches("typed").count() >= 2 {
+            writeln!(heard, "read").unwrap();
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    fs::write(directory.join("spawned"), heard).unwrap();
+}
+
+#[test]
+fn a_pane_spawns_children_and_reaches_only_them() {
+    let session = Session::new("p", None).unwrap();
+    let exe = env::current_exe().unwrap();
+    let shell = format!(
+        "if mkdir \"$PINFOLD_TEST_CLIENT/first\"; then {SPAWN}=\"$PINFOLD_TEST_CLIENT\" exec '{}' \
+         --exact spawn_process; fi; exec cat",
+        exe.display()
+    );
+    let mut core = session.start_core(&["--idle", "1"], &shell).unwrap();
+    assert!(session.wait_for("spawned"), "{}", session.read_log());
+    let heard = session.read("spawned");
+    let replies: Vec<serde_json::Value> = heard
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let methods = replies[0]["result"]["methods"].to_string();
+    assert!(methods.contains("pane.spawn") && methods.contains("pane.close"));
+    assert_eq!(replies[1]["result"], serde_json::json!({"pane": 1}));
+    assert_eq!(replies[2]["result"], serde_json::json!({"pane": 2}));
+    assert_eq!(replies[3]["result"], serde_json::json!({}));
+    assert_eq!(replies[4]["result"], serde_json::json!({}));
+    assert!(replies[5]["error"].is_object(), "{heard}");
+    assert!(replies[6]["error"].is_object(), "{heard}");
+    assert!(heard.ends_with("read\n"), "{heard}");
+
+    let mut outside = Command::new(&exe);
+    outside
+        .args(["--exact", "spawn_process"])
+        .env("XDG_RUNTIME_DIR", session.directory.join("run"))
+        .env(SPAWN, &session.directory);
+    let detached = pinfold_sys::spawn_detached(outside, Stdio::null());
+    assert!(detached.unwrap().wait().unwrap().success());
+    let refused = session.read("outside");
+    assert!(refused.contains("needs a caller in a pane"), "{refused}");
+    core.kill().unwrap();
+    core.wait().unwrap();
+}

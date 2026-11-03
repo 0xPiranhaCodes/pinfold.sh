@@ -17,17 +17,21 @@ Every connection starts with `hello`:
 | `hello`            | First, once                 | [`hello.schema.json`](hello.schema.json)                     |
 | `window.open`      | Any `hello`                 | Takes nothing, returns `{}`                                  |
 | `pane.list`        | Version 2 and a terminal    | [`pane.list.schema.json`](pane.list.schema.json)             |
-| `pane.read`        | Version 2 and its own pane  | [`pane.read.schema.json`](pane.read.schema.json)             |
-| `pane.last_output` | Version 2 and its own pane  | [`pane.last_output.schema.json`](pane.last_output.schema.json) |
-| `pane.send`        | Version 2 and its own pane  | [`pane.send.schema.json`](pane.send.schema.json)             |
-| `pane.wait`        | Version 2 and its own pane  | [`pane.wait.schema.json`](pane.wait.schema.json)             |
+| `pane.read`        | Version 2, a pane in reach  | [`pane.read.schema.json`](pane.read.schema.json)             |
+| `pane.last_output` | Version 2, a pane in reach  | [`pane.last_output.schema.json`](pane.last_output.schema.json) |
+| `pane.send`        | Version 2, a pane in reach  | [`pane.send.schema.json`](pane.send.schema.json)             |
+| `pane.wait`        | Version 2, a pane in reach  | [`pane.wait.schema.json`](pane.wait.schema.json)             |
+| `pane.spawn`       | Version 2 and its own pane  | [`pane.spawn.schema.json`](pane.spawn.schema.json)           |
+| `pane.close`       | Version 2, a spawned pane   | [`pane.close.schema.json`](pane.close.schema.json)           |
 | `events.subscribe` | Version 2 and a terminal    | [`events.subscribe.schema.json`](events.subscribe.schema.json) |
 
-For now a caller reads and sends only to the pane it runs in, the `self` scope, and any other
-pane is refused. Reads return at most 2,000,000 bytes, keeping the newest. A send carries at
-most 4096 bytes, and a pane takes at most 20 sends a second.
+A pane in reach is the caller's own, the `self` scope, or one it spawned, or one they spawned in
+turn, the `children` scope. Any other pane is refused. `pane.spawn` opens a split or tab running
+the user's shell, never a program the caller names, and a program in that pane is that pane, not
+its parent. Reads return at most 2,000,000 bytes, keeping the newest. A send carries at most 4096
+bytes, and a pane takes at most 20 sends a second.
 
-`pane.wait` waits on the caller's own pane for at most 10 minutes, and the core parks at most 64
+`pane.wait` waits on a pane in reach for at most 10 minutes, and the core parks at most 64
 waits. `events.subscribe` sends `event` notifications on its connection. A connection with a
 wait or a subscription stays open past the usual limit, and is closed if 2 MiB of replies
 queue unread.
