@@ -107,8 +107,10 @@ sandbox = true
 The sandbox hides `~/.ssh`, the directory of this file, PinFold's state directory, and every
 other pane's terminal device, and where any of those directories, or this file, lead
 through a symlink. On macOS it is `/usr/bin/sandbox-exec`, which denies reads and
-writes there. On Linux it is bubblewrap, `bwrap` on `PATH`, which puts an empty directory over
-each one, gives the agent its own `/dev` and `/proc`, and needs unprivileged user namespaces.
+writes there. On Linux it is bubblewrap, which puts an empty directory over each one, gives the
+agent its own `/dev` and `/proc`, and needs unprivileged user namespaces. `bwrap` is taken from
+`/usr/bin`, `/usr/local/bin` or `/bin`, never `PATH`, and only if root alone can change it and
+the directories above it.
 If the tool is missing or refuses, the agent does not start: it never runs unsandboxed. A
 directory that does not exist when the agent starts is not hidden on Linux.
 
@@ -118,7 +120,13 @@ into that terminal with `TIOCSTI`. On Linux it does not yet, but only the agent 
 terminal, so such input reaches nothing outside the sandbox. Linux 6.2 and later refuse
 `TIOCSTI` to unprivileged programs when `sysctl dev.tty.legacy_tiocsti` prints `0`, the default
 on kernels built without `CONFIG_LEGACY_TIOCSTI`; check it there.
-Everything else in your home directory stays readable and writable.
+
+A sandboxed agent writes only to its working directory and temporary directories: a fresh,
+empty `/tmp` on Linux, and `/private/tmp` and your temporary directory on macOS. Everything else
+it can read but not change, so it cannot edit `~/.zshrc` or put programs on your `PATH`. The
+working directory is the pane's, as its shell reports it, and the agent does not start unless
+that directory is yours, writable by no other user or group, not `/`, your home directory or
+above it, and does not hold or sit inside a hidden directory.
 
 ## Keys
 

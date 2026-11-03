@@ -6,12 +6,21 @@
 //! nothing outside the sandbox reads that terminal, so TIOCSTI, which only reaches the caller's
 //! own terminal, can type into sandboxed programs alone.
 //!
+//! The agent writes only to its [`WorkingDirectory`] and temporary directories: a fresh `/tmp` on
+//! Linux, and `/private/tmp` and the user's temporary directory on macOS.
+//!
 //! A missing tool is an error: a pane that asked for a sandbox never runs without one.
 
 use std::ffi::OsString;
+use std::fs;
 use std::io;
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// Where bubblewrap is looked for. Not `PATH`, where an agent could put its own `bwrap` for the
+/// next launch.
+const BWRAP: [&str; 3] = ["/usr/bin/bwrap", "/usr/local/bin/bwrap", "/bin/bwrap"];
 
 /// The macOS rules: everything is allowed but the hidden directories, every terminal by name and
 /// TIOCSTI (`0x80017472`). A pane's own terminal is already open, and `/dev/tty` still reaches it.
@@ -19,25 +28,124 @@ const PROFILE: &str = "(version 1)(allow default)\
 (deny file-read* file-write* (regex #\"^/dev/ttys[0-9]+$\"))\
 (deny file-ioctl (ioctl-command 2147578994))";
 
-/// Returns the command that runs `program` with `hidden` unreadable, for
-/// [`Reactor::spawn`](crate::io::Reactor::spawn).
+/// The macOS write rule: nowhere but the working directory `W`, the user's temporary directory
+/// `T`, `/private/tmp` and `/dev`.
+const WRITES: &str = "(deny file-write* (require-all (require-not (subpath (param \"W\")))\
+(require-not (subpath (param \"T\"))) (require-not (subpath \"/private/tmp\"))\
+(require-not (subpath \"/dev\"))))";
+
+/// A directory a sandboxed agent may write to, from [`working_directory`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkingDirectory(PathBuf);
+
+impl WorkingDirectory {
+    /// The directory, resolved through symlinks.
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+/// Checks `path` as a sandboxed agent's writable directory. It comes from a pane's OSC 7 report,
+/// which any program can print, so it must resolve to a directory of this user's that no one else
+/// can write to, and must not be `/`, `$HOME` or above it, or hold or sit inside a `hidden` one.
 ///
 /// # Errors
 ///
-/// Returns an error if `program` is empty or starts with `-`, the system has no sandbox, or on Linux `bwrap` is not
-/// on `PATH`.
+/// Returns an error if `path` does not resolve, `HOME` is not set, or any rule fails. There is no
+/// fallback: the agent does not start.
 ///
 /// # Examples
 ///
 /// ```
+/// use std::os::unix::fs::DirBuilderExt;
+/// use std::path::Path;
+/// use pinfold_core::sandbox::working_directory;
+///
+/// let project = std::env::temp_dir().join(format!("pinfold-project-{}", std::process::id()));
+/// std::fs::DirBuilder::new().mode(0o700).create(&project)?;
+/// assert!(working_directory(&project, &[]).is_ok());
+/// assert!(working_directory(&project, &[project.join(".ssh")]).is_err());
+/// assert!(working_directory(Path::new("/"), &[]).is_err());
+/// std::fs::remove_dir(&project)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn working_directory(path: &Path, hidden: &[PathBuf]) -> io::Result<WorkingDirectory> {
+    let refuse = |why: &str| {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{path:?} {why}, so the sandboxed agent does not start"),
+        ))
+    };
+    let dir = path.canonicalize()?;
+    let meta = fs::metadata(&dir)?;
+    if !meta.is_dir() {
+        return refuse("is not a directory");
+    }
+    if meta.uid() != pinfold_sys::effective_uid() {
+        return refuse("belongs to another user");
+    }
+    if meta.mode() & 0o022 != 0 {
+        return refuse("is writable by other users");
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return refuse("cannot be checked without HOME");
+    };
+    if home.starts_with(&dir) || resolve(&home).starts_with(&dir) {
+        return refuse("is the home directory or above it");
+    }
+    for hidden in hidden {
+        let real = resolve(hidden);
+        let near = |other: &PathBuf| other.starts_with(&dir) || dir.starts_with(other);
+        if near(hidden) || near(&real) {
+            return refuse("holds or is inside a directory the sandbox hides");
+        }
+    }
+    Ok(WorkingDirectory(dir))
+}
+
+/// `path` resolved through symlinks as far as it exists, as a hidden directory may not yet.
+fn resolve(path: &Path) -> PathBuf {
+    for base in path.ancestors() {
+        if let Ok(real) = base.canonicalize() {
+            return path
+                .strip_prefix(base)
+                .map_or(real.clone(), |rest| real.join(rest));
+        }
+    }
+    path.to_path_buf()
+}
+
+/// Returns the command that runs `program` with `hidden` unreadable and only `work` and temporary
+/// directories writable, for [`Reactor::spawn`](crate::io::Reactor::spawn).
+///
+/// # Errors
+///
+/// Returns an error if `program` is empty or starts with `-`, the system has no sandbox, or on
+/// Linux no `bwrap` in `/usr/bin`, `/usr/local/bin` or `/bin` is root's alone.
+///
+/// # Examples
+///
+/// ```
+/// use std::os::unix::fs::DirBuilderExt;
+/// use pinfold_core::sandbox;
+///
+/// let project = std::env::temp_dir().join(format!("pinfold-agent-{}", std::process::id()));
+/// std::fs::DirBuilder::new().mode(0o700).create(&project)?;
+/// let work = sandbox::working_directory(&project, &[])?;
 /// let program = ["/bin/echo".to_owned(), "hi".to_owned()];
-/// match pinfold_core::sandbox::command(&program, &[]) {
+/// match sandbox::command(&program, &[], &work) {
 ///     Ok(command) => assert_ne!(command.get_program(), "/bin/echo"),
 ///     // No bubblewrap here: the pane does not start.
 ///     Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
 /// }
+/// std::fs::remove_dir(&project)?;
+/// # Ok::<(), std::io::Error>(())
 /// ```
-pub fn command(program: &[String], hidden: &[PathBuf]) -> io::Result<Command> {
+pub fn command(
+    program: &[String],
+    hidden: &[PathBuf],
+    work: &WorkingDirectory,
+) -> io::Result<Command> {
     // `sandbox-exec` would read a leading dash as its own option.
     if program
         .first()
@@ -50,15 +158,16 @@ pub fn command(program: &[String], hidden: &[PathBuf]) -> io::Result<Command> {
     }
     let (tool, args) = if cfg!(target_os = "macos") {
         let tool = PathBuf::from("/usr/bin/sandbox-exec");
-        (tool, macos_args(hidden, program))
+        (tool, macos_args(hidden, program, work.path()))
     } else if cfg!(target_os = "linux") {
         let tool = bwrap().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                "bubblewrap (bwrap) is not on PATH, so the sandboxed agent does not start",
+                "no bubblewrap (bwrap) in /usr/bin, /usr/local/bin or /bin that only root can \
+                 change, so the sandboxed agent does not start",
             )
         })?;
-        (tool, linux_args(hidden, program))
+        (tool, linux_args(hidden, program, work.path()))
     } else {
         return Err(io::ErrorKind::Unsupported.into());
     };
@@ -68,9 +177,16 @@ pub fn command(program: &[String], hidden: &[PathBuf]) -> io::Result<Command> {
 }
 
 /// `sandbox-exec`'s arguments. Paths go in as parameters, so no path is quoted into the rules.
-fn macos_args(hidden: &[PathBuf], program: &[String]) -> Vec<OsString> {
-    let mut profile = PROFILE.to_owned();
+fn macos_args(hidden: &[PathBuf], program: &[String], work: &Path) -> Vec<OsString> {
+    let mut profile = format!("{PROFILE}{WRITES}");
+    let temp = std::env::temp_dir();
+    let temp = temp.canonicalize().unwrap_or(temp);
     let mut args = Vec::new();
+    for (name, path) in [("W", work), ("T", &temp)] {
+        let mut define = OsString::from(format!("{name}="));
+        define.push(path);
+        args.extend([OsString::from("-D"), define]);
+    }
     for (index, path) in hidden.iter().enumerate() {
         profile += &format!("(deny file-read* file-write* (subpath (param \"H{index}\")))");
         // The rules match resolved paths, such as /private/var for /var.
@@ -85,12 +201,12 @@ fn macos_args(hidden: &[PathBuf], program: &[String]) -> Vec<OsString> {
     all
 }
 
-/// `bwrap`'s arguments: the real root, a private `/dev` and `/proc`, and an empty directory over
-/// each hidden one. A missing directory is skipped, as bwrap would make it outside the sandbox, and
+/// `bwrap`'s arguments: the real root read-only, a private `/dev`, `/proc` and `/tmp`, `work`
+/// writable, and an empty directory over each hidden one. A missing directory is skipped, as bwrap would make it outside the sandbox, and
 /// so is one inside another hidden directory, which that one's mount already covers.
-fn linux_args(hidden: &[PathBuf], program: &[String]) -> Vec<OsString> {
+fn linux_args(hidden: &[PathBuf], program: &[String], work: &Path) -> Vec<OsString> {
     let fixed = [
-        "--bind",
+        "--ro-bind",
         "/",
         "/",
         "--dev",
@@ -98,8 +214,11 @@ fn linux_args(hidden: &[PathBuf], program: &[String]) -> Vec<OsString> {
         "--unshare-pid",
         "--proc",
         "/proc",
+        "--tmpfs",
+        "/tmp",
     ];
     let mut args: Vec<OsString> = fixed.map(OsString::from).into();
+    args.extend(["--bind".into(), work.into(), work.into()]);
     let mounted: Vec<&PathBuf> = hidden.iter().filter(|path| path.is_dir()).collect();
     for path in &mounted {
         if mounted
@@ -115,12 +234,20 @@ fn linux_args(hidden: &[PathBuf], program: &[String]) -> Vec<OsString> {
     args
 }
 
-/// The first `bwrap` on `PATH`.
+/// The first of [`BWRAP`] that is [`trusted`].
 fn bwrap() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join("bwrap"))
-        .find(|tool| Path::is_file(tool))
+    BWRAP.iter().map(PathBuf::from).find(|tool| trusted(tool))
+}
+
+/// Whether `file` is a file that only root can change: it and every directory above it are owned
+/// by root, writable by no one else and not symlinks.
+fn trusted(file: &Path) -> bool {
+    file.is_file()
+        && file.ancestors().all(|path| {
+            fs::symlink_metadata(path).is_ok_and(|meta| {
+                !meta.file_type().is_symlink() && meta.uid() == 0 && meta.mode() & 0o022 == 0
+            })
+        })
 }
 
 #[cfg(test)]
@@ -137,10 +264,11 @@ mod tests {
             PathBuf::from("/nowhere/.ssh"),
             PathBuf::from("/nowhere/a\"b"),
         ];
-        let args = macos_args(&hidden, &["agent".to_owned(), "-v".to_owned()]);
+        let work = Path::new("/nowhere/work");
+        let args = macos_args(&hidden, &["agent".to_owned(), "-v".to_owned()], work);
         let args = strings(&args);
         assert_eq!(args[0], "-p");
-        assert!(args[1].starts_with(PROFILE));
+        assert!(args[1].starts_with(&format!("{PROFILE}{WRITES}")));
         assert!(args[1].ends_with(
             "(deny file-read* file-write* (subpath (param \"H0\")))\
              (deny file-read* file-write* (subpath (param \"H1\")))"
@@ -148,6 +276,13 @@ mod tests {
         assert_eq!(
             args[2..],
             [
+                "-D",
+                "W=/nowhere/work",
+                "-D",
+                &format!(
+                    "T={}",
+                    std::env::temp_dir().canonicalize().unwrap().display()
+                ),
                 "-D",
                 "H0=/nowhere/.ssh",
                 "-D",
@@ -165,20 +300,75 @@ mod tests {
         std::fs::create_dir_all(&inner).unwrap();
         // A directory inside another hidden one, before or after it, needs no mount of its own.
         let hidden = [inner.clone(), root.clone(), PathBuf::from("/nowhere/.ssh")];
-        let args = linux_args(&hidden, &["agent".to_owned()]);
+        let args = linux_args(&hidden, &["agent".to_owned()], Path::new("/work"));
         std::fs::remove_dir(&inner).unwrap();
         let args = strings(&args);
         let tmpfs = ["--tmpfs", root.to_str().unwrap(), "--", "agent"];
         assert_eq!(args[args.len() - 4..], tmpfs);
-        assert_eq!(args.iter().filter(|arg| **arg == "--tmpfs").count(), 1);
+        // /tmp and the outer hidden directory.
+        assert_eq!(args.iter().filter(|arg| **arg == "--tmpfs").count(), 2);
         assert!(!args.contains(&"/nowhere/.ssh"));
         assert!(!args.contains(&"--new-session"));
+        assert_eq!(args[..3], ["--ro-bind", "/", "/"]);
+        assert!(
+            args.windows(3)
+                .any(|three| three == ["--bind", "/work", "/work"])
+        );
+        assert!(args.windows(2).any(|pair| pair == ["--tmpfs", "/tmp"]));
+    }
+
+    #[test]
+    fn only_a_file_root_alone_can_change_is_trusted() {
+        assert!(trusted(Path::new("/usr/bin/env")));
+        let dir = std::env::temp_dir().join(format!("pinfold-planted-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let planted = dir.join("bwrap");
+        fs::write(&planted, "").unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink("/usr/bin/env", &link).unwrap();
+        let (file, symlink) = (trusted(&planted), trusted(&link));
+        fs::remove_dir_all(&dir).unwrap();
+        assert!(!file && !symlink);
+    }
+
+    #[test]
+    fn a_working_directory_must_be_a_private_project() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("pinfold-work-{}", std::process::id()));
+        let (open, inner) = (dir.join("open"), dir.join("inner"));
+        for (path, mode) in [(&dir, 0o700), (&open, 0o777), (&inner, 0o700)] {
+            fs::create_dir_all(path).unwrap();
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let real = dir.canonicalize().unwrap();
+        let work = working_directory(&dir, &[]);
+        let home = PathBuf::from(std::env::var_os("HOME").unwrap());
+        let refused = [
+            working_directory(Path::new("/"), &[]),
+            working_directory(&home, &[]),
+            working_directory(home.parent().unwrap(), &[]),
+            working_directory(&dir, &[dir.join(".ssh")]),
+            working_directory(&inner, std::slice::from_ref(&dir)),
+            working_directory(&open, &[]),
+            working_directory(&dir.join("missing"), &[]),
+        ];
+        let root = working_directory(Path::new("/usr/bin"), &[]);
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(work.unwrap().path(), real);
+        for refusal in refused {
+            assert!(refusal.is_err(), "{refusal:?}");
+        }
+        if pinfold_sys::effective_uid() != 0 {
+            assert!(root.is_err());
+        }
     }
 
     #[test]
     fn an_empty_program_or_an_option_is_refused() {
         for program in [&[][..], &[String::new()], &["-p".to_owned()]] {
-            let error = command(program, &[]).unwrap_err();
+            let work = WorkingDirectory(PathBuf::from("/nowhere"));
+            let error = command(program, &[], &work).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         }
     }
