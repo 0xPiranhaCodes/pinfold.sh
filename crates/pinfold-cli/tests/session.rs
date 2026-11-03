@@ -681,10 +681,18 @@ fn a_new_core_restores_the_layout_and_cwds_of_a_killed_one() {
     let exe = env::current_exe().unwrap();
     let window = format!("exec '{}' --exact split_client_process", exe.display());
     let session = Session::new("r", Some(&window)).unwrap();
-    // Each pane works in a directory of its own, and says so with OSC 7.
+    // Each pane works in a directory of its own, and says so with OSC 7. A restore keeps only a
+    // directory no one else can write, which Linux's sticky `/tmp` is not, so these live in the
+    // target directory.
+    let work =
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("restore-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&work);
+    fs::create_dir_all(&work).unwrap();
     let tell = r#"printf '\033]7;file://%s\033\\' "$(pwd -P)""#;
-    let first =
-        format!("d=\"$PINFOLD_TEST_CLIENT/w$$\"; mkdir \"$d\" && cd \"$d\"; {tell}; exec sleep 60");
+    let first = format!(
+        "d='{}/w'$$; mkdir \"$d\" && cd \"$d\"; {tell}; exec sleep 60",
+        work.display()
+    );
     let mut core = session
         .start_core(&["--window", "2", "80x24"], &first)
         .unwrap();
@@ -716,4 +724,5 @@ fn a_new_core_restores_the_layout_and_cwds_of_a_killed_one() {
     assert_eq!(pwds, expected);
     core.kill().unwrap();
     core.wait().unwrap();
+    fs::remove_dir_all(&work).unwrap();
 }

@@ -227,10 +227,31 @@ pub fn load(state: &Path, session: &str) -> io::Result<Option<Snapshot>> {
     }
 }
 
-/// Where a restored pane starts: its saved directory if that still is one, else `$HOME`.
+/// Whether `path` and each directory above it is a real directory, not a symlink, owned by
+/// this user or root and writable by no one else. The saved directory comes from OSC 7, which
+/// any program in a pane can print, and a shell started in a planted directory can run its code
+/// (a direnv `.envrc`, git hooks or fsmonitor in a prompt). A sticky `/tmp` is refused too.
+fn is_private(path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Component;
+
+    let me = pinfold_sys::effective_uid();
+    let plain = |part: Component<'_>| matches!(part, Component::RootDir | Component::Normal(_));
+    path.is_absolute()
+        && path.components().all(plain)
+        && path.ancestors().all(|directory| {
+            fs::symlink_metadata(directory).is_ok_and(|meta| {
+                meta.file_type().is_dir()
+                    && (meta.uid() == me || meta.uid() == 0)
+                    && meta.mode() & 0o022 == 0
+            })
+        })
+}
+
+/// Where a restored pane starts: its saved directory if [`is_private`], else `$HOME`.
 fn start_in(pane: Option<&Pane>) -> Option<PathBuf> {
     let saved = pane.and_then(|pane| pane.cwd.as_deref()).map(Path::new);
-    let saved = saved.filter(|cwd| cwd.is_absolute() && cwd.is_dir());
+    let saved = saved.filter(|cwd| is_private(cwd));
     saved
         .map(Path::to_path_buf)
         .or_else(|| env::var_os("HOME").map(PathBuf::from))
@@ -558,6 +579,37 @@ mod tests {
         assert_eq!(start_in(Some(&Pane::new(Some("/no/such"), ""))), home);
         assert_eq!(start_in(Some(&Pane::new(Some("/"), ""))), Some("/".into()));
         fs::remove_dir_all(&state).unwrap();
+    }
+
+    #[test]
+    fn only_a_directory_no_one_else_can_write_or_redirect_is_kept() {
+        // On macOS the temporary directory is 0700 under root's 0755 `/private/var/folders`.
+        // Linux's `/tmp` is sticky and world-writable, so there the tree goes in the crate.
+        let bases = [env::temp_dir(), PathBuf::from(env!("CARGO_MANIFEST_DIR"))];
+        let base = bases.iter().filter_map(|base| base.canonicalize().ok());
+        let base = base.into_iter().find(|base| is_private(base)).unwrap();
+        let root = base.join(format!("pinfold-cwd-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let mode = |path: &Path, mode| fs::set_permissions(path, fs::Permissions::from_mode(mode));
+        let kept = root.join("kept");
+        fs::create_dir_all(&kept).unwrap();
+        mode(&root, 0o755).unwrap();
+        mode(&kept, 0o755).unwrap();
+        let open = root.join("open");
+        fs::create_dir(&open).unwrap();
+        mode(&open, 0o777).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&kept, &link).unwrap();
+        fs::create_dir(kept.join("below")).unwrap();
+
+        let start = |cwd: &Path| start_in(Some(&Pane::new(cwd.to_str(), "")));
+        let home = env::var_os("HOME").map(PathBuf::from);
+        assert_eq!(start(&kept), Some(kept.clone()));
+        assert_eq!(start(&open), home);
+        assert_eq!(start(&link), home);
+        assert_eq!(start(&link.join("below")), home);
+        assert_eq!(start(&kept.join("../open")), home);
+        fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
