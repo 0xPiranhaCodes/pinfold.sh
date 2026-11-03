@@ -682,6 +682,15 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
     }
 }
 
+/// Feeds one bounded request line through every parser state used by a control-socket peer.
+#[doc(hidden)]
+pub fn fuzz_request_line(line: &[u8]) {
+    let line = &line[..line.len().min(MAX_LINE)];
+    for mut greeted in [false, true] {
+        let _ = answer(line, &mut greeted);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
