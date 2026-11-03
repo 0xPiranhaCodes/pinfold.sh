@@ -24,7 +24,7 @@ Every connection starts with `hello`:
 | `events.subscribe` | Version 2 and a terminal    | [`events.subscribe.schema.json`](events.subscribe.schema.json) |
 
 For now a caller reads and sends only to the pane it runs in, the `self` scope, and any other
-pane is refused. Reads return at most 2,000,000 bytes, keeping the newest. A send carries at
+pane is refused. Reads return at most 1,000,000 bytes, keeping the newest. A send carries at
 most 4096 bytes, and a pane takes at most 20 sends a second.
 
 `pane.wait` waits on the caller's own pane for at most 10 minutes, and the core parks at most 64
@@ -53,4 +53,4 @@ Code does with this in `.mcp.json`, or any client with the same command:
 { "mcpServers": { "pinfold": { "command": "pinfold", "args": ["mcp"] } } }
 ```
 
-A reply is read up to 1,000,000 bytes, so read a long history with `lines`.
+A read returns at most 1,000,000 bytes of text, so read a long history with `lines`.
