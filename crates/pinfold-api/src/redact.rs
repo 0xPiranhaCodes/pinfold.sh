@@ -193,6 +193,10 @@ fn pair_value_at(bytes: &[u8], index: usize) -> Option<(usize, usize)> {
         _ => None,
     };
     let value_start: usize = cursor;
+    // A key block as the value is left whole for the private-key rule, so no line of it shows.
+    if bytes.get(value_start..)?.starts_with(b"-----BEGIN ") {
+        return None;
+    }
     while let Some(&byte) = bytes.get(cursor) {
         if quote.is_some() && byte == b'\\' {
             // An escaped quote does not end the value.
@@ -209,8 +213,13 @@ fn pair_value_at(bytes: &[u8], index: usize) -> Option<(usize, usize)> {
         cursor += 1;
     }
     let value: &[u8] = &bytes[value_start..cursor];
-    // Counts such as `max_tokens: 4096` are not secrets.
-    (!value.is_empty() && !value.iter().all(u8::is_ascii_digit)).then_some((value_start, cursor))
+    // Counts such as `max_tokens: 4096` are not secrets, but a numeric password is.
+    let count: bool = value.iter().all(u8::is_ascii_digit)
+        && WORDS
+            .iter()
+            .filter(|word| contains_ignore_case(key, word))
+            .all(|word| *word == b"token");
+    (!value.is_empty() && !count).then_some((value_start, cursor))
 }
 
 fn is_key(byte: u8) -> bool {
@@ -336,9 +345,9 @@ fn entropy_at(bytes: &[u8], index: usize) -> Option<usize> {
     let random: bool = if looks_like_path(candidate) {
         candidate
             .split(|&byte| byte == b'/')
-            .any(|segment| segment.len() >= PATH_SEGMENT && is_random(segment))
+            .any(|segment| segment.len() >= PATH_SEGMENT && is_random(segment, 12))
     } else {
-        candidate.len() >= 32 && is_random(candidate)
+        candidate.len() >= 32 && is_random(candidate, 6)
     };
     if !random {
         return None;
@@ -364,14 +373,15 @@ const PATH_SEGMENT: usize = 24;
 /// Pure hex is not random here: in a terminal it is almost always a digest or commit
 /// (Cargo.lock checksums alone were 3% of lines), and hex secrets after `token=` and the like
 /// are caught by the pair rule. Random base64 of 24+ chars has a digit 99.8% of the time, while
-/// long `UPPER_SNAKE` names have none. Base64url has about one `-` or `_` per 32 chars, while
-/// `0032-api-thread-and-m3-order` is words. 3.75 bits/char rejects repetitive identifiers.
-fn is_random(run: &[u8]) -> bool {
+/// long `UPPER_SNAKE` names have none. Base64url has about one `-` or `_` per 32 chars, so a run
+/// with one per `chars_per_separator` or more is words. Path segments use a stricter 12, since
+/// file names such as `0032-api-thread-and-m3-order` are where such words show up. 3.75 bits/char rejects repetitive identifiers.
+fn is_random(run: &[u8], chars_per_separator: usize) -> bool {
     let separators: usize = run
         .iter()
         .filter(|&&byte| matches!(byte, b'-' | b'_'))
         .count();
-    separators * 12 <= run.len()
+    separators * chars_per_separator <= run.len()
         && !is_hex(run)
         && !is_uuid(run)
         && run.iter().any(u8::is_ascii_digit)

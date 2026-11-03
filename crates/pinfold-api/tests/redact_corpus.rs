@@ -65,6 +65,21 @@ const POSITIVES: &[(Kind, &str, &str)] = &[
     (Kind::HighEntropy, HIGH_ENTROPY, "«redacted:high-entropy»"),
     (
         Kind::Password,
+        "PIN_PASSWORD=12345678",
+        "PIN_PASSWORD=«redacted:password»",
+    ),
+    (
+        Kind::PrivateKey,
+        "key: -----BEGIN RSA PRIVATE KEY-----\nMIIEow IBAAKCAQEA\n-----END RSA PRIVATE KEY-----",
+        "key: «redacted:private-key»",
+    ),
+    (
+        Kind::HighEntropy,
+        "aB3_dE5-fG7_hJ9kLmN2pQ4rS6tUvWxYz0",
+        "«redacted:high-entropy»",
+    ),
+    (
+        Kind::Password,
         "DB_PASSWORD=x",
         "DB_PASSWORD=«redacted:password»",
     ),
