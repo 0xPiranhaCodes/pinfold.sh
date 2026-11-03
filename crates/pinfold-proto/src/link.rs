@@ -289,6 +289,10 @@ pub enum ApprovalAction {
     Read,
     /// Type exact text into another pane.
     Send,
+    /// Trust a workspace's layout file. The first text is the canonical directory and the rest
+    /// are every `run` line; `caller` is 0 and `target` is 1 when the directory was trusted with
+    /// another layout. Only allowing once answers it.
+    Trust,
 }
 
 impl ApprovalAction {
@@ -298,6 +302,7 @@ impl ApprovalAction {
         match self {
             Self::Read => "read",
             Self::Send => "send",
+            Self::Trust => "trust",
         }
     }
 }
@@ -1039,7 +1044,11 @@ impl Notice<'_> {
                 let target = body.u32()?;
                 let action = body.tag(
                     "approval action",
-                    &[ApprovalAction::Read, ApprovalAction::Send],
+                    &[
+                        ApprovalAction::Read,
+                        ApprovalAction::Send,
+                        ApprovalAction::Trust,
+                    ],
                 )?;
                 let count = body.u16()?;
                 let mut texts = Vec::with_capacity(usize::from(count));
@@ -2734,7 +2743,9 @@ mod tests {
             id in any::<u64>(),
             caller in any::<u32>(),
             target in any::<u32>(),
-            action in prop::sample::select(&[ApprovalAction::Read, ApprovalAction::Send][..]),
+            action in prop::sample::select(
+                &[ApprovalAction::Read, ApprovalAction::Send, ApprovalAction::Trust][..]
+            ),
             owned in vec(".{0,32}", 0..4),
             chunk in chunks(),
         ) {
