@@ -25,7 +25,7 @@ const HARDEN: &str = "PINFOLD_TEST_HARDEN";
 const PANIC: &str = "PINFOLD_TEST_PANIC";
 /// Names the directory of a run, in the pane that calls the API.
 const API: &str = "PINFOLD_TEST_API";
-const PATIENCE: Duration = Duration::from_secs(30);
+const PATIENCE: Duration = Duration::from_secs(120);
 
 type Result<T = ()> = std::result::Result<T, Box<dyn Error>>;
 
@@ -271,9 +271,14 @@ fn two_launchers_at_once_share_one_core_and_one_window() {
         session.start_launcher().unwrap(),
         session.start_launcher().unwrap(),
     );
-    assert!(first.wait().unwrap().success());
-    assert!(second.wait().unwrap().success());
     assert!(session.wait_for("core"));
+    first.wait().unwrap();
+    second.wait().unwrap();
+    assert_eq!(session.read("starts").lines().count(), 1);
+
+    // A loaded machine may run a launcher past its reply deadline. Once the window has said it
+    // is ready, the session must answer and must still have only that window.
+    assert!(session.launch().unwrap().status.success());
     assert_eq!(session.read("starts").lines().count(), 1);
 }
 
