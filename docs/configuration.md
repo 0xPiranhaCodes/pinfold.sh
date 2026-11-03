@@ -105,7 +105,8 @@ sandbox = true
 ```
 
 The sandbox hides `~/.ssh`, the directory of this file, PinFold's state directory, and every
-other pane's terminal device. On macOS it is `/usr/bin/sandbox-exec`, which denies reads and
+other pane's terminal device, and where any of those directories, or this file, lead
+through a symlink. On macOS it is `/usr/bin/sandbox-exec`, which denies reads and
 writes there. On Linux it is bubblewrap, `bwrap` on `PATH`, which puts an empty directory over
 each one, gives the agent its own `/dev` and `/proc`, and needs unprivileged user namespaces.
 If the tool is missing or refuses, the agent does not start: it never runs unsandboxed. A

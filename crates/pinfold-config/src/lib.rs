@@ -245,8 +245,9 @@ fn state_dir_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathB
 }
 
 /// Returns what a sandboxed agent may not see: `~/.ssh`, the config file's directory and
-/// [`state_dir`]. The runtime directory is not among them, as an agent needs its socket to call
-/// the API, which knows each caller by its terminal.
+/// [`state_dir`], each also as it resolves through symlinks, so a config file linked from a
+/// dotfiles repo hides that repo's directory too. The runtime directory is not among them, as an
+/// agent needs its socket to call the API, which knows each caller by its terminal.
 ///
 /// ```
 /// for dir in pinfold_config::private_dirs() {
@@ -254,12 +255,45 @@ fn state_dir_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathB
 /// }
 /// ```
 pub fn private_dirs() -> Vec<PathBuf> {
-    let home = env::var_os("HOME").map(PathBuf::from);
+    private_dirs_from(
+        env::var_os("XDG_CONFIG_HOME"),
+        env::var_os("XDG_STATE_HOME"),
+        env::var_os("HOME"),
+    )
+}
+
+fn private_dirs_from(
+    xdg_config: Option<OsString>,
+    xdg_state: Option<OsString>,
+    home: Option<OsString>,
+) -> Vec<PathBuf> {
     let ssh = home
+        .clone()
+        .map(PathBuf::from)
         .filter(|home| home.is_absolute())
         .map(|home| home.join(".ssh"));
-    let config = path().and_then(|path| Some(path.parent()?.to_path_buf()));
-    [ssh, config, state_dir()].into_iter().flatten().collect()
+    let config = path_from(xdg_config, home.clone());
+    // The file's own target, which may sit in another directory than the link.
+    let target = config.as_ref().and_then(|path| fs::canonicalize(path).ok());
+    let parent = |path: Option<PathBuf>| Some(path?.parent()?.to_path_buf());
+    let mut dirs = Vec::new();
+    for dir in [
+        ssh,
+        parent(config),
+        parent(target),
+        state_dir_from(xdg_state, home),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let real = fs::canonicalize(&dir).ok();
+        for dir in [Some(dir), real].into_iter().flatten() {
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+    }
+    dirs
 }
 
 /// Reads the config file, following a symlink, or returns the defaults if there is none.
@@ -568,6 +602,28 @@ mod tests {
         }
         assert_eq!(path_from(None, None), None);
         assert_eq!(path_from(None, some("")), None);
+    }
+
+    #[test]
+    fn private_dirs_hide_where_a_linked_config_really_lives() {
+        let root = tempdir().unwrap();
+        let (home, dotfiles) = (root.path().join("home"), root.path().join("dotfiles"));
+        fs::create_dir_all(home.join(".config/pinfold")).unwrap();
+        fs::create_dir_all(&dotfiles).unwrap();
+        fs::write(dotfiles.join("pinfold.toml"), "").unwrap();
+        symlink(
+            dotfiles.join("pinfold.toml"),
+            home.join(".config/pinfold/pinfold.toml"),
+        )
+        .unwrap();
+        symlink(&dotfiles, home.join(".ssh")).unwrap();
+        let dirs = private_dirs_from(None, None, Some(home.clone().into()));
+        let dotfiles = fs::canonicalize(&dotfiles).unwrap();
+        assert!(dirs.contains(&home.join(".ssh")), "{dirs:?}");
+        assert!(dirs.contains(&home.join(".config/pinfold")), "{dirs:?}");
+        assert!(dirs.contains(&dotfiles), "{dirs:?}");
+        assert_eq!(dirs.iter().filter(|dir| **dir == dotfiles).count(), 1);
+        assert!(private_dirs_from(None, None, None).is_empty());
     }
 
     #[test]
