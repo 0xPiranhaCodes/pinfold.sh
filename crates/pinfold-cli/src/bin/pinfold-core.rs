@@ -22,6 +22,7 @@ use pinfold_config::Agent;
 use pinfold_core::family::{self, Family, SplitWay};
 use pinfold_core::grants::{Decision, Grants, Released};
 use pinfold_core::io::{Reactor, Waker};
+use pinfold_core::snapshot::{self, Saver};
 use pinfold_core::status::Status;
 use pinfold_core::wait::{Outcome, Waits};
 use pinfold_core::workspace::Workspaces;
@@ -522,12 +523,53 @@ fn wants(topics: Topics, event: &Value) -> bool {
     }
 }
 
-/// Runs `panes` shells, a tab each, until every pane has gone and no window is left to tell, or
-/// until killed. With a size, it opens a window for `cargo xtask mem-gate` and prints its pid.
-fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
+/// Saves the session, logging a failure by its kind alone, which names no path or pane. A
+/// failed save stops nothing.
+fn save(saver: &mut Saver, reactor: &Reactor) {
+    if let Err(error) = saver.save(&reactor.snapshot()) {
+        let _ = writeln!(
+            io::stderr(),
+            "pinfold-core: cannot save the session: {}",
+            error.kind()
+        );
+    }
+}
+
+/// Restores the saved session (ADR-0034), and says whether it did. A failure is logged by its
+/// kind alone, which names no path or pane, and leaves the core to start fresh.
+fn restore_session(reactor: &mut Reactor, state: &Path) -> bool {
+    let restored = snapshot::load(state, control::SESSION).and_then(|snapshot| {
+        snapshot
+            .map(|snapshot| reactor.restore(&snapshot))
+            .transpose()
+    });
+    restored
+        .unwrap_or_else(|error| {
+            let _ = writeln!(
+                io::stderr(),
+                "pinfold-core: cannot restore the session: {}",
+                error.kind()
+            );
+            None
+        })
+        .is_some()
+}
+
+/// Runs the saved session if `restore` and there is one, else `panes` shells, a tab each, until every pane has gone and no window is left to tell, or
+/// until SIGTERM or SIGHUP, saving the session on the way out, when the window closes and a
+/// minute after a change (ADR-0034). With a size, it opens a window for `cargo xtask mem-gate` and prints its pid.
+fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result<()> {
     let binary = window_binary()?;
     let mut reactor = Reactor::new()?;
+    reactor.watch_signals()?;
+    let state = pinfold_config::state_dir();
+    let mut saver = state
+        .clone()
+        .map(|state| Saver::new(state, control::SESSION));
     let asked = listen(reactor.waker())?;
+    if restore && state.is_some_and(|state| restore_session(&mut reactor, &state)) {
+        panes = 0;
+    }
     for _ in 0..panes {
         reactor
             .open_tab(shell::command(), ROWS, COLUMNS)
@@ -555,11 +597,16 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
         reactor.set_patterns(patterns);
     }
     let mut log = audit::open(&config.api);
+    let mut window = reactor.has_window();
     loop {
+        let now = Instant::now();
         let deadline = waits.deadline().into_iter().chain(grants.deadline()).min();
-        let wait = deadline.map(|at| at.saturating_duration_since(Instant::now()));
+        let wait = deadline.map(|at| at.saturating_duration_since(now));
+        let wait = wait
+            .into_iter()
+            .chain(saver.as_ref().and_then(|saver| saver.wait(now)));
         output::tap(&mut reactor, &waits, &subscribers);
-        reactor.turn(Some(wait.unwrap_or(IDLE)))?;
+        reactor.turn(Some(wait.min().unwrap_or(IDLE)))?;
         output::hand_out(&mut reactor, &mut waits, &subscribers);
         waits.retain(|request| !request.is_gone());
         grants.retain(|request| !request.is_gone());
@@ -655,7 +702,19 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
                 audit::reply(&mut log, &reactor, request, result);
             }
         }
-        if reactor.pane_count() == 0 && !reactor.has_window() {
+        let ending = reactor.is_terminated() || reactor.pane_count() == 0 && !reactor.has_window();
+        if let Some(saver) = saver.as_mut() {
+            let now = Instant::now();
+            if reactor.was_active() {
+                saver.touch(now);
+            }
+            let closed = window && !reactor.has_window();
+            if ending || closed || saver.is_due(now) {
+                save(saver, &reactor);
+            }
+        }
+        window = reactor.has_window();
+        if ending {
             return Ok(());
         }
     }
@@ -664,7 +723,7 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
 /// Hardens, then runs the first pane, whose shell is the user's.
 fn serve() -> io::Result<()> {
     pinfold_sys::harden()?;
-    daemon(1, None)
+    daemon(1, None, true)
 }
 
 /// Plays `file` through a real pane, says so on stdout, then idles until killed.
@@ -687,9 +746,12 @@ fn run(args: &[&str]) -> io::Result<()> {
     match *args {
         [] => serve(),
         // The daemon without hardening, which also leaves a way to attach a debugger
-        // (ADR-0020). `cargo xtask mem-gate` measures these two, as /proc refuses a hardened one.
-        ["--idle", panes] => daemon(panes.parse().map_err(io::Error::other)?, None),
-        ["--window", panes, size] => daemon(panes.parse().map_err(io::Error::other)?, Some(size)),
+        // (ADR-0020). `cargo xtask mem-gate` measures these two, as /proc refuses a hardened one,
+        // so they restore nothing, which would change what it measures.
+        ["--idle", panes] => daemon(panes.parse().map_err(io::Error::other)?, None, false),
+        ["--window", panes, size] => {
+            daemon(panes.parse().map_err(io::Error::other)?, Some(size), false)
+        }
         ["--replay", file] => replay(file),
         _ => Err(io::Error::other(
             "usage: pinfold-core [--idle <panes> | --window <panes> <width>x<height> | --replay <file>]",

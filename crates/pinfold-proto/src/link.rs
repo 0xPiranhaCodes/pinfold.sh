@@ -37,7 +37,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 7;
+pub const VERSION: u16 = 8;
 
 /// Most rows or columns a screen can have, which the core clamps its panes to.
 pub const MAX_DIMENSION: u16 = 1024;
@@ -64,6 +64,9 @@ const FRAME_HEAD: usize = 43 + COUNT;
 /// 1024 rows of 1024 cells. Nothing else comes near it, as a selection stops at about 2 MB.
 pub const MAX_MESSAGE: usize =
     KIND + FRAME_HEAD + MAX_DIMENSION as usize * (ROW_NUMBER + MAX_DIMENSION as usize * CELL);
+
+/// Longest command in a [`Notice::WasRunning`], the cap a session snapshot keeps.
+pub const MAX_COMMAND: usize = 4096;
 
 /// The most input a pane holds waiting for its program, so the most one paste can usefully be.
 pub const MAX_INPUT: usize = 1024 * 1024;
@@ -120,6 +123,7 @@ const MOVE_FOCUS: u8 = 16;
 const MOVE_BORDER: u8 = 17;
 const ZOOM: u8 = 18;
 const APPROVAL_ANSWER: u8 = 19;
+const WAS_RUNNING_ANSWER: u8 = 20;
 
 const FRAME: u8 = 1;
 const CWD: u8 = 2;
@@ -131,6 +135,7 @@ const REFUSED: u8 = 7;
 const ACTIVITY: u8 = 8;
 const STATUS: u8 = 9;
 const APPROVAL: u8 = 10;
+const WAS_RUNNING: u8 = 11;
 
 /// How many agent states there are. [`Notice::Status`] numbers them in the order of the
 /// contributor rule: needs you, running, done, error, idle.
@@ -493,6 +498,14 @@ pub enum Request<'a> {
     },
     /// Toggles whether the focused pane fills its tab.
     Zoom,
+    /// Answers [`Notice::WasRunning`] for a pane: with `run`, the core types the command and a
+    /// newline into the pane's shell, if it offered that. Either way it forgets the command.
+    WasRunningAnswer {
+        /// The pane.
+        pane: u32,
+        /// Whether the person pressed Enter.
+        run: bool,
+    },
     /// Answers a prompt. Only the inherited window link can carry this message.
     ApprovalAnswer {
         /// Prompt id.
@@ -551,6 +564,16 @@ pub enum Notice<'a> {
     Refused {
         /// Why.
         reason: Refusal,
+    },
+    /// A restored pane was running `command` when the session was saved (ADR-0034). Nothing
+    /// runs until the window answers with [`Request::WasRunningAnswer`].
+    WasRunning {
+        /// The pane.
+        pane: u32,
+        /// Whether the core would run it, which it will not once redaction changed it.
+        runnable: bool,
+        /// The redacted command, which is only a hint. At most [`MAX_COMMAND`] bytes.
+        command: &'a str,
     },
     /// The state of a pane that names its tab.
     Status {
@@ -852,6 +875,11 @@ impl Request<'_> {
                 put!(out, MOVE_BORDER, cells)
             }
             Self::Zoom => ZOOM,
+            Self::WasRunningAnswer { pane, run } => {
+                put!(out; pane);
+                out.push(u8::from(run));
+                WAS_RUNNING_ANSWER
+            }
             Self::ApprovalAnswer { id, answer } => {
                 put!(out; id);
                 out.push(answer as u8);
@@ -929,6 +957,10 @@ impl Request<'_> {
                 Request::MoveBorder { side, cells }
             }
             ZOOM => Request::Zoom,
+            WAS_RUNNING_ANSWER => Request::WasRunningAnswer {
+                pane: body.u32()?,
+                run: body.tag("run", &[false, true])?,
+            },
             APPROVAL_ANSWER => Request::ApprovalAnswer {
                 id: body.array().map(u64::from_le_bytes)?,
                 answer: body.tag(
@@ -989,6 +1021,23 @@ impl Notice<'_> {
             Self::Refused { reason } => {
                 out.push(*reason as u8);
                 REFUSED
+            }
+            Self::WasRunning {
+                pane,
+                runnable,
+                command,
+            } => {
+                // The decoder refuses a longer one, so it must not go out.
+                if command.len() > MAX_COMMAND {
+                    out.truncate(start);
+                    return Err(Error::TooLarge {
+                        size: command.len() as u64,
+                    });
+                }
+                put!(out; pane);
+                out.push(u8::from(*runnable));
+                out.extend_from_slice(command.as_bytes());
+                WAS_RUNNING
             }
             Self::Status {
                 pane,
@@ -1089,6 +1138,20 @@ impl Notice<'_> {
                     ],
                 )?,
             },
+            WAS_RUNNING => {
+                let (pane, runnable) = (body.u32()?, body.tag("runnable", &[false, true])?);
+                let command = body.text()?;
+                if command.len() > MAX_COMMAND {
+                    return Err(Error::TooLarge {
+                        size: command.len() as u64,
+                    });
+                }
+                Notice::WasRunning {
+                    pane,
+                    runnable,
+                    command,
+                }
+            }
             APPROVAL => {
                 let id = body.array().map(u64::from_le_bytes)?;
                 let caller = body.u32()?;
@@ -1694,7 +1757,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 7, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 8, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -2316,6 +2379,17 @@ mod tests {
             message.encode(&mut out),
             Err(Error::TooLarge { .. })
         ));
+        // Under the message limit, but over what the decoder takes for a command.
+        let command = "x".repeat(MAX_COMMAND + 1);
+        let message = Notice::WasRunning {
+            pane: 0,
+            runnable: true,
+            command: &command,
+        };
+        assert!(matches!(
+            message.encode(&mut out),
+            Err(Error::TooLarge { .. })
+        ));
         assert_eq!(out, [1]);
     }
 
@@ -2688,6 +2762,7 @@ mod tests {
                 Request::MoveFocus { side },
                 Request::MoveBorder { side, cells },
                 Request::Zoom,
+                Request::WasRunningAnswer { pane, run: forward },
             ] {
                 prop_assert!(request_survives(command, chunk), "changed on the link");
             }
@@ -2799,6 +2874,17 @@ mod tests {
         #[test]
         fn raise_round_trips(chunk in chunks()) {
             prop_assert!(notice_survives(&Notice::Raise, chunk), "changed on the link");
+        }
+
+        #[test]
+        fn was_running_round_trips(
+            pane in any::<u32>(),
+            runnable in any::<bool>(),
+            command in ".{0,64}",
+            chunk in chunks(),
+        ) {
+            let notice = Notice::WasRunning { pane, runnable, command: &command };
+            prop_assert!(notice_survives(&notice, chunk), "changed on the link");
         }
 
         #[test]

@@ -43,6 +43,19 @@ pub fn footprint(pid: u32) -> io::Result<u64> {
     platform::footprint(pid)
 }
 
+/// Writes a byte to `pipe` on each SIGTERM and SIGHUP, the self-pipe the core polls to save its
+/// session before it exits. Neither signal ends the process after this, so the reader must.
+///
+/// # Errors
+///
+/// Returns an error if the descriptor cannot be copied or the system refuses a handler.
+pub fn on_terminate(pipe: &OwnedFd) -> io::Result<()> {
+    for signal in [libc::SIGTERM, libc::SIGHUP] {
+        signal_hook::low_level::pipe::register_raw(signal, pipe.try_clone()?)?;
+    }
+    Ok(())
+}
+
 /// Returns the user this process acts as.
 pub fn effective_uid() -> u32 {
     // SAFETY: geteuid takes no arguments, cannot fail and touches no memory.
@@ -254,6 +267,29 @@ pub fn open_log(path: &Path) -> io::Result<File> {
     // Not O_TRUNC, which the standard library refuses beside append.
     file.set_len(0)?;
     Ok(file)
+}
+
+/// Opens the file at `path` for reading, refused if it is a symlink. The caller checks that it
+/// got a regular file: O_NONBLOCK, so that a FIFO put here cannot hang the open.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened or is a symlink.
+///
+/// # Examples
+///
+/// ```
+/// let path = std::env::temp_dir().join(format!("pinfold-read-{}", std::process::id()));
+/// std::fs::write(&path, "saved")?;
+/// assert!(pinfold_sys::open_no_follow(&path)?.metadata()?.is_file());
+/// std::fs::remove_file(&path)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn open_no_follow(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
 }
 
 /// A moment on the local clock.

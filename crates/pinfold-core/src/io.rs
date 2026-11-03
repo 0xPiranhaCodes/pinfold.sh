@@ -11,7 +11,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mio::unix::SourceFd;
+use mio::unix::{SourceFd, pipe};
 use mio::{Events, Interest, Poll, Token};
 use pinfold_mux::{Session, Size};
 use pinfold_proto::link::ApprovalAnswer;
@@ -47,6 +47,8 @@ const KEPT_INPUT: usize = 4 * 1024;
 const EVENT_CAPACITY: usize = 64;
 /// Beyond any pane number, so a wake-up is never mistaken for PTY activity.
 const WAKE: Token = Token(usize::MAX);
+/// SIGTERM or SIGHUP, through the self-pipe of [`Reactor::watch_signals`].
+const SIGNAL: Token = Token(usize::MAX - 2);
 
 /// How a pass over one pane ended.
 #[derive(Debug, PartialEq)]
@@ -193,6 +195,11 @@ pub struct Reactor {
     pub(crate) shell: fn() -> Command,
     buffer: Vec<u8>,
     pub(crate) host: Host,
+    /// The read end of the self-pipe, kept open while it is polled.
+    signals: Option<pipe::Receiver>,
+    terminated: bool,
+    /// Restored panes and the redacted command each was running, until a window answers.
+    pub(crate) was_running: Vec<(usize, String)>,
     /// Answers accepted only from the inherited window link.
     pub(crate) approval_answers: Vec<(u64, ApprovalAnswer)>,
     pub(crate) protect: Protect,
@@ -219,6 +226,9 @@ impl Reactor {
             shell: shell::command,
             buffer: vec![0; READ_BUDGET],
             host: Host::default(),
+            signals: None,
+            terminated: false,
+            was_running: Vec::new(),
             approval_answers: Vec::new(),
             protect: Protect::default(),
         })
@@ -297,6 +307,8 @@ impl Reactor {
             result => result?,
         }
         for event in &self.events {
+            // Never read, as the core exits once it has saved.
+            self.terminated |= event.token() == SIGNAL;
             if event.token() == LINK {
                 self.host.wake();
             }
@@ -538,6 +550,35 @@ impl Reactor {
         self.pane(pane).map(|pane| pane.engine.as_ref())
     }
 
+    /// Makes SIGTERM and SIGHUP end a [`Reactor::turn`] and set [`Reactor::is_terminated`],
+    /// instead of ending the process, so the caller can save first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pipe cannot be made or polled, or the system refuses a handler.
+    pub fn watch_signals(&mut self) -> io::Result<()> {
+        let (sender, mut receiver) = pipe::new()?;
+        self.poll
+            .registry()
+            .register(&mut receiver, SIGNAL, Interest::READABLE)?;
+        pinfold_sys::on_terminate(&sender.into())?;
+        self.signals = Some(receiver);
+        Ok(())
+    }
+
+    /// Returns whether SIGTERM or SIGHUP has arrived since [`Reactor::watch_signals`].
+    #[must_use]
+    pub fn is_terminated(&self) -> bool {
+        self.terminated
+    }
+
+    /// Returns whether the last [`Reactor::turn`] saw any event, such as output, a request or a
+    /// window's message. A turn that only timed out saw none.
+    #[must_use]
+    pub fn was_active(&self) -> bool {
+        !self.events.is_empty()
+    }
+
     /// Returns how many panes there are. A pane of a tab goes when its program exits or a window
     /// closes it, and its number is not used again.
     #[must_use]
@@ -646,6 +687,7 @@ impl Reactor {
     /// Stops polling a pane and drops it, which ends its program and frees its terminal.
     pub(crate) fn drop_pane(&mut self, number: usize) {
         if let Ok(index) = self.panes.binary_search_by_key(&number, |pane| pane.number) {
+            self.was_running.retain(|(pane, _)| *pane != number);
             let pane = self.panes.remove(index);
             let fd = pane.pty.master().as_raw_fd();
             let _ = self.poll.registry().deregister(&mut SourceFd(&fd));
@@ -1000,9 +1042,18 @@ mod tests {
     #[test]
     fn sends_past_20_a_second_or_a_full_queue_are_refused() {
         let mut reactor = Reactor::new().unwrap();
-        let script = "stty raw -echo; echo ready; sleep 30";
+        let script = "stty raw -echo; echo ready; exec sleep 30";
         let pane = reactor.spawn(shell(script), 24, 80).unwrap();
-        assert!(turn_until(&mut reactor, |r| on_screen(r, pane, "ready")));
+        // A program still starting hides its arguments on a loaded Mac, which protects the
+        // pane, so wait until `sleep` holds the foreground with them readable.
+        let started = |r: &Reactor| {
+            let master = std::os::fd::AsFd::as_fd(r.pty(pane).unwrap().master());
+            pinfold_sys::foreground::foreground(master).is_ok_and(|found| {
+                let sleep = |m: &pinfold_sys::foreground::Process| m.name == "sleep";
+                found.members.iter().any(|m| sleep(m) && m.argv.is_some())
+            })
+        };
+        assert!(turn_until(&mut reactor, |r| on_screen(r, pane, "ready") && started(r)));
         let now = Instant::now();
         for _ in 0..SENDS_PER_SECOND {
             assert_eq!(reactor.send(pane, "x", now), Ok(()));
