@@ -4,20 +4,17 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver, SyncSender};
+use std::sync::mpsc::{self, Receiver, TrySendError};
 use std::time::Duration;
-use std::{env, mem, thread};
+use std::{env, thread};
 
-use pinfold_api::control::{self, Control};
+use pinfold_api::control::{self, Control, Opening};
 use pinfold_core::io::{Reactor, Waker};
 use pinfold_core::shell;
 
 const ROWS: u16 = 24;
 const COLUMNS: u16 = 80;
 const IDLE: Duration = Duration::from_secs(3600);
-
-/// The answer to `window.open`: why no window came, in words that are safe to hand a caller.
-type Opened = Result<(), String>;
 
 /// Returns the window binary beside this one. It is resolved once, so nothing later can name
 /// another program.
@@ -27,21 +24,20 @@ fn window_binary() -> io::Result<PathBuf> {
         .with_file_name("pinfold-window"))
 }
 
-/// Binds the control socket and answers it on the API thread (ADR-0007). The reactor's thread
-/// makes every spawn (see `pinfold_sys::socket::pair`), so `window.open` crosses to it. The
-/// channel holds one, as the API thread serves one peer at a time.
-fn listen(waker: Arc<Waker>) -> io::Result<Receiver<SyncSender<Opened>>> {
+/// Binds the control socket and answers it on the API thread (ADR-0007, ADR-0032). The
+/// reactor's thread makes every spawn (see `pinfold_sys::socket::pair`), so `window.open`
+/// crosses to it. The channel holds one request per peer the API thread serves.
+fn listen(waker: Arc<Waker>) -> io::Result<Receiver<Opening>> {
     let control = Control::bind(&control::runtime_dir()).map_err(io::Error::other)?;
-    let (ask, asked) = mpsc::sync_channel(1);
-    let mut wait = control::FIRST_OPEN_WAIT;
-    let open = move || {
-        let (reply, answer) = mpsc::sync_channel(1);
-        if ask.try_send(reply).is_err() || waker.wake().is_err() {
-            return Err("the core is busy".to_owned());
+    let (ask, asked) = mpsc::sync_channel(control::MAX_PEERS);
+    let open = move |opening: Opening| match ask.try_send(opening) {
+        Ok(()) => {
+            // A lost wake leaves the caller to hear that the window is not ready.
+            let _ = waker.wake();
         }
-        answer
-            .recv_timeout(mem::replace(&mut wait, control::OPEN_WAIT))
-            .unwrap_or_else(|_| Err("the window is not ready and may still open".to_owned()))
+        Err(TrySendError::Full(opening) | TrySendError::Disconnected(opening)) => {
+            opening.answer(Err("the core is busy".to_owned()));
+        }
     };
     let serve = move || control.serve(open);
     thread::Builder::new()
@@ -69,29 +65,28 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
         let pid = reactor.window_pid().unwrap_or_default();
         writeln!(io::stdout(), "{pid}")?;
     }
-    // Who asked for the window, until it says hello or ends. A caller that timed out has gone,
-    // so a reply can fail, and a new caller takes the place of one like that.
-    let mut waiting = None;
+    // Who asked for the window, until it says hello or ends. A caller that timed out has gone
+    // and hears nothing.
+    let mut waiting = Vec::new();
     loop {
         reactor.turn(Some(IDLE))?;
-        while let Ok(reply) = asked.try_recv() {
+        while let Ok(opening) = asked.try_recv() {
             match reactor.spawn_window(&binary) {
-                Ok(_) => waiting = Some(reply),
+                Ok(_) => waiting.push(opening),
                 // The system's words alone, which name no pane, secret or variable.
-                Err(error) => {
-                    let reason = format!("cannot start pinfold-window: {error}");
-                    let _ = reply.try_send(Err(reason));
-                }
+                Err(error) => opening.answer(Err(format!("cannot start pinfold-window: {error}"))),
             }
         }
         let ended = !reactor.has_window();
-        if let Some(reply) = waiting.take_if(|_| ended || reactor.is_window_ready()) {
-            let reason = "the window ended before it was ready";
-            let _ = reply.try_send(if ended {
-                Err(reason.to_owned())
-            } else {
-                Ok(())
-            });
+        if ended || reactor.is_window_ready() {
+            for opening in waiting.drain(..) {
+                let reason = "the window ended before it was ready";
+                opening.answer(if ended {
+                    Err(reason.to_owned())
+                } else {
+                    Ok(())
+                });
+            }
         }
         if reactor.pane_count() == 0 && !reactor.has_window() {
             return Ok(());

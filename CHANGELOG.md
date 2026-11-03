@@ -16,6 +16,7 @@ Entries are generated from Conventional Commits with git-cliff
 ### Added
 
 - ADR-0033: a native menu bar and Dock menu on macOS, and a right-click menu drawn in cells, all running the same commands as the keys.
+- The core serves up to 16 callers of its control socket at once on one `mio` thread, so a caller waiting for a window holds up no one (ADR-0032).
 - ADR-0032: the agent API gets one `mio` thread of its own, and M3 lands in eight steps. M1 and M2 are done.
 - Tests that fail if the core stops refusing a debugger, or a pane's shell starts refusing one, and `tests/hardening/audit.sh`, which attacks real binaries by hand and is where the threat model's table comes from.
 - ADR-0031: a macOS beta comes before v0.1, which covers macOS and Linux.
