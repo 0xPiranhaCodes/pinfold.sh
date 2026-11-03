@@ -136,6 +136,33 @@ Deleting the file changes nothing until the next start.
 PinFold checks the file with one `stat` a second on a thread of its own, so an idle window
 wakes once a second for this. Changes to the font file itself are not noticed.
 
+## Workspace layouts
+
+A project may describe tabs and panes in `.pinfold/layout.toml`. PinFold validates this format
+now; `pinfold up` and the trust prompt arrive separately, so it does not open the layout yet.
+
+```toml
+[[tabs]]
+[[tabs.panes]]
+cwd = "."
+run = "cargo test"
+
+[[tabs.panes]]
+split = "right"
+cwd = "crates/pinfold-core"
+run = "cargo test -p pinfold-core"
+```
+
+The root contains only `tabs`; each tab contains only `panes`; and a pane may contain only
+`split`, `cwd`, and `run`. `split` is `right` or `down` and is omitted for the first pane. A
+relative `cwd` starts at the project directory. Every supplied `cwd` must already exist as a
+directory and resolve inside the project, including after following directory symlinks.
+
+A layout must have at least one tab and one pane in each tab. It may hold at most 32 tabs and 64
+panes in total, and the file may be at most 64 KiB. Unknown keys, invalid values, non-UTF-8,
+special files, and a symlink in place of `layout.toml` are refused. `run` is only data at this
+stage; a later trust prompt will show it before anything can run.
+
 ## Vi mode
 
 Command+X on macOS, or Ctrl+Shift+X elsewhere, turns vi mode on at the program's cursor, and
