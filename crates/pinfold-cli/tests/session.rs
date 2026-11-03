@@ -60,6 +60,9 @@ impl Session {
         let mut command = Command::new(self.directory.join("pinfold"));
         command
             .env("XDG_RUNTIME_DIR", self.directory.join("run"))
+            // As in `start_core`: the core it starts saves the session, never to the person's.
+            .env("XDG_STATE_HOME", self.directory.join("state"))
+            .env("HOME", self.directory.join("state"))
             .env("SHELL", shell)
             .env(CLIENT, &self.directory);
         command
