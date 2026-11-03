@@ -10,7 +10,7 @@ use std::process::{Command, ExitCode, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use pinfold_api::control;
+use pinfold_api::{control, trust};
 use pinfold_config::workspace::{self, Layout, Split};
 use serde_json::{Value, json};
 
@@ -69,28 +69,36 @@ fn launch() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// `pinfold up [dir]`: opens `dir`'s `.pinfold/layout.toml` as shells in a window, or focuses
-/// its tabs if they are open. The file is untrusted, so its `run` lines wait for workspace trust.
+/// `pinfold up [dir]`: opens `dir`'s `.pinfold/layout.toml` in a window, or focuses its tabs if
+/// they are open. If the file has `run` lines and the directory is not trusted with its hash,
+/// the window asks first. The core, not this, reads the lines from the file again and types
+/// them, and only once trusted; refused, the layout opens as shells.
 fn up(dir: Option<&str>) -> Result<(), Box<dyn Error>> {
     let root = std::fs::canonicalize(dir.unwrap_or("."))?;
-    let layout = workspace::load(&root.join(".pinfold/layout.toml"), &root)?;
-    let (params, waiting) = request(&root, &layout)?;
+    let bytes = workspace::read(&root.join(".pinfold/layout.toml"), &root)?;
+    let layout = workspace::parse(&bytes, &root)?;
+    let (mut params, runs) = request(&root, &layout)?;
+    let sha256 = trust::sha256(&bytes);
     control::open_window(&core(&control::runtime_dir())?)?;
-    control::ask(&running()?, "workspace.open", &params)?;
-    let commands = if waiting == 1 {
-        "command waits"
-    } else {
-        "commands wait"
-    };
-    if waiting > 0 {
-        eprintln!("pinfold: {waiting} {commands} for workspace trust (not yet available)");
+    let asked = json!({"root": params["root"], "sha256": sha256});
+    if !runs.is_empty()
+        && control::ask(&running()?, "workspace.trust_state", &asked)?.1["trusted"] != true
+    {
+        let asked = json!({"root": params["root"], "sha256": sha256, "runs": runs});
+        if let Err(error) = control::ask(&running()?, "workspace.ask_trust", &asked) {
+            let count = runs.len();
+            let lines = if count == 1 { "line" } else { "lines" };
+            eprintln!("pinfold: {count} run {lines} did not run: {error}");
+        }
     }
+    params["sha256"] = sha256.into();
+    control::ask(&running()?, "workspace.open", &params)?;
     Ok(())
 }
 
 /// `workspace.open`'s parameters for `layout`, with each pane's cwd, or `root` for none, and
-/// without its `run` lines, and how many `run` lines there are.
-fn request(root: &Path, layout: &Layout) -> Result<(Value, usize), Box<dyn Error>> {
+/// without its `run` lines, and those lines, for the trust prompt.
+fn request<'a>(root: &Path, layout: &'a Layout) -> Result<(Value, Vec<&'a str>), Box<dyn Error>> {
     let text = |path: &Path| {
         path.to_str()
             .map(str::to_owned)
@@ -110,9 +118,9 @@ fn request(root: &Path, layout: &Layout) -> Result<(Value, usize), Box<dyn Error
         tabs.push(json!({"panes": panes}));
     }
     let panes = layout.tabs.iter().flat_map(|tab| &tab.panes);
-    let waiting = panes.filter(|pane| pane.run.is_some()).count();
+    let runs = panes.filter_map(|pane| pane.run.as_deref()).collect();
     let params = json!({"root": text(root)?, "layout": {"tabs": tabs}});
-    Ok((params, waiting))
+    Ok((params, runs))
 }
 
 /// `pinfold ctl list`: prints the session's panes, as JSON with `json`. It starts no core.
@@ -348,19 +356,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_request_holds_tabs_splits_and_cwds_and_counts_run_lines_without_sending_them() {
+    fn a_request_holds_tabs_splits_and_cwds_and_lists_run_lines_without_sending_them() {
         let root = std::env::temp_dir().canonicalize().unwrap();
         let toml = b"[[tabs]]\n[[tabs.panes]]\nrun = 'make'\n\
             [[tabs]]\n[[tabs.panes]]\ncwd = '.'\n[[tabs.panes]]\nsplit = 'down'\nrun = 'ls'\n\
             [[tabs.panes]]\n";
         let layout = workspace::parse(toml, &root).unwrap();
-        let (params, waiting) = request(&root, &layout).unwrap();
+        let (params, runs) = request(&root, &layout).unwrap();
         let cwd = root.to_str().unwrap();
         let expected = json!({"root": cwd, "layout": {"tabs": [
             {"panes": [{"cwd": cwd}]},
             {"panes": [{"cwd": cwd}, {"split": "down", "cwd": cwd}, {"split": "right", "cwd": cwd}]},
         ]}});
-        assert_eq!((params, waiting), (expected, 2));
+        assert_eq!((params, runs), (expected, vec!["make", "ls"]));
     }
 
     #[test]

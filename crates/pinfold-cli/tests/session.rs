@@ -1151,8 +1151,7 @@ fn up_opens_a_workspace_as_shells_once_and_then_attaches_to_it() {
     for directory in ["a", "b", ".pinfold"] {
         fs::create_dir_all(project.join(directory)).unwrap();
     }
-    let layout = "[[tabs]]\n[[tabs.panes]]\ncwd = 'a'\nrun = 'make'\n\
-                  [[tabs]]\n[[tabs.panes]]\ncwd = 'b'\n";
+    let layout = "[[tabs]]\n[[tabs.panes]]\ncwd = 'a'\n[[tabs]]\n[[tabs.panes]]\ncwd = 'b'\n";
     fs::write(project.join(".pinfold/layout.toml"), layout).unwrap();
     // Each shell says where it is, as OSC 7, and stays.
     let shell = session.directory.join("shell");
@@ -1202,7 +1201,7 @@ fn up_opens_a_workspace_as_shells_once_and_then_attaches_to_it() {
     let (a, b) = (canonical("a"), canonical("b"));
 
     let said = in_terminal("up");
-    let waits = "pinfold: 1 command waits for workspace trust (not yet available)\nexit 0\n";
+    let waits = "exit 0\n";
     assert_eq!(said, waits);
     // The core's first shell, then a tab in each cwd.
     let opened = cwds();
@@ -1615,4 +1614,135 @@ fn a_new_core_restores_the_layout_and_cwds_of_a_killed_one() {
     core.kill().unwrap();
     core.wait().unwrap();
     fs::remove_dir_all(&work).unwrap();
+}
+
+/// Not a test: the window of
+/// [`up_runs_a_trusted_workspace_and_a_restore_runs_it_again_until_its_file_changes`], which
+/// checks that nothing ran before it trusts the workspace, then waits to see the run line's
+/// output in the pane. Once that is shown, a later window types a probe into the focused pane,
+/// which runs after any line a restore typed.
+#[test]
+fn up_trust_window_process() {
+    let Some(directory) = env::var_os(CLIENT) else {
+        return;
+    };
+    let directory = Path::new(&directory);
+    let core = std::os::unix::process::parent_id().to_string();
+    fs::write(directory.join("core"), core).unwrap();
+    let mut link = Link::new(socket::take_link().unwrap()).unwrap();
+    assert!(link.resize(24, 80));
+    if directory.join("shown").exists() {
+        let probes = || probes(&fs::read_to_string(directory.join("ran")).unwrap_or_default());
+        let before = probes();
+        until(&mut link, |link| !link.screens().is_empty()).unwrap();
+        assert!(type_in(
+            &mut link,
+            "echo probe >> \"$PINFOLD_TEST_CLIENT/ran\"\n"
+        ));
+        until(&mut link, |_| probes() > before).unwrap();
+        return;
+    }
+    let mut prompt = None;
+    until(&mut link, |link| {
+        prompt = link.take_approval();
+        prompt.is_some()
+    })
+    .unwrap();
+    let prompt = prompt.unwrap();
+    assert_eq!(prompt.action, ApprovalAction::Trust);
+    assert!(prompt.texts[1].contains("space-ran"), "{:?}", prompt.texts);
+    assert!(!directory.join("ran").exists());
+    let (id, answer) = (prompt.id, ApprovalAnswer::AllowOnce);
+    assert!(link.send(Request::ApprovalAnswer { id, answer }));
+    // The typed line shows `work''space-ran`; only its output shows this.
+    until(&mut link, |link| shows(link, "workspace-ran")).unwrap();
+    fs::write(directory.join("shown"), "yes").unwrap();
+}
+
+#[test]
+fn up_runs_a_trusted_workspace_and_a_restore_runs_it_again_until_its_file_changes() {
+    let exe = env::current_exe().unwrap();
+    let window = format!("exec '{}' --exact up_trust_window_process", exe.display());
+    let session = Session::new("ut", Some(&window)).unwrap();
+    let (project, state) = (
+        session.directory.join("project"),
+        session.directory.join("state"),
+    );
+    fs::create_dir_all(project.join(".pinfold")).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    let layout = r#"[[tabs]]
+[[tabs.panes]]
+run = "echo work''space-ran | tee -a \"$PINFOLD_TEST_CLIENT/ran\""
+"#;
+    fs::write(project.join(".pinfold/layout.toml"), layout).unwrap();
+    let script = format!(
+        "'{}' up > up.tmp 2>&1; echo \"exit $?\" >> up.tmp; mv up.tmp '{}'",
+        session.directory.join("pinfold").display(),
+        session.directory.join("up").display()
+    );
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", &script])
+        .current_dir(&project)
+        .env("XDG_RUNTIME_DIR", session.directory.join("run"))
+        .env("XDG_STATE_HOME", &state)
+        .env("HOME", &state)
+        .env("SHELL", "/bin/sh")
+        .env(CLIENT, &session.directory);
+    let _terminal = pinfold_sys::pty::Pty::spawn(command, 24, 80).unwrap();
+    assert!(session.wait_for("shown"), "{}", session.read_log());
+    assert!(session.wait_for("up"), "{}", session.read_log());
+    assert_eq!(session.read("up"), "exit 0\n");
+    assert_eq!(session.read("ran"), "workspace-ran\n");
+
+    // The snapshot names the workspace and its hash, never its run line.
+    let path = ctl(&session, "ctl session save", "saved").unwrap();
+    let saved = fs::read_to_string(path.trim()).unwrap();
+    let snapshot: serde_json::Value = serde_json::from_str(&saved).unwrap();
+    let root = fs::canonicalize(&project).unwrap();
+    assert_eq!(snapshot["workspaces"][0]["root"], root.to_str().unwrap());
+    assert_eq!(snapshot["workspaces"][0]["panes"], serde_json::json!([1]));
+    assert!(!saved.contains("space-ran"), "{saved}");
+    let core = session.read("core");
+    assert!(kill(&core).status().unwrap().success());
+    let alive = || {
+        let check = format!("kill -0 {core} 2>/dev/null");
+        Command::new("/bin/sh")
+            .args(["-c", &check])
+            .status()
+            .unwrap()
+            .success()
+    };
+    let start = Instant::now();
+    while alive() && start.elapsed() < PATIENCE {
+        thread::sleep(Duration::from_millis(20));
+    }
+
+    // Each restore types the trusted line once; a probe typed after it shows when it would have run.
+    let restore = |ran: &str| {
+        let mut core = session.start_core(&[], "exec /bin/sh").unwrap();
+        let launched = session.launch().unwrap();
+        assert!(launched.status.success(), "{launched:?}");
+        let start = Instant::now();
+        while probes(&session.read("ran")) < probes(ran) {
+            assert!(start.elapsed() < PATIENCE, "{}", session.read("ran"));
+            thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(session.read("ran"), ran);
+        let _ = ctl(&session, "ctl session save", "saved").unwrap();
+        core.kill().unwrap();
+        core.wait().unwrap();
+    };
+    restore("workspace-ran\nworkspace-ran\nprobe\n");
+    // A changed file is no longer trusted: its line does not run again.
+    fs::write(
+        project.join(".pinfold/layout.toml"),
+        format!("{layout}# changed\n"),
+    )
+    .unwrap();
+    restore("workspace-ran\nworkspace-ran\nprobe\nprobe\n");
+}
+
+fn probes(ran: &str) -> usize {
+    ran.matches("probe").count()
 }
