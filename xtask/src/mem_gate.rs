@@ -31,12 +31,15 @@ pub const WINDOW_SETTLE: Duration = Duration::from_secs(7);
 /// Parts of the file names of `FALLBACKS` in `pinfold-render`, which keeps that list private.
 const CJK_FONTS: [&str; 4] = ["Hiragino", "AppleSDGothicNeo", "NotoSansCJK", "wqy-zenhei"];
 
+/// Read by `pinfold-ui`'s window, and only in a measured one.
+const MENU_VARIABLE: &str = "PINFOLD_MEASURE_MENU";
+
 /// ADR-0021 budgets with nothing to measure yet, and the issue that makes them measurable.
 const NOT_MEASURED: [(&str, &str); 2] = [
     ("Window on Wayland", "a compositor in CI"),
     (
-        "Window with a menu open",
-        "the Dock menu (#114) and context menu (#115)",
+        "Window with the Dock menu open",
+        "a way to right-click the Dock from a script",
     ),
 ];
 
@@ -62,6 +65,8 @@ pub struct Budget<'a> {
     /// The program prints a window's pid as its line, and this says which process to read. The
     /// two are separate processes and neither count holds the other (ADR-0003).
     pub window: Option<Side>,
+    /// Asks a measured window to open its right-click menu.
+    pub menu: bool,
 }
 
 /// Bytes, and whether a screen's CJK text went undrawn for want of a font.
@@ -90,6 +95,9 @@ fn measure_once(budget: &Budget, args: &[&str]) -> io::Result<Reading> {
     command.args(args).stdout(stdout);
     if let Some(screen) = budget.screen {
         command.env("SHELL", screen);
+    }
+    if budget.menu {
+        command.env(MENU_VARIABLE, "1");
     }
     // A core takes its session's socket, which a core the user is running holds.
     let runtime = std::env::temp_dir().join(format!("pinfold-gate-{}", std::process::id()));
@@ -221,6 +229,7 @@ mod tests {
             wait_for_line: false,
             screen: None,
             window: None,
+            menu: false,
         }
     }
 
@@ -251,6 +260,7 @@ mod tests {
             wait_for_line: false,
             screen: None,
             window: None,
+            menu: false,
         };
         assert!(!run(&[budget]));
     }
@@ -336,6 +346,12 @@ mod tests {
             ..sleep(1, &["30"])
         };
         assert!(!run(&[budget]));
+    }
+
+    #[test]
+    fn the_menu_variable_matches_the_window() {
+        let window = include_str!("../../crates/pinfold-ui/src/window.rs");
+        assert!(window.contains(&format!("var_os(\"{MENU_VARIABLE}\")")));
     }
 
     #[test]
