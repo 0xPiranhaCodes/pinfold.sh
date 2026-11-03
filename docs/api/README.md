@@ -71,9 +71,14 @@ the time starts again after each answer. A malformed request closes it, and so d
 the core took too long to answer; a refusal, such as "the core is busy", does not.
 
 `pane.wait` waits on a pane in reach for at most 10 minutes, and the core parks at most 64
-waits. `events.subscribe` sends `event` notifications on its connection. A connection is closed
-if 2 MiB of replies queue unread, or if the core has more events for it than it can queue, so a
-subscriber that was closed may have missed events.
+waits. It waits for a command to exit, a prompt, any output, a later line that matches a regex
+of at most 1 KiB (`match`, with ASCII-only `\w`, `\d`, `\s` and case folding), or a quiet spell (`idle`); `match` and `idle` take only the
+caller's own pane. `events.subscribe` sends `event` notifications on its connection. Its
+`pane.output` events carry what the caller's own pane printed, up to 4 KiB each, and never
+another pane's, its children's included; a caller outside any pane that asks for them is
+refused. Streaming another pane's text would need redaction that holds state across reads, which
+waits for an ADR. A connection is closed if 2 MiB of replies queue unread, or if the core has more
+events for it than it can queue, so a subscriber that was closed may have missed events.
 
 `pane.status` lets an agent say what state its own pane is in: `needs-you`, `running`, `done`,
 `error` or `idle`, with a message of at most 200 characters. A report outranks the pane's OSC 133
@@ -99,9 +104,12 @@ cannot show entries cut from its end.
 `pinfold ctl list` prints `pane.list` as plain text, with `*` by the caller's own pane, and
 `pinfold ctl list --json` prints its result. Its title, directory and status come from what
 programs print, which can fake them: read them as hints, not facts. `pinfold ctl send <pane>
-<text>` types into a pane. `pinfold ctl session save`, from a terminal that is no pane, writes the
-session's snapshot and prints its path. A core that refuses version 2 is older than the client, and
-`pinfold ctl` says to quit PinFold so that a new core starts.
+<text>` types into a pane. `pinfold ctl wait <pane> --until exit|prompt|output|match|idle
+[--pattern <regex>] [--idle-ms <n>] --timeout <s>` prints how the wait ended, and exits 0 if
+what it waited for happened, 1 on a timeout or a closed pane, and 2 on an error. `pinfold ctl
+session save`, from a terminal that is no pane, writes the session's snapshot and prints its
+path. A core that refuses version 2 is older than the client, and `pinfold ctl` says to quit
+PinFold so that a new core starts.
 
 `pinfold up [dir]` reads `<dir>/.pinfold/layout.toml`, the current directory's by default,
 starts a core and a window as `pinfold` does, and sends `workspace.open` with each pane's split
