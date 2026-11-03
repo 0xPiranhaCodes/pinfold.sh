@@ -15,6 +15,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Added
 
+- ADR-0032: the agent API gets one `mio` thread of its own, and M3 lands in eight steps. M1 and M2 are done.
 - Tests that fail if the core stops refusing a debugger, or a pane's shell starts refusing one, and `tests/hardening/audit.sh`, which attacks real binaries by hand and is where the threat model's table comes from.
 - ADR-0031: a macOS beta comes before v0.1, which covers macOS and Linux.
 - The app is called PinFold: `PinFold.app`, the window's title and the Dock.
