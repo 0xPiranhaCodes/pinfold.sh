@@ -9,11 +9,12 @@
 //! Linux, and `/private/tmp` and the user's temporary directory on macOS. Git runs what its
 //! repository's hooks and config name outside the sandbox, so on Linux all of `.git` is read-only,
 //! and on macOS those files, its submodules' and anything that points git elsewhere are. Of other
-//! programs' Unix sockets, such as ssh-agent's, it reaches only PinFold's API socket.
+//! programs' Unix sockets, such as ssh-agent's, it reaches only PinFold's API socket, and on
+//! Linux with Landlock ABI 6 no abstract socket bound outside the sandbox (ADR-0038).
 //!
 //! A missing tool is an error: a pane that asked for a sandbox never runs without one.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::os::fd::AsRawFd;
@@ -85,7 +86,8 @@ impl WorkingDirectory {
 /// which any program can print, so it must resolve to a directory of this user's that no one else
 /// can write to, under directories that only it or root can change. It must not be `/`, `$HOME`
 /// or above it, a dot-directory of `$HOME` such as `~/.config` or inside one, `~/Library` or
-/// inside it, inside a `.git` directory, or hold or sit inside a `hidden` one.
+/// inside it, inside a `.git` directory, a `PATH` directory or above one, or hold or sit inside a
+/// `hidden` one.
 ///
 /// # Errors
 ///
@@ -153,6 +155,9 @@ pub fn working_directory(path: &Path, hidden: &[PathBuf]) -> io::Result<WorkingD
             return refuse("is under a directory another user can change");
         }
     }
+    if std::env::var_os("PATH").is_some_and(|path| holds_path(&dir, &path)) {
+        return refuse("is or holds a PATH directory");
+    }
     for hidden in hidden {
         let real = resolve(hidden);
         let near = |other: &PathBuf| other.starts_with(&dir) || dir.starts_with(other);
@@ -161,6 +166,20 @@ pub fn working_directory(path: &Path, hidden: &[PathBuf]) -> io::Result<WorkingD
         }
     }
     Ok(WorkingDirectory(dir))
+}
+
+/// Whether `dir` is or holds an entry of `path`, as given or resolved, where a program the agent
+/// writes would run for the user. A relative entry counts from `dir`, as a shell there searches
+/// it, and a dangling symlink as held, as the agent could make where it leads.
+fn holds_path(dir: &Path, path: &OsStr) -> bool {
+    std::env::split_paths(path)
+        .map(|entry| dir.join(entry))
+        .any(|entry| {
+            let dangling = entry
+                .ancestors()
+                .any(|above| above.is_symlink() && !above.exists());
+            dangling || entry.starts_with(dir) || resolve(&entry).starts_with(dir)
+        })
 }
 
 /// `path` resolved through symlinks as far as it exists, as a hidden directory may not yet.
@@ -179,14 +198,16 @@ fn resolve(path: &Path) -> PathBuf {
 
 /// Returns the command that runs `program` with `hidden` unreadable, only `work` and temporary
 /// directories writable and, of Unix sockets, only the API's at `api` reachable, for
-/// [`Reactor::spawn`](crate::io::Reactor::spawn). Spawn it once: on Linux its seccomp filter is
-/// read to the end by the first launch.
+/// [`Reactor::spawn`](crate::io::Reactor::spawn). On Linux below Landlock ABI 6 abstract sockets
+/// stay reachable. Spawn it once: on Linux its seccomp filter is read to the end by the first
+/// launch.
 ///
 /// # Errors
 ///
 /// Returns an error if `program` is empty or starts with `-`, the system has no sandbox, or on
-/// Linux no `bwrap` in `/usr/bin`, `/usr/local/bin` or `/bin` is root's alone, or the filter has
-/// no rules for this architecture.
+/// Linux no `bwrap` in `/usr/bin`, `/usr/local/bin` or `/bin` is root's alone, the filter has
+/// no rules for this architecture, or the kernel has Landlock but its probe or rules fail. Rules
+/// that fail in the child fail the spawn.
 ///
 /// # Examples
 ///
@@ -254,6 +275,11 @@ pub fn command(
     command.args(args);
     if let Some(filter) = filter {
         pinfold_sys::inherit(&mut command, filter)?;
+        // Linux only, set before bwrap runs, so it and the agent share one domain that binds no
+        // socket of the host's.
+        if pinfold_sys::landlock::abi()? >= pinfold_sys::landlock::SCOPED {
+            pinfold_sys::landlock::scope_abstract_sockets(&mut command)?;
+        }
     }
     for name in SOCKET_VARS {
         command.env_remove(name);
@@ -704,6 +730,41 @@ mod tests {
         assert_eq!(found.modules, [work.join("sub/.git"), vendor.clone()]);
         assert!(found.kept.contains(&vendor));
         assert!(found.controls.contains(&vendor.join("hooks")));
+    }
+
+    #[test]
+    fn a_path_directory_or_one_above_it_is_refused() {
+        let work = project("pinfold-path", 0o700);
+        let bin = work.join("bin");
+        let link = work.join("link");
+        fs::create_dir_all(&bin).unwrap();
+        std::os::unix::fs::symlink(&bin, &link).unwrap();
+        let real = work.canonicalize().unwrap();
+        // Outside the working directory, leading to where the agent could make a directory.
+        let away = project("pinfold-path-away", 0o700);
+        let dangling = away.join("bin");
+        std::os::unix::fs::symlink(real.join("later"), &dangling).unwrap();
+        let path = |entries: &[&Path]| std::env::join_paths(entries).unwrap();
+        let other = Path::new("/usr/bin");
+        let held = [
+            holds_path(&real, &path(&[other, &work])),
+            holds_path(&real, &path(&[&bin])),
+            holds_path(&real.join("bin"), &path(&[&link])),
+            holds_path(&real, &path(&[&work.join("missing/bin")])),
+            holds_path(&real, &path(&[other, Path::new("")])),
+            holds_path(&real, &path(&[Path::new(".")])),
+            holds_path(&real, &path(&[Path::new("bin")])),
+            holds_path(&real, &path(&[&dangling])),
+            holds_path(&real, &path(&[&dangling.join("sub")])),
+        ];
+        let free = [
+            holds_path(&real.join("bin"), &path(&[&work])),
+            holds_path(&real, &path(&[other, &away])),
+        ];
+        fs::remove_dir_all(&work).unwrap();
+        fs::remove_dir_all(&away).unwrap();
+        assert_eq!(held, [true; 9]);
+        assert_eq!(free, [false; 2]);
     }
 
     #[test]
