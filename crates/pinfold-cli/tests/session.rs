@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
 use pinfold_api::control;
-use pinfold_proto::link::{Request, VERSION};
+use pinfold_proto::link::{ApprovalAction, ApprovalAnswer, Request, VERSION};
 use pinfold_sys::socket;
 use pinfold_ui::link::{Disconnect, Link};
 
@@ -527,7 +527,7 @@ fn ctl_lists_the_sessions_panes_inside_and_outside_a_pane_and_not_without_a_term
 }
 
 #[test]
-fn a_pane_can_send_to_itself_and_not_to_another_pane() {
+fn a_pane_can_send_to_itself_and_cross_pane_send_needs_a_window() {
     let session = Session::new("s", None).unwrap();
     let ctl = format!("'{}' ctl", session.directory.join("pinfold").display());
     let client = "\"$PINFOLD_TEST_CLIENT\"";
@@ -541,7 +541,10 @@ fn a_pane_can_send_to_itself_and_not_to_another_pane() {
     assert!(session.wait_for("refused"));
     assert_eq!(session.read("got"), "typed\n");
     let refused = session.read("refused");
-    assert!(refused.contains("only the caller's own pane"), "{refused}");
+    assert!(
+        refused.contains("needs an open PinFold window"),
+        "{refused}"
+    );
     core.kill().unwrap();
     core.wait().unwrap();
 }
@@ -780,6 +783,193 @@ fn a_caller_waits_on_its_pane_and_hears_panes_open_and_close() {
     assert_eq!(events.next(), Some(closed));
 }
 
+/// Not a test: pane 0 asks to send twice. It prints answer-looking bytes and tries a JSON-RPC
+/// answer while the first call is parked, then waits for an outside terminal to revoke its grant.
+#[test]
+fn approval_api_process() {
+    let Some(directory) = env::var_os(API) else {
+        return;
+    };
+    let directory = Path::new(&directory);
+    while !directory.join("second").exists() {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let send = |id, text| {
+        serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "pane.send",
+            "params": {"pane": 1, "text": text}})
+    };
+    let mut first = api(&[send(2, "approved\n")]).unwrap();
+    assert_eq!(next(&mut first, || Ok(())).unwrap()["result"]["pane"], 0);
+
+    let mut tty = fs::OpenOptions::new().write(true).open("/dev/tty").unwrap();
+    std::io::Write::write_all(&mut tty, b"y a n Escape\n").unwrap();
+    let socket = UnixStream::connect(control::socket_path(&control::runtime_dir())).unwrap();
+    let api_answer = control::ask(
+        &socket,
+        "approval.answer",
+        &serde_json::json!({"id": 1, "answer": "allow"}),
+    );
+    assert!(api_answer.is_err());
+    let socket = UnixStream::connect(control::socket_path(&control::runtime_dir())).unwrap();
+    let pane_admin = control::ask(&socket, "grants.list", &serde_json::json!({}));
+    assert!(pane_admin.is_err());
+    fs::write(directory.join("attempted"), "yes").unwrap();
+    let blocked = matches!(
+        first.next(),
+        Some(Err(error)) if error.kind() == std::io::ErrorKind::WouldBlock
+    );
+    assert!(blocked, "pane output or the API answered the prompt");
+    fs::write(directory.join("still-parked"), "yes").unwrap();
+
+    let allowed = next(&mut first, || Ok(())).unwrap();
+    assert_eq!(allowed["result"], serde_json::json!({}));
+    fs::write(directory.join("first-allowed"), "yes").unwrap();
+    while !directory.join("revoked").exists() {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let mut second = api(&[send(2, "must-not-arrive\n")]).unwrap();
+    let _ = next(&mut second, || Ok(())).unwrap();
+    let denied = next(&mut second, || Ok(())).unwrap();
+    assert!(
+        denied["error"]["message"]
+            .as_str()
+            .is_some_and(|text| text.contains("denied"))
+    );
+    fs::write(directory.join("second-denied"), "yes").unwrap();
+
+    let read = serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "pane.read",
+        "params": {"pane": 1}});
+    let mut reading = api(&[read]).unwrap();
+    let _ = next(&mut reading, || Ok(())).unwrap();
+    let read = next(&mut reading, || Ok(())).unwrap();
+    let text = read["result"]["text"].as_str().unwrap();
+    assert!(text.contains("«redacted:password»"), "{text}");
+    assert!(!text.contains("hunter2"), "{text}");
+    fs::write(directory.join("redacted"), "yes").unwrap();
+}
+
+/// Not a test: the trusted inherited link sees both prompts and answers them with key meanings.
+#[test]
+fn approval_window_process() {
+    let Some(directory) = env::var_os(CLIENT) else {
+        return;
+    };
+    let directory = Path::new(&directory);
+    fs::write(
+        directory.join("core"),
+        std::os::unix::process::parent_id().to_string(),
+    )
+    .unwrap();
+    let mut link = Link::new(socket::take_link().unwrap()).unwrap();
+    assert!(link.resize(24, 80));
+    until(&mut link, |link| link.is_greeted()).unwrap();
+    assert!(link.send(Request::NewTab));
+    let mut first = None;
+    until(&mut link, |link| {
+        first = link.take_approval();
+        first.is_some()
+    })
+    .unwrap();
+    let first = first.unwrap();
+    assert_eq!(
+        (first.caller, first.target, first.action),
+        (0, 1, ApprovalAction::Send)
+    );
+    assert_eq!(first.texts, ["approved\n"]);
+    fs::write(directory.join("prompt"), format!("{}", first.id)).unwrap();
+    until(&mut link, |_| {
+        directory.join("attempted").exists() && directory.join("still-parked").exists()
+    })
+    .unwrap();
+    assert!(link.send(Request::ApprovalAnswer {
+        id: first.id,
+        answer: ApprovalAnswer::AllowForThirtyMinutes,
+    }));
+
+    let mut second = None;
+    until(&mut link, |link| {
+        second = link.take_approval();
+        second.is_some()
+    })
+    .unwrap();
+    let second = second.unwrap();
+    assert_eq!(second.texts, ["must-not-arrive\n"]);
+    assert!(link.send(Request::ApprovalAnswer {
+        id: second.id,
+        answer: ApprovalAnswer::Deny,
+    }));
+    until(&mut link, |_| directory.join("second-denied").exists()).unwrap();
+
+    let mut read = None;
+    until(&mut link, |link| {
+        read = link.take_approval();
+        read.is_some()
+    })
+    .unwrap();
+    let read = read.unwrap();
+    assert_eq!(read.action, ApprovalAction::Read);
+    assert!(read.texts.is_empty());
+    assert!(link.send(Request::ApprovalAnswer {
+        id: read.id,
+        answer: ApprovalAnswer::AllowOnce,
+    }));
+    until(&mut link, |_| directory.join("redacted").exists()).unwrap();
+}
+
+#[test]
+fn only_the_window_answers_cross_pane_actions_and_ctl_revokes_grants() {
+    let exe = env::current_exe().unwrap();
+    let window = format!("exec '{}' --exact approval_window_process", exe.display());
+    let session = Session::new("approval", Some(&window)).unwrap();
+    let shell = session.directory.join("approval-shell");
+    let script = format!(
+        "#!/bin/sh\nif mkdir \"$PINFOLD_TEST_CLIENT/first\" 2>/dev/null; then \
+         exec '{}' --exact approval_api_process; else echo yes > \"$PINFOLD_TEST_CLIENT/second\"; \
+         echo 'password=hunter2'; \
+         read line; echo \"$line\" > \"$PINFOLD_TEST_CLIENT/received\"; exec sleep 30; fi\n",
+        exe.display()
+    );
+    fs::write(&shell, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
+    let launched = session
+        .launcher(shell.to_str().unwrap())
+        .env(API, &session.directory)
+        .output()
+        .unwrap();
+    assert!(launched.status.success(), "{launched:?}");
+    assert!(session.wait_for("first-allowed"), "{}", session.read_log());
+    // The target's shell writes this after its own read, a moment after the send returns.
+    assert!(session.wait_for("received"), "{}", session.read_log());
+    assert_eq!(session.read("received"), "approved\n");
+
+    let id = session.read("prompt").trim().to_owned();
+    let pinfold = session.directory.join("pinfold");
+    let command = format!(
+        "'{}' ctl grants --json > \"$PINFOLD_TEST_CLIENT/grants\"; \
+         '{}' ctl grants revoke {id}; \
+         '{}' ctl grants --json > \"$PINFOLD_TEST_CLIENT/after\"; \
+         echo yes > \"$PINFOLD_TEST_CLIENT/revoked\"",
+        pinfold.display(),
+        pinfold.display(),
+        pinfold.display()
+    );
+    let mut outside = Command::new("/bin/sh");
+    outside
+        .args(["-c", &command])
+        .env("XDG_RUNTIME_DIR", session.directory.join("run"))
+        .env(CLIENT, &session.directory);
+    let _terminal = pinfold_sys::pty::Pty::spawn(outside, 24, 80).unwrap();
+    assert!(session.wait_for("revoked"), "{}", session.read_log());
+    let listed: serde_json::Value = serde_json::from_str(&session.read("grants")).unwrap();
+    assert_eq!(listed["grants"][0]["id"].to_string(), id);
+    let after: serde_json::Value = serde_json::from_str(&session.read("after")).unwrap();
+    assert_eq!(after["grants"], serde_json::json!([]));
+    assert!(session.wait_for("second-denied"), "{}", session.read_log());
+    assert!(session.wait_for("redacted"), "{}", session.read_log());
+    assert!(session.read("received").contains("approved"));
+}
+
 /// Names the directory of a run, in the pane that spawns others.
 const SPAWN: &str = "PINFOLD_TEST_SPAWN";
 
@@ -926,7 +1116,7 @@ fn mcp_lists_tools_calls_the_core_as_its_pane_and_reports_a_refusal_as_a_tool_er
     let refused = &replies[2]["result"];
     assert_eq!(refused["isError"], true, "{out}");
     let message = refused["content"][0]["text"].as_str().unwrap();
-    assert!(message.contains("own pane"), "{out}");
+    assert!(message.contains("no such pane"), "{out}");
     let names: Vec<_> = replies[3]["result"]["tools"]
         .as_array()
         .unwrap()

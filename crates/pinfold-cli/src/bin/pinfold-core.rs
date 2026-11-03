@@ -10,14 +10,17 @@ use std::{env, thread};
 
 use pinfold_api::Log;
 use pinfold_api::control::{self, Control, Method, Request, Subscriber, Topics, Until, Wait};
+use pinfold_api::redact;
 use pinfold_api::spawn::Place;
 use pinfold_cli::audit;
 use pinfold_core::family::{self, Family, SplitWay};
+use pinfold_core::grants::{Decision, Grants, Released};
 use pinfold_core::io::{Reactor, Waker};
 use pinfold_core::shell;
 use pinfold_core::status::Status;
 use pinfold_core::wait::{Outcome, Waits};
 use pinfold_core::workspace::Workspaces;
+use pinfold_proto::link::{ApprovalAction, ApprovalAnswer};
 use serde_json::{Value, json};
 
 const ROWS: u16 = 24;
@@ -57,15 +60,67 @@ fn listen(waker: Arc<Waker>) -> io::Result<Receiver<Request>> {
     Ok(asked)
 }
 
-/// Answers a request that opens no window. A caller with no terminal is unidentified and may
-/// not list panes (threat model, caller identity point 3). Any caller with a terminal may, in a
-/// pane or not, as a list shows no screen and little a same-user `ps` does not. Reads, sends and
-/// closes reach only the caller's own pane and the panes it spawned, the `self` and `children`
-/// scopes, until other scopes ask the person. Pane contents go to the caller alone, never to a
-/// log. Only a person's terminal outside any pane opens a workspace, so a pane's program cannot.
-fn answer(
+/// Carries out a pane operation whose scope was already decided. Cross-pane reads are redacted
+/// at this last boundary, after the whole result has been collected.
+fn pane_action(reactor: &mut Reactor, method: &Method, cross_pane: bool) -> Result<Value, String> {
+    let clean = |text: String| {
+        if cross_pane {
+            redact(&text).into_owned()
+        } else {
+            text
+        }
+    };
+    match method {
+        Method::PaneRead { pane, lines } => {
+            let text = reactor.read(*pane, *lines).ok_or("no such pane")?;
+            Ok(json!({"text": clean(text)}))
+        }
+        Method::PaneLastOutput { pane } => match reactor.last_output(*pane) {
+            Some(text) => Ok(json!({"text": clean(text)})),
+            None if reactor.engine(*pane).is_none() => Err("no such pane".to_owned()),
+            None => Err("the pane has no command output marked with OSC 133".to_owned()),
+        },
+        // Another pane takes a line at a time, each checked for protection before it goes.
+        Method::PaneSend { pane, text } if cross_pane => reactor
+            .send_lines(*pane, text, Instant::now())
+            .map(|_| json!({}))
+            .map_err(str::to_owned),
+        Method::PaneSend { pane, text } => reactor
+            .send(*pane, text, Instant::now())
+            .map(|()| json!({}))
+            .map_err(str::to_owned),
+        _ => Err("not a pane action".to_owned()),
+    }
+}
+
+fn cross_pane(method: &Method) -> Option<(usize, ApprovalAction, Option<String>)> {
+    match method {
+        Method::PaneRead { pane, .. } | Method::PaneLastOutput { pane } => {
+            Some((*pane, ApprovalAction::Read, None))
+        }
+        Method::PaneSend { pane, text } => Some((*pane, ApprovalAction::Send, Some(text.clone()))),
+        _ => None,
+    }
+}
+
+fn grants_list<T, C: pinfold_core::grants::Clock>(grants: &mut Grants<T, C>) -> Value {
+    let listed = grants.list().into_iter().map(|grant| {
+        json!({"id": grant.id, "caller": grant.caller, "target": grant.target,
+               "action": grant.action.as_str(), "expires_ms": grant.remaining.as_millis()})
+    });
+    json!({"grants": listed.collect::<Vec<_>>()})
+}
+
+/// Answers a request that opens no window and needs no approval. A caller with no terminal is
+/// unidentified and may not list panes (threat model, caller identity point 3). Any caller with
+/// a terminal may, in a pane or not, as a list shows no screen and little a same-user `ps` does
+/// not. Spawns and closes reach only the caller's own pane and the panes it spawned, the `self`
+/// and `children` scopes. Pane contents go to the caller alone, never to a log. Only a person's
+/// terminal outside any pane opens a workspace, so a pane's program cannot.
+fn immediate<T, C: pinfold_core::grants::Clock>(
     reactor: &mut Reactor,
     family: &mut Family,
+    grants: &mut Grants<T, C>,
     workspaces: &mut Workspaces,
     request: &Request,
 ) -> Result<Value, String> {
@@ -91,31 +146,13 @@ fn answer(
                     "pane.list",
                     "events.subscribe",
                     "audit.read",
+                    "grants.list",
+                    "grants.revoke",
                     "workspace.open",
                 ],
                 (false, _) => &["window.open"],
             };
             Ok(json!({"version": control::VERSION, "methods": methods, "pane": own}))
-        }
-        Method::PaneRead { pane, lines } => {
-            let text = reactor.read(family.reach(reactor, own, *pane)?, *lines);
-            Ok(json!({"text": text.unwrap_or_default()}))
-        }
-        Method::PaneLastOutput { pane } => {
-            match reactor.last_output(family.reach(reactor, own, *pane)?) {
-                Some(text) => Ok(json!({"text": text})),
-                None => Err("the pane has no command output marked with OSC 133".to_owned()),
-            }
-        }
-        Method::PaneSend { pane, text } => {
-            let target = family.reach(reactor, own, *pane)?;
-            // Another pane takes a line at a time, each checked for protection before it goes.
-            let sent = if own == Some(target) {
-                reactor.send(target, text, Instant::now())
-            } else {
-                reactor.send_lines(target, text, Instant::now()).map(drop)
-            };
-            sent.map(|()| json!({})).map_err(str::to_owned)
         }
         Method::PaneStatus {
             pane,
@@ -153,8 +190,15 @@ fn answer(
             Ok(json!({"panes": panes.collect::<Vec<_>>()}))
         }
         Method::PaneList => Err("pane.list needs a caller in a terminal".to_owned()),
+        Method::GrantsList if identified && own.is_none() => Ok(grants_list(grants)),
+        Method::GrantsRevoke { id } if identified && own.is_none() => {
+            Ok(json!({"revoked": grants.revoke(*id)}))
+        }
+        Method::GrantsList | Method::GrantsRevoke { .. } => {
+            Err("grant administration needs a terminal outside every pane".to_owned())
+        }
         // shortcut: the same guardrail as audit.read, not proof of a person; ask in the window
-        // once approval prompts land (#100).
+        // once approval prompts cover it (#100).
         Method::WorkspaceOpen(open) if identified && own.is_none() => {
             let pane = |(place, cwd): &(Place, String)| (way(*place), cwd.clone());
             let tabs = open.tabs.iter();
@@ -169,6 +213,9 @@ fn answer(
         Method::WindowOpen
         | Method::PaneWait(_)
         | Method::EventsSubscribe(_)
+        | Method::PaneRead { .. }
+        | Method::PaneLastOutput { .. }
+        | Method::PaneSend { .. }
         | Method::AuditRead { .. } => Err("not here".to_owned()),
     }
 }
@@ -179,6 +226,71 @@ fn way(place: Place) -> Option<SplitWay> {
         Place::SplitRight => Some(SplitWay::Right),
         Place::SplitDown => Some(SplitWay::Down),
         Place::Tab => None,
+    }
+}
+
+fn answer_released(reactor: &mut Reactor, log: &mut Log, released: Vec<Released<Request>>) {
+    for released in released {
+        let answer = if released.allowed {
+            pane_action(reactor, released.ticket.method(), true)
+        } else {
+            Err(released.reason.to_owned())
+        };
+        audit::reply(log, reactor, released.ticket, answer);
+    }
+}
+
+/// Answers a request at once, or parks a read or send outside the caller's `self` and
+/// `children` scopes on a window approval.
+fn decide(
+    reactor: &mut Reactor,
+    family: &mut Family,
+    grants: &mut Grants<Request>,
+    workspaces: &mut Workspaces,
+    log: &mut Log,
+    request: Request,
+) {
+    let own = request.caller().and_then(|caller| reactor.pane_of(caller));
+    let Some((target, action, text)) = cross_pane(request.method()) else {
+        let answer = immediate(reactor, family, grants, workspaces, &request);
+        return audit::reply(log, reactor, request, answer);
+    };
+    let Some(caller) = own else {
+        return audit::reply(
+            log,
+            reactor,
+            request,
+            Err("cross-pane actions need a caller pane".to_owned()),
+        );
+    };
+    if reactor.engine(target).is_none() {
+        return audit::reply(log, reactor, request, Err("no such pane".to_owned()));
+    }
+    if family.reach(reactor, own, target).is_ok() {
+        // Text from any pane but the caller's own is redacted (threat model, Secret redaction).
+        let answer = pane_action(reactor, request.method(), caller != target);
+        return audit::reply(log, reactor, request, answer);
+    }
+    match grants.decide(
+        request,
+        caller,
+        target,
+        action,
+        text,
+        reactor.is_window_ready(),
+    ) {
+        Decision::Allow(request) => {
+            let answer = pane_action(reactor, request.method(), true);
+            audit::reply(log, reactor, request, answer);
+        }
+        Decision::Refuse(request, reason) => {
+            audit::reply(log, reactor, request, Err(reason.to_owned()));
+        }
+        Decision::Ask(prompt) if reactor.ask_approval(&prompt) => {}
+        // Fail closed for this prompt alone, so one oversized batch cannot drop the others.
+        Decision::Ask(prompt) => {
+            answer_released(reactor, log, grants.answer(prompt.id, ApprovalAnswer::Deny));
+        }
     }
 }
 
@@ -293,6 +405,7 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
     // and hears nothing.
     let mut waiting = Vec::new();
     let mut waits: Waits<Request> = Waits::default();
+    let mut grants: Grants<Request> = Grants::default();
     let mut family = Family::default();
     let mut workspaces = Workspaces::default();
     let mut subscribers: Vec<(Subscriber, Topics)> = Vec::new();
@@ -304,12 +417,19 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
     }
     let mut log = audit::open(&config.api);
     loop {
-        let wait = waits
-            .deadline()
-            .map(|at| at.saturating_duration_since(Instant::now()));
+        let deadline = waits.deadline().into_iter().chain(grants.deadline()).min();
+        let wait = deadline.map(|at| at.saturating_duration_since(Instant::now()));
         reactor.turn(Some(wait.unwrap_or(IDLE)))?;
         waits.retain(|request| !request.is_gone());
+        grants.retain(|request| !request.is_gone());
         subscribers.retain(|(subscriber, _)| !subscriber.is_gone());
+        while let Some((id, answer)) = reactor.take_approval_answer() {
+            answer_released(&mut reactor, &mut log, grants.answer(id, answer));
+        }
+        if !reactor.has_window() && grants.deadline().is_some() {
+            answer_released(&mut reactor, &mut log, grants.window_closed());
+        }
+        answer_released(&mut reactor, &mut log, grants.expire());
         while let Ok(request) = asked.try_recv() {
             // Its peer has been told the core is busy, so acting now would surprise a retry.
             if *request.method() != Method::WindowOpen && request.is_late() {
@@ -344,8 +464,14 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
                     audit::reply(&mut log, &reactor, request, read);
                 }
                 _ => {
-                    let answer = answer(&mut reactor, &mut family, &mut workspaces, &request);
-                    audit::reply(&mut log, &reactor, request, answer);
+                    decide(
+                        &mut reactor,
+                        &mut family,
+                        &mut grants,
+                        &mut workspaces,
+                        &mut log,
+                        request,
+                    );
                 }
             }
         }

@@ -27,12 +27,27 @@ Every connection starts with `hello`:
 | `pane.status`      | Version 2 and its own pane  | [`pane.status.schema.json`](pane.status.schema.json)         |
 | `audit.read`       | Version 2, outside any pane | [`audit.read.schema.json`](audit.read.schema.json)           |
 | `workspace.open`   | Version 2, a terminal, no pane | [`workspace.open.schema.json`](workspace.open.schema.json) |
+| `grants.list`      | Version 2, outside panes    | [`grants.list.schema.json`](grants.list.schema.json)         |
+| `grants.revoke`    | Version 2, outside panes    | [`grants.revoke.schema.json`](grants.revoke.schema.json)     |
 
 A pane in reach is the caller's own, the `self` scope, or one it spawned, or one they spawned in
-turn, the `children` scope. Any other pane is refused. `pane.spawn` opens a split or tab running
-the user's shell, never a program the caller names, and a program in that pane is that pane, not
-its parent. Reads return at most 1,000,000 bytes, keeping the newest. A send carries at most 4096
-bytes, and a pane takes at most 20 sends a second.
+turn, the `children` scope. `pane.spawn` opens a split or tab running the user's shell, never a
+program the caller names, and a program in that pane is that pane, not its parent.
+
+`pane.read`, `pane.last_output` and `pane.send` on any other pane park the call for up to 60
+seconds and ask in trusted window chrome. `y` allows the batch once, `a` grants that caller,
+target and action for 30 minutes, and `n` or Esc denies it. Allow keys count only once the prompt
+has been on screen in a focused window for half a second; denial always counts. Pane text is
+muted while a prompt is up, and at most 16 prompts wait: past that a new one is denied. Related calls share a prompt, which takes a new id as each joins,
+so a key pressed for the smaller batch approves nothing. The prompt shows every send text whole
+with its byte length; one too long for the window offers only denial. Without an open window the
+call is refused. Cross-pane reads are redacted. Reads return at most 1,000,000 bytes, keeping the
+newest. A send carries at most 4096 bytes, and a pane takes at most 20 sends a second.
+
+`grants.list` and `grants.revoke` are accepted only from an identified terminal outside every
+pane. Listing is read-only and revocation only removes authority, so neither raises another
+approval prompt. `pinfold ctl grants [--json]` lists lasting grants and `pinfold ctl grants
+revoke <id>` revokes one.
 
 A connection takes many requests, answered one at a time in order, each line at most 32 KiB.
 It must send `hello` within 2 seconds of connecting and end each line within 2 seconds of its

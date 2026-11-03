@@ -126,14 +126,18 @@ fn record(
         Method::AuditRead { pane, .. } => ("audit.read", *pane, "outside"),
         // A refused call from inside a pane is the caller's own, not one from outside.
         Method::WorkspaceOpen(_) => ("workspace.open", None, own.map_or("outside", |_| "self")),
+        Method::GrantsList => ("grants.list", None, "outside"),
+        Method::GrantsRevoke { .. } => ("grants.revoke", None, "outside"),
     };
     let mut reason = match result {
         Ok(_) => "allowed".to_owned(),
         Err(reason) => reason.clone(),
     };
     // A send's text is never recorded, only its size.
-    if let Method::PaneSend { text, .. } = method {
-        reason += &format!(", {} bytes", text.len());
+    match method {
+        Method::PaneSend { text, .. } => reason += &format!(", {} bytes", text.len()),
+        Method::GrantsRevoke { id } => reason += &format!(", grant {id}"),
+        _ => {}
     }
     let at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -197,5 +201,14 @@ mod tests {
             (scope(None).as_str(), scope(Some(1)).as_str()),
             ("outside", "self")
         );
+    }
+
+    #[test]
+    fn a_revoke_is_recorded_with_its_grant_id() {
+        let revoke = Method::GrantsRevoke { id: 3 };
+        let record = record(&revoke, true, None, &Ok(json!({"revoked": true})));
+        let names = (record.method.as_str(), record.scope.as_str());
+        assert_eq!(names, ("grants.revoke", "outside"));
+        assert_eq!(record.outcome, Outcome::Ok("allowed, grant 3".to_owned()));
     }
 }
