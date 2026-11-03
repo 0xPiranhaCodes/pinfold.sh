@@ -76,6 +76,11 @@ fn pane_action(reactor: &mut Reactor, method: &Method, cross_pane: bool) -> Resu
             None if reactor.engine(*pane).is_none() => Err("no such pane".to_owned()),
             None => Err("the pane has no command output marked with OSC 133".to_owned()),
         },
+        // Another pane takes a line at a time, each checked for protection before it goes.
+        Method::PaneSend { pane, text } if cross_pane => reactor
+            .send_lines(*pane, text, Instant::now())
+            .map(|_| json!({}))
+            .map_err(str::to_owned),
         Method::PaneSend { pane, text } => reactor
             .send(*pane, text, Instant::now())
             .map(|()| json!({}))
