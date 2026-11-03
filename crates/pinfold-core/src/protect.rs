@@ -44,6 +44,8 @@ pub enum Reason {
     /// A command-line pattern, a process that could not be read, or for a split send, a
     /// foreground that did not return to the pane's own program in time.
     Rule,
+    /// Not a protection: a later line of a split send found the pane's input queue full.
+    Busy,
 }
 
 impl Reason {
@@ -57,6 +59,7 @@ impl Reason {
             Self::EchoOff => "the pane is protected: echo-off",
             Self::Marked => "the pane is protected: marked",
             Self::Rule => "the pane is protected: rule",
+            Self::Busy => "the pane's input is full",
         }
     }
 }
@@ -294,8 +297,12 @@ impl Reactor {
             let line: String = send.rest.drain(..line_end(&send.rest)).collect();
             (send.check, send.after) = (now + RECHECK, now + LINE_GAP);
             send.give_up = now + LINE_GAP + SHELL_WAIT;
-            // A full queue drops the rest, as a refused send would.
-            self.write(send.pane, line.as_bytes()) && !send.rest.is_empty()
+            // A full queue drops the rest, which the caller was told would go, so say so.
+            if !self.write(send.pane, line.as_bytes()) {
+                self.protect.refuse(send.pane, Reason::Busy);
+                return false;
+            }
+            !send.rest.is_empty()
         });
         self.protect.pending.append(&mut pending);
     }
@@ -428,6 +435,25 @@ mod tests {
         };
         assert!(turn_until(&mut reactor, got));
         assert!(reactor.take_refused().is_empty());
+    }
+
+    #[test]
+    fn a_later_line_that_finds_the_input_full_is_told_of() {
+        let mut reactor = Reactor::new().unwrap();
+        // Raw, so the kernel queue fills without a line limit, and nothing reads it.
+        let pane = spawn(&mut reactor, "stty raw -echo; echo ready; sleep 30");
+        let ready = |reactor: &mut Reactor| reactor.read(pane, None).unwrap().contains("ready");
+        assert!(turn_until(&mut reactor, ready));
+        assert_eq!(reactor.send_lines(pane, "a\nb\n", Instant::now()), Ok(2));
+        let mut writes = 0;
+        while reactor.write(pane, b"x") {
+            writes += 1;
+            assert!(writes < 10_000_000, "the input never filled");
+        }
+        let done = |reactor: &mut Reactor| !reactor.protect.is_sending(pane);
+        assert!(turn_until(&mut reactor, done));
+        assert_eq!(reactor.take_refused(), vec![(pane, Reason::Busy)]);
+        assert_eq!(Reason::Busy.refusal(), "the pane's input is full");
     }
 
     #[test]
