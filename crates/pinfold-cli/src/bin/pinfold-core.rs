@@ -1,7 +1,8 @@
 //! The `pinfold-core` binary.
 
+use std::collections::BTreeMap;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TrySendError};
@@ -12,11 +13,12 @@ use pinfold_api::Log;
 use pinfold_api::control::{self, Control, Method, Request, Subscriber, Topics, Until, Wait};
 use pinfold_api::spawn::Place;
 use pinfold_cli::audit;
+use pinfold_config::Agent;
 use pinfold_core::family::{self, Family, SplitWay};
 use pinfold_core::io::{Reactor, Waker};
-use pinfold_core::shell;
 use pinfold_core::status::Status;
 use pinfold_core::wait::{Outcome, Waits};
+use pinfold_core::{sandbox, shell};
 use serde_json::{Value, json};
 
 const ROWS: u16 = 24;
@@ -61,8 +63,13 @@ fn listen(waker: Arc<Waker>) -> io::Result<Receiver<Request>> {
 /// pane or not, as a list shows no screen and little a same-user `ps` does not. Reads, sends and
 /// closes reach only the caller's own pane and the panes it spawned, the `self` and `children`
 /// scopes, until other scopes ask the person. Pane contents go to the caller alone, never to a
-/// log.
-fn answer(reactor: &mut Reactor, family: &mut Family, request: &Request) -> Result<Value, String> {
+/// log. An agent launches only by its profile's name in `agents`, the user's config.
+fn answer(
+    reactor: &mut Reactor,
+    family: &mut Family,
+    agents: &BTreeMap<String, Agent>,
+    request: &Request,
+) -> Result<Value, String> {
     let identified = request.caller().is_some();
     let own = request.caller().and_then(|caller| reactor.pane_of(caller));
     match request.method() {
@@ -76,6 +83,7 @@ fn answer(reactor: &mut Reactor, family: &mut Family, request: &Request) -> Resu
                     "pane.send",
                     "pane.wait",
                     "pane.spawn",
+                    "agent.launch",
                     "pane.close",
                     "events.subscribe",
                     "pane.status",
@@ -122,13 +130,41 @@ fn answer(reactor: &mut Reactor, family: &mut Family, request: &Request) -> Resu
         }
         Method::PaneSpawn(spawn) => {
             let own = own.ok_or("pane.spawn needs a caller in a pane")?;
-            let way = match spawn.place {
-                Place::SplitRight => Some(SplitWay::Right),
-                Place::SplitDown => Some(SplitWay::Down),
-                Place::Tab => None,
-            };
             let of = spawn.of.unwrap_or(own);
+            let way = way(spawn.place);
             let pane = family.spawn(reactor, own, of, way, spawn.cwd.as_deref())?;
+            Ok(json!({"pane": pane}))
+        }
+        Method::AgentLaunch(launch) => {
+            let own = own.ok_or("agent.launch needs a caller in a pane")?;
+            let of = family.reach(reactor, Some(own), launch.of.unwrap_or(own))?;
+            // The caller's name is not echoed: the reason goes to the audit log.
+            let agent = agents
+                .get(&launch.profile)
+                .ok_or("no agent profile by that name in the config")?;
+            // Where `of`'s shell last said it was (OSC 7), which any program there can print.
+            let cwd = reactor
+                .list()
+                .find(|pane| pane.id == of)
+                .and_then(|pane| pane.cwd);
+            let cwd = cwd.filter(|cwd| Path::new(cwd).is_dir()).map(str::to_owned);
+            let command = if agent.sandbox {
+                // The sandbox needs a directory of the pane's, never one the core chose.
+                if cwd.is_none() {
+                    return Err("a sandboxed agent needs its pane's directory from OSC 7".into());
+                }
+                // A missing sandbox tool is an error, so the agent never runs unsandboxed.
+                let hidden = pinfold_config::private_dirs();
+                sandbox::command(&agent.command, &hidden)
+                    .map_err(|error| format!("the sandbox will not start: {error}"))?
+            } else {
+                let (program, args) = agent.command.split_first().ok_or("empty command")?;
+                let mut command = Command::new(program);
+                command.args(args);
+                command
+            };
+            let way = way(launch.place);
+            let pane = family.spawn_command(reactor, own, of, way, cwd.as_deref(), command)?;
             Ok(json!({"pane": pane}))
         }
         Method::PaneClose { pane } => {
@@ -151,6 +187,15 @@ fn answer(reactor: &mut Reactor, family: &mut Family, request: &Request) -> Resu
         | Method::PaneWait(_)
         | Method::EventsSubscribe(_)
         | Method::AuditRead { .. } => Err("not here".to_owned()),
+    }
+}
+
+/// A split's way, or none for a tab.
+fn way(place: Place) -> Option<SplitWay> {
+    match place {
+        Place::SplitRight => Some(SplitWay::Right),
+        Place::SplitDown => Some(SplitWay::Down),
+        Place::Tab => None,
     }
 }
 
@@ -315,7 +360,7 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
                     audit::reply(&mut log, &reactor, request, read);
                 }
                 _ => {
-                    let answer = answer(&mut reactor, &mut family, &request);
+                    let answer = answer(&mut reactor, &mut family, &config.agents, &request);
                     audit::reply(&mut log, &reactor, request, answer);
                 }
             }

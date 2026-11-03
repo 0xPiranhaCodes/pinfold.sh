@@ -96,7 +96,12 @@ example does.
 
 An `[agents.<name>]` table describes one agent. `command` is the program and its arguments,
 run with no shell; it must not be empty or start with `-`. `sandbox = true` runs it in the
-system's sandbox. Nothing starts agent profiles yet: launching one is follow-up work.
+system's sandbox. `pinfold agent <name>` in a pane opens a split to its right running the
+profile; `--down` splits below and `--tab` opens a tab. It calls the API's `agent.launch`, which
+takes only a profile's name, never a program ([ADR-0036](adr/0036-launching-agent-profiles.md)).
+The agent starts in the directory the pane's shell last reported with OSC 7, if any. A
+sandboxed profile needs that directory and is refused without it. The core reads profiles once,
+at start.
 
 ```toml
 [agents.claude]

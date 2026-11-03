@@ -22,6 +22,7 @@ Every connection starts with `hello`:
 | `pane.send`        | Version 2, a pane in reach  | [`pane.send.schema.json`](pane.send.schema.json)             |
 | `pane.wait`        | Version 2, a pane in reach  | [`pane.wait.schema.json`](pane.wait.schema.json)             |
 | `pane.spawn`       | Version 2 and its own pane  | [`pane.spawn.schema.json`](pane.spawn.schema.json)           |
+| `agent.launch`     | Version 2 and its own pane  | [`agent.launch.schema.json`](agent.launch.schema.json)       |
 | `pane.close`       | Version 2, a spawned pane   | [`pane.close.schema.json`](pane.close.schema.json)           |
 | `events.subscribe` | Version 2 and a terminal    | [`events.subscribe.schema.json`](events.subscribe.schema.json) |
 | `pane.status`      | Version 2 and its own pane  | [`pane.status.schema.json`](pane.status.schema.json)         |
@@ -30,7 +31,8 @@ Every connection starts with `hello`:
 A pane in reach is the caller's own, the `self` scope, or one it spawned, or one they spawned in
 turn, the `children` scope. Any other pane is refused. `pane.spawn` opens a split or tab running
 the user's shell, never a program the caller names, and a program in that pane is that pane, not
-its parent. Reads return at most 1,000,000 bytes, keeping the newest. A send carries at most 4096
+its parent. `agent.launch` opens one running an `[agents.<name>]` profile from the user's
+config, named by the caller and never described by it. Reads return at most 1,000,000 bytes, keeping the newest. A send carries at most 4096
 bytes, and a pane takes at most 20 sends a second.
 
 A connection takes many requests, answered one at a time in order, each line at most 32 KiB.

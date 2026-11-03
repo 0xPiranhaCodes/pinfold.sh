@@ -15,7 +15,8 @@ use serde_json::{Value, json};
 /// How long a core that was just started gets to answer.
 const START_WAIT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(20);
-const USAGE: &str = "usage: pinfold [ctl list [--json] | ctl send <pane> <text> | \
+const USAGE: &str = "usage: pinfold [agent <name> [--right | --down | --tab] | \
+    ctl list [--json] | ctl send <pane> <text> | \
     ctl log [--json] [-n <count>] [--pane <pane>] | ctl log --verify <file> | mcp]";
 
 /// Connects to a core at `path`. Nothing listening is no error, as that is what starts one.
@@ -84,6 +85,14 @@ fn send(pane: &str, text: &str) -> Result<(), Box<dyn Error>> {
     let pane: usize = pane.parse().map_err(|_| "the pane must be a number")?;
     let params = json!({"pane": pane, "text": text});
     control::ask(&running()?, "pane.send", &params)?;
+    Ok(())
+}
+
+/// `pinfold agent <name> [--right | --down | --tab]`: opens a pane beside the caller's running
+/// the config's `[agents.<name>]` profile. It starts no core, as it needs a caller in a pane.
+fn agent(name: &str, place: &str) -> Result<(), Box<dyn Error>> {
+    let params = json!({"profile": name, "place": place});
+    control::ask(&running()?, "agent.launch", &params)?;
     Ok(())
 }
 
@@ -210,6 +219,9 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         [] => launch(),
+        ["agent", name] | ["agent", name, "--right"] => agent(name, "right"),
+        ["agent", name, "--down"] => agent(name, "down"),
+        ["agent", name, "--tab"] => agent(name, "tab"),
         ["ctl", "list"] => list(false),
         ["ctl", "list", "--json"] => list(true),
         ["ctl", "send", pane, text] => send(pane, text),

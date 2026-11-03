@@ -7,6 +7,7 @@
 //! where the person left it.
 
 use std::path::Path;
+use std::process::Command;
 
 pub use pinfold_proto::link::SplitWay;
 
@@ -77,8 +78,26 @@ impl Family {
         way: Option<SplitWay>,
         cwd: Option<&str>,
     ) -> Result<usize, String> {
+        let shell = (reactor.shell)();
+        self.spawn_command(reactor, caller, of, way, cwd, shell)
+    }
+
+    /// As [`Family::spawn`], but the pane runs `command`, which must come from the user, such as
+    /// an agent profile, and never from the caller.
+    ///
+    /// # Errors
+    ///
+    /// As [`Family::spawn`].
+    pub fn spawn_command(
+        &mut self,
+        reactor: &mut Reactor,
+        caller: usize,
+        of: usize,
+        way: Option<SplitWay>,
+        cwd: Option<&str>,
+        mut command: Command,
+    ) -> Result<usize, String> {
         self.reach(reactor, Some(caller), of)?;
-        let mut command = (reactor.shell)();
         if let Some(cwd) = cwd.map(Path::new) {
             if !cwd.is_absolute() || !cwd.is_dir() {
                 return Err("cwd must be an existing directory's absolute path".to_owned());
