@@ -32,7 +32,7 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
@@ -76,8 +76,11 @@ const IDLE: Duration = Duration::from_secs(60);
 /// Most requests handed to the reactor and not yet taken back by this thread, each holding a
 /// ticket. The answer channel holds this many, so the reactor never finds it full.
 const ANSWERS: usize = 4 * MAX_PEERS;
-/// Most events queued for this thread. A subscriber whose event will not fit is closed.
-const EVENTS: usize = 256;
+/// Most events one subscriber may have queued for this thread. One whose next event will not
+/// fit is closed, and its backlog never costs another subscriber an event.
+const EVENTS_EACH: usize = 64;
+/// Most events queued for this thread: every peer at its own limit, so the channel never fills.
+const EVENTS: usize = MAX_PEERS * EVENTS_EACH;
 /// How long the core waits for a window to say hello. Past it a launcher reports the window as
 /// not ready, so a hung one is heard of, and the window may still open.
 pub const OPEN_WAIT: Duration = Duration::from_secs(2);
@@ -347,7 +350,7 @@ impl Control {
         let mut poll = Poll::new()?;
         let waker = Arc::new(Waker::new(poll.registry(), WAKE)?);
         let (answers, answered) = mpsc::sync_channel(ANSWERS);
-        let (events_to, evented) = mpsc::sync_channel(EVENTS);
+        let (events_to, evented) = mpsc::sync_channel::<Event>(EVENTS);
         let tickets = Arc::new(());
         self.listener.set_nonblocking(true)?;
         let listener = self.listener.as_raw_fd();
@@ -387,9 +390,10 @@ impl Control {
                 }
                 // A subscription is answered before its events, so answers are taken before
                 // each event to keep that order.
-                let Ok((peer, params)) = evented.try_recv() else {
+                let Ok((peer, params, queued)) = evented.try_recv() else {
                     break;
                 };
+                queued.fetch_sub(1, Ordering::Relaxed);
                 let event = json!({"jsonrpc": "2.0", "method": "event", "params": params});
                 if let Some(peer) = at(&mut peers, peer) {
                     peer.queue(&event);
@@ -525,6 +529,7 @@ impl Request {
             peer: self.peer,
             alive: self.alive.clone(),
             events: self.events.clone(),
+            queued: Arc::default(),
             waker: Arc::clone(&self.waker),
         }
     }
@@ -550,21 +555,29 @@ pub struct Subscriber {
     peer: (usize, u64),
     alive: Weak<AtomicBool>,
     events: SyncSender<Event>,
+    /// Its events sent and not yet taken by the API thread, at most [`EVENTS_EACH`].
+    queued: Arc<AtomicUsize>,
     waker: Arc<Waker>,
 }
 
 impl Subscriber {
     /// Sends `{"method": "event", "params": params}`, which must carry no pane contents. It never
-    /// blocks: if the API thread's queue is full, the connection missed an event and is closed.
+    /// blocks: past [`EVENTS_EACH`] queued, the connection missed an event and is closed.
     pub fn send(&self, params: Value) {
-        match self.events.try_send((self.peer, params)) {
-            Ok(()) => {}
-            Err(TrySendError::Full(_)) => {
+        let room = self.queued.fetch_add(1, Ordering::Relaxed) < EVENTS_EACH;
+        let sent = room.then(|| {
+            self.events
+                .try_send((self.peer, params, Arc::clone(&self.queued)))
+        });
+        match sent {
+            Some(Ok(())) => {}
+            Some(Err(TrySendError::Disconnected(_))) => return,
+            None | Some(Err(TrySendError::Full(_))) => {
+                self.queued.fetch_sub(1, Ordering::Relaxed);
                 if let Some(missed) = self.alive.upgrade() {
                     missed.store(true, Ordering::Relaxed);
                 }
             }
-            Err(TrySendError::Disconnected(_)) => return,
         }
         let _ = self.waker.wake();
     }
@@ -592,7 +605,8 @@ fn gone(alive: &Weak<AtomicBool>) -> bool {
 /// An answer for the peer in a slot, of a generation, with its request's ticket.
 type Answer = ((usize, u64), Result<Value, String>, Arc<()>);
 /// An event for the peer in a slot, of a generation.
-type Event = ((usize, u64), Value);
+/// An event for the peer in a slot, of a generation, with its subscriber's count of queued events.
+type Event = ((usize, u64), Value, Arc<AtomicUsize>);
 
 /// Refuses a socket whose other end is not `user`.
 fn check_peer(socket: BorrowedFd<'_>, user: u32) -> Result<(), Error> {
@@ -1683,7 +1697,7 @@ mod tests {
             request.answer(Ok(json!({})));
             if subscribed {
                 // All sent before the API thread takes any, so the last one does not fit.
-                for _ in 0..=EVENTS {
+                for _ in 0..=EVENTS_EACH {
                     subscriber.send(json!({"event": "pane.status"}));
                 }
                 gone.send(subscriber).unwrap();
@@ -1696,7 +1710,7 @@ mod tests {
         let (lines, after) = until_closed(&stream);
         // What was queued before the missed event may still be written.
         assert!(
-            lines.len() <= EVENTS + 2 && after < TIMEOUT,
+            lines.len() <= EVENTS_EACH + 2 && after < TIMEOUT,
             "{} {after:?}",
             lines.len()
         );
