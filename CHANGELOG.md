@@ -23,6 +23,7 @@ Entries are generated from Conventional Commits with git-cliff
 ### Added
 
 - `hello` version 2 returns the version, the methods a caller may call and its pane id. `pane.list` lists the session's panes (id, title, cwd, command, status, and nothing from a screen) for any caller with a terminal, with a JSON Schema in [docs/api](docs/api/README.md). `pinfold ctl list` prints them, as JSON with `--json`. Version 1 still opens windows and cannot list panes (ADR-0032 step 3).
+- A per-pane status state machine combines OSC 133 marks with authoritative API reports and rate-limited alerts.
 - The control socket identifies each caller at accept from its controlling terminal and session, which the core maps to a pane, and caps peers at 4 per identity, with all unidentified callers sharing one cap (ADR-0032 step 2).
 - A spike that answers the macOS Dock menu by adding `applicationDockMenu:` to winit's app delegate, in `docs/spikes/m3-dock-menu`.
 - Right-click in a pane opens a menu drawn in cells: Copy, Paste, Select All, Find, Split Right, Split Down, New Tab, Zoom and Close Pane. Arrows, Enter and Esc work it as well as the mouse. When a program has turned on mouse reporting, the click goes to it, and `Shift`+right-click opens the menu (ADR-0033).
