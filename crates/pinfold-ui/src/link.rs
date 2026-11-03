@@ -46,6 +46,8 @@ const READ_BUDGET: usize = 64 * 1024;
 const MAX_QUEUE: usize = 2 * MAX_REQUEST;
 /// Queue capacity an empty queue keeps, so one large paste does not cost memory for good.
 const KEPT_QUEUE: usize = 4 * 1024;
+/// The bytes of the longest request, with its length.
+const LONGEST: usize = size_of::<u32>() + MAX_REQUEST;
 
 const LINK: Token = Token(0);
 const WAKE: Token = Token(1);
@@ -411,6 +413,14 @@ impl Link {
         let queued = self.stream.is_some() && self.state.queue(request);
         self.flush();
         queued
+    }
+
+    /// Returns whether [`Link::send`] has room for any request, however long. While it has not,
+    /// a caller keeps its requests in order and asks again after [`Link::turn`], which returns
+    /// when the socket can take more.
+    #[must_use]
+    pub fn has_room(&self) -> bool {
+        self.state.out.len() + LONGEST <= MAX_QUEUE
     }
 
     /// Returns a handle that makes a blocked [`Link::turn`] return, from any thread.

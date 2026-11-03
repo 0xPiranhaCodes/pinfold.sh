@@ -2,7 +2,7 @@
 //!
 //! That row is outside pane text, so program output cannot fake it (T7 in the threat model).
 
-use pinfold_proto::link::MAX_INPUT;
+use pinfold_proto::link::MAX_PASTE;
 use pinfold_proto::{Cell, Frame};
 
 const GROUND: u32 = 0x0012_151a;
@@ -21,7 +21,7 @@ pub enum Prompt {
         lines: usize,
         risk: Option<&'static str>,
     },
-    /// Text that cannot fit in the input queue.
+    /// Text that cannot fit in the input queue with its brackets.
     TooLarge,
     /// A pane to close, which ends its program.
     Close {
@@ -64,7 +64,7 @@ fn risk(text: &str) -> Option<&'static str> {
 // This asks for every program. OSC 133 cannot narrow that: marks are program output, so a
 // fake "running" over a shell at its prompt would let these lines run unasked (T4, T7).
 pub fn check(text: String) -> Result<String, Prompt> {
-    if text.len() > MAX_INPUT {
+    if text.len() > MAX_PASTE {
         return Err(Prompt::TooLarge);
     }
     if !text.contains(['\n', '\r']) {
@@ -177,7 +177,9 @@ mod tests {
 
     #[test]
     fn a_paste_that_cannot_fit_is_refused() {
-        assert_eq!(check("x".repeat(MAX_INPUT + 1)), Err(Prompt::TooLarge));
+        let longest = "x".repeat(MAX_PASTE);
+        assert_eq!(check(longest.clone()), Ok(longest));
+        assert_eq!(check("x".repeat(MAX_PASTE + 1)), Err(Prompt::TooLarge));
     }
 
     fn drawn(prompt: &Prompt, columns: u16) -> (Frame, String) {

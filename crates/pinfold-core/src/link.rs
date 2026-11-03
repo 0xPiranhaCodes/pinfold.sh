@@ -153,11 +153,13 @@ impl Session {
         match request {
             Request::Hello { .. } => self.greeted = true,
             Request::Input { pane, bytes } => {
-                reactor.write(pane as usize, bytes);
+                let taken = reactor.write(pane as usize, bytes);
+                self.note_input(reactor, pane, taken);
             }
             // Never `write`: this is the call that sanitizes a paste (T7).
             Request::Paste { pane, text } => {
-                reactor.paste(pane as usize, text);
+                let taken = reactor.paste(pane as usize, text);
+                self.note_input(reactor, pane, taken);
             }
             Request::Scroll { pane, lines } => reactor.scroll(pane as usize, lines),
             Request::Reveal { pane, row } => reveal(reactor, pane as usize, row),
@@ -193,6 +195,13 @@ impl Session {
             command => self.refused = reactor.command(command).err().or(self.refused),
         }
         Ok(())
+    }
+
+    /// Tells the window of input a pane had no room for. A pane that has closed is no news.
+    fn note_input(&mut self, reactor: &Reactor, pane: u32, taken: bool) {
+        if !taken && reactor.engine(pane as usize).is_some() {
+            self.refused = Some(Refusal::Input);
+        }
     }
 
     /// Sends what finished since the last pass: searches, and a step of any copy.
@@ -648,7 +657,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
-    use pinfold_proto::link::{MAX_MESSAGE, MAX_PANES, MAX_TABS, Rect, Side, SplitWay};
+    use pinfold_proto::link::{MAX_INPUT, MAX_MESSAGE, MAX_PANES, MAX_TABS, Rect, Side, SplitWay};
     use proptest::prelude::*;
 
     use super::*;
@@ -1309,7 +1318,7 @@ mod tests {
 
     #[test]
     fn a_second_open_starts_nothing_until_the_first_has_gone() {
-        let hello = r"printf '\003\000\000\000\000\003\000' >&3; exec cat <&3 >/dev/null";
+        let hello = r"printf '\003\000\000\000\000\004\000' >&3; exec cat <&3 >/dev/null";
         let (binary, log) = window_script("second-open", hello);
         let mut reactor = Reactor::new().unwrap();
         assert_eq!(spawn_window(&mut reactor, &binary), WindowOpen::Started);
@@ -1709,6 +1718,33 @@ mod tests {
         assert_eq!(reactor.pane_count(), MAX_PANES);
         assert!(reactor.has_window());
         assert_pty_lives(&mut reactor, peer.tabs[1] as usize);
+    }
+
+    #[test]
+    fn input_a_pane_has_no_room_for_is_refused_and_a_closed_pane_says_nothing() {
+        let (mut reactor, mut peer, first) = session(24, 80);
+        reactor.shell = || shell("stty raw -echo; echo ready; sleep 30");
+        peer.send(Request::Paste {
+            pane: first + 1,
+            text: "x",
+        });
+        peer.send(Request::NewTab);
+        serve(&mut reactor, &mut peer, |_, p| p.tabs.len() == 2);
+        assert_eq!(peer.refused, []);
+
+        let stuck = peer.tabs[1];
+        let pane = stuck as usize;
+        assert!(turn_until(&mut reactor, |r| on_screen(r, pane, "ready")));
+        assert!(reactor.write(pane, &vec![b'x'; MAX_INPUT]));
+        while reactor.write(pane, b"x") {}
+        peer.send(Request::Paste {
+            pane: stuck,
+            text: "y",
+        });
+        serve(&mut reactor, &mut peer, |_, p| {
+            p.refused.contains(&Refusal::Input)
+        });
+        assert!(reactor.has_window());
     }
 
     #[test]
