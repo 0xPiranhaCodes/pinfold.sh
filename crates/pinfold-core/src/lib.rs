@@ -1,9 +1,11 @@
 //! Core daemon library: PTY, VT engine, mux, sessions and status engine.
 
+pub mod family;
 pub mod io;
 pub mod link;
 pub mod marks;
 pub mod paste;
+pub mod protect;
 mod reflow;
 pub mod scrollback;
 pub mod search;

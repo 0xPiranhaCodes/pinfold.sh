@@ -19,6 +19,7 @@ use pinfold_sys::pty::Pty;
 
 use crate::link::{Host, LINK};
 use crate::marks::ShellMarks;
+use crate::protect::Protect;
 use crate::search::{CopyStep, Copying, Direction, Position, Search, SearchStep, Selection};
 use crate::status::{self, Status, Tracker};
 use crate::vt::{AlacrittyEngine, VtEngine};
@@ -184,6 +185,7 @@ pub struct Reactor {
     pub(crate) shell: fn() -> Command,
     buffer: Vec<u8>,
     pub(crate) host: Host,
+    pub(crate) protect: Protect,
 }
 
 impl Reactor {
@@ -207,13 +209,14 @@ impl Reactor {
             shell: shell::command,
             buffer: vec![0; READ_BUDGET],
             host: Host::default(),
+            protect: Protect::default(),
         })
     }
 
     /// Starts `command` on a new PTY and returns its pane number. The pane is in no tab, so it
     /// stays when its program exits, for reading. [`Reactor::open_tab`] adds one to the session.
     ///
-    /// The reactor's thread makes every spawn, which [`Pty::spawn`] requires.
+    /// The reactor's thread makes every spawn, which `pinfold_sys::socket::pair` requires.
     ///
     /// # Errors
     ///
@@ -269,6 +272,7 @@ impl Reactor {
             .panes
             .iter()
             .filter_map(|pane| pane.engine.sync_deadline())
+            .chain(self.protect.deadline())
             .min()
             .map(|deadline| deadline.saturating_duration_since(now));
         let timeout = if unfinished {
@@ -288,6 +292,7 @@ impl Reactor {
                 pane.readable |= !pane.closed && (event.is_readable() || event.is_read_closed());
             }
         }
+        self.send_due(Instant::now());
         for pane in &mut self.panes {
             if pane.readable {
                 let mut master = pane.pty.master();
@@ -369,7 +374,8 @@ impl Reactor {
 
     /// Types `text` into a pane's program as it is, through the queue [`Reactor::write`] fills.
     /// Refused with a reason past [`SENDS_PER_SECOND`] calls in a second, which count refusals
-    /// too, or if the queue has no room for all of it.
+    /// too, while the pane is protected or still taking a split send, or if the queue has no
+    /// room for all of it.
     // shortcut: the second is per pane, which is per caller while the API has only the `self`
     // scope. Key it by caller when a caller can send to other panes.
     pub fn send(&mut self, pane: usize, text: &str, now: Instant) -> Result<(), &'static str> {
@@ -384,6 +390,12 @@ impl Reactor {
             return Err("rate limited: at most 20 sends a second");
         }
         *count += 1;
+        if let Some(reason) = self.protection(pane) {
+            return Err(reason.refusal());
+        }
+        if self.protect.is_sending(pane) {
+            return Err("the pane is still taking an earlier send");
+        }
         if self.write(pane, text.as_bytes()) {
             Ok(())
         } else {
@@ -576,6 +588,11 @@ impl Reactor {
             output: pane.output,
             marks,
         })
+    }
+
+    /// A pane's PTY, for [`Reactor::protection`].
+    pub(crate) fn pty(&self, pane: usize) -> Option<&Pty> {
+        Some(&self.pane(pane)?.pty)
     }
 
     fn pane(&self, number: usize) -> Option<&Pane> {
