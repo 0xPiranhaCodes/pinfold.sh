@@ -16,7 +16,7 @@ use pinfold_proto::link::{MAX_PANES, MAX_TABS, Rect, Refusal, Request, Side, Spl
 use crate::io::Reactor;
 
 /// The size of a pane opened before any window has said how much room it has.
-const FIRST_SIZE: Size = Size { cols: 80, rows: 24 };
+pub(crate) const FIRST_SIZE: Size = Size { cols: 80, rows: 24 };
 
 fn direction(side: Side) -> Direction {
     match side {
