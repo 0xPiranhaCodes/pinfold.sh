@@ -12,7 +12,7 @@
 //!
 //! let directory = control::runtime_dir();
 //! let core = Control::bind(&directory)?;
-//! std::thread::spawn(move || core.serve(|| Ok(())));
+//! std::thread::spawn(move || core.serve(|opening| opening.answer(Ok(()))));
 //!
 //! let mut launcher = UnixStream::connect(control::socket_path(&directory))?;
 //! launcher.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"hello\",\"params\":{\"version\":1}}\n")?;
@@ -23,12 +23,17 @@
 
 use std::fs::{self, DirBuilder, File, OpenOptions, TryLockError};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::os::fd::{AsFd, BorrowedFd};
+use std::mem;
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::mpsc::{self, Sender};
 use std::time::{Duration, Instant};
 
+use mio::unix::SourceFd;
+use mio::{Events, Interest, Poll, Token, Waker};
 use serde_json::{Value, json};
 
 /// The version `hello` must name.
@@ -38,12 +43,15 @@ pub const STACK: usize = 256 * 1024;
 
 /// The session's name in its file names. There is one session until M2 adds attach.
 const SESSION: &str = "default";
+/// Most peers served at once (ADR-0032). Past it a new peer is closed unread.
+pub const MAX_PEERS: usize = 16;
+const LISTENER: Token = Token(usize::MAX);
+const WAKE: Token = Token(usize::MAX - 1);
 /// Longest request, far above what `hello` and `window.open` need.
 const MAX_LINE: usize = 4096;
 /// Most bytes one connection may send: both requests, so it cannot stay and keep talking.
 const MAX_CONNECTION: u64 = 2 * MAX_LINE as u64;
-/// Longest stay of one peer, however it spaces its bytes, as this thread serves them one at a
-/// time.
+/// Longest a peer may spend sending, however it spaces its bytes, so it cannot hold a slot.
 const TIMEOUT: Duration = Duration::from_secs(2);
 /// How long the core waits for a window to say hello. Past it a launcher reports the window as
 /// not ready, so a hung one is heard of, and the window may still open.
@@ -220,15 +228,124 @@ impl Control {
         })
     }
 
-    /// Answers peers one at a time, for as long as the process lives. `open` asks for a window
-    /// and returns once one is ready, or a short reason for the caller, which must carry no
-    /// pane contents, tokens or environment. A peer that fails costs only its own connection.
-    pub fn serve(&self, mut open: impl FnMut() -> Result<(), String>) {
-        for stream in self.listener.incoming().flatten() {
-            let _ = serve_peer(&stream, &mut open);
+    /// Answers up to [`MAX_PEERS`] peers at once on this thread, for as long as the process
+    /// lives (ADR-0032). `open` is handed each request for a window and must not block: the
+    /// thread that can open one answers the [`Opening`] later. A peer that fails costs only its
+    /// own connection.
+    ///
+    /// # Errors
+    ///
+    /// Only if the system refuses to set up the poll; after that it never returns.
+    pub fn serve(&self, mut open: impl FnMut(Opening)) -> io::Result<()> {
+        let mut poll = Poll::new()?;
+        let waker = Arc::new(Waker::new(poll.registry(), WAKE)?);
+        let (answers, answered) = mpsc::channel();
+        self.listener.set_nonblocking(true)?;
+        let listener = self.listener.as_raw_fd();
+        poll.registry()
+            .register(&mut SourceFd(&listener), LISTENER, Interest::READABLE)?;
+        let mut peers: Vec<Option<Peer>> = (0..MAX_PEERS).map(|_| None).collect();
+        let mut generation = 0;
+        // The first window of a core starts with nothing warm.
+        let mut wait = FIRST_OPEN_WAIT;
+        let mut events = Events::with_capacity(MAX_PEERS + 2);
+        loop {
+            let now = Instant::now();
+            let timeout = peers.iter().flatten().map(Peer::deadline).min();
+            match poll.poll(
+                &mut events,
+                timeout.map(|at| at.saturating_duration_since(now)),
+            ) {
+                Err(error) if error.kind() != io::ErrorKind::Interrupted => return Err(error),
+                _ => {}
+            }
+            for event in &events {
+                match event.token() {
+                    LISTENER => self.accept(&poll, &mut peers, &mut generation),
+                    WAKE => {}
+                    Token(slot) => {
+                        if let Some(peer) = peers.get_mut(slot).and_then(Option::as_mut) {
+                            peer.read();
+                        }
+                    }
+                }
+            }
+            while let Ok(((slot, generation), result)) = answered.try_recv() {
+                let peer = peers.get_mut(slot).and_then(Option::as_mut);
+                if let Some(peer) = peer.filter(|peer: &&mut Peer| peer.generation == generation) {
+                    peer.opened(result);
+                }
+            }
+            let now = Instant::now();
+            for (slot, entry) in peers.iter_mut().enumerate() {
+                let Some(peer) = entry else { continue };
+                peer.expire(now);
+                let generation = peer.generation;
+                peer.step(now, &mut || {
+                    open(Opening {
+                        peer: (slot, generation),
+                        answers: answers.clone(),
+                        waker: Arc::clone(&waker),
+                    });
+                    mem::replace(&mut wait, OPEN_WAIT)
+                });
+                peer.flush();
+                if peer.done(now) {
+                    let fd = peer.stream.as_raw_fd();
+                    let _ = poll.registry().deregister(&mut SourceFd(&fd));
+                    *entry = None;
+                }
+            }
+        }
+    }
+
+    /// Takes every waiting peer of this user while a slot is free, and closes the rest unread.
+    fn accept(&self, poll: &Poll, peers: &mut [Option<Peer>], generation: &mut u64) {
+        while let Ok((stream, _)) = self.listener.accept() {
+            let Some(slot) = peers.iter().position(Option::is_none) else {
+                continue;
+            };
+            let ours = pinfold_sys::peer_uid(stream.as_fd())
+                .is_ok_and(|uid| uid == pinfold_sys::effective_uid());
+            if !ours || stream.set_nonblocking(true).is_err() {
+                continue;
+            }
+            let interest = Interest::READABLE | Interest::WRITABLE;
+            let fd = stream.as_raw_fd();
+            if poll
+                .registry()
+                .register(&mut SourceFd(&fd), Token(slot), interest)
+                .is_ok()
+            {
+                *generation += 1;
+                peers[slot] = Some(Peer::new(stream, *generation));
+            }
         }
     }
 }
+
+/// A request for a window, handed to the thread that can open one. The caller hears
+/// [`Opening::answer`], or that the window is not ready once [`OPEN_WAIT`] has passed.
+#[derive(Debug)]
+pub struct Opening {
+    /// The peer's slot and generation, so an answer never reaches a later peer in that slot.
+    peer: (usize, u64),
+    answers: Sender<Answer>,
+    waker: Arc<Waker>,
+}
+
+impl Opening {
+    /// Answers the caller: `Ok` once a window is ready, or a short reason, which must carry no
+    /// pane contents, tokens or environment. A caller that has gone hears nothing.
+    pub fn answer(self, result: Result<(), String>) {
+        if self.answers.send((self.peer, result)).is_ok() {
+            let _ = self.waker.wake();
+        }
+    }
+}
+
+/// An answer for the peer in a slot, of a generation.
+type Answer = ((usize, u64), Result<(), String>);
 
 /// Refuses a socket whose other end is not `user`.
 fn check_peer(socket: BorrowedFd<'_>, user: u32) -> Result<(), Error> {
@@ -277,67 +394,168 @@ pub fn open_window(stream: &UnixStream) -> Result<(), Error> {
     Ok(())
 }
 
-/// A connection that fails once a moment has passed, however often bytes arrive before it.
-struct Deadline<'a> {
-    stream: &'a UnixStream,
+/// One connection on the API thread.
+struct Peer {
+    stream: UnixStream,
+    generation: u64,
+    /// Bytes read and not yet taken as lines.
+    input: Vec<u8>,
+    /// Bytes read in all, at most [`MAX_CONNECTION`].
+    taken: u64,
+    /// The peer sent all it may: it ended, failed, or reached the limit.
+    ended: bool,
+    greeted: bool,
+    output: Vec<u8>,
+    /// The connection ends once its output is written.
+    closing: bool,
+    /// When reading stops, however the peer spaces its bytes.
     until: Instant,
+    /// The id of the request waiting for a window, and when it stops waiting.
+    opening: Option<(Value, Instant)>,
 }
 
-impl Read for Deadline<'_> {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        let left = self.until.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Err(io::ErrorKind::TimedOut.into());
+impl Peer {
+    fn new(stream: UnixStream, generation: u64) -> Self {
+        Self {
+            stream,
+            generation,
+            input: Vec::new(),
+            taken: 0,
+            ended: false,
+            greeted: false,
+            output: Vec::new(),
+            closing: false,
+            until: Instant::now() + TIMEOUT,
+            opening: None,
         }
-        self.stream.set_read_timeout(Some(left))?;
-        (&mut &*self.stream).read(buffer)
     }
-}
 
-/// Takes one connection from a peer of this user, until it fails or ends.
-fn serve_peer(
-    stream: &UnixStream,
-    open: &mut impl FnMut() -> Result<(), String>,
-) -> io::Result<()> {
-    if pinfold_sys::peer_uid(stream.as_fd())? != pinfold_sys::effective_uid() {
-        return Ok(());
+    /// When the poll must wake for this peer.
+    fn deadline(&self) -> Instant {
+        self.opening.as_ref().map_or(self.until, |(_, at)| *at)
     }
-    stream.set_write_timeout(Some(TIMEOUT))?;
-    let until = Instant::now() + TIMEOUT;
-    let mut lines = BufReader::new(Deadline { stream, until }.take(MAX_CONNECTION));
-    let mut greeted = false;
-    let mut line = Vec::new();
-    loop {
-        line.clear();
-        (&mut lines)
-            .take(MAX_LINE as u64)
-            .read_until(b'\n', &mut line)?;
-        if line.pop() != Some(b'\n') {
-            return Ok(());
+
+    /// Reads all the peer has sent, up to its limit.
+    fn read(&mut self) {
+        let mut buffer = [0; MAX_LINE];
+        while !self.ended {
+            let room = usize::try_from(MAX_CONNECTION - self.taken).unwrap_or(0);
+            if room == 0 {
+                self.ended = true;
+                return;
+            }
+            let room = room.min(buffer.len());
+            match (&mut &self.stream).read(&mut buffer[..room]) {
+                Ok(0) => self.ended = true,
+                Ok(read) => {
+                    self.input.extend_from_slice(&buffer[..read]);
+                    self.taken += read as u64;
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return,
+                Err(_) => self.ended = true,
+            }
         }
-        let (reply, go_on) = answer(&line, &mut greeted, open);
+    }
+
+    /// Answers each whole line, in order, until one waits for a window. `open` asks for a window
+    /// and returns how long the caller waits for it.
+    fn step(&mut self, now: Instant, open: &mut impl FnMut() -> Duration) {
+        while self.opening.is_none() && !self.closing {
+            let line = self
+                .input
+                .iter()
+                .take(MAX_LINE)
+                .position(|&byte| byte == b'\n');
+            let Some(end) = line else {
+                // A line past the limit, or a last one with no end.
+                self.closing = self.input.len() >= MAX_LINE || self.ended || now >= self.until;
+                return;
+            };
+            let line: Vec<u8> = self.input.drain(..=end).take(end).collect();
+            match answer(&line, &mut self.greeted) {
+                Step::Reply(reply, go_on) => {
+                    self.queue(&reply);
+                    self.closing = !go_on;
+                }
+                Step::Open(id) => self.opening = Some((id, now + open())),
+            }
+        }
+    }
+
+    /// Hands the waiting request its answer.
+    fn opened(&mut self, result: Result<(), String>) {
+        let Some((id, _)) = self.opening.take() else {
+            return;
+        };
+        let (reply, go_on) = match result {
+            Ok(()) => (done(&id, &json!({})), true),
+            Err(reason) => refuse(&id, NO_WINDOW, &format!("no window can open: {reason}")),
+        };
+        self.queue(&reply);
+        self.closing = !go_on;
+    }
+
+    /// Tells a request that waited too long that its window is not ready.
+    fn expire(&mut self, now: Instant) {
+        if self.opening.as_ref().is_some_and(|(_, at)| now >= *at) {
+            self.opened(Err("the window is not ready and may still open".to_owned()));
+        }
+    }
+
+    fn queue(&mut self, reply: &Value) {
         if !reply.is_null() {
-            let mut bytes = reply.to_string().into_bytes();
-            bytes.push(b'\n');
-            (&mut &*stream).write_all(&bytes)?;
+            self.output.extend(reply.to_string().bytes());
+            self.output.push(b'\n');
         }
-        if !go_on {
-            return Ok(());
+    }
+
+    /// Writes what the socket will take now.
+    fn flush(&mut self) {
+        while !self.output.is_empty() {
+            match (&mut &self.stream).write(&self.output) {
+                Ok(written) => drop(self.output.drain(..written)),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => return,
+                Err(_) => {
+                    self.output.clear();
+                    self.closing = true;
+                }
+            }
         }
+    }
+
+    /// Whether the connection is over: it said its last, or its time is up while it waits for
+    /// nothing.
+    fn done(&self, now: Instant) -> bool {
+        self.opening.is_none() && ((self.closing && self.output.is_empty()) || now >= self.until)
     }
 }
 
-/// Returns the reply to one request, and whether the connection goes on. A null reply means a
-/// notification: JSON-RPC gives it no answer, and no method here is one, so it does nothing.
-fn answer(
-    line: &[u8],
-    greeted: &mut bool,
-    open: &mut impl FnMut() -> Result<(), String>,
-) -> (Value, bool) {
+/// What one request leads to.
+#[derive(Debug, PartialEq)]
+enum Step {
+    /// This reply, null for none, and whether the connection goes on.
+    Reply(Value, bool),
+    /// A window is wanted for the request with this id.
+    Open(Value),
+}
+
+fn done(id: &Value, result: &Value) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "result": result})
+}
+
+fn refuse(id: &Value, code: i64, message: &str) -> (Value, bool) {
+    let error = json!({"code": code, "message": message});
+    (json!({"jsonrpc": "2.0", "id": id, "error": error}), false)
+}
+
+/// Returns what one request leads to. A null reply means a notification: JSON-RPC gives it no
+/// answer, and no method here is one, so it does nothing.
+fn answer(line: &[u8], greeted: &mut bool) -> Step {
     let refuse = |id: Option<&Value>, code, message: &str| {
-        let id = id.cloned().unwrap_or(Value::Null);
-        let error = json!({"code": code, "message": message});
-        (json!({"jsonrpc": "2.0", "id": id, "error": error}), false)
+        let (reply, go_on) = refuse(id.unwrap_or(&Value::Null), code, message);
+        Step::Reply(reply, go_on)
     };
     let Ok(request) = serde_json::from_slice::<Value>(line) else {
         return refuse(None, PARSE_ERROR, "not JSON");
@@ -351,26 +569,23 @@ fn answer(
     {
         return refuse(None, NOT_A_REQUEST, "not a JSON-RPC 2.0 request");
     }
-    if id.is_none() {
-        return (Value::Null, false);
-    }
-    let done = |result: Value| (json!({"jsonrpc": "2.0", "id": id, "result": result}), true);
+    let Some(id) = id else {
+        return Step::Reply(Value::Null, false);
+    };
     match request.get("method").and_then(Value::as_str) {
-        Some("hello") if *greeted => refuse(id, NO_METHOD, "hello comes once"),
+        Some("hello") if *greeted => refuse(Some(id), NO_METHOD, "hello comes once"),
         Some("hello") => {
             let version = request.pointer("/params/version").and_then(Value::as_u64);
             if version != Some(VERSION) {
-                return refuse(id, BAD_VERSION, "unknown version");
+                return refuse(Some(id), BAD_VERSION, "unknown version");
             }
             *greeted = true;
-            done(json!({"version": VERSION, "capabilities": ["window.open"]}))
+            let result = json!({"version": VERSION, "capabilities": ["window.open"]});
+            Step::Reply(done(id, &result), true)
         }
-        _ if !*greeted => refuse(id, NO_HELLO, "hello comes first"),
-        Some("window.open") => match open() {
-            Ok(()) => done(json!({})),
-            Err(reason) => refuse(id, NO_WINDOW, &format!("no window can open: {reason}")),
-        },
-        _ => refuse(id, NO_METHOD, "unknown method"),
+        _ if !*greeted => refuse(Some(id), NO_HELLO, "hello comes first"),
+        Some("window.open") => Step::Open(id.clone()),
+        _ => refuse(Some(id), NO_METHOD, "unknown method"),
     }
 }
 
@@ -402,18 +617,30 @@ mod tests {
         reply.pointer("/error/code").and_then(Value::as_i64)
     }
 
+    /// The reply to a request that wants no window.
+    fn replied(line: &[u8], greeted: &mut bool) -> (Value, bool) {
+        match answer(line, greeted) {
+            Step::Reply(reply, go_on) => (reply, go_on),
+            Step::Open(id) => panic!("{id} asked for a window"),
+        }
+    }
+
+    /// Answers every window request at once with `result`.
+    fn serving(result: Result<(), String>) -> impl FnMut(Opening) {
+        move |opening| opening.answer(result.clone())
+    }
+
     #[test]
     fn hello_comes_first_and_once() {
-        let mut open = || Ok(());
         let mut greeted = false;
-        let (reply, go_on) = answer(OPEN, &mut greeted, &mut open);
+        let (reply, go_on) = replied(OPEN, &mut greeted);
         assert_eq!((code(&reply), go_on), (Some(NO_HELLO), false));
-        let (reply, go_on) = answer(HELLO, &mut greeted, &mut open);
+        let (reply, go_on) = replied(HELLO, &mut greeted);
         assert_eq!(reply["result"]["version"], json!(VERSION));
         assert_eq!(reply["result"]["capabilities"], json!(["window.open"]));
         assert_eq!(reply["id"], json!(1));
         assert!(go_on);
-        let (reply, go_on) = answer(HELLO, &mut greeted, &mut open);
+        let (reply, go_on) = replied(HELLO, &mut greeted);
         assert_eq!((code(&reply), go_on), (Some(NO_METHOD), false));
     }
 
@@ -421,7 +648,7 @@ mod tests {
     fn a_wrong_version_is_refused() {
         let line = br#"{"jsonrpc":"2.0","id":1,"method":"hello","params":{"version":2}}"#;
         let mut greeted = false;
-        let (reply, go_on) = answer(line, &mut greeted, &mut || Ok(()));
+        let (reply, go_on) = replied(line, &mut greeted);
         assert_eq!(
             (code(&reply), go_on, greeted),
             (Some(BAD_VERSION), false, false)
@@ -433,61 +660,40 @@ mod tests {
         for method in ["pane.read", "pane.write", "window.close", "", "HELLO"] {
             let line = json!({"jsonrpc": "2.0", "id": 1, "method": method}).to_string();
             let mut greeted = true;
-            let (reply, go_on) = answer(line.as_bytes(), &mut greeted, &mut || Ok(()));
+            let (reply, go_on) = replied(line.as_bytes(), &mut greeted);
             assert_eq!((code(&reply), go_on), (Some(NO_METHOD), false), "{method}");
         }
     }
 
     #[test]
-    fn window_open_reports_what_happened_and_ignores_arguments() {
+    fn window_open_asks_for_a_window_and_ignores_arguments() {
         let line =
             br#"{"jsonrpc":"2.0","id":2,"method":"window.open","params":{"path":"/bin/sh"}}"#;
-        let mut asked = 0;
-        let mut greeted = true;
-        let (reply, go_on) = answer(line, &mut greeted, &mut || {
-            asked += 1;
-            Ok(())
-        });
-        assert_eq!((reply["result"].clone(), go_on), (json!({}), true));
-        let (reply, _) = answer(line, &mut greeted, &mut || Err("why".to_owned()));
-        assert_eq!(code(&reply), Some(NO_WINDOW));
-        assert_eq!(reply["error"]["message"], "no window can open: why");
-        assert_eq!(asked, 1);
+        assert_eq!(answer(line, &mut true), Step::Open(json!(2)));
     }
 
     #[test]
     fn only_json_rpc_2_requests_are_taken() {
-        let mut asked = 0;
         for line in [
             json!({"id": 1, "method": "window.open"}),
             json!({"jsonrpc": "1.0", "id": 1, "method": "window.open"}),
             json!({"jsonrpc": "2.0", "id": [1], "method": "window.open"}),
             json!(null),
         ] {
-            let mut open = || {
-                asked += 1;
-                Ok(())
-            };
             let line = line.to_string();
-            let (reply, go_on) = answer(line.as_bytes(), &mut true, &mut open);
+            let (reply, go_on) = replied(line.as_bytes(), &mut true);
             assert_eq!(
                 (code(&reply), go_on),
                 (Some(NOT_A_REQUEST), false),
                 "{line}"
             );
         }
-        assert_eq!(asked, 0);
     }
 
     #[test]
     fn a_notification_gets_no_reply_and_does_nothing() {
         let line = br#"{"jsonrpc":"2.0","method":"window.open"}"#;
-        let mut opened = false;
-        let (reply, go_on) = answer(line, &mut true, &mut || {
-            opened = true;
-            Ok(())
-        });
-        assert_eq!((reply, go_on, opened), (Value::Null, false, false));
+        assert_eq!(answer(line, &mut true), Step::Reply(Value::Null, false));
     }
 
     #[test]
@@ -503,7 +709,7 @@ mod tests {
         ];
         let worker = thread::Builder::new().stack_size(STACK).spawn(move || {
             for line in lines.into_iter().chain([nested.as_slice()]) {
-                let (reply, go_on) = answer(line, &mut false, &mut || Ok(()));
+                let (reply, go_on) = replied(line, &mut false);
                 assert!(code(&reply).is_some() && !go_on);
             }
         });
@@ -562,7 +768,7 @@ mod tests {
     fn a_slow_peer_cannot_hold_the_socket() {
         let directory = fresh();
         let control = Control::bind(&directory).unwrap();
-        thread::spawn(move || control.serve(|| Ok(())));
+        thread::spawn(move || control.serve(serving(Ok(()))));
 
         let path = socket_path(&directory);
         let mut slow = UnixStream::connect(&path).unwrap();
@@ -590,7 +796,7 @@ mod tests {
         for (window, opened) in [(true, true), (false, false)] {
             let directory = fresh();
             let control = Control::bind(&directory).unwrap();
-            let open = move || window.then_some(()).ok_or_else(|| "why".to_owned());
+            let open = serving(window.then_some(()).ok_or_else(|| "why".to_owned()));
             thread::spawn(move || control.serve(open));
             let stream = UnixStream::connect(socket_path(&directory)).unwrap();
             match open_window(&stream) {
@@ -620,7 +826,7 @@ mod tests {
     fn a_connection_gets_answers_and_cannot_stay_for_ever() {
         let directory = fresh();
         let control = Control::bind(&directory).unwrap();
-        thread::spawn(move || control.serve(|| Ok(())));
+        thread::spawn(move || control.serve(serving(Ok(()))));
 
         let mut stream = UnixStream::connect(socket_path(&directory)).unwrap();
         stream.write_all(HELLO).unwrap();
@@ -648,5 +854,48 @@ mod tests {
         let mut reply = String::new();
         BufReader::new(&peer).read_line(&mut reply).unwrap();
         assert!(reply.contains("hello comes first"), "{reply}");
+    }
+
+    #[test]
+    fn a_peer_waiting_for_a_window_holds_up_no_one() {
+        let directory = fresh();
+        let control = Control::bind(&directory).unwrap();
+        // Never answered, as by a core whose window hangs.
+        let mut held = Vec::new();
+        thread::spawn(move || control.serve(move |opening| held.push(opening)));
+
+        let path = socket_path(&directory);
+        let mut waiting = UnixStream::connect(&path).unwrap();
+        waiting.write_all(HELLO).unwrap();
+        waiting.write_all(b"\n").unwrap();
+        waiting.write_all(OPEN).unwrap();
+        waiting.write_all(b"\n").unwrap();
+        thread::sleep(Duration::from_millis(100));
+
+        let start = Instant::now();
+        let mut peer = UnixStream::connect(&path).unwrap();
+        peer.set_read_timeout(Some(TIMEOUT)).unwrap();
+        peer.write_all(HELLO).unwrap();
+        peer.write_all(b"\n").unwrap();
+        let mut reply = String::new();
+        BufReader::new(&peer).read_line(&mut reply).unwrap();
+        assert!(reply.contains("\"version\""), "{reply}");
+        assert!(start.elapsed() < TIMEOUT);
+    }
+
+    #[test]
+    fn past_the_cap_a_peer_is_closed_unread() {
+        let directory = fresh();
+        let control = Control::bind(&directory).unwrap();
+        thread::spawn(move || control.serve(serving(Ok(()))));
+
+        let path = socket_path(&directory);
+        let held: Vec<UnixStream> = (0..MAX_PEERS)
+            .map(|_| UnixStream::connect(&path).unwrap())
+            .collect();
+        let mut over = UnixStream::connect(&path).unwrap();
+        over.set_read_timeout(Some(TIMEOUT / 2)).unwrap();
+        assert_eq!(over.read(&mut [0; 8]).unwrap(), 0);
+        drop(held);
     }
 }
