@@ -200,20 +200,25 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                 .find(|pane| pane.id == of)
                 .and_then(|pane| pane.cwd);
             let cwd = cwd.filter(|cwd| Path::new(cwd).is_dir()).map(str::to_owned);
-            let command = if agent.sandbox {
+            let (command, cwd) = if agent.sandbox {
                 // The sandbox needs a directory of the pane's, never one the core chose.
-                if cwd.is_none() {
-                    return Err("a sandboxed agent needs its pane's directory from OSC 7".into());
-                }
-                // A missing sandbox tool is an error, so the agent never runs unsandboxed.
+                let cwd = cwd.ok_or("a sandboxed agent needs its pane's directory from OSC 7")?;
+                let refused = |error: io::Error| format!("the sandbox will not start: {error}");
                 let hidden = pinfold_config::private_dirs();
-                sandbox::command(&agent.command, &hidden)
-                    .map_err(|error| format!("the sandbox will not start: {error}"))?
+                let work = sandbox::working_directory(Path::new(&cwd), &hidden).map_err(refused)?;
+                let api = control::socket_path(&control::runtime_dir());
+                // A missing sandbox tool is an error, so the agent never runs unsandboxed.
+                let command = sandbox::command(&agent.command, &hidden, &work, &api);
+                let cwd = work
+                    .path()
+                    .to_str()
+                    .ok_or("the pane's directory is not UTF-8")?;
+                (command.map_err(refused)?, Some(cwd.to_owned()))
             } else {
                 let (program, args) = agent.command.split_first().ok_or("empty command")?;
                 let mut command = Command::new(program);
                 command.args(args);
-                command
+                (command, cwd)
             };
             let way = way(launch.place);
             let pane = family.spawn_command(reactor, own, of, way, cwd.as_deref(), command)?;

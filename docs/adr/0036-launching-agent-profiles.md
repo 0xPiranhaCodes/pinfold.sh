@@ -25,8 +25,9 @@ in the config", which does not echo the name into the audit log.
   never runs unsandboxed.
 - The pane starts where `of`'s shell last said it was, by OSC 7, if that is a directory. Any
   program in that pane can print OSC 7, so a sandboxed launch with no such directory is
-  refused rather than given one the core chose, and the sandbox validates it once its
-  working-directory rule lands.
+  refused rather than given one the core chose. `sandbox::working_directory` then checks it,
+  and a directory it refuses, such as `$HOME` or one another user can change, refuses the
+  launch.
 - It is audited like `pane.spawn`: method `agent.launch`, scope `children`, the new pane as
   target. The profile's name is not recorded.
 - `pinfold agent <name> [--right | --down | --tab]` calls it from a pane.

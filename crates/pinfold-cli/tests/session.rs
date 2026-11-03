@@ -1622,9 +1622,10 @@ fn an_agent_launches_by_profile_as_the_callers_child_and_an_unknown_one_is_refus
     let mut toml = "[agents.sleepy]\ncommand = [\"sleep\", \"30\"]\n".to_owned();
     let pinfold = format!("'{}'", session.directory.join("pinfold").display());
     let client = "\"$PINFOLD_TEST_CLIENT\"";
-    // The sandbox takes its directory from OSC 7, so the caller's shell reports one first.
+    // The sandbox takes its directory from OSC 7, so the caller's shell reports one first: a
+    // private one under the core's HOME, as the sandbox refuses HOME and what is above it.
     let mut shell = format!(
-        "printf '\\033]7;file://localhost%s\\007' {client}; \
+        "mkdir -p -m 700 \"$HOME/work\"; printf '\\033]7;file://localhost%s\\007' \"$HOME/work\"; \
          {pinfold} agent sleepy 2> {client}/e; {pinfold} agent nope 2> {client}/nope; "
     );
     if cfg!(target_os = "macos") {
