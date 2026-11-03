@@ -398,7 +398,8 @@ pub fn shadow(work: &Path, dir: &Path) -> io::Result<PathBuf> {
 /// path in `/proc` shows, which no later swap of a link or directory changes. On Linux the agent
 /// may have made `.git` itself, with links to hidden files whose text the shadow would show it.
 fn open_inside(git: &Path, name: &str) -> Option<fs::File> {
-    let file = fs::File::open(git.join(name)).ok()?;
+    // Not following a last link, and not blocking on a FIFO planted there.
+    let file = pinfold_sys::open_no_follow(&git.join(name)).ok()?;
     let real = fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd())).ok()?;
     let plain = file.metadata().is_ok_and(|meta| meta.is_file());
     (plain && real.starts_with(git)).then_some(file)
@@ -975,6 +976,11 @@ mod tests {
         fs::write(git.join("HEAD"), "ref: refs/heads/main\n").unwrap();
         std::os::unix::fs::symlink(&secret, git.join("index")).unwrap();
         std::os::unix::fs::symlink(&secret, git.join("refs/heads/main")).unwrap();
+        // A FIFO for `packed-refs`, which a plain open would wait on forever.
+        let fifo = std::process::Command::new("mkfifo")
+            .arg(git.join("packed-refs"))
+            .status();
+        assert!(fifo.unwrap().success());
         let planted = shadow(&temp.join("work"), &temp.join("data/planted")).unwrap();
         let leaked = [
             planted.join("index").exists(),
