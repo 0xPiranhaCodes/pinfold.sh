@@ -12,6 +12,7 @@ Entries are generated from Conventional Commits with git-cliff
 ### Fixed
 
 - On macOS a new pane no longer fails to start, as "Device not configured" or "The shell would not start", when another pane closes at the same moment: opening its PTY is tried once more.
+- A sandboxed agent can no longer write outside its working directory and temporary directories, such as to `~/.zshrc`, and Linux takes `bwrap` only from root-owned system directories, not `PATH`, where an agent could plant one. The working directory must be the user's own and private, not home, above it, a dot-directory of home, `~/Library` or inside `.git`, and git cannot be made to run its code: on Linux its `.git` is read-only, so commits happen outside the sandbox, and on macOS the hooks, config and pointers of the repository and its submodules are, and each listed submodule's `.git` stays read-only on both. The agent reaches no Unix socket but PinFold's API socket and gets no `SSH_AUTH_SOCK`, `GPG_AGENT_INFO` or `DBUS_SESSION_BUS_ADDRESS`; on Linux it also gets its own IPC, host name and cgroup namespaces and ends with the core.
 - The core now applies `api.protect` from the config file; before, only the default patterns protected panes.
 - `past_its_identitys_cap_a_peer_is_closed_unread` no longer fails on macOS when the core closes the extra peer before the test sets its read timeout.
 - The link test that fills every tab and pane uses 128 by 128 panes instead of 1024 by 1024, so it no longer runs past its 20 second limit on CI's Intel Mac.
@@ -28,6 +29,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 - A per-pane status state machine combines OSC 133 marks with authoritative API reports and rate-limited alerts.
 - Agent profiles in `[agents.<name>]` may set `sandbox`, which runs the agent under `sandbox-exec` on macOS or bubblewrap on Linux, inside its pane's session, with `~/.ssh`, PinFold's config and state, and other panes' terminals hidden.
+- On Linux a sandboxed agent's bubblewrap gets a seccomp filter that fails `ioctl(TIOCSTI)` with `EPERM`, so the agent cannot type into its pane's terminal; on architectures other than x86_64 and aarch64 the agent does not start.
 - The control socket identifies each caller at accept from its controlling terminal and session, which the core maps to a pane, and caps peers at 4 per identity, with all unidentified callers sharing one cap (ADR-0032 step 2).
 - A spike that answers the macOS Dock menu by adding `applicationDockMenu:` to winit's app delegate, in `docs/spikes/m3-dock-menu`.
 - `pane.status` lets an agent report its own pane's state, which outranks OSC 133 marks; `pane.list` and events say whether a status came from marks or a report. Each tab shows its state's glyph in colour, a hidden tab whose pane needs you is marked ◆ in amber, and the title row gives the active state as glyph, colour and word with the agent's message.
@@ -57,10 +59,14 @@ Entries are generated from Conventional Commits with git-cliff
 - `pinfold mcp` can spawn and close child panes through versioned MCP tools.
 - `pinfold mcp` has `events_next_v1`, which waits up to 30 seconds by default for the next pane opened, closed or status event, so an MCP client need not poll (ADR-0035).
 - Prefix keys work: `Ctrl+a`, or `keys.prefix`, then `c`, `n`, `p`, `0` to `9`, `|`, `-`, the arrows, `z`, `d` and `x`. `x` asks first, and says so in red when it would end the session. On macOS Command+T opens a tab and Command+1 to Command+9 go to one. A click focuses a pane or picks a tab, and the `+` button opens one. Bindings are in [docs/configuration.md](docs/configuration.md).
+- Cross-pane reads and sends ask through keyboard-only window chrome, with batched 30-minute grants that `pinfold ctl grants` lists and revokes.
+- Workspace trust: `workspace.ask_trust` shows a project directory and every `run` line in window chrome, and `y` records the directory and layout SHA-256 in a private `trust.json` that `workspace.trust_state` checks. Nothing runs yet. The link's version is now 7.
 - Cross-pane reads and sends ask through keyboard-only window chrome, with batched 30-minute grants that `pinfold ctl grants` lists and revokes. Approved actions and grant changes are recorded in the audit log.
 - `pinfold-core` runs as a hardened daemon with a private control socket that takes `hello` and `window.open`.
+- `pinfold ctl session save`, from a terminal outside any pane, writes the session's layout and each pane's directory and redacted command to `sessions/default.json` in the state directory, 0600 and atomically, with no scrollback or environment.
 - The core records each API request that reaches it in a hash-chained audit log, never pane contents or sent text; `audit.read`, `pinfold ctl log` and `pinfold ctl log --verify` read and check it, and `api.audit_log = true` also writes it to disk.
 - `pinfold` is now a launcher: it starts the core if none answers, checks that the socket's owner is you, asks for a window and exits. The window is its own `pinfold-window` process on the link (ADR-0028), so a window that crashes or closes leaves every pane running and `pinfold` reattaches. A second `pinfold` brings the window to the front, and a window whose core dies says the session ended. `pinfold --size` is gone.
+- `pane.wait` takes `until: "match"`, a regex of at most 1 KiB over lines printed after the wait began, with ASCII-only `\w`, `\d`, `\s` and case folding, and `until: "idle"`; both take only the caller's own pane, as does `pane.output` in `events.subscribe`; and `pinfold ctl wait` waits from a script, exiting 0, 1 on a timeout or 2 on an error.
 - `cargo xtask mem-gate` measures the window and the core as separate processes, and the core beside a window.
 - `pinfold-mux` exports a session's layout as a plain tree that names panes by index, and rebuilds a session from one, refusing a bad tree with an error.
 - A TOML config file with `font_size` and `macos_option_as_alt`. A bad file means the defaults.

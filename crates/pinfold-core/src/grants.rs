@@ -147,20 +147,10 @@ impl<T, C: Clock> Grants<T, C> {
         if self.grants.iter().any(|grant| grant.key == key) {
             return Decision::Allow(ticket);
         }
-        if !window_ready {
-            return Decision::Refuse(ticket, "approval needs an open PinFold window");
+        if let Some(refused) = self.full(window_ready) {
+            return Decision::Refuse(ticket, refused);
         }
-        if self
-            .pending
-            .iter()
-            .map(|pending| pending.tickets.len())
-            .sum::<usize>()
-            >= MAX_PENDING
-        {
-            return Decision::Refuse(ticket, "too many requests are waiting for approval");
-        }
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1).max(1);
+        let id = self.next_id();
         if let Some(pending) = self.pending.iter_mut().find(|pending| pending.key == key) {
             // A fresh id, so a key pressed for the batch as it was cannot approve what joined it.
             pending.id = id;
@@ -181,6 +171,56 @@ impl<T, C: Clock> Grants<T, C> {
         Decision::Ask(asked)
     }
 
+    /// Parks a workspace trust prompt of its own: `texts` is the canonical directory, then every
+    /// `run` line, and `changed` says the directory was trusted with another layout. Allowing it
+    /// once is the only allowing answer; it grants nothing lasting.
+    pub fn ask_trust(
+        &mut self,
+        ticket: T,
+        texts: Vec<String>,
+        changed: bool,
+        window_ready: bool,
+    ) -> Decision<T> {
+        if let Some(refused) = self.full(window_ready) {
+            return Decision::Refuse(ticket, refused);
+        }
+        let now = self.clock.now();
+        let id = self.next_id();
+        let pending = Parked {
+            id,
+            // Never matched by `decide`, so no other request joins this prompt.
+            key: Key {
+                caller: 0,
+                target: usize::from(changed),
+                action: ApprovalAction::Trust,
+            },
+            deadline: now.checked_add(PROMPT_TIME).unwrap_or(now),
+            tickets: vec![ticket],
+            texts,
+        };
+        let asked = prompt(&pending);
+        self.pending.push(pending);
+        Decision::Ask(asked)
+    }
+
+    fn full(&self, window_ready: bool) -> Option<&'static str> {
+        if !window_ready {
+            return Some("approval needs an open PinFold window");
+        }
+        let parked: usize = self
+            .pending
+            .iter()
+            .map(|pending| pending.tickets.len())
+            .sum();
+        (parked >= MAX_PENDING).then_some("too many requests are waiting for approval")
+    }
+
+    fn next_id(&mut self) -> u64 {
+        let id = self.next_id;
+        self.next_id = self.next_id.wrapping_add(1).max(1);
+        id
+    }
+
     /// Releases the batch named by a window answer. Unknown and stale ids do nothing.
     pub fn answer(&mut self, id: u64, answer: ApprovalAnswer) -> Vec<Released<T>> {
         let Some(index) = self.pending.iter().position(|pending| pending.id == id) else {
@@ -188,7 +228,8 @@ impl<T, C: Clock> Grants<T, C> {
         };
         let pending = self.pending.swap_remove(index);
         let allowed = answer != ApprovalAnswer::Deny;
-        if answer == ApprovalAnswer::AllowForThirtyMinutes {
+        let trust = pending.key.action == ApprovalAction::Trust;
+        if answer == ApprovalAnswer::AllowForThirtyMinutes && !trust {
             let now = self.clock.now();
             let expires = now.checked_add(GRANT_TIME).unwrap_or(now);
             self.grants.push(Grant {
@@ -197,7 +238,12 @@ impl<T, C: Clock> Grants<T, C> {
                 expires,
             });
         }
-        release(pending.tickets, allowed, "cross-pane action denied")
+        let reason = if trust {
+            "the workspace was not trusted"
+        } else {
+            "cross-pane action denied"
+        };
+        release(pending.tickets, allowed, reason)
     }
 
     /// Releases prompts whose deadline has passed.
@@ -389,6 +435,30 @@ mod tests {
             Decision::Refuse(1, _)
         ));
         assert_eq!(grants.deadline(), None);
+    }
+
+    #[test]
+    fn a_trust_prompt_is_its_own_and_grants_nothing_lasting() {
+        let mut grants = Grants::default();
+        let texts = vec!["/p".to_owned(), "make".to_owned()];
+        let Decision::Ask(first) = grants.ask_trust(1, texts.clone(), true, true) else {
+            panic!("not asked")
+        };
+        assert_eq!((first.target, first.action), (1, ApprovalAction::Trust));
+        assert_eq!(first.texts, texts);
+        let Decision::Ask(second) = grants.ask_trust(2, texts, false, true) else {
+            panic!("not asked")
+        };
+        assert_ne!(first.id, second.id);
+        let released = grants.answer(first.id, ApprovalAnswer::AllowForThirtyMinutes);
+        assert!(released[0].allowed);
+        assert!(grants.list().is_empty());
+        let released = grants.answer(second.id, ApprovalAnswer::Deny);
+        assert_eq!(released[0].reason, "the workspace was not trusted");
+        assert!(matches!(
+            grants.ask_trust(3, Vec::new(), false, false),
+            Decision::Refuse(3, _)
+        ));
     }
 
     #[test]

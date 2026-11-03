@@ -79,6 +79,9 @@ impl Session {
             .args(arguments)
             .env("XDG_RUNTIME_DIR", self.directory.join("run"))
             .env("XDG_CONFIG_HOME", self.directory.join("config"))
+            // The state directory, on macOS from HOME, so a test never writes the person's.
+            .env("XDG_STATE_HOME", self.directory.join("state"))
+            .env("HOME", self.directory.join("state"))
             .env("SHELL", &script)
             .env(CLIENT, &self.directory)
             .spawn()?;
@@ -1075,6 +1078,143 @@ fn a_pane_spawns_children_and_reaches_only_them() {
 }
 
 #[test]
+fn ctl_wait_prints_how_a_wait_ended_and_exits_0_1_or_2() {
+    let session = Session::new("cw", None).unwrap();
+    let ctl = format!("'{}' ctl wait", session.directory.join("pinfold").display());
+    // Each line notes what `ctl wait` printed and its exit status. The pane prints in the
+    // background over and over, so a wait parked late still sees a later line or mark.
+    let shell = format!(
+        r#"exec 3> "$PINFOLD_TEST_CLIENT/x$$"
+note() {{ "$@" >&3 2>/dev/null; echo "status $?" >&3; }}
+note {ctl} self --until output --timeout 1
+note {ctl} self --until idle --idle-ms 100 --timeout 20
+(while :; do echo ready-42; sleep 0.2; done) & loud=$!
+note {ctl} self --until match --pattern 'ready-\d+$' --timeout 20
+kill $loud
+(while :; do printf '\033]133;D;3\007'; sleep 0.2; done) & loud=$!
+note {ctl} self --until exit --timeout 20
+kill $loud
+note {ctl} self --until match --pattern '(' --timeout 1
+note {ctl} 9 --until exit --timeout 1
+note {ctl} self --until exit
+mv "$PINFOLD_TEST_CLIENT/x$$" "$PINFOLD_TEST_CLIENT/waited"
+exec sleep 30"#
+    );
+    let mut core = session.start_core(&["--idle", "1"], &shell).unwrap();
+    assert!(session.wait_for("waited"), "{}", session.read_log());
+    let expected = "timeout\nstatus 1\nidle\nstatus 0\nmatch ready-42\nstatus 0\nexit 3\n\
+                    status 0\nstatus 2\nstatus 2\nstatus 2\n";
+    assert_eq!(session.read("waited"), expected);
+    core.kill().unwrap();
+    core.wait().unwrap();
+}
+
+/// Names the directory of a run, in the pane that subscribes to output.
+const OUTPUT: &str = "PINFOLD_TEST_OUTPUT";
+
+/// Not a test: the first pane of [`output_events_and_match_waits_reach_only_the_callers_pane`].
+/// It subscribes to output, spawns a child, and notes what it hears from whom.
+#[test]
+fn output_process() {
+    let Some(directory) = env::var_os(OUTPUT) else {
+        return;
+    };
+    let subscribe = call(
+        2,
+        "events.subscribe",
+        serde_json::json!({"events": ["pane.output"]}),
+    );
+    let mut events = api(&[subscribe]).unwrap();
+    let own = next(&mut events, || Ok(())).unwrap()["result"]["pane"].clone();
+    next(&mut events, || Ok(())).unwrap();
+    let spawned = ask("pane.spawn", serde_json::json!({"where": "split-right"})).unwrap();
+    let child = spawned["result"]["pane"].clone();
+    let wait =
+        serde_json::json!({"pane": child, "until": "match", "pattern": "x", "timeout_ms": 1});
+    let refused = ask("pane.wait", wait).unwrap();
+    let text = "child password=hunter2\n";
+    let send = serde_json::json!({"pane": child, "text": text});
+    ask("pane.send", send).unwrap();
+    // The child has printed before the caller does, so its events would come first.
+    let start = Instant::now();
+    while start.elapsed() < PATIENCE {
+        let read = ask("pane.read", serde_json::json!({"pane": child})).unwrap();
+        if read["result"]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("child")
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let mut tty = fs::OpenOptions::new().write(true).open("/dev/tty").unwrap();
+    std::io::Write::write_all(&mut tty, b"own password=hunter2\n").unwrap();
+    let mut heard = format!("{own}\n{refused}\n");
+    while !heard.contains("own password=hunter2") {
+        let event = next(&mut events, || Ok(())).unwrap();
+        writeln!(heard, "{}", event["params"]).unwrap();
+    }
+    fs::write(Path::new(&directory).join("heard"), heard).unwrap();
+}
+
+/// Not a test: a terminal outside any pane in
+/// [`output_events_and_match_waits_reach_only_the_callers_pane`], which asks for output.
+#[test]
+fn outside_output_process() {
+    let Some(directory) = env::var_os(OUTPUT) else {
+        return;
+    };
+    let events = serde_json::json!({"events": ["pane.output"]});
+    let refused = ask("events.subscribe", events).unwrap();
+    fs::write(Path::new(&directory).join("outside"), refused.to_string()).unwrap();
+}
+
+#[test]
+fn output_events_and_match_waits_reach_only_the_callers_pane() {
+    let session = Session::new("o", None).unwrap();
+    let exe = env::current_exe().unwrap();
+    // The second pane is another of the person's, printing all along.
+    let shell = format!(
+        "if mkdir \"$PINFOLD_TEST_CLIENT/first\"; then {OUTPUT}=\"$PINFOLD_TEST_CLIENT\" exec '{}' \
+         --exact output_process; elif mkdir \"$PINFOLD_TEST_CLIENT/second\"; then \
+         while :; do echo other password=hunter2; sleep 0.1; done; fi; exec cat",
+        exe.display()
+    );
+    let mut core = session.start_core(&["--idle", "2"], &shell).unwrap();
+    assert!(session.wait_for("heard"), "{}", session.read_log());
+    let heard = session.read("heard");
+    let mut lines = heard.lines();
+    let own: u64 = lines.next().unwrap().parse().unwrap();
+    let refused = lines.next().unwrap();
+    assert!(
+        refused.contains("a match wait needs the caller's own pane"),
+        "{heard}"
+    );
+    for line in lines {
+        let event: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(event["event"], "pane.output", "{heard}");
+        assert_eq!(event["pane"], own, "another pane was heard: {heard}");
+    }
+
+    // A terminal that is no pane has no own pane to hear, so it is refused.
+    let mut outside = Command::new(&exe);
+    outside
+        .args(["--exact", "outside_output_process"])
+        .env("XDG_RUNTIME_DIR", session.directory.join("run"))
+        .env(OUTPUT, &session.directory);
+    let _terminal = pinfold_sys::pty::Pty::spawn(outside, 24, 80).unwrap();
+    assert!(session.wait_for("outside"), "{}", session.read_log());
+    let refused = session.read("outside");
+    assert!(
+        refused.contains("pane.output needs the caller's own pane"),
+        "{refused}"
+    );
+    core.kill().unwrap();
+    core.wait().unwrap();
+}
+
+#[test]
 fn mcp_lists_tools_calls_the_core_as_its_pane_and_reports_a_refusal_as_a_tool_error() {
     let session = Session::new("m", None).unwrap();
     let call = |id: u32, name: &str, arguments: serde_json::Value| {
@@ -1136,6 +1276,45 @@ fn mcp_lists_tools_calls_the_core_as_its_pane_and_reports_a_refusal_as_a_tool_er
             "events_next_v1",
         ]
     );
+    core.kill().unwrap();
+    core.wait().unwrap();
+}
+
+#[test]
+fn ctl_session_save_writes_a_private_snapshot_only_from_outside_a_pane() {
+    use std::os::unix::fs::PermissionsExt;
+    let session = Session::new("n", None).unwrap();
+    let ctl = format!(
+        "'{}' ctl session save",
+        session.directory.join("pinfold").display()
+    );
+    let to = |name: &str| format!("> \"$PINFOLD_TEST_CLIENT/{name}\" 2>&1");
+    let inside = format!("{ctl} {}; exec sleep 30", to("in"));
+    let mut core = session.start_core(&["--idle", "1"], &inside).unwrap();
+    assert!(session.wait_for("in"), "{}", session.read_log());
+    let refused = session.read("in");
+    assert!(refused.contains("outside any pane"), "{refused}");
+
+    // The core's state directory, which `start_core` puts in the session's.
+    let state = session.directory.join("state");
+    let mut outside = Command::new("/bin/sh");
+    outside
+        .args(["-c", &format!("{ctl} {}", to("out"))])
+        .env("XDG_RUNTIME_DIR", session.directory.join("run"))
+        .env(CLIENT, &session.directory);
+    let _terminal = pinfold_sys::pty::Pty::spawn(outside, 24, 80).unwrap();
+    assert!(session.wait_for("out"));
+    let said = session.read("out");
+    let path = PathBuf::from(said.trim());
+    assert!(path.starts_with(&state), "{said}");
+    assert!(path.ends_with("sessions/default.json"), "{said}");
+    let mode = fs::metadata(&path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let snapshot: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(snapshot["version"], 1);
+    assert_eq!(snapshot["tabs"][0]["root"]["pane"], 0);
+    // The shell, whose temporary path redaction may take for a secret.
+    assert!(snapshot["panes"][0]["command"].is_string(), "{snapshot}");
     core.kill().unwrap();
     core.wait().unwrap();
 }
@@ -1262,6 +1441,116 @@ fn mcp_waits_for_the_next_event_and_times_out_with_none() {
     assert_eq!(texts[2], serde_json::json!({"timeout": true}), "{out}");
     core.kill().unwrap();
     core.wait().unwrap();
+}
+
+/// Names the directory of a run, in the terminal outside any pane that asks for trust.
+const TRUST: &str = "PINFOLD_TEST_TRUST";
+
+/// Not a test: a terminal outside every pane asks for trust twice, and notes what it hears.
+#[test]
+fn trust_api_process() {
+    let Some(directory) = env::var_os(TRUST) else {
+        return;
+    };
+    let directory = Path::new(&directory);
+    let root = fs::canonicalize(directory.join("project")).unwrap();
+    let root = root.to_str().unwrap();
+    let (old, new) = ("a".repeat(64), "b".repeat(64));
+    let state = |sha256: &str| {
+        ask(
+            "workspace.trust_state",
+            serde_json::json!({"root": root, "sha256": sha256}),
+        )
+        .unwrap()["result"]
+            .clone()
+    };
+    let unknown = serde_json::json!({"trusted": false, "changed": false});
+    assert_eq!(state(&old), unknown);
+    let runs = ["npm run dev", "cargo watch\u{1b}[2J"];
+    let trusted = ask(
+        "workspace.ask_trust",
+        serde_json::json!({"root": root, "sha256": old, "runs": runs}),
+    )
+    .unwrap();
+    assert_eq!(trusted["result"], serde_json::json!({"trusted": true}));
+    assert_eq!(state(&old)["trusted"], true);
+    assert_eq!(state(&new)["changed"], true);
+    let refused = ask(
+        "workspace.ask_trust",
+        serde_json::json!({"root": root, "sha256": new, "runs": []}),
+    )
+    .unwrap();
+    let reason = refused["error"]["message"].as_str().unwrap_or_default();
+    assert!(reason.contains("not trusted"), "{refused}");
+    assert_eq!(state(&old)["trusted"], true);
+    fs::write(directory.join("asked"), "yes").unwrap();
+}
+
+/// Not a test: the window sees each trust prompt with the directory and every run line, then
+/// trusts the first and refuses the second, changed one.
+#[test]
+fn trust_window_process() {
+    let Some(directory) = env::var_os(CLIENT) else {
+        return;
+    };
+    let directory = Path::new(&directory);
+    let core = std::os::unix::process::parent_id().to_string();
+    fs::write(directory.join("core"), core).unwrap();
+    let mut link = Link::new(socket::take_link().unwrap()).unwrap();
+    assert!(link.resize(24, 80));
+    until(&mut link, |link| link.is_greeted()).unwrap();
+    let root = fs::canonicalize(directory.join("project")).unwrap();
+    for (target, runs, answer) in [
+        (
+            0,
+            &["npm run dev", "cargo watch\u{1b}[2J"][..],
+            ApprovalAnswer::AllowOnce,
+        ),
+        (1, &[][..], ApprovalAnswer::Deny),
+    ] {
+        let mut prompt = None;
+        until(&mut link, |link| {
+            prompt = link.take_approval();
+            prompt.is_some()
+        })
+        .unwrap();
+        let prompt = prompt.unwrap();
+        assert_eq!(
+            (prompt.target, prompt.action),
+            (target, ApprovalAction::Trust)
+        );
+        assert_eq!(prompt.texts[0], root.to_str().unwrap());
+        assert_eq!(prompt.texts[1..], *runs);
+        let id = prompt.id;
+        assert!(link.send(Request::ApprovalAnswer { id, answer }));
+    }
+    until(&mut link, |_| directory.join("asked").exists()).unwrap();
+}
+
+#[test]
+fn only_the_window_answers_a_trust_prompt_and_trusting_records_the_layout() {
+    let exe = env::current_exe().unwrap();
+    let window = format!("exec '{}' --exact trust_window_process", exe.display());
+    let session = Session::new("trust", Some(&window)).unwrap();
+    fs::create_dir_all(session.directory.join("project")).unwrap();
+    let (home, state) = (
+        session.directory.join("home"),
+        session.directory.join("state"),
+    );
+    let launched = session
+        .launcher("/bin/sh")
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .output()
+        .unwrap();
+    assert!(launched.status.success(), "{launched:?}");
+    let mut outside = Command::new(exe);
+    outside
+        .args(["--exact", "trust_api_process"])
+        .env("XDG_RUNTIME_DIR", session.directory.join("run"))
+        .env(TRUST, &session.directory);
+    let _terminal = pinfold_sys::pty::Pty::spawn(outside, 24, 80).unwrap();
+    assert!(session.wait_for("asked"), "{}", session.read_log());
 }
 
 /// Runs a core whose first pane spawns a second running `sleep <number>` and sends to it

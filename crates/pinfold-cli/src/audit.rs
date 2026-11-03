@@ -124,10 +124,14 @@ fn record(
         Method::PaneClose { pane } => ("pane.close", Some(*pane), scope(*pane)),
         Method::PaneStatus { pane, .. } => ("pane.status", Some(*pane), scope(*pane)),
         Method::AuditRead { pane, .. } => ("audit.read", *pane, "outside"),
+        Method::SessionSave => ("session.save", None, "outside"),
         // A refused call from inside a pane is the caller's own, not one from outside.
         Method::WorkspaceOpen(_) => ("workspace.open", None, own.map_or("outside", |_| "self")),
         Method::GrantsList => ("grants.list", None, "outside"),
         Method::GrantsRevoke { .. } => ("grants.revoke", None, "outside"),
+        // The root and run lines are not recorded.
+        Method::WorkspaceTrustState(_) => ("workspace.trust_state", None, "outside"),
+        Method::WorkspaceAskTrust(..) => ("workspace.ask_trust", None, "outside"),
     };
     let mut reason = match result {
         Ok(_) => "allowed".to_owned(),
@@ -187,6 +191,15 @@ mod tests {
         assert_eq!((record.outcome, record.scope.as_str()), (expected, "other"));
         let unidentified = super::record(&Method::PaneList, false, None, &Ok(json!({})));
         assert_eq!((unidentified.caller, unidentified.terminal), (None, false));
+    }
+
+    #[test]
+    fn a_save_is_recorded_without_its_path() {
+        let saved = Ok(json!({"path": "/home/someone/.local/state/pinfold/default.json"}));
+        let record = record(&Method::SessionSave, true, None, &saved);
+        let names = (record.method.as_str(), record.scope.as_str());
+        assert_eq!((names, record.target), (("session.save", "outside"), None));
+        assert_eq!(record.outcome, Outcome::Ok("allowed".to_owned()));
     }
 
     #[test]

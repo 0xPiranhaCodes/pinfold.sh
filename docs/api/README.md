@@ -26,9 +26,12 @@ Every connection starts with `hello`:
 | `events.subscribe` | Version 2 and a terminal    | [`events.subscribe.schema.json`](events.subscribe.schema.json) |
 | `pane.status`      | Version 2 and its own pane  | [`pane.status.schema.json`](pane.status.schema.json)         |
 | `audit.read`       | Version 2, outside any pane | [`audit.read.schema.json`](audit.read.schema.json)           |
+| `session.save`     | Version 2, outside any pane | [`session.save.schema.json`](session.save.schema.json)       |
 | `workspace.open`   | Version 2, a terminal, no pane | [`workspace.open.schema.json`](workspace.open.schema.json) |
 | `grants.list`      | Version 2, outside panes    | [`grants.list.schema.json`](grants.list.schema.json)         |
 | `grants.revoke`    | Version 2, outside panes    | [`grants.revoke.schema.json`](grants.revoke.schema.json)     |
+| `workspace.trust_state` | Version 2, outside panes | [`workspace.trust_state.schema.json`](workspace.trust_state.schema.json) |
+| `workspace.ask_trust` | Version 2, outside panes | [`workspace.ask_trust.schema.json`](workspace.ask_trust.schema.json) |
 
 A pane in reach is the caller's own, the `self` scope, or one it spawned, or one they spawned in
 turn, the `children` scope. `pane.spawn` opens a split or tab running the user's shell, never a
@@ -49,6 +52,15 @@ pane. Listing is read-only and revocation only removes authority, so neither rai
 approval prompt. `pinfold ctl grants [--json]` lists lasting grants and `pinfold ctl grants
 revoke <id>` revokes one.
 
+`workspace.trust_state` and `workspace.ask_trust` are accepted only from an identified terminal
+outside every pane, and take a canonical project directory and the SHA-256 of its layout file.
+Trust is one hash per directory, kept in `trust.json` (mode 0600) in the state directory, at most
+1,000 directories with the oldest dropped; a file that will not parse is moved to
+`trust.json.bad` and trusts nothing. `workspace.ask_trust` parks for up to 60 seconds on a prompt
+in window chrome that shows the directory, whether its layout changed since it was trusted, and
+every `run` line, at most 64. `y` trusts and records the pair, and `n` or Esc refuses. A prompt
+too long for the window offers only refusal, and no API call can answer it. It runs nothing.
+
 A connection takes many requests, answered one at a time in order, each line at most 32 KiB.
 It must send `hello` within 2 seconds of connecting and end each line within 2 seconds of its
 first byte. It is closed after 60 seconds with no request in flight, wait or subscription, and
@@ -56,9 +68,14 @@ the time starts again after each answer. A malformed request closes it, and so d
 the core took too long to answer; a refusal, such as "the core is busy", does not.
 
 `pane.wait` waits on a pane in reach for at most 10 minutes, and the core parks at most 64
-waits. `events.subscribe` sends `event` notifications on its connection. A connection is closed
-if 2 MiB of replies queue unread, or if the core has more events for it than it can queue, so a
-subscriber that was closed may have missed events.
+waits. It waits for a command to exit, a prompt, any output, a later line that matches a regex
+of at most 1 KiB (`match`, with ASCII-only `\w`, `\d`, `\s` and case folding), or a quiet spell (`idle`); `match` and `idle` take only the
+caller's own pane. `events.subscribe` sends `event` notifications on its connection. Its
+`pane.output` events carry what the caller's own pane printed, up to 4 KiB each, and never
+another pane's, its children's included; a caller outside any pane that asks for them is
+refused. Streaming another pane's text would need redaction that holds state across reads, which
+waits for an ADR. A connection is closed if 2 MiB of replies queue unread, or if the core has more
+events for it than it can queue, so a subscriber that was closed may have missed events.
 
 `pane.status` lets an agent say what state its own pane is in: `needs-you`, `running`, `done`,
 `error` or `idle`, with a message of at most 200 characters. A report outranks the pane's OSC 133
@@ -84,8 +101,12 @@ cannot show entries cut from its end.
 `pinfold ctl list` prints `pane.list` as plain text, with `*` by the caller's own pane, and
 `pinfold ctl list --json` prints its result. Its title, directory and status come from what
 programs print, which can fake them: read them as hints, not facts. `pinfold ctl send <pane>
-<text>` types into a pane. A core that refuses version 2 is older than the client, and
-`pinfold ctl` says to quit PinFold so that a new core starts.
+<text>` types into a pane. `pinfold ctl wait <pane> --until exit|prompt|output|match|idle
+[--pattern <regex>] [--idle-ms <n>] --timeout <s>` prints how the wait ended, and exits 0 if
+what it waited for happened, 1 on a timeout or a closed pane, and 2 on an error. `pinfold ctl
+session save`, from a terminal that is no pane, writes the session's snapshot and prints its
+path. A core that refuses version 2 is older than the client, and `pinfold ctl` says to quit
+PinFold so that a new core starts.
 
 `pinfold up [dir]` reads `<dir>/.pinfold/layout.toml`, the current directory's by default,
 starts a core and a window as `pinfold` does, and sends `workspace.open` with each pane's split

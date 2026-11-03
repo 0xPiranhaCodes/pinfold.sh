@@ -3,10 +3,11 @@
 //!
 //! It takes `hello`, `window.open` and, after `hello` version 2, `pane.list`, `pane.read`,
 //! `pane.last_output`, `pane.send`, `pane.wait`, `events.subscribe`, `audit.read`,
-//! `grants.list` and `grants.revoke`, as newline-delimited JSON-RPC 2.0 (ADR-0009,
-//! ADR-0028, ADR-0032). `window.open` takes no arguments, so a caller
-//! cannot name a program. This only checks a request's shape: the reactor answers every
-//! [`Request`], checks its scope, parks waits and sends events, so nothing here reaches a pane.
+//! `grants.list`, `grants.revoke`, `workspace.trust_state`, `workspace.ask_trust` and
+//! `session.save`, as newline-delimited JSON-RPC 2.0 (ADR-0009, ADR-0028, ADR-0032).
+//! `window.open` takes no arguments, so a caller cannot name a program. This only checks a
+//! request's shape: the reactor answers every [`Request`], checks its scope, parks waits and
+//! sends events, so nothing here reaches a pane.
 //! Same-user controls are guardrails (threat model).
 //!
 //! ```no_run
@@ -52,7 +53,7 @@ pub const OLDEST: u64 = 1;
 pub const STACK: usize = 256 * 1024;
 
 /// The session's name in its file names. There is one session until M2 adds attach.
-const SESSION: &str = "default";
+pub const SESSION: &str = "default";
 /// Most peers served at once (ADR-0032). Past it a new peer is closed unread.
 pub const MAX_PEERS: usize = 16;
 /// Most peers of one caller identity, where all unidentified peers count as one (ADR-0032).
@@ -167,6 +168,8 @@ pub enum Method {
         /// The pane's number.
         pane: usize,
     },
+    /// `session.save`: write the session's snapshot now.
+    SessionSave,
     /// `workspace.open`, its shape checked.
     WorkspaceOpen(crate::workspace::Open),
     /// `grants.list`, accepted only from a terminal outside every pane.
@@ -176,10 +179,27 @@ pub enum Method {
         /// Stable grant id.
         id: u64,
     },
+    /// `workspace.trust_state`: whether a directory is trusted with a layout's hash.
+    WorkspaceTrustState(Workspace),
+    /// `workspace.ask_trust`: asks the window whether to trust a layout, showing every `run` line.
+    /// Accepted only from a terminal outside every pane.
+    WorkspaceAskTrust(Workspace, Vec<String>),
 }
 
+/// A workspace named by `workspace.trust_state` and `workspace.ask_trust`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Workspace {
+    /// The project directory, an absolute path the reactor makes canonical.
+    pub root: String,
+    /// The layout file's SHA-256, 64 lowercase hexadecimal digits.
+    pub sha256: String,
+}
+
+/// Most `run` lines one trust prompt shows.
+pub const MAX_RUNS: usize = 64;
+
 /// What `pane.wait` waits for, until its timeout.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Wait {
     /// The pane named, or nothing for `self`, the caller's own.
     pub pane: Option<usize>,
@@ -190,7 +210,7 @@ pub struct Wait {
 }
 
 /// What ends a `pane.wait`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Until {
     /// The shell finishes a command (OSC 133 `D`).
     Exit,
@@ -198,7 +218,15 @@ pub enum Until {
     Prompt,
     /// The program writes anything.
     Output,
+    /// A line printed later matches this regex, at most [`MAX_PATTERN`] bytes, which the
+    /// reactor compiles.
+    Match(String),
+    /// The program writes nothing for this long, from 100 ms to [`MAX_WAIT`].
+    Idle(Duration),
 }
+
+/// Longest `pane.wait` pattern.
+pub const MAX_PATTERN: usize = 1024;
 
 /// The events a subscriber asked for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -209,6 +237,8 @@ pub struct Topics {
     pub closed: bool,
     /// `pane.status`.
     pub status: bool,
+    /// `pane.output`, for the caller's own pane only.
+    pub output: bool,
 }
 
 /// Why the core cannot take the control socket.
@@ -299,7 +329,11 @@ pub fn start_log(directory: &Path) -> Result<File, Error> {
 }
 
 /// Makes `directory` if it is missing, and refuses it unless only this user can reach it.
-fn checked(directory: &Path) -> Result<(), Error> {
+///
+/// # Errors
+///
+/// Returns an error if it cannot be made, or is a symlink, someone else's or open to others.
+pub fn checked(directory: &Path) -> Result<(), Error> {
     match DirBuilder::new().mode(0o700).create(directory) {
         Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error.into()),
         _ => {}
@@ -457,7 +491,8 @@ impl Control {
                         Method::PaneWait(Wait { timeout, .. }) => *timeout + OPEN_WAIT,
                         Method::PaneRead { .. }
                         | Method::PaneLastOutput { .. }
-                        | Method::PaneSend { .. } => APPROVAL_WAIT + OPEN_WAIT,
+                        | Method::PaneSend { .. }
+                        | Method::WorkspaceAskTrust(..) => APPROVAL_WAIT + OPEN_WAIT,
                         _ => OPEN_WAIT,
                     };
                     ask(Request {
@@ -581,6 +616,7 @@ impl Request {
     pub fn subscriber(&self) -> Subscriber {
         Subscriber {
             peer: self.peer,
+            caller: self.caller,
             alive: self.alive.clone(),
             events: self.events.clone(),
             queued: Arc::default(),
@@ -607,6 +643,7 @@ enum Asked {
 #[derive(Debug)]
 pub struct Subscriber {
     peer: (usize, u64),
+    caller: Option<Terminal>,
     alive: Weak<AtomicBool>,
     events: SyncSender<Event>,
     /// Its events sent and not yet taken by the API thread, at most [`EVENTS_EACH`].
@@ -615,8 +652,15 @@ pub struct Subscriber {
 }
 
 impl Subscriber {
-    /// Sends `{"method": "event", "params": params}`, which must carry no pane contents. It never
-    /// blocks: past `EVENTS_EACH` (64) queued, the connection missed an event and is closed.
+    /// The subscriber's caller, as [`Request::caller`] gives it.
+    #[must_use]
+    pub fn caller(&self) -> Option<Terminal> {
+        self.caller
+    }
+
+    /// Sends `{"method": "event", "params": params}`, which carries pane contents only for the
+    /// caller's own pane. It never blocks: past `EVENTS_EACH` (64) queued, the connection missed
+    /// an event and is closed.
     pub fn send(&self, params: Value) {
         let room = self.queued.fetch_add(1, Ordering::Relaxed) < EVENTS_EACH;
         let sent = room.then(|| {
@@ -1090,14 +1134,25 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
         _ if *greeted == 0 => refuse(Some(id), NO_HELLO, "hello comes first"),
         Some("window.open") => Step::Ask(id.clone(), Method::WindowOpen),
         Some(
-            method @ ("pane.list" | "pane.read" | "pane.last_output" | "pane.send" | "pane.spawn"
-            | "pane.close" | "workspace.open" | "grants.list" | "grants.revoke"),
+            method @ ("pane.list"
+            | "pane.read"
+            | "pane.last_output"
+            | "pane.send"
+            | "pane.spawn"
+            | "pane.close"
+            | "grants.list"
+            | "grants.revoke"
+            | "workspace.open"
+            | "workspace.trust_state"
+            | "workspace.ask_trust"
+            | "session.save"),
         ) if *greeted < VERSION => refuse(
             Some(id),
             NO_METHOD,
             &format!("{method} needs hello version 2"),
         ),
         Some("pane.list") => Step::Ask(id.clone(), Method::PaneList),
+        Some("session.save") => Step::Ask(id.clone(), Method::SessionSave),
         Some(method @ ("pane.wait" | "events.subscribe" | "audit.read" | "pane.status"))
             if *greeted < VERSION =>
         {
@@ -1112,7 +1167,7 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
             None => refuse(
                 Some(id),
                 BAD_PARAMS,
-                "pane.wait takes pane, until and timeout_ms",
+                "pane.wait takes pane, until, timeout_ms, and pattern or idle_ms",
             ),
         },
         Some("events.subscribe") => match topics(request.get("params")) {
@@ -1155,6 +1210,12 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
                 "grants.revoke takes a positive numeric id",
             ),
         },
+        Some(method @ ("workspace.trust_state" | "workspace.ask_trust")) => {
+            match workspace(method, request.get("params")) {
+                Ok(method) => Step::Ask(id.clone(), method),
+                Err(reason) => refuse(Some(id), BAD_PARAMS, reason),
+            }
+        }
         _ => refuse(Some(id), NO_METHOD, "unknown method"),
     }
 }
@@ -1171,6 +1232,15 @@ fn wait(params: Option<&Value>) -> Option<Wait> {
         "exit" => Until::Exit,
         "prompt" => Until::Prompt,
         "output" => Until::Output,
+        "match" => {
+            let pattern = params.get("pattern")?.as_str()?;
+            (pattern.len() <= MAX_PATTERN).then(|| Until::Match(pattern.to_owned()))?
+        }
+        "idle" => {
+            let quiet = Duration::from_millis(params.get("idle_ms")?.as_u64()?);
+            let allowed = (Duration::from_millis(100)..=MAX_WAIT).contains(&quiet);
+            allowed.then_some(Until::Idle(quiet))?
+        }
         _ => return None,
     };
     let timeout = Duration::from_millis(params.get("timeout_ms")?.as_u64()?);
@@ -1189,6 +1259,7 @@ fn topics(params: Option<&Value>) -> Option<Topics> {
             "pane.opened" => topics.opened = true,
             "pane.closed" => topics.closed = true,
             "pane.status" => topics.status = true,
+            "pane.output" => topics.output = true,
             _ => return None,
         }
     }
@@ -1269,6 +1340,39 @@ fn pane_method(method: &str, params: Option<&Value>) -> Result<Method, &'static 
         "pane.close" => Ok(Method::PaneClose { pane }),
         _ => Ok(Method::PaneLastOutput { pane }),
     }
+}
+
+/// Checks a workspace method's `params`: an absolute `root`, a lowercase hex `sha256`, and for
+/// `workspace.ask_trust` at most [`MAX_RUNS`] `runs` strings.
+fn workspace(method: &str, params: Option<&Value>) -> Result<Method, &'static str> {
+    let field = |name| params.and_then(|params| params.get(name));
+    let root = field("root")
+        .and_then(Value::as_str)
+        .filter(|root| root.starts_with('/'))
+        .ok_or("params.root must be an absolute path")?;
+    let sha256 = field("sha256")
+        .and_then(Value::as_str)
+        .filter(|hash| {
+            hash.len() == 64 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
+        .ok_or("params.sha256 must be 64 lowercase hexadecimal digits")?;
+    let workspace = Workspace {
+        root: root.to_owned(),
+        sha256: sha256.to_owned(),
+    };
+    if method == "workspace.trust_state" {
+        return Ok(Method::WorkspaceTrustState(workspace));
+    }
+    let runs = field("runs")
+        .and_then(Value::as_array)
+        .filter(|runs| runs.len() <= MAX_RUNS)
+        .and_then(|runs| {
+            runs.iter()
+                .map(|run| Some(run.as_str()?.to_owned()))
+                .collect()
+        })
+        .ok_or("params.runs must be at most 64 strings")?;
+    Ok(Method::WorkspaceAskTrust(workspace, runs))
 }
 
 /// Feeds one bounded request line through every parser state used by a control-socket peer.
@@ -1367,6 +1471,13 @@ mod tests {
             answer(list, &mut greeted),
             Step::Ask(json!(2), Method::PaneList)
         );
+        let save = br#"{"jsonrpc":"2.0","id":3,"method":"session.save"}"#;
+        assert_eq!(
+            answer(save, &mut greeted),
+            Step::Ask(json!(3), Method::SessionSave)
+        );
+        let (reply, _) = replied(save, &mut OLDEST.clone());
+        assert_eq!(code(&reply), Some(NO_METHOD));
     }
 
     /// A request for a pane method with these params.
@@ -1458,6 +1569,62 @@ mod tests {
     }
 
     #[test]
+    fn workspace_trust_takes_an_absolute_root_a_sha256_and_bounded_runs() {
+        let request = |method: &str, params: Value| {
+            json!({"jsonrpc": "2.0", "id": 3, "method": method, "params": params}).to_string()
+        };
+        let hash = "a".repeat(64);
+        let workspace = Workspace {
+            root: "/p".to_owned(),
+            sha256: hash.clone(),
+        };
+        let line = request(
+            "workspace.ask_trust",
+            json!({"root": "/p", "sha256": hash, "runs": ["make"]}),
+        );
+        let (reply, _) = replied(line.as_bytes(), &mut OLDEST.clone());
+        assert_eq!(code(&reply), Some(NO_METHOD));
+        let asked = answer(line.as_bytes(), &mut VERSION.clone());
+        let method = Method::WorkspaceAskTrust(workspace.clone(), vec!["make".to_owned()]);
+        assert_eq!(asked, Step::Ask(json!(3), method));
+        let line = request(
+            "workspace.trust_state",
+            json!({"root": "/p", "sha256": hash}),
+        );
+        let asked = answer(line.as_bytes(), &mut VERSION.clone());
+        assert_eq!(
+            asked,
+            Step::Ask(json!(3), Method::WorkspaceTrustState(workspace))
+        );
+        for (method, params) in [
+            (
+                "workspace.trust_state",
+                json!({"root": "p", "sha256": hash}),
+            ),
+            (
+                "workspace.trust_state",
+                json!({"root": "/p", "sha256": "A".repeat(64)}),
+            ),
+            (
+                "workspace.trust_state",
+                json!({"root": "/p", "sha256": "a"}),
+            ),
+            ("workspace.ask_trust", json!({"root": "/p", "sha256": hash})),
+            (
+                "workspace.ask_trust",
+                json!({"root": "/p", "sha256": hash, "runs": [1]}),
+            ),
+            (
+                "workspace.ask_trust",
+                json!({"root": "/p", "sha256": hash, "runs": vec![""; MAX_RUNS + 1]}),
+            ),
+        ] {
+            let (reply, _) = replied(request(method, params).as_bytes(), &mut VERSION.clone());
+            assert_eq!(code(&reply), Some(BAD_PARAMS), "{method}");
+        }
+    }
+
+    #[test]
     fn a_status_needs_version_2_a_known_state_and_a_short_message() {
         let status = |params: Value| pane_request("pane.status", &params);
         let most = "é".repeat(MAX_STATUS_MESSAGE);
@@ -1511,13 +1678,34 @@ mod tests {
             panic!("pane 4 was refused");
         };
         assert_eq!((asked.pane, asked.until), (Some(4), Until::Output));
+        for (params, until) in [
+            (
+                json!({"until": "match", "pattern": "x".repeat(MAX_PATTERN)}),
+                Until::Match("x".repeat(MAX_PATTERN)),
+            ),
+            (
+                json!({"until": "idle", "idle_ms": 100}),
+                Until::Idle(Duration::from_millis(100)),
+            ),
+        ] {
+            let mut params = params;
+            params["pane"] = json!("self");
+            params["timeout_ms"] = json!(5);
+            let Step::Ask(_, Method::PaneWait(asked)) =
+                answer(wait(params).as_bytes(), &mut VERSION.clone())
+            else {
+                panic!("a well-formed wait was refused");
+            };
+            assert_eq!(asked.until, until);
+        }
 
         let subscribe = |events| request("events.subscribe", json!({"events": events}));
-        let line = subscribe(json!(["pane.opened", "pane.status"]));
+        let line = subscribe(json!(["pane.opened", "pane.status", "pane.output"]));
         let topics = Topics {
             opened: true,
             closed: false,
             status: true,
+            output: true,
         };
         let asked = answer(line.as_bytes(), &mut VERSION.clone());
         assert_eq!(asked, Step::Ask(json!(3), Method::EventsSubscribe(topics)));
@@ -1528,6 +1716,12 @@ mod tests {
             wait(json!({"pane": "other", "until": "exit", "timeout_ms": 1})),
             wait(json!({"pane": -1, "until": "exit", "timeout_ms": 1})),
             wait(json!({"pane": "self", "until": "never", "timeout_ms": 1})),
+            wait(json!({"pane": "self", "until": "match", "timeout_ms": 1})),
+            wait(
+                json!({"pane": "self", "until": "match", "pattern": "x".repeat(MAX_PATTERN + 1), "timeout_ms": 1}),
+            ),
+            wait(json!({"pane": "self", "until": "idle", "idle_ms": 99, "timeout_ms": 1})),
+            wait(json!({"pane": "self", "until": "idle", "idle_ms": 600_001, "timeout_ms": 1})),
             subscribe(json!([])),
             subscribe(json!(["pane.contents"])),
             request("events.subscribe", json!(null)),

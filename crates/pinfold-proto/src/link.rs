@@ -37,7 +37,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 6;
+pub const VERSION: u16 = 7;
 
 /// Most rows or columns a screen can have, which the core clamps its panes to.
 pub const MAX_DIMENSION: u16 = 1024;
@@ -294,6 +294,10 @@ pub enum ApprovalAction {
     Read,
     /// Type exact text into another pane.
     Send,
+    /// Trust a workspace's layout file. The first text is the canonical directory and the rest
+    /// are every `run` line; `caller` is 0 and `target` is 1 when the directory was trusted with
+    /// another layout. Only allowing once answers it.
+    Trust,
 }
 
 impl ApprovalAction {
@@ -303,6 +307,7 @@ impl ApprovalAction {
         match self {
             Self::Read => "read",
             Self::Send => "send",
+            Self::Trust => "trust",
         }
     }
 }
@@ -1090,7 +1095,11 @@ impl Notice<'_> {
                 let target = body.u32()?;
                 let action = body.tag(
                     "approval action",
-                    &[ApprovalAction::Read, ApprovalAction::Send],
+                    &[
+                        ApprovalAction::Read,
+                        ApprovalAction::Send,
+                        ApprovalAction::Trust,
+                    ],
                 )?;
                 let count = body.u16()?;
                 let mut texts = Vec::with_capacity(usize::from(count));
@@ -1685,7 +1694,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 6, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 7, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -2833,7 +2842,9 @@ mod tests {
             id in any::<u64>(),
             caller in any::<u32>(),
             target in any::<u32>(),
-            action in prop::sample::select(&[ApprovalAction::Read, ApprovalAction::Send][..]),
+            action in prop::sample::select(
+                &[ApprovalAction::Read, ApprovalAction::Send, ApprovalAction::Trust][..]
+            ),
             owned in vec(".{0,32}", 0..4),
             chunk in chunks(),
         ) {

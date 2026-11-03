@@ -17,9 +17,10 @@ use serde_json::{Value, json};
 /// How long a core that was just started gets to answer.
 const START_WAIT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(20);
-const USAGE: &str = "usage: pinfold [up [dir] | ctl list [--json] | ctl send <pane> <text> | \
+const USAGE: &str = "usage: pinfold [up [dir] | ctl list [--json] | ctl send <pane> <text> | ctl wait <pane> \
+    --until exit|prompt|output|match|idle [--pattern <regex>] [--idle-ms <n>] --timeout <s> | \
     ctl grants [--json | revoke <id>] | ctl log [--json] [-n <count>] [--pane <pane>] | \
-    ctl log --verify <file> | mcp]";
+    ctl log --verify <file> | ctl session save | mcp]";
 
 /// Connects to a core at `path`. Nothing listening is no error, as that is what starts one.
 fn connect(path: &Path) -> std::io::Result<Option<UnixStream>> {
@@ -133,6 +134,57 @@ fn send(pane: &str, text: &str) -> Result<(), Box<dyn Error>> {
     let pane: usize = pane.parse().map_err(|_| "the pane must be a number")?;
     let params = json!({"pane": pane, "text": text});
     control::ask(&running()?, "pane.send", &params)?;
+    Ok(())
+}
+
+/// `pinfold ctl wait <pane> --until <what> [--pattern <regex>] [--idle-ms <n>] --timeout <s>`:
+/// waits on a pane, `self` or a number, and prints how the wait ended. Returns whether what it
+/// waited for happened, rather than a timeout or the pane closing. It starts no core.
+fn wait(args: &[&str]) -> Result<bool, Box<dyn Error>> {
+    let [pane, flags @ ..] = args else {
+        return Err(USAGE.into());
+    };
+    let pane = match *pane {
+        "self" => json!("self"),
+        pane => json!(
+            pane.parse::<usize>()
+                .map_err(|_| "the pane must be a number or self")?
+        ),
+    };
+    let mut params = json!({"pane": pane});
+    for pair in flags.chunks(2) {
+        let (key, value) = match *pair {
+            ["--until", until] => ("until", json!(until)),
+            ["--pattern", pattern] => ("pattern", json!(pattern)),
+            ["--idle-ms", idle] => ("idle_ms", json!(idle.parse::<u64>()?)),
+            ["--timeout", seconds] => (
+                "timeout_ms",
+                json!(seconds.parse::<u64>()?.saturating_mul(1000)),
+            ),
+            _ => return Err(USAGE.into()),
+        };
+        params[key] = value;
+    }
+    if params["timeout_ms"].is_null() {
+        return Err("--timeout is required".into());
+    }
+    let (_, result) = control::ask(&running()?, "pane.wait", &params)?;
+    let outcome = result["outcome"].as_str().unwrap_or_default();
+    let text = match (outcome, &result["exit"], result["line"].as_str()) {
+        ("exit", Value::Number(exit), _) => format!("exit {exit}"),
+        ("match", _, Some(line)) => format!("match {line}"),
+        _ => outcome.to_owned(),
+    };
+    std::io::stdout().write_all(format!("{}\n", printable(&text)).as_bytes())?;
+    Ok(!matches!(outcome, "timeout" | "closed"))
+}
+
+/// `pinfold ctl session save`: writes the session's snapshot and prints its path. It starts
+/// no core.
+fn save() -> Result<(), Box<dyn Error>> {
+    let (_, saved) = control::ask(&running()?, "session.save", &json!({}))?;
+    let path = saved["path"].as_str().ok_or("the core named no file")?;
+    std::io::stdout().write_all(format!("{}\n", printable(path)).as_bytes())?;
     Ok(())
 }
 
@@ -305,6 +357,17 @@ fn main() -> ExitCode {
         ["ctl", "list"] => list(false),
         ["ctl", "list", "--json"] => list(true),
         ["ctl", "send", pane, text] => send(pane, text),
+        // 0 once what it waited for happened, 1 if not, and 2 on an error.
+        ["ctl", "wait", ref wait_args @ ..] => {
+            return match wait(wait_args) {
+                Ok(happened) => ExitCode::from(u8::from(!happened)),
+                Err(error) => {
+                    eprintln!("pinfold: {error}");
+                    ExitCode::from(2)
+                }
+            };
+        }
+        ["ctl", "session", "save"] => save(),
         ["ctl", "log", ref rest @ ..] => log(rest),
         ["mcp"] => {
             let socket = control::socket_path(&control::runtime_dir());

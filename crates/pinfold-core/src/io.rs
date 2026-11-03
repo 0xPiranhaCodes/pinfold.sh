@@ -23,6 +23,7 @@ use crate::marks::ShellMarks;
 use crate::protect::Protect;
 use crate::search::{CopyStep, Copying, Direction, Position, Search, SearchStep, Selection};
 use crate::status::{self, Status, Tracker};
+use crate::tap::Tap;
 use crate::vt::{AlacrittyEngine, VtEngine};
 use crate::{paste, shell};
 
@@ -65,6 +66,7 @@ fn pump(
     replies: &mut Vec<u8>,
     buffer: &mut [u8],
     fed: &mut bool,
+    mut tap: Option<&mut Tap>,
 ) -> Pumped {
     let mut left = READ_BUDGET;
     while left > 0 {
@@ -75,6 +77,9 @@ fn pump(
                 left -= count;
                 *fed = true;
                 engine.feed(&buffer[..count], replies);
+                if let Some(tap) = tap.as_deref_mut() {
+                    tap.feed(&buffer[..count]);
+                }
                 replies.truncate(MAX_REPLIES);
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock => return Pumped::Drained,
@@ -114,6 +119,8 @@ struct Pane {
     dirty: bool,
     /// Counts reads that found output, wrapping, for `pane.wait`.
     output: u64,
+    /// The text it printed, while something listens.
+    tap: Option<Box<Tap>>,
     /// The running search, which gets one step per pass, so PTYs are served between steps.
     search: Option<Search>,
     found: Option<Selection>,
@@ -248,6 +255,7 @@ impl Reactor {
             closed: false,
             dirty: true,
             output: 0,
+            tap: None,
             search: None,
             found: None,
             sends: (Instant::now(), 0),
@@ -307,6 +315,7 @@ impl Reactor {
                     &mut pane.replies,
                     &mut self.buffer,
                     &mut fed,
+                    pane.tap.as_deref_mut(),
                 );
                 pane.dirty |= fed;
                 pane.output = pane.output.wrapping_add(u64::from(fed));
@@ -594,6 +603,21 @@ impl Reactor {
         })
     }
 
+    /// Starts or stops keeping the text `pane` prints, for [`Reactor::take_text`].
+    pub fn tap(&mut self, pane: usize, on: bool) {
+        if let Some(pane) = pane_mut(&mut self.panes, pane)
+            && on != pane.tap.is_some()
+        {
+            pane.tap = on.then(Box::default);
+        }
+    }
+
+    /// Returns the text `pane` printed since the last take, if it is tapped.
+    pub fn take_text(&mut self, pane: usize) -> Option<String> {
+        let tap = pane_mut(&mut self.panes, pane)?.tap.as_deref_mut()?;
+        Some(tap.take())
+    }
+
     /// A pane's PTY, for [`Reactor::protection`].
     pub(crate) fn pty(&self, pane: usize) -> Option<&Pty> {
         Some(&self.pane(pane)?.pty)
@@ -846,6 +870,7 @@ mod tests {
             &mut replies,
             &mut buffer,
             &mut fed,
+            None,
         );
         assert_eq!(pumped, Pumped::Budget);
         assert!(fed);
@@ -863,6 +888,7 @@ mod tests {
             &mut replies,
             &mut buffer,
             &mut false,
+            None,
         );
         assert_eq!(replies.len(), MAX_REPLIES);
     }
