@@ -45,6 +45,21 @@ pub struct Snapshot {
     pub active: usize,
     /// Each pane, by its index in the layout.
     pub panes: Vec<Pane>,
+    /// The workspaces `pinfold up` opened, so a restore can run their `run` lines again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspaces: Vec<Workspace>,
+}
+
+/// A workspace of a [`Snapshot`]. It names no command: `run` lines are read from the layout
+/// file again, and only if it still has this hash and is trusted with it (ADR-0034).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Workspace {
+    /// The canonical project directory.
+    pub root: String,
+    /// The layout file's SHA-256 when it opened.
+    pub sha256: String,
+    /// Each layout pane, in the file's order, by its index in the snapshot, or none once closed.
+    pub panes: Vec<Option<usize>>,
 }
 
 impl Default for Snapshot {
@@ -54,6 +69,7 @@ impl Default for Snapshot {
             tabs: Vec::new(),
             active: 0,
             panes: Vec::new(),
+            workspaces: Vec::new(),
         }
     }
 }
@@ -414,6 +430,7 @@ impl Reactor {
             tabs: tabs.collect(),
             active: tree.active,
             panes: panes.collect(),
+            workspaces: Vec::new(),
         }
     }
 }
@@ -478,6 +495,11 @@ mod tests {
                 ),
                 Pane::new(None, &"é".repeat(MAX_SEND)),
             ],
+            workspaces: vec![Workspace {
+                root: "/p".to_owned(),
+                sha256: "0".repeat(64),
+                panes: vec![Some(1), None],
+            }],
         }
     }
 

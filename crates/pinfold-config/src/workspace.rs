@@ -103,6 +103,16 @@ pub enum Error {
 /// Returns an error when the path is not a regular file, is a symlink, cannot be read, exceeds
 /// [`MAX_BYTES`], or its bytes do not form a valid [`Layout`].
 pub fn load(path: &Path, project: &Path) -> Result<Layout, Error> {
+    parse(&read(path, project)?, project)
+}
+
+/// Reads a workspace layout's bytes as [`load`] does, without parsing them, so a caller can
+/// hash and then parse the same bytes.
+///
+/// # Errors
+///
+/// As [`load`], but for the parse.
+pub fn read(path: &Path, project: &Path) -> Result<Vec<u8>, Error> {
     let metadata = fs::symlink_metadata(path)?;
     if metadata.file_type().is_symlink() {
         return Err(Error::Symlink);
@@ -135,7 +145,7 @@ pub fn load(path: &Path, project: &Path) -> Result<Layout, Error> {
     }
     let mut bytes = Vec::with_capacity(metadata.len() as usize);
     file.take(MAX_BYTES as u64 + 1).read_to_end(&mut bytes)?;
-    parse(&bytes, project)
+    Ok(bytes)
 }
 
 /// Parses workspace layout bytes and resolves every supplied `cwd` inside `project`.
