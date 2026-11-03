@@ -20,7 +20,7 @@ const POLL: Duration = Duration::from_millis(20);
 const USAGE: &str = "usage: pinfold [up [dir] | ctl list [--json] | ctl send <pane> <text> | ctl wait <pane> \
     --until exit|prompt|output|match|idle [--pattern <regex>] [--idle-ms <n>] --timeout <s> | \
     ctl grants [--json | revoke <id>] | ctl log [--json] [-n <count>] [--pane <pane>] | \
-    ctl log --verify <file> | mcp]";
+    ctl log --verify <file> | ctl session save | mcp]";
 
 /// Connects to a core at `path`. Nothing listening is no error, as that is what starts one.
 fn connect(path: &Path) -> std::io::Result<Option<UnixStream>> {
@@ -177,6 +177,15 @@ fn wait(args: &[&str]) -> Result<bool, Box<dyn Error>> {
     };
     std::io::stdout().write_all(format!("{}\n", printable(&text)).as_bytes())?;
     Ok(!matches!(outcome, "timeout" | "closed"))
+}
+
+/// `pinfold ctl session save`: writes the session's snapshot and prints its path. It starts
+/// no core.
+fn save() -> Result<(), Box<dyn Error>> {
+    let (_, saved) = control::ask(&running()?, "session.save", &json!({}))?;
+    let path = saved["path"].as_str().ok_or("the core named no file")?;
+    std::io::stdout().write_all(format!("{}\n", printable(path)).as_bytes())?;
+    Ok(())
 }
 
 /// Lists lasting cross-pane grants. The core accepts this only from a terminal outside panes.
@@ -358,6 +367,7 @@ fn main() -> ExitCode {
                 }
             };
         }
+        ["ctl", "session", "save"] => save(),
         ["ctl", "log", ref rest @ ..] => log(rest),
         ["mcp"] => {
             let socket = control::socket_path(&control::runtime_dir());

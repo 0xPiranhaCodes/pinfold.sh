@@ -150,6 +150,7 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                     "pane.list",
                     "events.subscribe",
                     "audit.read",
+                    "session.save",
                     "grants.list",
                     "grants.revoke",
                     "workspace.open",
@@ -196,6 +197,16 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
             Ok(json!({"panes": panes.collect::<Vec<_>>()}))
         }
         Method::PaneList => Err("pane.list needs a caller in a terminal".to_owned()),
+        // Like audit.read: a guardrail against a pane's program, not proof of a person.
+        Method::SessionSave if identified && own.is_none() => {
+            let state = pinfold_config::state_dir().ok_or("HOME is not set")?;
+            let path = reactor.snapshot().write(&state, control::SESSION);
+            path.map(|path| json!({"path": path.to_string_lossy()}))
+                .map_err(|error| format!("cannot save the session: {error}"))
+        }
+        Method::SessionSave => {
+            Err("session.save needs a caller in a terminal outside any pane".to_owned())
+        }
         Method::GrantsList if identified && own.is_none() => Ok(grants_list(grants)),
         Method::GrantsRevoke { id } if identified && own.is_none() => {
             Ok(json!({"revoked": grants.revoke(*id)}))

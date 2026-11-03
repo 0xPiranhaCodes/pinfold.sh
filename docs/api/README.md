@@ -26,6 +26,7 @@ Every connection starts with `hello`:
 | `events.subscribe` | Version 2 and a terminal    | [`events.subscribe.schema.json`](events.subscribe.schema.json) |
 | `pane.status`      | Version 2 and its own pane  | [`pane.status.schema.json`](pane.status.schema.json)         |
 | `audit.read`       | Version 2, outside any pane | [`audit.read.schema.json`](audit.read.schema.json)           |
+| `session.save`     | Version 2, outside any pane | [`session.save.schema.json`](session.save.schema.json)       |
 | `workspace.open`   | Version 2, a terminal, no pane | [`workspace.open.schema.json`](workspace.open.schema.json) |
 | `grants.list`      | Version 2, outside panes    | [`grants.list.schema.json`](grants.list.schema.json)         |
 | `grants.revoke`    | Version 2, outside panes    | [`grants.revoke.schema.json`](grants.revoke.schema.json)     |
@@ -102,8 +103,10 @@ cannot show entries cut from its end.
 programs print, which can fake them: read them as hints, not facts. `pinfold ctl send <pane>
 <text>` types into a pane. `pinfold ctl wait <pane> --until exit|prompt|output|match|idle
 [--pattern <regex>] [--idle-ms <n>] --timeout <s>` prints how the wait ended, and exits 0 if
-what it waited for happened, 1 on a timeout or a closed pane, and 2 on an error. A core that refuses version 2 is older than the client, and
-`pinfold ctl` says to quit PinFold so that a new core starts.
+what it waited for happened, 1 on a timeout or a closed pane, and 2 on an error. `pinfold ctl
+session save`, from a terminal that is no pane, writes the session's snapshot and prints its
+path. A core that refuses version 2 is older than the client, and `pinfold ctl` says to quit
+PinFold so that a new core starts.
 
 `pinfold up [dir]` reads `<dir>/.pinfold/layout.toml`, the current directory's by default,
 starts a core and a window as `pinfold` does, and sends `workspace.open` with each pane's split

@@ -12,6 +12,7 @@ pub mod sandbox;
 pub mod scrollback;
 pub mod search;
 pub mod shell;
+pub mod snapshot;
 pub mod status;
 mod tabs;
 pub mod tap;
