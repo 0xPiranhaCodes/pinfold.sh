@@ -18,7 +18,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::os::unix::fs::MetadataExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 /// Where bubblewrap is looked for. Not `PATH`, where an agent could put its own `bwrap` for the
@@ -48,7 +48,7 @@ const WRITES: &str = "(deny file-write* (require-all (require-not (subpath (para
 /// back. What git runs code from inside it gets a rule each.
 const GIT: &str = "(deny file-write* (literal (param \"G\")))";
 
-/// The most directories [`git_controls`] looks at before it refuses the launch.
+/// The most directories and submodules [`git_controls`] looks at before it refuses the launch.
 const GIT_DIRS: usize = 256;
 
 /// The macOS socket rule: no Unix socket but the API's `S`, as given and resolved `SR`, and the
@@ -57,6 +57,18 @@ const SOCKETS: &str = "(deny network-outbound (require-all (remote unix-socket)\
 (require-not (remote unix-socket (path-literal (param \"S\"))))\
 (require-not (remote unix-socket (path-literal (param \"SR\"))))\
 (require-not (remote unix-socket (path-literal \"/private/var/run/mDNSResponder\")))))";
+
+/// What git runs code from in a working directory, from [`git_controls`].
+#[derive(Debug, Default, PartialEq)]
+struct Git {
+    /// Directories that must stay where they are, as the rules name what is inside them.
+    kept: Vec<PathBuf>,
+    /// Hooks, config and pointers to other directories, which git reads code or paths from.
+    controls: Vec<PathBuf>,
+    /// The `.git` of each submodule that `.gitmodules` lists, a file that points git at the
+    /// submodule's repository or that repository itself.
+    modules: Vec<PathBuf>,
+}
 
 /// A directory a sandboxed agent may write to, from [`working_directory`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -155,9 +167,11 @@ pub fn working_directory(path: &Path, hidden: &[PathBuf]) -> io::Result<WorkingD
 fn resolve(path: &Path) -> PathBuf {
     for base in path.ancestors() {
         if let Ok(real) = base.canonicalize() {
-            return path
-                .strip_prefix(base)
-                .map_or(real.clone(), |rest| real.join(rest));
+            // Not joined when nothing is left, which would add a trailing `/` that rules then miss.
+            return match path.strip_prefix(base) {
+                Ok(rest) if !rest.as_os_str().is_empty() => real.join(rest),
+                _ => real,
+            };
         }
     }
     path.to_path_buf()
@@ -209,13 +223,10 @@ pub fn command(
             "a sandboxed agent needs a program that does not start with -",
         ));
     }
-    let (kept, controls) = git_controls(work.path())?;
+    let git = git_controls(work.path())?;
     let (tool, args) = if cfg!(target_os = "macos") {
         let tool = PathBuf::from("/usr/bin/sandbox-exec");
-        (
-            tool,
-            macos_args(hidden, program, work.path(), api, (&kept, &controls)),
-        )
+        (tool, macos_args(hidden, program, work.path(), api, &git))
     } else if cfg!(target_os = "linux") {
         let tool = bwrap().ok_or_else(|| {
             io::Error::new(
@@ -226,7 +237,7 @@ pub fn command(
         })?;
         let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
         let runtime = runtime.as_deref();
-        let args = linux_args(hidden, program, work.path(), api, runtime);
+        let args = linux_args(hidden, program, work.path(), api, runtime, &git.modules);
         (tool, args)
     } else {
         return Err(io::ErrorKind::Unsupported.into());
@@ -245,7 +256,7 @@ fn macos_args(
     program: &[String],
     work: &Path,
     api: &Path,
-    (kept, controls): (&[PathBuf], &[PathBuf]),
+    found: &Git,
 ) -> Vec<OsString> {
     let mut profile = format!("{PROFILE}{WRITES}{GIT}{SOCKETS}");
     let temp = std::env::temp_dir();
@@ -264,8 +275,9 @@ fn macos_args(
         define.push(path);
         args.extend([OsString::from("-D"), define]);
     }
-    let rules = kept.iter().map(|path| ("K", "literal", path));
-    let rules = rules.chain(controls.iter().map(|path| ("C", "subpath", path)));
+    let kept = found.kept.iter().chain(&found.modules);
+    let rules = kept.map(|path| ("K", "literal", path));
+    let rules = rules.chain(found.controls.iter().map(|path| ("C", "subpath", path)));
     for (index, (name, kind, path)) in rules.enumerate() {
         profile += &format!("(deny file-write* ({kind} (param \"{name}{index}\")))");
         let mut define = OsString::from(format!("{name}{index}="));
@@ -287,8 +299,8 @@ fn macos_args(
 }
 
 /// `bwrap`'s arguments: the real root read-only, private `/dev`, `/proc`, `/tmp` and IPC, an
-/// empty `runtime` directory but for the API socket's, `work` writable but its `.git`, and an
-/// empty directory over each hidden one. A missing directory is skipped, as bwrap
+/// empty `runtime` directory but for the API socket's, `work` writable but its `.git` and its
+/// submodules' `modules`, and an empty directory over each hidden one. A missing directory is skipped, as bwrap
 /// would make it outside the sandbox, and so is one inside another hidden directory, which that
 /// one's mount already covers.
 fn linux_args(
@@ -297,6 +309,7 @@ fn linux_args(
     work: &Path,
     api: &Path,
     runtime: Option<&Path>,
+    modules: &[PathBuf],
 ) -> Vec<OsString> {
     let fixed = [
         "--ro-bind",
@@ -328,8 +341,10 @@ fn linux_args(
     // `commondir` or other file that points git at its own hooks and config. Commits happen
     // outside the sandbox.
     let git = work.join(".git");
-    if fs::symlink_metadata(&git).is_ok() {
-        mount("--ro-bind", &git);
+    for git in std::iter::once(&git).chain(modules) {
+        if fs::symlink_metadata(git).is_ok() {
+            mount("--ro-bind", git);
+        }
     }
     let mounted: Vec<&PathBuf> = hidden.iter().filter(|path| path.is_dir()).collect();
     for path in &mounted {
@@ -346,34 +361,44 @@ fn linux_args(
     args
 }
 
-/// What git runs code from in `work`'s `.git` directory, for macOS to deny writing: the
-/// directories down to each repository's, which must stay where they are, and the hooks, config,
-/// worktree config and pointers to other directories (`commondir`, `gitdir`) of the repository and
-/// of each submodule and linked worktree in it, whether they exist or not. Symlinks are not
-/// followed.
+/// What git runs code from in `work`, for macOS to deny writing: the directories down to each
+/// repository's in `.git`, which must stay where they are, the hooks, config, worktree config and
+/// pointers to other directories (`commondir`, `gitdir`) of the repository and of each submodule
+/// and linked worktree, whether they exist or not, and each submodule's `.git` in the working
+/// tree, as `.gitmodules` lists them. Symlinks are not followed.
 ///
 /// Refuses if the repository or a submodule has no hooks directory or no config, if any of those
-/// files is a symlink, or if `.git` holds more than [`GIT_DIRS`] directories.
-fn git_controls(work: &Path) -> io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
+/// files is a symlink, or if there are more than [`GIT_DIRS`] directories and submodules.
+fn git_controls(work: &Path) -> io::Result<Git> {
     let git = work.join(".git");
-    let (mut kept, mut controls) = (Vec::new(), Vec::new());
-    if !fs::symlink_metadata(&git).is_ok_and(|meta| meta.is_dir()) {
-        return Ok((kept, controls));
-    }
+    let mut found = Git::default();
     let refuse = |why: &str| {
         Err(io::Error::new(
             io::ErrorKind::PermissionDenied,
-            format!("{git:?} {why}, so the sandboxed agent does not start"),
+            format!("{work:?} {why}, so the sandboxed agent does not start"),
         ))
     };
+    let is_dir = |path: &Path| fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir());
     // Each directory, whether git keeps a repository there and whether that is a submodule's or
     // the top one's, which need their own hooks and config.
-    let mut pending = vec![(git.clone(), true, true)];
-    let mut seen = 0;
+    let mut pending = Vec::new();
+    if is_dir(&git) {
+        pending.push((git.clone(), true, true));
+    }
+    for path in submodules(work) {
+        let module = work.join(path).join(".git");
+        // A submodule that keeps its repository in the working tree, not in `.git/modules`.
+        if is_dir(&module) {
+            pending.push((module.clone(), true, true));
+        }
+        found.modules.push(module);
+    }
+    let (kept, controls) = (&mut found.kept, &mut found.controls);
+    let mut seen = found.modules.len();
     while let Some((dir, repository, module)) = pending.pop() {
         seen += 1;
         if seen > GIT_DIRS {
-            return refuse("holds too many directories to check");
+            return refuse("holds too many git directories to check");
         }
         if repository {
             kept.push(dir.clone());
@@ -415,7 +440,35 @@ fn git_controls(work: &Path) -> io::Result<(Vec<PathBuf>, Vec<PathBuf>)> {
             }
         }
     }
-    Ok((kept, controls))
+    Ok(found)
+}
+
+/// The paths `.gitmodules` lists, if each is a relative path inside the working directory.
+fn submodules(work: &Path) -> Vec<PathBuf> {
+    let Ok(text) = fs::read(work.join(".gitmodules")) else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&text)
+        .lines()
+        .filter_map(|line| {
+            let (key, value) = line.split_once('=')?;
+            // Keys ignore case, and `;` or `#` starts a comment outside quotes.
+            let value = value.trim();
+            let value = match value.strip_prefix('"') {
+                Some(quoted) => quoted.split('"').next()?,
+                None => value.split([';', '#']).next()?.trim(),
+            };
+            key.trim()
+                .eq_ignore_ascii_case("path")
+                .then(|| PathBuf::from(value))
+        })
+        .filter(|path| {
+            path.components().next().is_some()
+                && path
+                    .components()
+                    .all(|part| matches!(part, Component::Normal(_)))
+        })
+        .collect()
 }
 
 /// The first of [`BWRAP`] that is [`trusted`].
@@ -462,14 +515,19 @@ mod tests {
             PathBuf::from("/nowhere/a\"b"),
         ];
         let (work, api) = (Path::new("/nowhere/work"), Path::new("/nowhere/api.sock"));
-        let controls = [work.join(".git/hooks")];
+        let found = Git {
+            controls: vec![work.join(".git/hooks")],
+            modules: vec![work.join("sub/.git")],
+            ..Git::default()
+        };
         let program = ["agent".to_owned(), "-v".to_owned()];
-        let args = macos_args(&hidden, &program, work, api, (&[], &controls));
+        let args = macos_args(&hidden, &program, work, api, &found);
         let args = strings(&args);
         assert_eq!(args[0], "-p");
         assert!(args[1].starts_with(&format!("{PROFILE}{WRITES}{GIT}{SOCKETS}")));
         assert!(args[1].ends_with(
-            "(deny file-write* (subpath (param \"C0\")))\
+            "(deny file-write* (literal (param \"K0\")))\
+             (deny file-write* (subpath (param \"C1\")))\
              (deny file-read* file-write* (subpath (param \"H0\")))\
              (deny file-read* file-write* (subpath (param \"H1\")))"
         ));
@@ -488,7 +546,9 @@ mod tests {
                 "-D",
                 "SR=/nowhere/api.sock",
                 "-D",
-                "C0=/nowhere/work/.git/hooks",
+                "K0=/nowhere/work/sub/.git",
+                "-D",
+                "C1=/nowhere/work/.git/hooks",
                 "-D",
                 "H0=/nowhere/.ssh",
                 "-D",
@@ -511,7 +571,18 @@ mod tests {
         let hidden = [inner.clone(), root.clone(), PathBuf::from("/nowhere/.ssh")];
         let api = Path::new("/run/user/7/pinfold/pinfold.sock");
         let runtime = Some(Path::new("/run/user/7"));
-        let args = linux_args(&hidden, &["agent".to_owned()], &work, api, runtime);
+        let module = work.join("sub/.git");
+        let modules = [module.clone()];
+        fs::create_dir_all(work.join("sub")).unwrap();
+        fs::write(&module, "gitdir: ../.git/modules/sub\n").unwrap();
+        let args = linux_args(
+            &hidden,
+            &["agent".to_owned()],
+            &work,
+            api,
+            runtime,
+            &modules,
+        );
         fs::remove_dir(&inner).unwrap();
         fs::remove_dir_all(&work).unwrap();
         let args = strings(&args);
@@ -525,7 +596,8 @@ mod tests {
         assert_eq!(args[..3], ["--ro-bind", "/", "/"]);
         let has = |want: &[&str]| args.windows(want.len()).any(|got| got == want);
         let (work, git) = (work.to_str().unwrap(), work.join(".git"));
-        let git = git.to_str().unwrap();
+        let (git, module) = (git.to_str().unwrap(), module.to_str().unwrap());
+        assert!(has(&["--ro-bind", module, module]));
         assert!(has(&["--tmpfs", "/tmp"]));
         assert!(has(&["--tmpfs", "/run/user/7"]));
         let dir = "/run/user/7/pinfold";
@@ -565,7 +637,7 @@ mod tests {
         fs::write(&git, "gitdir: /elsewhere\n").unwrap();
         let gitfile = git_controls(&work);
         fs::remove_dir_all(&work).unwrap();
-        let (kept, controls) = controls.unwrap();
+        let Git { kept, controls, .. } = controls.unwrap();
         for dir in [
             &git,
             &git.join("modules"),
@@ -588,8 +660,43 @@ mod tests {
             assert!(controls.contains(&path), "{path:?} in {controls:?}");
         }
         assert!(hookless.is_err() && linked.is_err());
-        let empty = (vec![], vec![]);
-        assert_eq!((none.unwrap(), gitfile.unwrap()), (empty.clone(), empty));
+        assert_eq!(none.unwrap(), Git::default());
+        assert_eq!(gitfile.unwrap(), Git::default());
+    }
+
+    #[test]
+    fn each_listed_submodule_keeps_its_git() {
+        let work = project("pinfold-submodules", 0o700);
+        let vendor = work.join("vendor/.git");
+        fs::create_dir_all(vendor.join("hooks")).unwrap();
+        fs::create_dir_all(work.join("sub")).unwrap();
+        for (path, text) in [
+            (work.join("sub/.git"), "gitdir: ../.git/modules/sub\n"),
+            (vendor.join("config"), ""),
+            (vendor.join("HEAD"), ""),
+            (
+                work.join(".gitmodules"),
+                "[submodule \"sub\"]\n\tPath = sub ; a comment\n[submodule \"vendor\"]\n\
+                 \tpath = \"vendor\" # a comment\n\
+                 [submodule \"out\"]\n\tpath = ../out\n[submodule \"root\"]\n\tpath = /etc\n",
+            ),
+        ] {
+            fs::write(path, text).unwrap();
+        }
+        let found = git_controls(&work);
+        fs::remove_dir_all(&work).unwrap();
+        let found = found.unwrap();
+        assert_eq!(found.modules, [work.join("sub/.git"), vendor.clone()]);
+        assert!(found.kept.contains(&vendor));
+        assert!(found.controls.contains(&vendor.join("hooks")));
+    }
+
+    #[test]
+    fn a_resolved_path_has_no_trailing_slash() {
+        let temp = std::env::temp_dir().canonicalize().unwrap();
+        assert_eq!(resolve(&temp).as_os_str(), temp.as_os_str());
+        let missing = temp.join("pinfold-missing/x");
+        assert_eq!(resolve(&missing).as_os_str(), missing.as_os_str());
     }
 
     #[test]

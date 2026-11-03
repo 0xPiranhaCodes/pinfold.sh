@@ -133,15 +133,20 @@ directory, and does not hold or sit inside a hidden directory.
 Git runs what a repository's hooks and config name outside the sandbox, so the agent cannot
 change them. On Linux the working directory's whole `.git` is read-only: a sandboxed agent
 cannot write the repository's git metadata, so it cannot commit, and commits happen outside the
-sandbox. On macOS the agent can commit, but it cannot write the hooks, config, worktree config,
-`commondir` or `gitdir` of the repository or of any submodule or linked worktree in `.git`, make
-them where they are missing, or move `.git` or the directories that hold them. The agent does
-not start if the repository or a submodule has no hooks directory or config, or links one
-elsewhere. On Linux, an agent in a directory with no `.git` yet can still make one. A
+sandbox. The `.git` of each submodule that `.gitmodules` lists is read-only too, whether it is
+a file pointing into `.git/modules` or a repository of its own. On macOS the agent can commit,
+but it cannot write the hooks, config, worktree config, `commondir` or `gitdir` of the
+repository or of any submodule or linked worktree, make them where they are missing, rewrite a
+submodule's `.git`, or move `.git` or the directories that hold them. The agent does not start
+if the repository or a submodule has no hooks directory or config, or links one elsewhere. On
+Linux, an agent in a directory with no `.git` yet can still make one, and on both systems a
+nested repository that `.gitmodules` does not list is not protected. A
 `core.hooksPath` or other config setting that names a file inside the working directory, such as
 a `.husky` directory, points at files the agent can change. So do other project files, such as a
 `Makefile`, `.envrc` or a `package.json` script. These run with your full rights when you run
-them, so review an agent's changes before you run git or the project's tools.
+them, so review an agent's changes before you run git or the project's tools. The sandbox
+keeps git from running the agent's code on its own; it does not try to guard every file in the
+working directory that you might later run, and such cases stay limits of this kind (#161).
 
 The agent gets no `SSH_AUTH_SOCK`, `GPG_AGENT_INFO` or `DBUS_SESSION_BUS_ADDRESS`, and reaches no
 Unix socket but PinFold's API socket, so it cannot sign with your ssh-agent without reading

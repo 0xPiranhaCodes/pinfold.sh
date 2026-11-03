@@ -38,6 +38,13 @@ fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
     for file in ["config", "HEAD"] {
         fs::write(module.join(file), "").unwrap();
     }
+    fs::create_dir_all(work.join("sub")).unwrap();
+    fs::write(work.join("sub/.git"), "gitdir: ../.git/modules/sub\n").unwrap();
+    fs::write(
+        work.join(".gitmodules"),
+        "[submodule \"sub\"]\n\tpath = sub\n",
+    )
+    .unwrap();
     let config_before = fs::read(work.join(".git/config")).unwrap();
     for dir in [&home, &work] {
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
@@ -86,6 +93,8 @@ fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
            && echo hook=written || echo hook=refused; \
          (echo x >'{home_dir}/work/.git/modules/sub/hooks/post-checkout') 2>/dev/null \
            && echo module=written || echo module=refused; \
+         (echo 'gitdir: /tmp' >'{home_dir}/work/sub/.git') 2>/dev/null \
+           && echo gitfile=written || echo gitfile=refused; \
          (echo x >>'{home_dir}/work/.git/config') 2>/dev/null \
            && echo config=written || echo config=refused; \
          (mv '{home_dir}/work/.git' '{home_dir}/work/moved') 2>/dev/null \
@@ -150,6 +159,7 @@ fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
     );
     assert!(output.contains("git=kept"), "{output}");
     assert!(output.contains("module=refused"), "{output}");
+    assert!(output.contains("gitfile=refused"), "{output}");
     // Linux keeps all of `.git` read-only, so commits happen outside the sandbox.
     if cfg!(target_os = "linux") {
         assert!(output.contains("scratch=refused"), "{output}");
