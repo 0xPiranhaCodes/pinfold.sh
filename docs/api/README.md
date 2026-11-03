@@ -24,6 +24,7 @@ Every connection starts with `hello`:
 | `pane.spawn`       | Version 2 and its own pane  | [`pane.spawn.schema.json`](pane.spawn.schema.json)           |
 | `pane.close`       | Version 2, a spawned pane   | [`pane.close.schema.json`](pane.close.schema.json)           |
 | `events.subscribe` | Version 2 and a terminal    | [`events.subscribe.schema.json`](events.subscribe.schema.json) |
+| `pane.status`      | Version 2 and its own pane  | [`pane.status.schema.json`](pane.status.schema.json)         |
 | `audit.read`       | Version 2, outside any pane | [`audit.read.schema.json`](audit.read.schema.json)           |
 | `workspace.open`   | Version 2, a terminal, no pane | [`workspace.open.schema.json`](workspace.open.schema.json) |
 
@@ -43,6 +44,12 @@ the core took too long to answer; a refusal, such as "the core is busy", does no
 waits. `events.subscribe` sends `event` notifications on its connection. A connection is closed
 if 2 MiB of replies queue unread, or if the core has more events for it than it can queue, so a
 subscriber that was closed may have missed events.
+
+`pane.status` lets an agent say what state its own pane is in: `needs-you`, `running`, `done`,
+`error` or `idle`, with a message of at most 200 characters. A report outranks the pane's OSC 133
+marks, which output can fake, so `pane.list` and `pane.status` events carry `source`: `marks` or
+`reported`. The window shows the state as glyph, colour and word, and the message only in its
+own chrome.
 
 The core records each request it answers in a hash-chained audit log: when, the caller's pane
 (or outside a pane, or unidentified), the method, the target pane, and whether it was allowed,

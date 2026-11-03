@@ -122,6 +122,7 @@ fn record(
             ("pane.spawn", pane, "children")
         }
         Method::PaneClose { pane } => ("pane.close", Some(*pane), scope(*pane)),
+        Method::PaneStatus { pane, .. } => ("pane.status", Some(*pane), scope(*pane)),
         Method::AuditRead { pane, .. } => ("audit.read", *pane, "outside"),
         // A refused call from inside a pane is the caller's own, not one from outside.
         Method::WorkspaceOpen(_) => ("workspace.open", None, own.map_or("outside", |_| "self")),
