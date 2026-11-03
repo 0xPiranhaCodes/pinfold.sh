@@ -5,6 +5,7 @@ mod flash;
 mod ime;
 mod input;
 pub mod link;
+mod menu_bar;
 mod mouse;
 mod outbox;
 mod panes;

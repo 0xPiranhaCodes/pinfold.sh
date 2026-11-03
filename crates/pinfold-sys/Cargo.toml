@@ -17,6 +17,8 @@ raw-window-handle = { version = "0.6.2", optional = true }
 [features]
 # Off in the core, which never touches the clipboard.
 clipboard = ["dep:copypasta", "dep:raw-window-handle"]
+# The macOS menu bar. Off in the core, which has no window.
+menu = ["dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
 # Off in the core, so it never loads Apple's graphics frameworks.
 metal = [
   "dep:objc2",
@@ -28,6 +30,14 @@ metal = [
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6.5", optional = true }
+objc2-app-kit = { version = "0.3.2", optional = true, default-features = false, features = [
+  "std",
+  "NSApplication",
+  "NSEvent",
+  "NSMenu",
+  "NSMenuItem",
+  "NSResponder",
+] }
 objc2-foundation = { version = "0.3.2", optional = true }
 objc2-metal = { version = "0.3.2", optional = true }
 objc2-quartz-core = { version = "0.3.2", optional = true }

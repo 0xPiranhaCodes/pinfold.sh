@@ -8,5 +8,6 @@ mod reflow;
 pub mod scrollback;
 pub mod search;
 pub mod shell;
+pub mod status;
 mod tabs;
 pub mod vt;

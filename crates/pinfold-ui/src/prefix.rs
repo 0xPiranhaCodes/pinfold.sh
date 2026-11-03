@@ -32,8 +32,9 @@
 //! Tabs and panes close on the prompt `x` raises, or when their last program exits. Closing the
 //! session's last pane says so in the prompt, in red, as it ends the session.
 //!
-//! On macOS Command+T opens a tab and Command+1 to Command+9 go to one, as the tab strip's keys
-//! show. Command+N stays free, as a window is all a session has.
+//! On macOS the menu bar holds every Command shortcut, such as Command+T for a tab and
+//! Command+1 to Command+9 for one, as the tab strip's keys show (`menu_bar`). Command+N stays
+//! free, as a window is all a session has.
 
 pub use pinfold_proto::link::Side as Direction;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
@@ -66,14 +67,24 @@ pub enum Command {
     Zoom,
     /// Close the window and leave the session running.
     Detach,
-    /// Put the selection on the clipboard.
+    /// Copy the selection.
     Copy,
-    /// Paste the clipboard into the focused pane, through the paste checks.
+    /// Paste the clipboard, through the paste checks.
     Paste,
-    /// Select the focused pane's history and screen.
+    /// Select every row the focused pane holds.
     SelectAll,
     /// Open the search bar.
     Find,
+    /// Draw text a point bigger, until the config is saved.
+    FontBigger,
+    /// Draw text a point smaller, until the config is saved.
+    FontSmaller,
+    /// Draw text at the config's size again.
+    FontReset,
+    /// Open the config file in the text editor, making it if it is missing.
+    OpenConfig,
+    /// Open the documentation in the browser.
+    OpenDocs,
 }
 
 /// What to do with a key.

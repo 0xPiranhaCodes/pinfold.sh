@@ -1,0 +1,17 @@
+[package]
+name = "spike-dock-menu"
+description = "M3 spike: answer applicationDockMenu: while winit owns the app delegate."
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "=0.6.5"
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSApplication", "NSMenu", "NSMenuItem", "NSResponder"] }
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSString", "NSObject"] }
+winit = { version = "=0.30.13", default-features = false, features = ["rwh_06"] }
+
+# Throwaway spike code, kept out of the product workspace (ADR-0019).
+[workspace]
