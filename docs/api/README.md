@@ -24,6 +24,7 @@ Every connection starts with `hello`:
 | `pane.spawn`       | Version 2 and its own pane  | [`pane.spawn.schema.json`](pane.spawn.schema.json)           |
 | `pane.close`       | Version 2, a spawned pane   | [`pane.close.schema.json`](pane.close.schema.json)           |
 | `events.subscribe` | Version 2 and a terminal    | [`events.subscribe.schema.json`](events.subscribe.schema.json) |
+| `workspace.open`   | Version 2, a terminal, no pane | [`workspace.open.schema.json`](workspace.open.schema.json) |
 
 A pane in reach is the caller's own, the `self` scope, or one it spawned, or one they spawned in
 turn, the `children` scope. Any other pane is refused. `pane.spawn` opens a split or tab running
@@ -47,6 +48,11 @@ subscriber that was closed may have missed events.
 programs print, which can fake them: read them as hints, not facts. `pinfold ctl send <pane>
 <text>` types into a pane. A core that refuses version 2 is older than the client, and
 `pinfold ctl` says to quit PinFold so that a new core starts.
+
+`pinfold up [dir]` reads `<dir>/.pinfold/layout.toml`, the current directory's by default,
+starts a core and a window as `pinfold` does, and sends `workspace.open` with each pane's split
+and cwd. A second run for the same directory focuses its first open tab. `run` lines are not
+sent: they wait for workspace trust, and `pinfold up` says how many there are.
 
 ## MCP
 
