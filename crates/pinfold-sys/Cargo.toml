@@ -45,6 +45,11 @@ objc2-foundation = { version = "0.3.2", optional = true }
 objc2-metal = { version = "0.3.2", optional = true }
 objc2-quartz-core = { version = "0.3.2", optional = true }
 
+[[test]]
+name = "dock_menu"
+harness = false
+required-features = ["menu"]
+
 # A crate cannot relax an inherited `forbid`, so this mirrors [workspace.lints].
 [lints.rust]
 unsafe_code = "deny"

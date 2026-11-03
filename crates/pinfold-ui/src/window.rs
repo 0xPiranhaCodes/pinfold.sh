@@ -35,6 +35,8 @@ use winit::platform::macos::{OptionAsAlt, WindowAttributesExtMacOS, WindowExtMac
 use winit::window::{Window, WindowId};
 
 use crate::context_menu::{self as menu, Choice, Menu};
+#[cfg(target_os = "macos")]
+use crate::dock_menu;
 use crate::flash::{self, Flash};
 use crate::link::{self, Approval, Link, Screen, Tab};
 use crate::outbox::{self, Inbox, Outbox, Request};
@@ -361,6 +363,8 @@ struct App {
     /// Whether the core has gone. The last screen stays, under a row that says so.
     ended: bool,
     menu_bar: menu_bar::Bar,
+    #[cfg(target_os = "macos")]
+    dock: dock_menu::Dock,
     /// Points added to the config's font size by Bigger and Smaller, until the next save.
     font_step: f32,
     result: Result<(), Error>,
@@ -497,6 +501,8 @@ impl App {
         self.states
             .extend(tabs.map(|(index, tab)| top_bar::tab_state(tab.status, shown.alerts, index)));
         self.activity = shown.activity | top_bar::marked(&self.states);
+        #[cfg(target_os = "macos")]
+        self.dock.update(&self.labels, &self.states);
         let active = shown.tabs.get(shown.active);
         self.status =
             active.and_then(|tab| Some((tab.status?.0, tab.status?.1, tab.message.clone())));
@@ -1496,6 +1502,13 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
     let menu_bar = menu_bar::Bar::install(move |command| {
         let _ = proxy.send_event(Notice::Command(command));
     });
+    #[cfg(target_os = "macos")]
+    let dock = {
+        let proxy = event_loop.create_proxy();
+        dock_menu::Dock::install(move |command| {
+            let _ = proxy.send_event(Notice::Command(command));
+        })
+    };
     let config = config();
     let mut app = App {
         prefix: Prefix::new(config.keys.prefix),
@@ -1544,6 +1557,8 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
         vi: None,
         ended: false,
         menu_bar,
+        #[cfg(target_os = "macos")]
+        dock,
         font_step: 0.0,
         result: Ok(()),
     };
