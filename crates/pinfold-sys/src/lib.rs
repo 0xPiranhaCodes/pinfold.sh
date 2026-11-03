@@ -107,6 +107,46 @@ pub fn peer_uid(socket: BorrowedFd<'_>) -> io::Result<u32> {
     platform::peer_uid(socket.as_raw_fd())
 }
 
+/// A controlling terminal and the session that holds it: what makes a process part of a pane
+/// (ADR-0004). A pane's comes from [`pty::Pty::terminal`] and a caller's from [`peer_terminal`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Terminal {
+    /// The terminal's device number, in the 32-bit form both systems report for a process.
+    pub device: u32,
+    /// The session's id, which is its leader's pid.
+    pub session: u32,
+}
+
+/// Returns the controlling terminal and session of the process at the other end of a connected
+/// Unix socket, or nothing if it has no terminal or has gone (ADR-0020, ADR-0032).
+///
+/// The pid comes from `SO_PEERCRED` on Linux and `LOCAL_PEERPID` on macOS. Where Linux has
+/// `SO_PEERPIDFD`, that descriptor is only used to check the peer outlived the lookup, so a
+/// reused pid gives nothing. macOS and older Linux kernels have no such check.
+///
+/// # Errors
+///
+/// Returns an error if `socket` is not a connected Unix socket.
+///
+/// # Examples
+///
+/// ```
+/// use std::os::fd::AsFd;
+/// use std::os::unix::net::{UnixListener, UnixStream};
+///
+/// let path = std::env::temp_dir().join(format!("pinfold-peer-{}", std::process::id()));
+/// let listener = UnixListener::bind(&path)?;
+/// let _caller = UnixStream::connect(&path)?;
+/// let (ours, _) = listener.accept()?;
+/// // The peer is this process, which may or may not have a terminal.
+/// let _terminal = pinfold_sys::peer_terminal(ours.as_fd())?;
+/// std::fs::remove_file(&path)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn peer_terminal(socket: BorrowedFd<'_>) -> io::Result<Option<Terminal>> {
+    platform::peer_terminal(socket.as_raw_fd())
+}
+
 /// Starts `command` in a session of its own, with nothing on stdin or stdout and `stderr` as its
 /// stderr, so it outlives the caller and the caller's terminal.
 ///
@@ -222,7 +262,9 @@ pub fn local_time(seconds: i64) -> Option<LocalTime> {
 mod platform {
     use std::io;
     use std::mem::MaybeUninit;
-    use std::os::fd::RawFd;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+
+    use crate::Terminal;
 
     pub fn harden() -> io::Result<()> {
         // SAFETY: PR_SET_DUMPABLE reads only its integer argument and touches no memory.
@@ -232,7 +274,7 @@ mod platform {
         }
     }
 
-    pub fn peer_uid(socket: RawFd) -> io::Result<u32> {
+    fn credentials(socket: RawFd) -> io::Result<libc::ucred> {
         let mut peer = MaybeUninit::<libc::ucred>::uninit();
         let mut length = size_of::<libc::ucred>() as libc::socklen_t;
         // SAFETY: `peer` and `length` are valid for writes for the call, and `length` holds
@@ -250,7 +292,73 @@ mod platform {
             return Err(io::Error::last_os_error());
         }
         // SAFETY: getsockopt succeeded, so it wrote a whole `ucred`.
-        Ok(unsafe { peer.assume_init() }.uid)
+        Ok(unsafe { peer.assume_init() })
+    }
+
+    pub fn peer_uid(socket: RawFd) -> io::Result<u32> {
+        Ok(credentials(socket)?.uid)
+    }
+
+    /// A descriptor that pins the peer process, from kernels with `SO_PEERPIDFD` (6.5 on).
+    fn peer_pidfd(socket: RawFd) -> io::Result<OwnedFd> {
+        let mut pidfd: libc::c_int = -1;
+        let mut length = size_of::<libc::c_int>() as libc::socklen_t;
+        // SAFETY: `pidfd` and `length` are valid for writes for the call, and `length` holds
+        // the size of `pidfd`.
+        let result = unsafe {
+            libc::getsockopt(
+                socket,
+                libc::SOL_SOCKET,
+                libc::SO_PEERPIDFD,
+                (&raw mut pidfd).cast(),
+                &raw mut length,
+            )
+        };
+        if result != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: getsockopt succeeded, so `pidfd` is open and owned only by this function.
+        Ok(unsafe { OwnedFd::from_raw_fd(pidfd) })
+    }
+
+    /// Whether the process a pidfd pins has exited, which makes the pidfd readable.
+    fn exited(pidfd: &OwnedFd) -> io::Result<bool> {
+        let mut poll = libc::pollfd {
+            fd: pidfd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: `poll` is one valid pollfd for the call, which does not wait.
+        match unsafe { libc::poll(&raw mut poll, 1, 0) } {
+            -1 => Err(io::Error::last_os_error()),
+            ready => Ok(ready > 0),
+        }
+    }
+
+    /// The terminal and session `/proc` gives for `pid`, or nothing if it has none or has gone.
+    fn terminal_of(pid: libc::pid_t) -> Option<Terminal> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // The command name may hold spaces and brackets, so the fields start after the last ')'.
+        let mut fields = stat.rsplit_once(')')?.1.split_whitespace();
+        let session = fields.nth(3)?.parse().ok()?;
+        let device = fields.next()?.parse().ok()?;
+        (device != 0 && session != 0).then_some(Terminal { device, session })
+    }
+
+    pub fn peer_terminal(socket: RawFd) -> io::Result<Option<Terminal>> {
+        let pid = credentials(socket)?.pid;
+        let pidfd = match peer_pidfd(socket) {
+            Ok(pidfd) => Some(pidfd),
+            // An older kernel: the lookup goes unguarded, as ADR-0020 allows.
+            Err(error) if error.raw_os_error() == Some(libc::ENOPROTOOPT) => None,
+            // The peer has gone.
+            Err(_) => return Ok(None),
+        };
+        let found = terminal_of(pid);
+        match pidfd {
+            Some(pidfd) if exited(&pidfd)? => Ok(None),
+            _ => Ok(found),
+        }
     }
 
     pub fn footprint(pid: u32) -> io::Result<u64> {
@@ -270,6 +378,8 @@ mod platform {
     use std::mem::MaybeUninit;
     use std::os::fd::RawFd;
     use std::ptr;
+
+    use crate::Terminal;
 
     pub fn harden() -> io::Result<()> {
         // SAFETY: PT_DENY_ATTACH takes no address or data and touches no memory.
@@ -308,6 +418,50 @@ mod platform {
             0 => Ok(user),
             _ => Err(io::Error::last_os_error()),
         }
+    }
+
+    pub fn peer_terminal(socket: RawFd) -> io::Result<Option<Terminal>> {
+        let mut pid: libc::pid_t = 0;
+        let mut length = size_of::<libc::pid_t>() as libc::socklen_t;
+        // SAFETY: `pid` and `length` are valid for writes for the call, and `length` holds the
+        // size of `pid`.
+        let result = unsafe {
+            libc::getsockopt(
+                socket,
+                libc::SOL_LOCAL,
+                libc::LOCAL_PEERPID,
+                (&raw mut pid).cast(),
+                &raw mut length,
+            )
+        };
+        if result != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut info = MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+        let size = size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        // SAFETY: `info` is writable for `size` bytes, the struct PROC_PIDTBSDINFO selects.
+        let read = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        // SAFETY: getsid takes an integer and touches no memory.
+        let session = unsafe { libc::getsid(pid) };
+        if read != size {
+            return Ok(None);
+        }
+        // SAFETY: all-zero bytes are valid for this integer struct, and the call filled it.
+        let device = unsafe { info.assume_init() }.e_tdev;
+        let Ok(session) = u32::try_from(session) else {
+            return Ok(None);
+        };
+        // NODEV, all ones, is what a process with no terminal has.
+        let none = device == 0 || device == u32::MAX || session == 0;
+        Ok((!none).then_some(Terminal { device, session }))
     }
 
     pub fn footprint(pid: u32) -> io::Result<u64> {
