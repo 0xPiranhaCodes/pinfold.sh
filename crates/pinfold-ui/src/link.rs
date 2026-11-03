@@ -35,8 +35,8 @@ use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
 use pinfold_proto::Frame;
 use pinfold_proto::link::{
-    Decoder, Error, Layout, MAX_DIMENSION, MAX_REQUEST, Notice, Rect, Refusal, Request, Selection,
-    VERSION,
+    Decoder, Error, Layout, MAX_DIMENSION, MAX_PANES, MAX_REQUEST, Notice, Rect, Refusal, Request,
+    Selection, VERSION,
 };
 
 /// Most bytes read per turn, so a flooding core cannot hold the window's thread.
@@ -134,6 +134,8 @@ struct State {
     copying: u32,
     raised: bool,
     refused: Option<Refusal>,
+    /// Restored panes, whether Enter may run what each was running, and that command.
+    was_running: Vec<(u32, bool, String)>,
 }
 
 impl State {
@@ -200,7 +202,15 @@ impl State {
                 self.laid = true;
             }
             Notice::Refused { reason } => self.refused = Some(reason),
-            Notice::Copied { .. } => {}
+            // The core restores at most this many panes, once.
+            Notice::WasRunning {
+                pane,
+                runnable,
+                command,
+            } if self.was_running.len() < MAX_PANES => {
+                self.was_running.push((pane, runnable, command.to_owned()));
+            }
+            Notice::Copied { .. } | Notice::WasRunning { .. } => {}
         }
         Ok(())
     }
@@ -496,6 +506,11 @@ impl Link {
     /// has. Its match is in view if it had one.
     pub fn take_searched(&mut self) -> Option<(u32, Option<Selection>)> {
         self.state.searched.take()
+    }
+
+    /// Returns what restored panes were running, once each.
+    pub fn take_was_running(&mut self) -> Vec<(u32, bool, String)> {
+        std::mem::take(&mut self.state.was_running)
     }
 
     /// Returns the last command the core refused, once.

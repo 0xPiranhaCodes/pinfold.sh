@@ -16,6 +16,7 @@ mod search_bar;
 mod selection;
 mod top_bar;
 mod vi;
+mod was_running;
 mod window;
 
 pub use window::{Error, run};

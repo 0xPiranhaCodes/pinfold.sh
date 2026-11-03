@@ -37,7 +37,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 4;
+pub const VERSION: u16 = 5;
 
 /// Most rows or columns a screen can have, which the core clamps its panes to.
 pub const MAX_DIMENSION: u16 = 1024;
@@ -64,6 +64,9 @@ const FRAME_HEAD: usize = 43 + COUNT;
 /// 1024 rows of 1024 cells. Nothing else comes near it, as a selection stops at about 2 MB.
 pub const MAX_MESSAGE: usize =
     KIND + FRAME_HEAD + MAX_DIMENSION as usize * (ROW_NUMBER + MAX_DIMENSION as usize * CELL);
+
+/// Longest command in a [`Notice::WasRunning`], the cap a session snapshot keeps.
+pub const MAX_COMMAND: usize = 4096;
 
 /// The most input a pane holds waiting for its program, so the most one paste can usefully be.
 pub const MAX_INPUT: usize = 1024 * 1024;
@@ -119,6 +122,8 @@ const FOCUS: u8 = 15;
 const MOVE_FOCUS: u8 = 16;
 const MOVE_BORDER: u8 = 17;
 const ZOOM: u8 = 18;
+// 19 and 9 are left to the approval messages of #149.
+const WAS_RUNNING_ANSWER: u8 = 20;
 
 const FRAME: u8 = 1;
 const CWD: u8 = 2;
@@ -128,6 +133,7 @@ const LAYOUT: u8 = 5;
 const RAISE: u8 = 6;
 const REFUSED: u8 = 7;
 const ACTIVITY: u8 = 8;
+const WAS_RUNNING: u8 = 10;
 
 const FLAG_FULL: u8 = 1;
 const FLAG_CURSOR: u8 = 1 << 1;
@@ -433,6 +439,14 @@ pub enum Request<'a> {
     },
     /// Toggles whether the focused pane fills its tab.
     Zoom,
+    /// Answers [`Notice::WasRunning`] for a pane: with `run`, the core types the command and a
+    /// newline into the pane's shell, if it offered that. Either way it forgets the command.
+    WasRunningAnswer {
+        /// The pane.
+        pane: u32,
+        /// Whether the person pressed Enter.
+        run: bool,
+    },
 }
 
 /// A message from the core to a window. Text borrows from the decoder's buffer.
@@ -481,6 +495,16 @@ pub enum Notice<'a> {
     Refused {
         /// Why.
         reason: Refusal,
+    },
+    /// A restored pane was running `command` when the session was saved (ADR-0034). Nothing
+    /// runs until the window answers with [`Request::WasRunningAnswer`].
+    WasRunning {
+        /// The pane.
+        pane: u32,
+        /// Whether the core would run it, which it will not once redaction changed it.
+        runnable: bool,
+        /// The redacted command, which is only a hint. At most [`MAX_COMMAND`] bytes.
+        command: &'a str,
     },
 }
 
@@ -769,6 +793,11 @@ impl Request<'_> {
                 put!(out, MOVE_BORDER, cells)
             }
             Self::Zoom => ZOOM,
+            Self::WasRunningAnswer { pane, run } => {
+                put!(out; pane);
+                out.push(u8::from(run));
+                WAS_RUNNING_ANSWER
+            }
         };
         finish(out, start, MAX_REQUEST, kind)
     }
@@ -841,6 +870,10 @@ impl Request<'_> {
                 Request::MoveBorder { side, cells }
             }
             ZOOM => Request::Zoom,
+            WAS_RUNNING_ANSWER => Request::WasRunningAnswer {
+                pane: body.u32()?,
+                run: body.tag("run", &[false, true])?,
+            },
             kind => return Err(Error::UnknownKind { kind }),
         };
         body.end()?;
@@ -894,6 +927,16 @@ impl Notice<'_> {
                 out.push(*reason as u8);
                 REFUSED
             }
+            Self::WasRunning {
+                pane,
+                runnable,
+                command,
+            } => {
+                put!(out; pane);
+                out.push(u8::from(*runnable));
+                out.extend_from_slice(command.as_bytes());
+                WAS_RUNNING
+            }
         };
         finish(out, start, MAX_MESSAGE, kind)
     }
@@ -936,6 +979,20 @@ impl Notice<'_> {
                     ],
                 )?,
             },
+            WAS_RUNNING => {
+                let (pane, runnable) = (body.u32()?, body.tag("runnable", &[false, true])?);
+                let command = body.text()?;
+                if command.len() > MAX_COMMAND {
+                    return Err(Error::TooLarge {
+                        size: command.len() as u64,
+                    });
+                }
+                Notice::WasRunning {
+                    pane,
+                    runnable,
+                    command,
+                }
+            }
             kind => return Err(Error::UnknownKind { kind }),
         };
         body.end()?;
@@ -1508,7 +1565,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 4, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 5, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -2471,6 +2528,7 @@ mod tests {
                 Request::MoveFocus { side },
                 Request::MoveBorder { side, cells },
                 Request::Zoom,
+                Request::WasRunningAnswer { pane, run: forward },
             ] {
                 prop_assert!(request_survives(command, chunk), "changed on the link");
             }
@@ -2566,6 +2624,17 @@ mod tests {
         #[test]
         fn raise_round_trips(chunk in chunks()) {
             prop_assert!(notice_survives(&Notice::Raise, chunk), "changed on the link");
+        }
+
+        #[test]
+        fn was_running_round_trips(
+            pane in any::<u32>(),
+            runnable in any::<bool>(),
+            command in ".{0,64}",
+            chunk in chunks(),
+        ) {
+            let notice = Notice::WasRunning { pane, runnable, command: &command };
+            prop_assert!(notice_survives(&notice, chunk), "changed on the link");
         }
 
         #[test]

@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use mio::Waker;
 use pinfold_config::{Config, MAX_FONT_SIZE, MIN_FONT_SIZE};
-use pinfold_proto::link::{self as proto, MAX_DIMENSION, Position, Rect, Selection};
+use pinfold_proto::link::{self as proto, MAX_DIMENSION, MAX_PANES, Position, Rect, Selection};
 use pinfold_proto::{Frame, MouseMode};
 use pinfold_render::cpu::{CpuRenderer, Renderer};
 use pinfold_render::font::{Font, FontError};
@@ -44,7 +44,7 @@ use crate::search_bar::{Bar, Step};
 use crate::selection::Selecting;
 use crate::top_bar::{Clicks, Hit};
 use crate::vi::{Step as ViStep, Vi, View};
-use crate::{ime, input, menu_bar, mouse, panes, paste, reload, selection, top_bar};
+use crate::{ime, input, menu_bar, mouse, panes, paste, reload, selection, top_bar, was_running};
 
 const DEFAULT_SIZE: LogicalSize<u32> = LogicalSize::new(1000, 640);
 /// Rows under the pane that belong to Pinfold, so program output cannot reach them.
@@ -86,6 +86,8 @@ enum Notice {
     Config(Config),
     /// A menu item was chosen.
     Command(Command),
+    /// A restored pane, whether the core would run what it was running, and that command.
+    WasRunning(u32, bool, String),
 }
 
 /// What the I/O thread has for the window. A screen marked dirty here is one the window has not
@@ -165,7 +167,10 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
         let copied = link.take_copied().map(Notice::Copied);
         let raised = link.take_raised().then_some(Notice::Raise);
         let refused = link.take_refused().map(Notice::Refused);
-        for notice in [searched, copied, raised, refused].into_iter().flatten() {
+        let ran = link.take_was_running().into_iter();
+        let ran = ran.map(|(pane, runnable, command)| Notice::WasRunning(pane, runnable, command));
+        let notices = [searched, copied, raised, refused].into_iter().flatten();
+        for notice in notices.chain(ran) {
             if proxy.send_event(notice).is_err() {
                 return;
             }
@@ -323,6 +328,9 @@ struct App {
     clipboard: Option<Clipboard>,
     /// A question for the user. Every key goes to this until it is answered.
     prompt: Option<Prompt>,
+    /// What restored panes were running, until answered. The focused one's strip takes the next
+    /// key.
+    was_running: Vec<(u32, bool, String)>,
     /// The right-click menu, while open. Every key and press goes to it.
     menu: Option<Menu>,
     prefix: Prefix,
@@ -584,6 +592,10 @@ impl App {
                 flash::ended(&mut self.composed);
             } else if let Some(prompt) = &self.prompt {
                 paste::banner(&mut self.composed, prompt);
+            } else if let Some((_, runnable, command)) =
+                (self.was_running.iter()).find(|(pane, ..)| *pane == self.focused)
+            {
+                was_running::banner(&mut self.composed, *runnable, command);
             } else if let Some(bar) = &self.bar {
                 bar.draw(&mut self.composed);
             } else if let Some(vi) = self.vi.filter(|_| self.flash.until().is_none()) {
@@ -786,6 +798,9 @@ impl App {
     /// mode, then the pane. A key pressed while composing belongs to the input method, so it
     /// neither reaches a program nor counts as the prefix.
     fn key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) {
+        if self.answer_strip(event) {
+            return;
+        }
         if self.window_key(event, event_loop) {
             self.prefix.cancel();
             return;
@@ -813,6 +828,22 @@ impl App {
         if !bytes.is_empty() {
             self.request(Request::Input(self.focused, bytes));
         }
+    }
+
+    /// Answers the focused pane's strip with any key: Enter, if offered and not held, runs what
+    /// it was running, and anything else dismisses it. Returns whether the key was used up, as
+    /// Enter and Esc are; any other goes on to the pane.
+    fn answer_strip(&mut self, event: &KeyEvent) -> bool {
+        let focused = self.focused;
+        let Some(index) = self.was_running.iter().position(|(at, ..)| *at == focused) else {
+            return false;
+        };
+        let (pane, runnable, command) = self.was_running.swap_remove(index);
+        let enter = event.logical_key == Key::Named(NamedKey::Enter) && !event.repeat;
+        let run = enter && was_running::offers_run(runnable, &command, self.area.1);
+        self.core(proto::Request::WasRunningAnswer { pane, run });
+        self.redraw_soon();
+        run || event.logical_key == Key::Named(NamedKey::Escape)
     }
 
     /// Turns vi mode on at the program's cursor, or off and back to the live screen. An input
@@ -1231,6 +1262,11 @@ impl ApplicationHandler<Notice> for App {
                 }
             }
             Notice::Config(config) => self.configure(config),
+            Notice::WasRunning(pane, runnable, command) if self.was_running.len() < MAX_PANES => {
+                self.was_running.push((pane, runnable, command));
+                self.redraw_soon();
+            }
+            Notice::WasRunning(..) => {}
             // A prompt keeps every key until it is answered, menu keys too; only Quit, which
             // leaves the session running, gets past it.
             Notice::Command(command) if self.prompt.is_none() || command == Command::Detach => {
@@ -1433,6 +1469,7 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
         wheel: 0.0,
         clipboard: None,
         prompt: None,
+        was_running: Vec::new(),
         menu: None,
         flash: Flash::default(),
         selecting: Selecting::default(),
