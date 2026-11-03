@@ -1,5 +1,6 @@
 //! The `pinfold-core` binary.
 
+use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -17,15 +18,16 @@ use pinfold_api::spawn::Place;
 use pinfold_api::trust::{self, State};
 use pinfold_cli::audit;
 use pinfold_cli::output;
+use pinfold_config::Agent;
 use pinfold_config::workspace as layout;
 use pinfold_core::family::{self, Family, SplitWay};
 use pinfold_core::grants::{Decision, Grants, Released};
 use pinfold_core::io::{Reactor, Waker};
-use pinfold_core::shell;
 use pinfold_core::snapshot::{self, Saver, Snapshot};
 use pinfold_core::status::Status;
 use pinfold_core::wait::{Outcome, Waits};
 use pinfold_core::workspace::Workspaces;
+use pinfold_core::{sandbox, shell};
 use pinfold_proto::link::{ApprovalAction, ApprovalAnswer};
 use serde_json::{Value, json};
 
@@ -122,10 +124,12 @@ fn grants_list<T, C: pinfold_core::grants::Clock>(grants: &mut Grants<T, C>) -> 
 /// a terminal may, in a pane or not, as a list shows no screen and little a same-user `ps` does
 /// not. Spawns and closes reach only the caller's own pane and the panes it spawned, the `self`
 /// and `children` scopes. Pane contents go to the caller alone, never to a log. Only a person's
-/// terminal outside any pane opens a workspace, so a pane's program cannot.
+/// terminal outside any pane opens a workspace, so a pane's program cannot. An agent
+/// launches only by its profile's name in `agents`, the user's config.
 fn immediate<T, C: pinfold_core::grants::Clock>(
     reactor: &mut Reactor,
     family: &mut Family,
+    agents: &BTreeMap<String, Agent>,
     grants: &mut Grants<T, C>,
     workspaces: &mut Workspaces,
     request: &Request,
@@ -143,6 +147,7 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                     "pane.send",
                     "pane.wait",
                     "pane.spawn",
+                    "agent.launch",
                     "pane.close",
                     "events.subscribe",
                     "pane.status",
@@ -182,6 +187,43 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
             let own = own.ok_or("pane.spawn needs a caller in a pane")?;
             let of = spawn.of.unwrap_or(own);
             let pane = family.spawn(reactor, own, of, way(spawn.place), spawn.cwd.as_deref())?;
+            Ok(json!({"pane": pane}))
+        }
+        Method::AgentLaunch(launch) => {
+            let own = own.ok_or("agent.launch needs a caller in a pane")?;
+            let of = family.reach(reactor, Some(own), launch.of.unwrap_or(own))?;
+            // The caller's name is not echoed: the reason goes to the audit log.
+            let agent = agents
+                .get(&launch.profile)
+                .ok_or("no agent profile by that name in the config")?;
+            // Where `of`'s shell last said it was (OSC 7), which any program there can print.
+            let cwd = reactor
+                .list()
+                .find(|pane| pane.id == of)
+                .and_then(|pane| pane.cwd);
+            let cwd = cwd.filter(|cwd| Path::new(cwd).is_dir()).map(str::to_owned);
+            let (command, cwd) = if agent.sandbox {
+                // The sandbox needs a directory of the pane's, never one the core chose.
+                let cwd = cwd.ok_or("a sandboxed agent needs its pane's directory from OSC 7")?;
+                let refused = |error: io::Error| format!("the sandbox will not start: {error}");
+                let hidden = pinfold_config::private_dirs();
+                let work = sandbox::working_directory(Path::new(&cwd), &hidden).map_err(refused)?;
+                let api = control::socket_path(&control::runtime_dir());
+                // A missing sandbox tool is an error, so the agent never runs unsandboxed.
+                let command = sandbox::command(&agent.command, &hidden, &work, &api);
+                let cwd = work
+                    .path()
+                    .to_str()
+                    .ok_or("the pane's directory is not UTF-8")?;
+                (command.map_err(refused)?, Some(cwd.to_owned()))
+            } else {
+                let (program, args) = agent.command.split_first().ok_or("empty command")?;
+                let mut command = Command::new(program);
+                command.args(args);
+                (command, cwd)
+            };
+            let way = way(launch.place);
+            let pane = family.spawn_command(reactor, own, of, way, cwd.as_deref(), command)?;
             Ok(json!({"pane": pane}))
         }
         Method::PaneClose { pane } => {
@@ -333,6 +375,7 @@ fn answer_released(reactor: &mut Reactor, log: &mut Log, released: Vec<Released<
 fn decide(
     reactor: &mut Reactor,
     family: &mut Family,
+    agents: &BTreeMap<String, Agent>,
     grants: &mut Grants<Request>,
     workspaces: &mut Workspaces,
     log: &mut Log,
@@ -340,7 +383,7 @@ fn decide(
 ) {
     let own = request.caller().and_then(|caller| reactor.pane_of(caller));
     let Some((target, action, text)) = cross_pane(request.method()) else {
-        let answer = immediate(reactor, family, grants, workspaces, &request);
+        let answer = immediate(reactor, family, agents, grants, workspaces, &request);
         return audit::reply(log, reactor, request, answer);
     };
     let Some(caller) = own else {
@@ -708,6 +751,7 @@ fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result
                     decide(
                         &mut reactor,
                         &mut family,
+                        &config.agents,
                         &mut grants,
                         &mut workspaces,
                         &mut log,

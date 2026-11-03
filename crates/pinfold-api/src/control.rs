@@ -163,6 +163,8 @@ pub enum Method {
     },
     /// `pane.spawn`, its shape checked.
     PaneSpawn(crate::spawn::Spawn),
+    /// `agent.launch`, its shape checked.
+    AgentLaunch(crate::spawn::Launch),
     /// `pane.close`: a pane the caller spawned.
     PaneClose {
         /// The pane's number.
@@ -1145,7 +1147,8 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
             | "workspace.open"
             | "workspace.trust_state"
             | "workspace.ask_trust"
-            | "session.save"),
+            | "session.save"
+            | "agent.launch"),
         ) if *greeted < VERSION => refuse(
             Some(id),
             NO_METHOD,
@@ -1184,6 +1187,10 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
         },
         Some("pane.spawn") => match crate::spawn::params(request.get("params")) {
             Ok(spawn) => Step::Ask(id.clone(), Method::PaneSpawn(spawn)),
+            Err(reason) => refuse(Some(id), BAD_PARAMS, reason),
+        },
+        Some("agent.launch") => match crate::spawn::launch(request.get("params")) {
+            Ok(launch) => Step::Ask(id.clone(), Method::AgentLaunch(launch)),
             Err(reason) => refuse(Some(id), BAD_PARAMS, reason),
         },
         Some("workspace.open") => match crate::workspace::params(request.get("params")) {
@@ -1518,6 +1525,12 @@ mod tests {
         let (reply, _) = replied(spawn.as_bytes(), &mut VERSION.clone());
         assert_eq!(code(&reply), Some(BAD_PARAMS));
         let (reply, _) = replied(spawn.as_bytes(), &mut OLDEST.clone());
+        assert_eq!(code(&reply), Some(NO_METHOD));
+        let launch = pane_request("agent.launch", &json!({"profile": "a", "command": ["sh"]}));
+        let (reply, _) = replied(launch.as_bytes(), &mut VERSION.clone());
+        assert_eq!(code(&reply), Some(BAD_PARAMS));
+        let launch = pane_request("agent.launch", &json!({"profile": "a"}));
+        let (reply, _) = replied(launch.as_bytes(), &mut OLDEST.clone());
         assert_eq!(code(&reply), Some(NO_METHOD));
         let bad = [
             json!(null),

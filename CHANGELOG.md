@@ -29,6 +29,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 - A per-pane status state machine combines OSC 133 marks with authoritative API reports and rate-limited alerts.
 - Agent profiles in `[agents.<name>]` may set `sandbox`, which runs the agent under `sandbox-exec` on macOS or bubblewrap on Linux, inside its pane's session, with `~/.ssh`, PinFold's config and state, and other panes' terminals hidden.
+- `pinfold agent <name> [--right | --down | --tab]` and the API's `agent.launch` open a pane running an `[agents.<name>]` profile by name, sandboxed if it says so, as a child of the caller (ADR-0036).
 - On Linux a sandboxed agent's bubblewrap gets a seccomp filter that fails `ioctl(TIOCSTI)` with `EPERM`, so the agent cannot type into its pane's terminal; on architectures other than x86_64 and aarch64 the agent does not start.
 - The control socket identifies each caller at accept from its controlling terminal and session, which the core maps to a pane, and caps peers at 4 per identity, with all unidentified callers sharing one cap (ADR-0032 step 2).
 - A spike that answers the macOS Dock menu by adding `applicationDockMenu:` to winit's app delegate, in `docs/spikes/m3-dock-menu`.

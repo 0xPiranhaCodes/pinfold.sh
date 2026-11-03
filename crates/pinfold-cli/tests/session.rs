@@ -1756,6 +1756,61 @@ fn a_configured_protect_pattern_refuses_a_send_to_a_pane_that_runs_it() {
     assert!(message.contains("the pane is protected: rule"), "{refused}");
 }
 
+#[test]
+fn an_agent_launches_by_profile_as_the_callers_child_and_an_unknown_one_is_refused() {
+    let session = Session::new("ag", None).unwrap();
+    fs::create_dir_all(session.directory.join("config/pinfold")).unwrap();
+    let mut toml = "[agents.sleepy]\ncommand = [\"sleep\", \"30\"]\n".to_owned();
+    let pinfold = format!("'{}'", session.directory.join("pinfold").display());
+    let client = "\"$PINFOLD_TEST_CLIENT\"";
+    // The sandbox takes its directory from OSC 7, so the caller's shell reports one first: a
+    // private one under the core's HOME, as the sandbox refuses HOME and what is above it.
+    let mut shell = format!(
+        "mkdir -p -m 700 \"$HOME/work\"; printf '\\033]7;file://localhost%s\\007' \"$HOME/work\"; \
+         {pinfold} agent sleepy 2> {client}/e; {pinfold} agent nope 2> {client}/nope; "
+    );
+    if cfg!(target_os = "macos") {
+        toml += "[agents.boxed]\ncommand = [\"sleep\", \"31\"]\nsandbox = true\n";
+        shell += &format!("{pinfold} agent boxed --tab 2> {client}/boxed; ");
+    }
+    fs::write(session.directory.join("config/pinfold/pinfold.toml"), toml).unwrap();
+    // A send to pane 1 is allowed only if the caller spawned it.
+    shell += &format!(
+        "{pinfold} ctl send 1 x 2> {client}/send && \
+         {pinfold} ctl list --json > {client}/j; mv {client}/j {client}/json; exec sleep 30"
+    );
+    let mut core = session.start_core(&["--idle", "1"], &shell).unwrap();
+    assert!(session.wait_for("json"), "{}", session.read_log());
+    core.kill().unwrap();
+    core.wait().unwrap();
+
+    let refused = session.read("nope");
+    assert!(
+        refused.contains("no agent profile by that name"),
+        "{refused}"
+    );
+    let list: serde_json::Value = serde_json::from_str(&session.read("json")).unwrap();
+    let command = |id: u64| {
+        let panes = list["panes"].as_array().unwrap();
+        let pane = panes.iter().find(|pane| pane["id"] == id);
+        pane.map(|pane| pane["command"].clone())
+    };
+    assert_eq!(
+        command(1),
+        Some("sleep".into()),
+        "{list} {}",
+        session.read("e")
+    );
+    if cfg!(target_os = "macos") {
+        let boxed = session.read("boxed");
+        assert_eq!(
+            command(2),
+            Some("/usr/bin/sandbox-exec".into()),
+            "{list} {boxed}"
+        );
+    }
+}
+
 /// Not a test: the window of
 /// [`up_runs_a_trusted_workspace_and_a_restore_runs_it_again_until_its_file_changes`], which
 /// refuses a first project, then checks that nothing ran before it trusts the second and waits

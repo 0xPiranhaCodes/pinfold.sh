@@ -17,7 +17,8 @@ use serde_json::{Value, json};
 /// How long a core that was just started gets to answer.
 const START_WAIT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(20);
-const USAGE: &str = "usage: pinfold [up [dir] | ctl list [--json] | ctl send <pane> <text> | ctl wait <pane> \
+const USAGE: &str = "usage: pinfold [up [dir] | agent <name> [--right | --down | --tab] | \
+    ctl list [--json] | ctl send <pane> <text> | ctl wait <pane> \
     --until exit|prompt|output|match|idle [--pattern <regex>] [--idle-ms <n>] --timeout <s> | \
     ctl grants [--json | revoke <id>] | ctl log [--json] [-n <count>] [--pane <pane>] | \
     ctl log --verify <file> | ctl session save | mcp]";
@@ -145,6 +146,14 @@ fn send(pane: &str, text: &str) -> Result<(), Box<dyn Error>> {
     let pane: usize = pane.parse().map_err(|_| "the pane must be a number")?;
     let params = json!({"pane": pane, "text": text});
     control::ask(&running()?, "pane.send", &params)?;
+    Ok(())
+}
+
+/// `pinfold agent <name> [--right | --down | --tab]`: opens a pane beside the caller's running
+/// the config's `[agents.<name>]` profile. It starts no core, as it needs a caller in a pane.
+fn agent(name: &str, place: &str) -> Result<(), Box<dyn Error>> {
+    let params = json!({"profile": name, "place": place});
+    control::ask(&running()?, "agent.launch", &params)?;
     Ok(())
 }
 
@@ -368,6 +377,9 @@ fn main() -> ExitCode {
             Ok(false) => return ExitCode::FAILURE,
             Err(error) => Err(error),
         },
+        ["agent", name] | ["agent", name, "--right"] => agent(name, "right"),
+        ["agent", name, "--down"] => agent(name, "down"),
+        ["agent", name, "--tab"] => agent(name, "tab"),
         ["ctl", "list"] => list(false),
         ["ctl", "list", "--json"] => list(true),
         ["ctl", "send", pane, text] => send(pane, text),

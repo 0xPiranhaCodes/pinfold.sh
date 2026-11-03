@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "agent.launch",
+  "description": "Opens a split or a tab running an [agents.<name>] profile from the user's config, sandboxed if the profile says so, and returns its number at once (ADR-0036). The caller names a profile, never a program, arguments or directory; an unknown name is refused. The pane starts in the directory `of`'s shell last reported by OSC 7, if any; a sandboxed profile with none, or one the sandbox's working-directory checks refuse, is refused, as is one whose sandbox tool is missing. Reach, focus and caps are as for pane.spawn, and the new pane joins the caller's children scope. Needs hello version 2 and a caller in a pane.",
+  "type": "object",
+  "properties": {
+    "params": {
+      "type": "object",
+      "required": ["profile"],
+      "additionalProperties": false,
+      "properties": {
+        "profile": { "type": "string", "minLength": 1, "description": "The name of an [agents.<name>] table in the config the core read at start." },
+        "place": { "enum": ["right", "down", "tab"], "default": "right", "description": "A split of the pane `of`, or a new tab after the others." },
+        "of": { "type": ["integer", "null"], "minimum": 0, "description": "The pane to split: the caller's own, the default, or one it spawned. Its directory is the new pane's." }
+      }
+    },
+    "result": {
+      "type": "object",
+      "required": ["pane"],
+      "additionalProperties": false,
+      "properties": {
+        "pane": { "type": "integer", "minimum": 0, "description": "The new pane's number." }
+      }
+    }
+  }
+}
