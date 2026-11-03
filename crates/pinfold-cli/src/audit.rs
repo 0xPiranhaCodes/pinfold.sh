@@ -74,6 +74,8 @@ pub fn reply(log: &mut Log, reactor: &Reactor, request: Request, result: Result<
 /// A short reason for a caller in a pane or with no terminal, or a request that is not
 /// `audit.read`.
 pub fn read(log: &Log, reactor: &Reactor, request: &Request) -> Result<Value, String> {
+    // shortcut: a terminal outside every pane is a guardrail, not proof of a person: an agent can
+    // open a new terminal of its own. Ask in the window once approval prompts land (#100).
     let outside = request
         .caller()
         .is_some_and(|caller| reactor.pane_of(caller).is_none());
