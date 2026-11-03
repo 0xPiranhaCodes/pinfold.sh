@@ -19,7 +19,7 @@
         "pattern": {
           "type": "string",
           "maxLength": 1024,
-          "description": "With match only, and required there: a regex in the Rust regex crate's syntax, at most 1024 bytes, matched in linear time. One that compiles to more than 64 KiB is refused."
+          "description": "With match only, and required there: a regex in the syntax of the Rust regex-lite crate, at most 1024 bytes, matched in linear time. Its \\w, \\d, \\s and case folding are ASCII only. One that compiles to more than 64 KiB is refused."
         },
         "idle_ms": {
           "type": "integer",

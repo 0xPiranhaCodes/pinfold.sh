@@ -17,9 +17,9 @@ mio = { version = "1.2.4", features = ["os-ext", "os-poll"] }
 pinfold-mux = { path = "../pinfold-mux", version = "0.0.0" }
 pinfold-proto = { path = "../pinfold-proto", version = "0.0.0" }
 pinfold-sys = { path = "../pinfold-sys", version = "0.0.0" }
-# Linear-time matching for `pane.wait` patterns. Off by default: the faster engines and their
-# caches, and Unicode tables beyond `\w`, `\d`, `\s` and case folding.
-regex = { version = "1.13.1", default-features = false, features = ["std", "unicode-case", "unicode-perl"] }
+# Linear-time matching for `pane.wait` patterns. Not `regex`, whose engines and Unicode tables
+# add about 0.6 MB to the core's resident size on Linux; the cost is ASCII-only classes.
+regex-lite = "0.1.9"
 
 [dev-dependencies]
 # Off by default: coloured diffs, which pull in `console`.

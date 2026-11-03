@@ -18,15 +18,15 @@
 
 use std::time::{Duration, Instant};
 
-use regex::{Regex, RegexBuilder};
+use regex_lite::{Regex, RegexBuilder};
 
 use crate::io::{Progress, Reactor};
 use crate::tap::{MAX_TAPPED, keep_newest};
 
 /// Most waits parked at once. Past it a wait is refused.
 pub const MAX_WAITS: usize = 64;
-/// Most heap a compiled pattern, and its search cache, may take. A pattern that needs more is
-/// refused, so 64 match waits hold at most a few megabytes. Unicode `\w` needs more than 32 KiB.
+/// Most heap a compiled pattern may take. A pattern that needs more is refused, so 64 match
+/// waits hold at most a few megabytes.
 const COMPILED: usize = 64 * 1024;
 /// Most of the unfinished line a match tries, the newest, once per settle if it grew.
 const MAX_TAIL: usize = 4096;
@@ -49,11 +49,12 @@ pub enum Until {
 }
 
 impl Until {
-    /// Compiles `pattern` for [`Until::Match`]. Matching takes time linear in the text.
+    /// Compiles `pattern` for [`Until::Match`]. Matching takes time linear in the text, and
+    /// `\w`, `\d`, `\s` and case folding are ASCII only.
     ///
     /// # Errors
     ///
-    /// Returns why the pattern is refused: it is not a regex, or it compiles too large.
+    /// Returns why the pattern is refused: it is not a valid pattern, or it compiles too large.
     ///
     /// # Examples
     ///
@@ -62,18 +63,15 @@ impl Until {
     ///
     /// assert!(Until::matching(r"^done \d+$").is_ok());
     /// assert!(Until::matching("(").is_err());
-    /// assert!(Until::matching(r"\w{1000}").is_err());
+    /// assert!(Until::matching(r"\w{4000}").is_err());
     /// ```
     pub fn matching(pattern: &str) -> Result<Self, String> {
         let mut builder = RegexBuilder::new(pattern);
-        builder.size_limit(COMPILED).dfa_size_limit(COMPILED);
+        builder.size_limit(COMPILED);
         builder
             .build()
             .map(Self::Match)
-            .map_err(|error| match error {
-                regex::Error::CompiledTooBig(_) => "the pattern compiles too large".to_owned(),
-                _ => "the pattern is not a valid regex".to_owned(),
-            })
+            .map_err(|_| "not a valid pattern, or too large".to_owned())
     }
 }
 
@@ -366,8 +364,8 @@ mod tests {
     #[test]
     fn a_pattern_too_large_is_refused_and_a_line_keeps_its_newest_bytes() {
         assert!(Until::matching(r"(?i)\w+ \d+$").is_ok());
-        let refused = Until::matching(r"\w{500}").unwrap_err();
-        assert_eq!(refused, "the pattern compiles too large");
+        let refused = Until::matching(r"\w{4000}").unwrap_err();
+        assert_eq!(refused, "not a valid pattern, or too large");
         let regex = Regex::new("^b").unwrap();
         let mut line = String::new();
         let long = "a".repeat(2 * MAX_TAPPED + 1);
