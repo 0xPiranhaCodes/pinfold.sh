@@ -393,6 +393,7 @@ impl Control {
                         caller,
                         method,
                         alive: alive.clone(),
+                        until: now + waits,
                         answers: answers.clone(),
                         waker: Arc::clone(&waker),
                     });
@@ -450,11 +451,20 @@ pub struct Request {
     method: Method,
     /// Dead once the connection has closed.
     alive: Weak<()>,
+    /// When the peer stops waiting for the answer.
+    until: Instant,
     answers: Sender<Answer>,
     waker: Arc<Waker>,
 }
 
 impl Request {
+    /// Whether the peer has stopped waiting, so acting now could only repeat what a caller
+    /// that retries will ask for again.
+    #[must_use]
+    pub fn is_late(&self) -> bool {
+        Instant::now() >= self.until
+    }
+
     /// The terminal and session the caller held when it connected, or nothing if it had no
     /// terminal. Map it to a pane on the reactor's thread for each request, so a pane that has
     /// closed since stops matching.
@@ -960,7 +970,16 @@ fn topics(params: Option<&Value>) -> Option<Topics> {
 /// Checks the shape of a pane method's `params`. Scope is the reactor's to check.
 fn pane_method(method: &str, params: Option<&Value>) -> Result<Method, &'static str> {
     let field = |name| params.and_then(|params| params.get(name));
-    let count = |value: &Value| value.as_u64().and_then(|count| usize::try_from(count).ok());
+    // JSON Schema's integer takes 1.0 as well as 1.
+    let count = |value: &Value| {
+        let integral = || {
+            value
+                .as_f64()
+                .filter(|n| n.fract() == 0.0 && (0.0..=1e15).contains(n))
+        };
+        let count = value.as_u64().or_else(|| integral().map(|n| n as u64));
+        count.and_then(|count| usize::try_from(count).ok())
+    };
     let pane = field("pane")
         .and_then(count)
         .ok_or("params.pane must be a pane number")?;
@@ -1108,6 +1127,10 @@ mod tests {
             read(3, Some(5))
         );
         assert_eq!(
+            asked("pane.read", json!({"pane": 3.0, "lines": 5.0})),
+            read(3, Some(5))
+        );
+        assert_eq!(
             asked("pane.last_output", json!({"pane": 0})),
             Step::Ask(json!(2), Method::PaneLastOutput { pane: 0 })
         );
@@ -1115,6 +1138,7 @@ mod tests {
             json!(null),
             json!({"pane": -1}),
             json!({"pane": "1"}),
+            json!({"pane": 1.5}),
             json!([1]),
         ];
         for params in bad {
