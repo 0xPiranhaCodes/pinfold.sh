@@ -14,6 +14,8 @@ use std::process::{Child, Command, Stdio};
 #[cfg(feature = "clipboard")]
 pub mod clipboard;
 pub mod mapped;
+#[cfg(all(target_os = "macos", feature = "menu"))]
+pub mod menu;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub mod metal;
 pub mod pty;

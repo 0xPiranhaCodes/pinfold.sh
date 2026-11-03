@@ -5,7 +5,10 @@ name: Release (dry run)
 on:
   push:
     tags: ["v*"]
-  workflow_dispatch:
+  # Not started by hand (#108). Pull requests that touch packaging run the dry run instead;
+  # M5 must keep signing and publishing to tag pushes only.
+  pull_request:
+    paths: [".github/workflows/release.yml", "packaging/**"]
 
 permissions:
   contents: read
