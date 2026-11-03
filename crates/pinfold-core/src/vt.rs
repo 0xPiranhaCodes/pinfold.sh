@@ -718,6 +718,23 @@ mod tests {
     }
 
     #[test]
+    fn a_copy_keeps_at_most_16_combining_marks_a_cell() {
+        let mut engine = AlacrittyEngine::new(4, 20);
+        feed(
+            &mut engine,
+            format!("e{}", "\u{301}".repeat(100)).as_bytes(),
+        );
+        let focus = Position { row: 0, column: 0 };
+        let selection = Selection {
+            anchor: Position::default(),
+            focus,
+        };
+        let mut text = String::new();
+        assert!(engine.selection_text(selection, &mut text));
+        assert_eq!(text.chars().filter(|&c| c == '\u{301}').count(), 16);
+    }
+
+    #[test]
     fn a_clipboard_write_is_counted_and_never_answered() {
         let mut engine = AlacrittyEngine::new(4, 20);
         assert_eq!(clipboard_writes(&engine), 0);

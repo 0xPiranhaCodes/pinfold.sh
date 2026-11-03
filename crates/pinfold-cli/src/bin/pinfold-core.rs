@@ -236,6 +236,10 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
         waits.retain(|request| !request.is_gone());
         subscribers.retain(|(subscriber, _)| !subscriber.is_gone());
         while let Ok(request) = asked.try_recv() {
+            // Its peer has been told the core is busy, so acting now would surprise a retry.
+            if *request.method() != Method::WindowOpen && request.is_late() {
+                continue;
+            }
             match request.method().clone() {
                 Method::WindowOpen => match reactor.spawn_window(&binary) {
                     Ok(_) => waiting.push(request),
