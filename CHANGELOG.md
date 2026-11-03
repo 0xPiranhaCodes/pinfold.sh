@@ -11,6 +11,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Fixed
 
+- The link test that fills every tab and pane uses 128 by 128 panes instead of 1024 by 1024, so it no longer runs past its 20 second limit on CI's Intel Mac.
 - Missing file and status icons now use installed fallback fonts while preserving the selected text font and terminal cell size.
 - macOS title text and the grid's left edge align with the actual native window buttons, accounting for font size and display scale.
 

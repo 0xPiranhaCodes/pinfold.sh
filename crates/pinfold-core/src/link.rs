@@ -1695,7 +1695,7 @@ mod tests {
 
     #[test]
     fn past_the_caps_commands_are_refused_and_the_link_stays() {
-        let (mut reactor, mut peer, first) = session(1024, 1024);
+        let (mut reactor, mut peer, first) = session(128, 128);
         for _ in 0..MAX_TABS + 8 {
             peer.send(Request::NewTab);
         }
