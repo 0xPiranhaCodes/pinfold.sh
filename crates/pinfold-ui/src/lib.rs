@@ -1,5 +1,6 @@
 //! Window process: winit, chrome as cells, input and IME.
 
+mod context_menu;
 mod flash;
 mod ime;
 mod input;
