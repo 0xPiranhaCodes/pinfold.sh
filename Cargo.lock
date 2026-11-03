@@ -1236,6 +1236,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 name = "pinfold-api"
 version = "0.0.0"
 dependencies = [
+ "mio",
  "pinfold-sys",
  "serde_json",
  "thiserror 2.0.21",

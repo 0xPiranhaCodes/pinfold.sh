@@ -10,6 +10,7 @@ homepage.workspace = true
 publish.workspace = true
 
 [dependencies]
+mio = { version = "1.2.4", features = ["os-ext", "os-poll"] }
 pinfold-sys = { path = "../pinfold-sys", version = "0.0.0" }
 serde_json = "1.0.154"
 thiserror = "2.0.21"
