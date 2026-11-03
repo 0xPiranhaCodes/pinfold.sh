@@ -21,6 +21,8 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+use pinfold_proto::link::{MAX_PANES, MAX_TABS};
+
 /// A pane, named by the caller. Unique across a session.
 pub type PaneId = u32;
 
@@ -703,6 +705,232 @@ impl Session {
     }
 }
 
+/// A session's layout as a plain tree that names panes by index, not by id, so it can be saved
+/// and rebuilt with new panes. Pane indices run from 0 across the whole session.
+///
+/// ```
+/// use pinfold_mux::{Session, SplitDirection};
+///
+/// let mut session = Session::default();
+/// session.new_tab(7)?;
+/// session.split(7, 9, SplitDirection::Down)?;
+/// let (tree, old) = session.to_tree();
+/// assert_eq!(old, [7, 9]);
+///
+/// let (restored, new) = Session::from_tree(&tree, 100)?;
+/// assert_eq!(new, [100, 101]);
+/// assert_eq!(restored.to_tree().0, tree);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Clone, Debug, PartialEq)]
+pub struct SessionTree {
+    /// The tabs, in order.
+    pub tabs: Vec<TabTree>,
+    /// The position of the active tab.
+    pub active: usize,
+}
+
+/// One tab of a [`SessionTree`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabTree {
+    /// Its split tree.
+    pub root: LayoutTree,
+    /// The index of the focused pane, which this tab must hold.
+    pub focus: usize,
+    /// Whether the focused pane fills the tab.
+    pub zoomed: bool,
+}
+
+/// A split tree of a [`TabTree`].
+#[derive(Clone, Debug, PartialEq)]
+pub enum LayoutTree {
+    /// A pane, by its index in the session.
+    Pane(usize),
+    /// Two subtrees side by side or stacked.
+    Split {
+        /// Where the second subtree goes.
+        direction: SplitDirection,
+        /// The part of the space the first subtree takes, between 0 and 1.
+        ratio: f64,
+        /// The left or top subtree.
+        first: Box<LayoutTree>,
+        /// The right or bottom subtree.
+        second: Box<LayoutTree>,
+    },
+}
+
+/// Why a [`SessionTree`] was not rebuilt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum TreeError {
+    /// The tree has no tab.
+    #[error("the tree has no tab")]
+    NoTabs,
+    /// More tabs than [`MAX_TABS`].
+    #[error("more than {} tabs", MAX_TABS)]
+    TooManyTabs,
+    /// More panes than [`MAX_PANES`], which also bounds the depth.
+    #[error("more than {} panes", MAX_PANES)]
+    TooManyPanes,
+    /// A pane index is repeated, or the indices leave a gap.
+    #[error("pane index {0} is repeated or out of range")]
+    BadPane(usize),
+    /// A tab's focus is not one of its panes.
+    #[error("focus {0} is not a pane of its tab")]
+    BadFocus(usize),
+    /// The active tab does not exist.
+    #[error("no tab at position {0}")]
+    UnknownTab(usize),
+    /// The new pane ids would pass `PaneId::MAX`.
+    #[error("pane ids run out")]
+    NoIds,
+}
+
+impl Session {
+    /// Exports the layout, and the live id of each pane index.
+    #[must_use]
+    pub fn to_tree(&self) -> (SessionTree, Vec<PaneId>) {
+        let mut ids = Vec::new();
+        let mut tabs = Vec::with_capacity(self.tabs.len());
+        for tab in &self.tabs {
+            let base = ids.len();
+            ids.extend(tab.panes());
+            let focus = tab.panes().position(|pane| pane == tab.focus).unwrap_or(0);
+            // Backwards, as in `needs`: a split comes after its subtrees, the first on top.
+            let mut next = ids.len();
+            let mut below = Vec::new();
+            for node in tab.nodes.iter().rev() {
+                let tree = match *node {
+                    Node::Pane(_) => {
+                        next = next.saturating_sub(1);
+                        LayoutTree::Pane(next)
+                    }
+                    Node::Split { direction, share } => LayoutTree::Split {
+                        direction,
+                        ratio: f64::from(share) / f64::from(WHOLE),
+                        first: Box::new(below.pop().unwrap_or(LayoutTree::Pane(base))),
+                        second: Box::new(below.pop().unwrap_or(LayoutTree::Pane(base))),
+                    },
+                };
+                below.push(tree);
+            }
+            tabs.push(TabTree {
+                root: below.pop().unwrap_or(LayoutTree::Pane(base)),
+                focus: base + focus,
+                zoomed: tab.zoomed,
+            });
+        }
+        let tree = SessionTree {
+            tabs,
+            active: self.active,
+        };
+        (tree, ids)
+    }
+
+    /// Builds a session from an untrusted tree, giving pane index `i` the id `first + i`, and
+    /// returns the new id of each index. Ratios are clamped so both sides of a split keep a
+    /// share.
+    ///
+    /// ```
+    /// use pinfold_mux::{LayoutTree, Session, SessionTree, TabTree, TreeError};
+    ///
+    /// let tab = TabTree { root: LayoutTree::Pane(1), focus: 1, zoomed: false };
+    /// let tree = SessionTree { tabs: vec![tab], active: 0 };
+    /// assert_eq!(Session::from_tree(&tree, 0), Err(TreeError::BadPane(1)));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// A [`TreeError`] if the tree is empty, over [`MAX_TABS`] or [`MAX_PANES`], names a pane
+    /// index twice or leaves a gap, focuses a pane outside its tab, or activates a missing tab.
+    pub fn from_tree(tree: &SessionTree, first: PaneId) -> Result<(Self, Vec<PaneId>), TreeError> {
+        if tree.tabs.is_empty() {
+            return Err(TreeError::NoTabs);
+        }
+        if tree.tabs.len() > MAX_TABS {
+            return Err(TreeError::TooManyTabs);
+        }
+        if tree.active >= tree.tabs.len() {
+            return Err(TreeError::UnknownTab(tree.active));
+        }
+        let mut seen = [false; MAX_PANES];
+        let mut walked = 0_usize;
+        let mut tabs = Vec::with_capacity(tree.tabs.len());
+        for tab in &tree.tabs {
+            let mut nodes = Vec::new();
+            let mut pending = vec![&tab.root];
+            while let Some(node) = pending.pop() {
+                // MAX_PANES panes take fewer than 2 * MAX_PANES nodes, so this bounds the walk.
+                walked += 1;
+                if walked >= 2 * MAX_PANES {
+                    return Err(TreeError::TooManyPanes);
+                }
+                match node {
+                    LayoutTree::Pane(index) => {
+                        let slot = seen.get_mut(*index).filter(|seen| !**seen);
+                        *slot.ok_or(TreeError::BadPane(*index))? = true;
+                        // Below MAX_PANES, so it fits.
+                        nodes.push(Node::Pane(*index as PaneId));
+                    }
+                    LayoutTree::Split {
+                        direction,
+                        ratio,
+                        first,
+                        second,
+                    } => {
+                        nodes.push(Node::Split {
+                            direction: *direction,
+                            share: share_of(*ratio),
+                        });
+                        pending.extend([&**second, &**first]);
+                    }
+                }
+            }
+            let focus = PaneId::try_from(tab.focus).ok();
+            let focus = focus
+                .filter(|focus| nodes.contains(&Node::Pane(*focus)))
+                .ok_or(TreeError::BadFocus(tab.focus))?;
+            tabs.push(Tab {
+                nodes,
+                focus,
+                zoomed: tab.zoomed,
+            });
+        }
+
+        let count = seen.iter().filter(|seen| **seen).count();
+        if let Some(gap) = seen.iter().skip(count).position(|seen| *seen) {
+            return Err(TreeError::BadPane(gap + count));
+        }
+        let ids: Vec<PaneId> = (0..count as PaneId)
+            .map(|index| first.checked_add(index).ok_or(TreeError::NoIds))
+            .collect::<Result<_, _>>()?;
+        let id = |index: PaneId| ids.get(index as usize).copied().unwrap_or(first);
+        for tab in &mut tabs {
+            for node in &mut tab.nodes {
+                if let Node::Pane(index) = node {
+                    *index = id(*index);
+                }
+            }
+            tab.focus = id(tab.focus);
+        }
+        let session = Self {
+            tabs,
+            active: tree.active,
+        };
+        Ok((session, ids))
+    }
+}
+
+/// A ratio as a share, inside the open range a resize keeps it in.
+fn share_of(ratio: f64) -> u32 {
+    if ratio.is_nan() {
+        return WHOLE / 2;
+    }
+    // Clamped first, so the cast neither truncates nor saturates.
+    (ratio * f64::from(WHOLE))
+        .round()
+        .clamp(1.0, f64::from(WHOLE - 1)) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -1166,6 +1394,127 @@ mod tests {
         }
     }
 
+    /// Mostly valid trees, with bad indices, ratios, focus and counts mixed in.
+    fn session_tree() -> impl Strategy<Value = SessionTree> {
+        let ratio = prop_oneof![0.0..=1.0_f64, any::<f64>()];
+        let leaf = prop_oneof![0..12_usize, any::<usize>()].prop_map(LayoutTree::Pane);
+        let layout = leaf.prop_recursive(8, 80, 2, move |inner| {
+            (split_direction(), ratio.clone(), inner.clone(), inner).prop_map(
+                |(direction, ratio, first, second)| LayoutTree::Split {
+                    direction,
+                    ratio,
+                    first: Box::new(first),
+                    second: Box::new(second),
+                },
+            )
+        });
+        let tab = (
+            layout,
+            prop_oneof![0..12_usize, any::<usize>()],
+            any::<bool>(),
+        )
+            .prop_map(|(root, focus, zoomed)| TabTree {
+                root,
+                focus,
+                zoomed,
+            });
+        let tabs = proptest::collection::vec(tab, 0..40);
+        (tabs, prop_oneof![0..4_usize, any::<usize>()])
+            .prop_map(|(tabs, active)| SessionTree { tabs, active })
+    }
+
+    fn one_tab(root: LayoutTree, focus: usize) -> SessionTree {
+        let zoomed = false;
+        let tabs = vec![TabTree {
+            root,
+            focus,
+            zoomed,
+        }];
+        SessionTree { tabs, active: 0 }
+    }
+
+    fn split(ratio: f64, first: LayoutTree, second: LayoutTree) -> LayoutTree {
+        LayoutTree::Split {
+            direction: SplitDirection::Right,
+            ratio,
+            first: Box::new(first),
+            second: Box::new(second),
+        }
+    }
+
+    #[test]
+    fn a_session_is_rebuilt_from_its_tree() -> Result<(), Box<dyn std::error::Error>> {
+        // Ids 1 to 4 in tree order, so new ids from 1 give back the same session.
+        let mut session = grid()?;
+        session.resize(1, Direction::Right, 5, WINDOW)?;
+        session.toggle_zoom();
+        session.new_tab(5)?;
+        session.split(5, 6, SplitDirection::Down)?;
+        while session.resize(5, Direction::Down, 1, WINDOW).is_ok() {}
+        session.switch_tab(0)?;
+
+        let (tree, old) = session.to_tree();
+        assert_eq!(old, [1, 2, 3, 4, 5, 6]);
+        assert_eq!(tree.tabs[0].focus, 3);
+        let (restored, new) = Session::from_tree(&tree, 1)?;
+        assert_eq!(new, old);
+        assert_eq!(restored, session);
+        Ok(())
+    }
+
+    #[test]
+    fn a_bad_tree_is_refused() {
+        let pane = LayoutTree::Pane;
+        let refused = |tree: &SessionTree| Session::from_tree(tree, 0).err();
+        let empty = SessionTree {
+            tabs: Vec::new(),
+            active: 0,
+        };
+        assert_eq!(refused(&empty), Some(TreeError::NoTabs));
+        let mut many = one_tab(pane(0), 0);
+        many.tabs = (0..=MAX_TABS).map(|_| many.tabs[0].clone()).collect();
+        assert_eq!(refused(&many), Some(TreeError::TooManyTabs));
+        let mut inactive = one_tab(pane(0), 0);
+        inactive.active = 1;
+        assert_eq!(refused(&inactive), Some(TreeError::UnknownTab(1)));
+
+        let twice = split(0.5, pane(0), pane(0));
+        assert_eq!(refused(&one_tab(twice, 0)), Some(TreeError::BadPane(0)));
+        assert_eq!(refused(&one_tab(pane(1), 1)), Some(TreeError::BadPane(1)));
+        assert_eq!(
+            refused(&one_tab(pane(usize::MAX), 0)),
+            Some(TreeError::BadPane(usize::MAX))
+        );
+        assert_eq!(refused(&one_tab(pane(0), 1)), Some(TreeError::BadFocus(1)));
+        assert_eq!(
+            Session::from_tree(&one_tab(pane(0), 0), PaneId::MAX).err(),
+            None
+        );
+        let past = Session::from_tree(&one_tab(split(0.5, pane(0), pane(1)), 0), PaneId::MAX);
+        assert_eq!(past.err(), Some(TreeError::NoIds));
+
+        // A chain deeper than MAX_PANES allows is refused before it is walked to the end.
+        let mut deep = pane(0);
+        for index in 1..=MAX_PANES {
+            deep = split(0.5, deep, pane(index));
+        }
+        assert_eq!(refused(&one_tab(deep, 0)), Some(TreeError::TooManyPanes));
+    }
+
+    #[test]
+    fn a_ratio_is_clamped_inside_the_split() {
+        for (ratio, share) in [
+            (f64::NAN, WHOLE / 2),
+            (-1.0, 1),
+            (0.0, 1),
+            (f64::INFINITY, WHOLE - 1),
+            (2.0, WHOLE - 1),
+            (0.25, WHOLE / 4),
+        ] {
+            assert_eq!(share_of(ratio), share, "{ratio}");
+        }
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(512))]
 
@@ -1242,6 +1591,50 @@ mod tests {
                     prop_assert!(session.resize(pane, opposite(direction), cells, tab_size).is_ok());
                     prop_assert_eq!(&session, &before);
                 }
+            }
+        }
+
+        #[test]
+        fn a_session_survives_a_round_trip(
+            ops in proptest::collection::vec(op(), 0..80),
+            tab_size in size(),
+        ) {
+            let mut session = Session::default();
+            let mut live = BTreeSet::new();
+            for op in ops {
+                apply(&mut session, &mut live, op, tab_size);
+            }
+            let (tree, old) = session.to_tree();
+            prop_assert_eq!(old.len(), live.len());
+            let Ok((restored, new)) = Session::from_tree(&tree, 1_000) else {
+                prop_assert!(session.tabs().is_empty());
+                return Ok(());
+            };
+            prop_assert_eq!(&restored.to_tree().0, &tree);
+            prop_assert_eq!(restored.active(), session.active());
+            let renamed = |pane: PaneId| old.iter().position(|old| *old == pane).map(|at| new[at]);
+            for (before, after) in session.tabs().iter().zip(restored.tabs()) {
+                let before: Vec<_> = before
+                    .layout(tab_size)
+                    .into_iter()
+                    .map(|(pane, place)| (renamed(pane), place))
+                    .collect();
+                let after: Vec<_> = after
+                    .layout(tab_size)
+                    .into_iter()
+                    .map(|(pane, place)| (Some(pane), place))
+                    .collect();
+                prop_assert_eq!(before, after);
+            }
+        }
+
+        #[test]
+        fn a_random_tree_never_panics(tree in session_tree(), first in any::<PaneId>()) {
+            if let Ok((session, ids)) = Session::from_tree(&tree, first) {
+                let held: Vec<PaneId> = session.tabs().iter().flat_map(Tab::panes).collect();
+                prop_assert_eq!(held.len(), ids.len());
+                prop_assert!(ids.len() <= MAX_PANES);
+                prop_assert_eq!(session.to_tree().0.tabs.len(), tree.tabs.len());
             }
         }
     }
