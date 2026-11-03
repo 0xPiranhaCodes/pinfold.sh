@@ -1951,4 +1951,29 @@ mod tests {
         assert_eq!(over.read(&mut [0; 8]).unwrap(), 0);
         drop(held);
     }
+
+    #[test]
+    fn a_subscriber_that_hangs_up_frees_its_slot() {
+        let path = core(serving(Ok(json!({}))), IDLE);
+        let topics = json!({"events": ["pane.closed"]});
+        // The core hears each hang-up after the next connect may arrive, so each try may be
+        // closed unread at the identity's cap for a moment.
+        fn eventually(mut call: impl FnMut() -> bool) {
+            let until = Instant::now() + TIMEOUT;
+            while !call() {
+                assert!(Instant::now() < until, "slots stayed taken");
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        for _ in 0..2 * MAX_PEERS {
+            eventually(|| {
+                let stream = UnixStream::connect(&path).unwrap();
+                next_event(&stream, &topics, Duration::ZERO).is_ok_and(|event| event.is_none())
+            });
+        }
+        eventually(|| {
+            let stream = UnixStream::connect(&path).unwrap();
+            ask(&stream, "pane.list", &json!({})).is_ok()
+        });
+    }
 }
