@@ -16,7 +16,7 @@ pub const ARMED_AFTER: Duration = Duration::from_millis(500);
 /// Most prompts waiting at once; past this a new one is denied at once.
 pub const MAX_QUEUED: usize = 16;
 /// Pane text while a prompt is up, so lookalike rows a pane draws read as pane text.
-const MUTED: u32 = 0x0055_5a63;
+pub(crate) const MUTED: u32 = 0x0055_5a63;
 
 /// Turns only the documented, non-repeating window key into an answer. Denial always counts.
 /// Allowing needs the prompt `armed` and shown whole, so nothing unseen can be approved.
@@ -176,7 +176,7 @@ fn trust_lines(prompt: &Approval, queued: usize, columns: usize) -> Vec<String> 
     lines
 }
 
-fn wrap(text: &str, columns: usize) -> Vec<String> {
+pub(crate) fn wrap(text: &str, columns: usize) -> Vec<String> {
     let characters: Vec<char> = text.chars().collect();
     characters
         .chunks(columns.max(1))
@@ -251,7 +251,7 @@ fn banner(frame: &mut Frame, prompt: &Approval, queued: usize) {
 /// Shows printable ASCII and the space as they are, newline and tab as marks, and every other
 /// character as `<U+XXXX>`, so nothing sent can hide, disguise or reorder itself, and each shown
 /// character takes one cell.
-fn visible(text: &str) -> String {
+pub(crate) fn visible(text: &str) -> String {
     let mut shown = String::new();
     let mut previous = '\n';
     for character in text.chars() {
