@@ -1317,7 +1317,7 @@ impl ApplicationHandler<Notice> for App {
                 let menu = self.menu.as_mut().filter(|_| asked);
                 // Copy Link copies only what Open Link would take.
                 if let Some(menu) = menu.filter(|_| hyperlink::check(&uri).is_some()) {
-                    menu.link(uri, self.area);
+                    menu.link(uri);
                     self.redraw_soon();
                 }
             }

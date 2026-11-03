@@ -5,13 +5,11 @@
 //! which output cannot reach, and with the URI in full and anything outside printable ASCII
 //! escaped.
 
+use pinfold_proto::link::MAX_URI;
 use pinfold_proto::{Cell, Frame};
 
 use crate::approval::{MUTED, visible, wrap};
 use crate::paste::{self, AMBER, GROUND, TEXT};
-
-/// The longest target taken. Browsers take more, but no link meant for a person is this long.
-pub const MAX_URI: usize = 2048;
 
 /// What Open Link does with a target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

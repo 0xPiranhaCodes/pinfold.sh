@@ -65,6 +65,10 @@ const FRAME_HEAD: usize = 43 + COUNT;
 pub const MAX_MESSAGE: usize =
     KIND + FRAME_HEAD + MAX_DIMENSION as usize * (ROW_NUMBER + MAX_DIMENSION as usize * CELL);
 
+/// Longest hyperlink target in a [`Notice::Linked`]. Browsers take more, but no link meant for
+/// a person is this long, and the core answers a longer one as no link.
+pub const MAX_URI: usize = 2048;
+
 /// Longest command in a [`Notice::WasRunning`], the cap a session snapshot keeps.
 pub const MAX_COMMAND: usize = 4096;
 

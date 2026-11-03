@@ -203,6 +203,7 @@ impl Session {
             Request::Link { pane, at } => {
                 let engine = reactor.engine(pane as usize);
                 let uri = engine.and_then(|engine| engine.hyperlink(at));
+                let uri = uri.filter(|uri| uri.len() <= link::MAX_URI);
                 self.notice(&Notice::Linked {
                     pane,
                     at,
@@ -1394,16 +1395,25 @@ mod tests {
     #[test]
     fn the_window_learns_the_hyperlink_under_a_cell() {
         let mut reactor = Reactor::new().unwrap();
-        let script = r"printf '\033]8;;https://pinfold.sh/a\033\\here\033]8;;\033\\ plain\n'; while read line; do echo got-$line; done";
+        let script = r"printf '\033]8;;https://pinfold.sh/a\033\\here\033]8;;\033\\ plain\n'; long=$(head -c 3000 /dev/zero | tr '\0' x); printf '\033]8;;https://a/%s\033\\long\033]8;;\033\\\n' $long; while read line; do echo got-$line; done";
         let pane = reactor.open_tab(shell(script), 24, 80).unwrap();
         let mut peer = Peer::watching(&mut reactor, pane);
-        serve(&mut reactor, &mut peer, |r, _| {
-            on_screen(r, pane, "here plain")
-        });
+        serve(&mut reactor, &mut peer, |r, _| on_screen(r, pane, "long"));
         let engine = reactor.engine(pane).unwrap();
         let (linked, plain) = (engine.position(0, 3), engine.position(0, 6));
+        let long = engine.position(1, 0);
+        assert!(
+            engine
+                .hyperlink(long)
+                .is_some_and(|uri| uri.len() > link::MAX_URI)
+        );
         let number = pane as u32;
-        for (pane, at) in [(number, linked), (number, plain), (9, linked)] {
+        for (pane, at) in [
+            (number, linked),
+            (number, plain),
+            (9, linked),
+            (number, long),
+        ] {
             peer.send(Request::Link { pane, at });
         }
         let far = link::Position {
@@ -1414,8 +1424,8 @@ mod tests {
             pane: number,
             at: far,
         });
-        serve(&mut reactor, &mut peer, |_, p| p.linked.len() == 4);
-        assert_eq!(peer.linked, ["https://pinfold.sh/a", "", "", ""]);
+        serve(&mut reactor, &mut peer, |_, p| p.linked.len() == 5);
+        assert_eq!(peer.linked, ["https://pinfold.sh/a", "", "", "", ""]);
         assert_pty_lives(&mut reactor, pane);
     }
 

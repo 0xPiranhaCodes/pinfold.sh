@@ -2,7 +2,8 @@
 //!
 //! The window draws it after the panes, and while it is open every key and click goes to it,
 //! so program output can neither fake it nor answer it. Each item runs a [`Command`], as a key
-//! would, apart from the two a hyperlink adds.
+//! would, apart from the two a hyperlink adds at the end. Those can join after the menu shows,
+//! so it keeps room for them from the start, and no item ever moves under the pointer.
 
 use pinfold_proto::{Cell, Frame};
 use winit::keyboard::{Key, NamedKey};
@@ -67,36 +68,28 @@ impl Menu {
     /// Opens at the cell `at`, moved up and left as far as it takes to fit a grid of `area`
     /// `(rows, columns)`.
     pub fn open(at: (u16, u16), area: (u16, u16), link: Option<String>) -> Self {
-        let mut menu = Self {
-            corner: (0, 0),
+        let height = (ITEMS.len() + LINK_ITEMS.len()) as u16 + 2;
+        Self {
+            corner: (
+                at.0.min(area.0.saturating_sub(height)),
+                at.1.min(area.1.saturating_sub(WIDTH)),
+            ),
             selected: 0,
             link,
-        };
-        let height = menu.len() as u16 + 2;
-        menu.corner = (
-            at.0.min(area.0.saturating_sub(height)),
-            at.1.min(area.1.saturating_sub(WIDTH)),
-        );
-        menu
+        }
     }
 
-    /// Adds Open Link and Copy Link for `link`, once, keeping the same item selected and the
-    /// menu inside a grid of `area`.
-    pub fn link(&mut self, link: String, area: (u16, u16)) {
-        if self.link.is_some() {
-            return;
-        }
-        self.link = Some(link);
-        self.selected += LINK_ITEMS.len();
-        let height = self.len() as u16 + 2;
-        self.corner.0 = self.corner.0.min(area.0.saturating_sub(height));
+    /// Adds Open Link and Copy Link for `link` after the other items, once. The room for them
+    /// was kept when the menu opened, so nothing drawn moves.
+    pub fn link(&mut self, link: String) {
+        self.link.get_or_insert(link);
     }
 
     fn len(&self) -> usize {
         ITEMS.len() + self.links()
     }
 
-    /// How many items the hyperlink adds, which come first.
+    /// How many items the hyperlink adds, which come last.
     fn links(&self) -> usize {
         if self.link.is_some() {
             LINK_ITEMS.len()
@@ -106,22 +99,21 @@ impl Menu {
     }
 
     fn label(&self, index: usize) -> &'static str {
-        let label = match index.checked_sub(self.links()) {
-            None => LINK_ITEMS.get(index),
-            Some(index) => ITEMS.get(index).map(|(label, _)| label),
+        let label = match index.checked_sub(ITEMS.len()) {
+            None => ITEMS.get(index).map(|(label, _)| label),
+            Some(index) => LINK_ITEMS.get(index),
         };
         label.copied().unwrap_or_default()
     }
 
     fn choose(&mut self, index: usize) -> Step {
-        let links = self.links();
-        let choice = match (self.link.take(), index) {
+        if let Some(&(_, command)) = ITEMS.get(index) {
+            return Step::Chose(Choice::Run(command));
+        }
+        let choice = match (self.link.take(), index - ITEMS.len()) {
             (Some(link), 0) => Choice::OpenLink(link),
             (Some(link), 1) => Choice::CopyLink(link),
-            _ => match ITEMS.get(index.wrapping_sub(links)) {
-                Some(&(_, command)) => Choice::Run(command),
-                None => return Step::Close,
-            },
+            _ => return Step::Close,
         };
         Step::Chose(choice)
     }
@@ -280,16 +272,16 @@ mod tests {
     #[test]
     fn moves_in_to_fit_and_survives_a_tiny_grid() {
         let menu = Menu::open((23, 79), (24, 80), None);
-        assert_eq!(menu.corner, (13, 65));
+        assert_eq!(menu.corner, (11, 65), "room kept for the link items");
         let rows = drawn(&menu, 24, 80);
-        assert_eq!(text(&rows[23], 65..80), "└─────────────┘");
+        assert_eq!(text(&rows[21], 65..80), "└─────────────┘");
         let tiny = Menu::open((1, 1), (3, 4), Some(LINK.into()));
         assert_eq!(tiny.corner, (0, 0));
         let rows: Vec<String> = drawn(&tiny, 3, 4)
             .iter()
             .map(|row| text(row, 0..4))
             .collect();
-        assert_eq!(rows, ["┌───", "│ Op", "│ Co"]);
+        assert_eq!(rows, ["┌───", "│ Co", "│ Pa"]);
     }
 
     #[test]
@@ -329,45 +321,48 @@ mod tests {
     }
 
     #[test]
-    fn a_hyperlink_adds_open_and_copy_link_first() {
+    fn a_hyperlink_adds_open_and_copy_link_last() {
         let menu = Menu::open((0, 0), (24, 80), Some(LINK.into()));
         let rows = drawn(&menu, 24, 80);
-        assert_eq!(text(&rows[1], 0..15), "│ Open Link   │");
-        assert_eq!(text(&rows[2], 0..15), "│ Copy Link   │");
-        assert_eq!(text(&rows[3], 0..15), "│ Copy        │");
+        assert_eq!(text(&rows[1], 0..15), "│ Copy        │");
+        assert_eq!(text(&rows[10], 0..15), "│ Open Link   │");
+        assert_eq!(text(&rows[11], 0..15), "│ Copy Link   │");
+        assert_eq!(text(&rows[12], 0..15), "└─────────────┘");
         let mut menu = Menu::open((0, 0), (24, 80), Some(LINK.into()));
-        assert_eq!(
-            named(&mut menu, NamedKey::Enter),
-            Step::Chose(Choice::OpenLink(LINK.into()))
-        );
-        let mut menu = Menu::open((0, 0), (24, 80), Some(LINK.into()));
-        named(&mut menu, NamedKey::ArrowDown);
+        named(&mut menu, NamedKey::ArrowUp);
         assert_eq!(
             named(&mut menu, NamedKey::Enter),
             Step::Chose(Choice::CopyLink(LINK.into()))
         );
         let mut menu = Menu::open((0, 0), (24, 80), Some(LINK.into()));
+        let open = Step::Chose(Choice::OpenLink(LINK.into()));
+        assert_eq!(menu.click(Some((10, 4))), open);
+        let mut menu = Menu::open((0, 0), (24, 80), Some(LINK.into()));
         let copy = Step::Chose(Choice::Run(Command::Copy));
-        assert_eq!(menu.click(Some((3, 4))), copy);
+        assert_eq!(menu.click(Some((1, 4))), copy);
     }
 
+    /// A link learned after the menu shows must not move what the pointer is on.
     #[test]
-    fn a_link_learned_late_adds_its_items_and_keeps_the_selection() {
+    fn a_link_learned_late_moves_nothing_already_drawn() {
         let mut menu = Menu::open((20, 0), (24, 80), None);
         named(&mut menu, NamedKey::ArrowDown);
-        menu.link(LINK.into(), (24, 80));
-        menu.link("https://other".into(), (24, 80));
-        assert_eq!(menu.corner, (11, 0), "moved up to fit");
-        let rows = drawn(&menu, 24, 80);
-        assert_eq!(text(&rows[12], 0..15), "│ Open Link   │");
-        assert_eq!(text(&rows[13], 0..15), "│ Copy Link   │");
+        let before = drawn(&menu, 24, 80);
+        menu.link(LINK.into());
+        menu.link("https://other".into());
+        let after = drawn(&menu, 24, 80);
+        assert_eq!(menu.corner, (11, 0));
+        assert_eq!(before[11..21], after[11..21], "the items above stay put");
+        assert_eq!(text(&after[21], 0..15), "│ Open Link   │");
+        assert_eq!(text(&after[22], 0..15), "│ Copy Link   │");
         let paste = Step::Chose(Choice::Run(Command::Paste));
         assert_eq!(named(&mut menu, NamedKey::Enter), paste);
         let mut menu = Menu::open((0, 0), (24, 80), None);
-        menu.link(LINK.into(), (24, 80));
-        named(&mut menu, NamedKey::Home);
-        let open = Step::Chose(Choice::OpenLink(LINK.into()));
-        assert_eq!(named(&mut menu, NamedKey::Enter), open);
+        menu.link(LINK.into());
+        assert_eq!(
+            menu.click(Some((10, 4))),
+            Step::Chose(Choice::OpenLink(LINK.into()))
+        );
     }
 
     /// The window opens the menu on a right press only when the press is not the program's.
