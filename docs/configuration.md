@@ -130,10 +130,13 @@ can change, not `/`, your home directory or above it, not a dot-directory of you
 `~/.config` or `~/.local/bin` or inside one, not in `~/Library` on macOS, not inside a `.git`
 directory, and does not hold or sit inside a hidden directory.
 
-In the working directory, git's hooks, config and worktree config stay read-only, for the
-repository and for each submodule and linked worktree in `.git`, and `.git` itself cannot be
-moved or rewritten, because git runs what they name outside the sandbox. The agent does not
-start if the repository or a submodule has no hooks directory or config, or links one
+Git runs what a repository's hooks and config name outside the sandbox, so the agent cannot
+change them. On Linux the working directory's whole `.git` is read-only: a sandboxed agent
+cannot write the repository's git metadata, so it cannot commit, and commits happen outside the
+sandbox. On macOS the agent can commit, but it cannot write the hooks, config, worktree config,
+`commondir` or `gitdir` of the repository or of any submodule or linked worktree in `.git`, make
+them where they are missing, or move `.git` or the directories that hold them. The agent does
+not start if the repository or a submodule has no hooks directory or config, or links one
 elsewhere. On Linux, an agent in a directory with no `.git` yet can still make one. A
 `core.hooksPath` or other config setting that names a file inside the working directory, such as
 a `.husky` directory, points at files the agent can change. So do other project files, such as a

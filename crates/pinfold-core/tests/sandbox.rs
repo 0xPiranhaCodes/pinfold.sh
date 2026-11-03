@@ -29,14 +29,16 @@ fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
     fs::write(state.join("state"), "SECRET-STATE\n").unwrap();
     fs::write(home.join("open"), "VISIBLE\n").unwrap();
     let work = home.join("work");
-    // A repository with a submodule, whose hooks git runs too.
+    fs::create_dir_all(&work).unwrap();
+    let init = Command::new("git").args(["init", "-q"]).arg(&work).status();
+    assert!(init.unwrap().success());
+    // A submodule, whose hooks git runs too.
     let module = work.join(".git/modules/sub");
-    for dir in [work.join(".git/hooks"), module.join("hooks")] {
-        fs::create_dir_all(dir).unwrap();
+    fs::create_dir_all(module.join("hooks")).unwrap();
+    for file in ["config", "HEAD"] {
+        fs::write(module.join(file), "").unwrap();
     }
-    for file in ["config", "HEAD", "modules/sub/config", "modules/sub/HEAD"] {
-        fs::write(work.join(".git").join(file), "").unwrap();
-    }
+    let config_before = fs::read(work.join(".git/config")).unwrap();
     for dir in [&home, &work] {
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
     }
@@ -88,7 +90,11 @@ fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
            && echo config=written || echo config=refused; \
          (mv '{home_dir}/work/.git' '{home_dir}/work/moved') 2>/dev/null \
            && echo git=moved || echo git=kept; \
-         echo x >'{home_dir}/work/.git/index' && echo index=written; \
+         (echo x >'{home_dir}/work/.git/scratch') 2>/dev/null \
+           && echo scratch=written || echo scratch=refused; \
+         git -C '{home_dir}/work' -c user.name=a -c user.email=a@example.com \
+           commit -q --allow-empty -m x >/dev/null 2>&1 \
+           && echo commit=done || echo commit=failed; \
          (exec 3<'{peer_tty}') 2>/dev/null && echo peer=open || echo peer=closed; \
          perl -e 'open(my $t, \"+<\", \"/dev/tty\") or die; my $c = \"x\"; \
          print ioctl($t, {tiocsti}, $c) ? \"sti=allowed\\n\" : \"sti=denied\\n\"'; \
@@ -139,12 +145,19 @@ fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
     }
     assert!(output.contains("hook=refused") && !hook, "{output}");
     assert!(
-        output.contains("config=refused") && config == Some(vec![]),
+        output.contains("config=refused") && config == Some(config_before),
         "{output}"
     );
     assert!(output.contains("git=kept"), "{output}");
     assert!(output.contains("module=refused"), "{output}");
-    assert!(output.contains("index=written"), "{output}");
+    // Linux keeps all of `.git` read-only, so commits happen outside the sandbox.
+    if cfg!(target_os = "linux") {
+        assert!(output.contains("scratch=refused"), "{output}");
+        assert!(output.contains("commit=failed"), "{output}");
+    } else {
+        assert!(output.contains("scratch=written"), "{output}");
+        assert!(output.contains("commit=done"), "{output}");
+    }
     assert!(output.contains("ssh=unset"), "{output}");
     let opened = output.matches("planted=open").count();
     let closed = output.matches("planted=closed").count();
