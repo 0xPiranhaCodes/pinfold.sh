@@ -127,6 +127,10 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
     loop {
         reactor.turn(Some(IDLE))?;
         while let Ok(request) = asked.try_recv() {
+            // Its peer has been told the core is busy, so acting now would surprise a retry.
+            if *request.method() != Method::WindowOpen && request.is_late() {
+                continue;
+            }
             if *request.method() != Method::WindowOpen {
                 let answer = answer(&mut reactor, &request);
                 request.answer(answer);
