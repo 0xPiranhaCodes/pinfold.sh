@@ -2,9 +2,9 @@
 //! `pinfold ctl` lists panes.
 //!
 //! It takes `hello`, `window.open` and, after `hello` version 2, `pane.list`, `pane.read`,
-//! `pane.last_output`, `pane.send`, `pane.wait`, `events.subscribe`, `grants.list` and
-//! `grants.revoke`, as newline-delimited JSON-RPC 2.0 (ADR-0009, ADR-0028, ADR-0032).
-//! `window.open` takes no arguments, so a caller
+//! `pane.last_output`, `pane.send`, `pane.wait`, `events.subscribe`, `audit.read`,
+//! `grants.list` and `grants.revoke`, as newline-delimited JSON-RPC 2.0 (ADR-0009,
+//! ADR-0028, ADR-0032). `window.open` takes no arguments, so a caller
 //! cannot name a program. This only checks a request's shape: the reactor answers every
 //! [`Request`], checks its scope, parks waits and sends events, so nothing here reaches a pane.
 //! Same-user controls are guardrails (threat model).
@@ -67,6 +67,12 @@ const READ_CHUNK: usize = 4096;
 pub const MAX_SEND: usize = 4096;
 /// Most bytes queued for a peer. One that will not read past it is closed (ADR-0032 point 5).
 pub const MAX_OUTPUT: usize = 2 * 1024 * 1024;
+/// Most characters of a `pane.status` message. More is refused, not cut.
+pub const MAX_STATUS_MESSAGE: usize = 200;
+/// The states a `pane.status` may report.
+pub const STATES: [&str; 5] = ["needs-you", "running", "done", "error", "idle"];
+/// Most entries one `audit.read` returns.
+pub const MAX_AUDIT_READ: usize = 1000;
 /// Longest `pane.wait` a caller may ask for.
 pub const MAX_WAIT: Duration = Duration::from_secs(600);
 /// Longest a peer may take to send its first request after it connects, and to end any line
@@ -133,10 +139,27 @@ pub enum Method {
         /// The text, typed as it is.
         text: String,
     },
+    /// `pane.status`: the state an agent reports for its own pane.
+    PaneStatus {
+        /// The pane's number.
+        pane: usize,
+        /// One of [`STATES`].
+        state: String,
+        /// At most [`MAX_STATUS_MESSAGE`] characters, or empty.
+        message: String,
+    },
     /// `pane.wait`, its shape checked.
     PaneWait(Wait),
     /// `events.subscribe`, its shape checked.
     EventsSubscribe(Topics),
+    /// `audit.read`: the newest `count` audit entries, at most [`MAX_AUDIT_READ`], of one pane
+    /// or all.
+    AuditRead {
+        /// How many of the newest entries.
+        count: usize,
+        /// Only calls by or to this pane.
+        pane: Option<usize>,
+    },
     /// `pane.spawn`, its shape checked.
     PaneSpawn(crate::spawn::Spawn),
     /// `pane.close`: a pane the caller spawned.
@@ -1007,11 +1030,15 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
             &format!("{method} needs hello version 2"),
         ),
         Some("pane.list") => Step::Ask(id.clone(), Method::PaneList),
-        Some(method @ ("pane.wait" | "events.subscribe")) if *greeted < VERSION => refuse(
-            Some(id),
-            NO_METHOD,
-            &format!("{method} needs hello version 2"),
-        ),
+        Some(method @ ("pane.wait" | "events.subscribe" | "audit.read" | "pane.status"))
+            if *greeted < VERSION =>
+        {
+            refuse(
+                Some(id),
+                NO_METHOD,
+                &format!("{method} needs hello version 2"),
+            )
+        }
         Some("pane.wait") => match wait(request.get("params")) {
             Some(wait) => Step::Ask(id.clone(), Method::PaneWait(wait)),
             None => refuse(
@@ -1024,16 +1051,25 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
             Some(topics) => Step::Ask(id.clone(), Method::EventsSubscribe(topics)),
             None => refuse(Some(id), BAD_PARAMS, "events.subscribe takes known events"),
         },
+        Some("audit.read") => match audit_read(request.get("params")) {
+            Some(method) => Step::Ask(id.clone(), method),
+            None => refuse(
+                Some(id),
+                BAD_PARAMS,
+                "audit.read takes count up to 1000 and pane",
+            ),
+        },
         Some("pane.spawn") => match crate::spawn::params(request.get("params")) {
             Ok(spawn) => Step::Ask(id.clone(), Method::PaneSpawn(spawn)),
             Err(reason) => refuse(Some(id), BAD_PARAMS, reason),
         },
-        Some(method @ ("pane.read" | "pane.last_output" | "pane.send" | "pane.close")) => {
-            match pane_method(method, request.get("params")) {
-                Ok(method) => Step::Ask(id.clone(), method),
-                Err(reason) => refuse(Some(id), BAD_PARAMS, reason),
-            }
-        }
+        Some(
+            method
+            @ ("pane.read" | "pane.last_output" | "pane.send" | "pane.close" | "pane.status"),
+        ) => match pane_method(method, request.get("params")) {
+            Ok(method) => Step::Ask(id.clone(), method),
+            Err(reason) => refuse(Some(id), BAD_PARAMS, reason),
+        },
         Some("grants.list") => Step::Ask(id.clone(), Method::GrantsList),
         Some("grants.revoke") => match request.pointer("/params/id").and_then(Value::as_u64) {
             Some(grant @ 1..) => Step::Ask(id.clone(), Method::GrantsRevoke { id: grant }),
@@ -1083,6 +1119,23 @@ fn topics(params: Option<&Value>) -> Option<Topics> {
     (topics != Topics::default()).then_some(topics)
 }
 
+/// Reads `audit.read`'s parameters: an optional `count`, 100 by default and at most
+/// [`MAX_AUDIT_READ`], and an optional `pane`.
+fn audit_read(params: Option<&Value>) -> Option<Method> {
+    let field = |name| {
+        params
+            .and_then(|params| params.get(name))
+            .filter(|v| !v.is_null())
+    };
+    let number = |value: &Value| usize::try_from(value.as_u64()?).ok();
+    let count = field("count").map_or(Some(100), number)?;
+    let pane = match field("pane") {
+        Some(pane) => Some(number(pane)?),
+        None => None,
+    };
+    (count <= MAX_AUDIT_READ).then_some(Method::AuditRead { count, pane })
+}
+
 /// Checks the shape of a pane method's `params`. Scope is the reactor's to check.
 fn pane_method(method: &str, params: Option<&Value>) -> Result<Method, &'static str> {
     let field = |name| params.and_then(|params| params.get(name));
@@ -1117,6 +1170,24 @@ fn pane_method(method: &str, params: Option<&Value>) -> Result<Method, &'static 
             Ok(Method::PaneSend {
                 pane,
                 text: text.to_owned(),
+            })
+        }
+        "pane.status" => {
+            let state = field("state").and_then(Value::as_str);
+            let state = state
+                .filter(|state| STATES.contains(state))
+                .ok_or("params.state must be needs-you, running, done, error or idle")?;
+            let message = match field("message") {
+                None | Some(Value::Null) => "",
+                Some(message) => message.as_str().ok_or("params.message must be a string")?,
+            };
+            if message.chars().count() > MAX_STATUS_MESSAGE {
+                return Err("params.message is over 200 characters");
+            }
+            Ok(Method::PaneStatus {
+                pane,
+                state: state.to_owned(),
+                message: message.to_owned(),
             })
         }
         "pane.close" => Ok(Method::PaneClose { pane }),
@@ -1311,6 +1382,38 @@ mod tests {
     }
 
     #[test]
+    fn a_status_needs_version_2_a_known_state_and_a_short_message() {
+        let status = |params: Value| pane_request("pane.status", &params);
+        let most = "é".repeat(MAX_STATUS_MESSAGE);
+        let line = status(json!({"pane": 1, "state": "needs-you", "message": most}));
+        assert_eq!(
+            answer(line.as_bytes(), &mut VERSION.clone()),
+            Step::Ask(
+                json!(2),
+                Method::PaneStatus {
+                    pane: 1,
+                    state: "needs-you".to_owned(),
+                    message: most
+                }
+            )
+        );
+        let line = status(json!({"pane": 1, "state": "idle"}));
+        let (reply, _) = replied(line.as_bytes(), &mut OLDEST.clone());
+        assert_eq!(code(&reply), Some(NO_METHOD));
+        let bad = [
+            json!({"pane": 1, "state": "needs you"}),
+            json!({"pane": 1}),
+            json!({"pane": "self", "state": "done"}),
+            json!({"pane": 1, "state": "done", "message": 7}),
+            json!({"pane": 1, "state": "done", "message": "x".repeat(MAX_STATUS_MESSAGE + 1)}),
+        ];
+        for params in bad {
+            let (reply, go_on) = replied(status(params.clone()).as_bytes(), &mut VERSION.clone());
+            assert_eq!((code(&reply), go_on), (Some(BAD_PARAMS), false), "{params}");
+        }
+    }
+
+    #[test]
     fn wait_and_subscribe_need_version_2_and_well_formed_params() {
         let request = |method: &str, params: Value| {
             json!({"jsonrpc": "2.0", "id": 3, "method": method, "params": params}).to_string()
@@ -1355,6 +1458,23 @@ mod tests {
         ] {
             let (reply, go_on) = replied(line.as_bytes(), &mut VERSION.clone());
             assert_eq!((code(&reply), go_on), (Some(BAD_PARAMS), false), "{line}");
+        }
+    }
+
+    #[test]
+    fn audit_read_takes_a_count_up_to_1000_and_a_pane() {
+        let read = |params: Value| {
+            let line = json!({"jsonrpc": "2.0", "id": 3, "method": "audit.read", "params": params});
+            answer(line.to_string().as_bytes(), &mut VERSION.clone())
+        };
+        let asked = |count, pane| Step::Ask(json!(3), Method::AuditRead { count, pane });
+        assert_eq!(read(json!({})), asked(100, None));
+        assert_eq!(
+            read(json!({"count": 1000, "pane": 2})),
+            asked(1000, Some(2))
+        );
+        for params in [json!({"count": 1001}), json!({"pane": "self"})] {
+            assert!(matches!(read(params), Step::Reply(..)));
         }
     }
 
@@ -1852,7 +1972,10 @@ mod tests {
         let expected = pinfold_sys::peer_terminal(probe.accept().unwrap().0.as_fd()).unwrap();
         assert_eq!(request.caller(), expected);
         let mut over = UnixStream::connect(&path).unwrap();
-        over.set_read_timeout(Some(TIMEOUT / 2)).unwrap();
+        // macOS refuses the option with EINVAL once the core has closed it, which is the point.
+        if let Err(error) = over.set_read_timeout(Some(TIMEOUT / 2)) {
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+        }
         assert_eq!(over.read(&mut [0; 8]).unwrap(), 0);
         drop(held);
     }

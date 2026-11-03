@@ -21,7 +21,7 @@ const NO_METHOD: i64 = -32601;
 const BAD_PARAMS: i64 = -32602;
 
 /// Each tool, the API method it calls, and that method's schema.
-const TOOLS: [(&str, &str, &str); 5] = [
+const TOOLS: [(&str, &str, &str); 7] = [
     (
         "pane_list_v1",
         "pane.list",
@@ -41,6 +41,16 @@ const TOOLS: [(&str, &str, &str); 5] = [
         "pane_send_v1",
         "pane.send",
         include_str!("../../../docs/api/pane.send.schema.json"),
+    ),
+    (
+        "pane_spawn_v1",
+        "pane.spawn",
+        include_str!("../../../docs/api/pane.spawn.schema.json"),
+    ),
+    (
+        "pane_close_v1",
+        "pane.close",
+        include_str!("../../../docs/api/pane.close.schema.json"),
     ),
     (
         "pane_wait_v1",
@@ -237,6 +247,8 @@ mod tests {
             "pane_read_v1",
             "pane_last_output_v1",
             "pane_send_v1",
+            "pane_spawn_v1",
+            "pane_close_v1",
             "pane_wait_v1",
         ];
         assert_eq!(names, expected);
@@ -245,8 +257,10 @@ mod tests {
             assert!(!tool["description"].as_str().unwrap().is_empty(), "{tool}");
         }
         assert_eq!(tools[3]["inputSchema"]["required"], json!(["pane", "text"]));
+        assert_eq!(tools[4]["inputSchema"]["required"], json!(["where"]));
+        assert_eq!(tools[5]["inputSchema"]["required"], json!(["pane"]));
         assert_eq!(
-            tools[4]["inputSchema"]["required"],
+            tools[6]["inputSchema"]["required"],
             json!(["pane", "until", "timeout_ms"])
         );
     }

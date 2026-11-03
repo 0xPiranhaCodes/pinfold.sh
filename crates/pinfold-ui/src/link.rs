@@ -109,6 +109,11 @@ pub struct Tab {
     pub pane: u32,
     /// That pane's last reported directory, as program output wrote it. Empty if none.
     pub cwd: String,
+    /// That pane's state, below [`pinfold_proto::link::STATES`], and whether its agent reported
+    /// it rather than output's marks. Nothing until the core says.
+    pub status: Option<(u8, bool)>,
+    /// The message its agent reported, cleaned by the core. Empty if none.
+    pub message: String,
 }
 
 /// An approval copied out of the decoder's borrowed message.
@@ -148,6 +153,8 @@ struct State {
     laid: bool,
     /// Which tabs have news, one bit each.
     activity: u32,
+    /// Which tabs hold a pane that needs you and raised an alert while hidden, one bit each.
+    alerts: u32,
     greeted: bool,
     /// Whether the core said no tab is left.
     over: bool,
@@ -219,9 +226,21 @@ impl State {
                 self.copied = Some(text.to_owned());
             }
             Notice::Raise => self.raised = true,
-            Notice::Activity { tabs } => {
-                self.activity = tabs;
+            Notice::Activity { tabs, alerts } => {
+                (self.activity, self.alerts) = (tabs, alerts);
                 self.laid = true;
+            }
+            Notice::Status {
+                pane,
+                state,
+                reported,
+                message,
+            } => {
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.pane == pane) {
+                    tab.status = Some((state, reported));
+                    message.clone_into(&mut tab.message);
+                    self.laid = true;
+                }
             }
             Notice::Refused { reason } => self.refused = Some(reason),
             Notice::Approval(approval) => {
@@ -264,7 +283,7 @@ impl State {
             same.map_or(
                 Tab {
                     pane,
-                    cwd: String::new(),
+                    ..Tab::default()
                 },
                 std::mem::take,
             )
@@ -531,6 +550,12 @@ impl Link {
     #[must_use]
     pub fn activity(&self) -> u32 {
         self.state.activity
+    }
+
+    /// Returns which tabs hold a pane that needs you and alerted while hidden, one bit each.
+    #[must_use]
+    pub fn alerts(&self) -> u32 {
+        self.state.alerts
     }
 
     /// Returns whether the tabs or the panes shown changed since the last call, and clears that.
@@ -1095,6 +1120,32 @@ mod tests {
         .unwrap();
         assert!(turn_until(&mut link, |link| link.tabs()[0].pane == PANE + 2));
         assert_eq!(link.tabs()[0].cwd, "");
+    }
+
+    #[test]
+    fn a_tab_takes_its_panes_status_and_the_alerts() {
+        let (mut link, mut peer) = linked().unwrap();
+        peer.greet().unwrap();
+        let status = Notice::Status {
+            pane: PANE,
+            state: 0,
+            reported: true,
+            message: "ok?",
+        };
+        let other = Notice::Status {
+            pane: PANE + 9,
+            state: 1,
+            reported: false,
+            message: "",
+        };
+        let alerts = Notice::Activity {
+            tabs: 0,
+            alerts: 0b1,
+        };
+        peer.notices(&[other, status, alerts]).unwrap();
+        assert!(turn_until(&mut link, |link| link.alerts() == 0b1));
+        let tab = &link.tabs()[0];
+        assert_eq!((tab.status, tab.message.as_str()), (Some((0, true)), "ok?"));
     }
 
     #[test]

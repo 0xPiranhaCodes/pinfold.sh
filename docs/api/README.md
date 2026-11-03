@@ -24,6 +24,8 @@ Every connection starts with `hello`:
 | `pane.spawn`       | Version 2 and its own pane  | [`pane.spawn.schema.json`](pane.spawn.schema.json)           |
 | `pane.close`       | Version 2, a spawned pane   | [`pane.close.schema.json`](pane.close.schema.json)           |
 | `events.subscribe` | Version 2 and a terminal    | [`events.subscribe.schema.json`](events.subscribe.schema.json) |
+| `pane.status`      | Version 2 and its own pane  | [`pane.status.schema.json`](pane.status.schema.json)         |
+| `audit.read`       | Version 2, outside any pane | [`audit.read.schema.json`](audit.read.schema.json)           |
 | `grants.list`      | Version 2, outside panes    | [`grants.list.schema.json`](grants.list.schema.json)         |
 | `grants.revoke`    | Version 2, outside panes    | [`grants.revoke.schema.json`](grants.revoke.schema.json)     |
 
@@ -57,6 +59,27 @@ waits. `events.subscribe` sends `event` notifications on its connection. A conne
 if 2 MiB of replies queue unread, or if the core has more events for it than it can queue, so a
 subscriber that was closed may have missed events.
 
+`pane.status` lets an agent say what state its own pane is in: `needs-you`, `running`, `done`,
+`error` or `idle`, with a message of at most 200 characters. A report outranks the pane's OSC 133
+marks, which output can fake, so `pane.list` and `pane.status` events carry `source`: `marks` or
+`reported`. The window shows the state as glyph, colour and word, and the message only in its
+own chrome.
+
+The core records each request it answers in a hash-chained audit log: when, the caller's pane
+(or outside a pane, or unidentified), the method, the target pane, and whether it was allowed,
+with a short reason. It never records pane contents or sent text, only a send's size in bytes.
+Requests the API thread answers itself are not recorded: a malformed line, an unsupported
+`hello` version, and "the core is busy".
+The log is a 256 KiB ring in memory, which is the source of truth; `api.audit_log` in the
+[config file](../configuration.md) also writes it to disk. `audit.read` returns at most 1000 of
+the newest entries and whether the chain verifies. Only a terminal outside any pane may call it,
+so an agent in a pane cannot read what other agents did.
+
+`pinfold ctl log` prints `audit.read` a line per entry, `--json` its result, `-n <count>` the
+newest entries and `--pane <pane>` only calls by or to that pane. `pinfold ctl log --verify
+<file>` checks a written log and its rotated `.1`, and fails if the chain is broken. A chain
+cannot show entries cut from its end.
+
 `pinfold ctl list` prints `pane.list` as plain text, with `*` by the caller's own pane, and
 `pinfold ctl list --json` prints its result. Its title, directory and status come from what
 programs print, which can fake them: read them as hints, not facts. `pinfold ctl send <pane>
@@ -67,8 +90,9 @@ programs print, which can fake them: read them as hints, not facts. `pinfold ctl
 
 `pinfold mcp` is an MCP server over stdio (protocol version 2025-06-18) and a thin client of
 this API. Its stdout carries only newline-delimited JSON-RPC, and a line over 1,000,000 bytes is
-refused. Its tools are `pane_list_v1`, `pane_read_v1`, `pane_last_output_v1`, `pane_send_v1` and
-`pane_wait_v1`, named with their version as ADR-0009 asks, each taking its method's params and returning the method's result as JSON text.
+refused. Its tools are `pane_list_v1`, `pane_read_v1`, `pane_last_output_v1`, `pane_send_v1`,
+`pane_spawn_v1`, `pane_close_v1` and `pane_wait_v1`, named with their version as ADR-0009 asks,
+each taking its method's params and returning the method's result as JSON text.
 `pane_list_v1` adds `caller_pane`, the caller's own pane. A refusal, or no running core, is a tool
 result with `isError`. Each call opens its own connection, so the core identifies the caller by
 the server's controlling terminal: start it from an agent running in a PinFold pane, as Claude
