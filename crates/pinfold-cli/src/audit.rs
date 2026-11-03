@@ -125,14 +125,18 @@ fn record(
         Method::PaneStatus { pane, .. } => ("pane.status", Some(*pane), scope(*pane)),
         Method::AuditRead { pane, .. } => ("audit.read", *pane, "outside"),
         Method::SessionSave => ("session.save", None, "outside"),
+        Method::GrantsList => ("grants.list", None, "outside"),
+        Method::GrantsRevoke { .. } => ("grants.revoke", None, "outside"),
     };
     let mut reason = match result {
         Ok(_) => "allowed".to_owned(),
         Err(reason) => reason.clone(),
     };
     // A send's text is never recorded, only its size.
-    if let Method::PaneSend { text, .. } = method {
-        reason += &format!(", {} bytes", text.len());
+    match method {
+        Method::PaneSend { text, .. } => reason += &format!(", {} bytes", text.len()),
+        Method::GrantsRevoke { id } => reason += &format!(", grant {id}"),
+        _ => {}
     }
     let at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -191,5 +195,14 @@ mod tests {
         let names = (record.method.as_str(), record.scope.as_str());
         assert_eq!((names, record.target), (("session.save", "outside"), None));
         assert_eq!(record.outcome, Outcome::Ok("allowed".to_owned()));
+    }
+
+    #[test]
+    fn a_revoke_is_recorded_with_its_grant_id() {
+        let revoke = Method::GrantsRevoke { id: 3 };
+        let record = record(&revoke, true, None, &Ok(json!({"revoked": true})));
+        let names = (record.method.as_str(), record.scope.as_str());
+        assert_eq!(names, ("grants.revoke", "outside"));
+        assert_eq!(record.outcome, Outcome::Ok("allowed, grant 3".to_owned()));
     }
 }

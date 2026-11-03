@@ -56,6 +56,7 @@ Entries are generated from Conventional Commits with git-cliff
 - `pinfold mcp` can spawn and close child panes through versioned MCP tools.
 - `pinfold mcp` has `events_next_v1`, which waits up to 30 seconds by default for the next pane opened, closed or status event, so an MCP client need not poll (ADR-0035).
 - Prefix keys work: `Ctrl+a`, or `keys.prefix`, then `c`, `n`, `p`, `0` to `9`, `|`, `-`, the arrows, `z`, `d` and `x`. `x` asks first, and says so in red when it would end the session. On macOS Command+T opens a tab and Command+1 to Command+9 go to one. A click focuses a pane or picks a tab, and the `+` button opens one. Bindings are in [docs/configuration.md](docs/configuration.md).
+- Cross-pane reads and sends ask through keyboard-only window chrome, with batched 30-minute grants that `pinfold ctl grants` lists and revokes. Approved actions and grant changes are recorded in the audit log.
 - `pinfold-core` runs as a hardened daemon with a private control socket that takes `hello` and `window.open`.
 - `pinfold ctl session save`, from a terminal outside any pane, writes the session's layout and each pane's directory and redacted command to `sessions/default.json` in the state directory, 0600 and atomically, with no scrollback or environment.
 - The core records each API request that reaches it in a hash-chained audit log, never pane contents or sent text; `audit.read`, `pinfold ctl log` and `pinfold ctl log --verify` read and check it, and `api.audit_log = true` also writes it to disk.
