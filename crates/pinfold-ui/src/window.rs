@@ -7,6 +7,7 @@
 use std::io::{self, Write};
 use std::os::fd::OwnedFd;
 use std::path::Path;
+use std::process::Stdio;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,7 +15,7 @@ use std::thread;
 use std::time::Instant;
 
 use mio::Waker;
-use pinfold_config::Config;
+use pinfold_config::{Config, MAX_FONT_SIZE, MIN_FONT_SIZE};
 use pinfold_proto::link::{self as proto, MAX_DIMENSION, Position, Rect, Selection};
 use pinfold_proto::{Frame, MouseMode};
 use pinfold_render::cpu::{CpuRenderer, Renderer};
@@ -43,7 +44,7 @@ use crate::search_bar::{Bar, Step};
 use crate::selection::Selecting;
 use crate::top_bar::{Clicks, Hit};
 use crate::vi::{Step as ViStep, Vi, View};
-use crate::{ime, input, mouse, panes, paste, reload, selection, top_bar};
+use crate::{ime, input, menu_bar, mouse, panes, paste, reload, selection, top_bar};
 
 const DEFAULT_SIZE: LogicalSize<u32> = LogicalSize::new(1000, 640);
 /// Rows under the pane that belong to Pinfold, so program output cannot reach them.
@@ -83,6 +84,8 @@ enum Notice {
     Raise,
     /// The config file was saved, and this is what it now says.
     Config(Config),
+    /// A menu item was chosen.
+    Command(Command),
 }
 
 /// What the I/O thread has for the window. A screen marked dirty here is one the window has not
@@ -331,6 +334,9 @@ struct App {
     vi: Option<Vi>,
     /// Whether the core has gone. The last screen stays, under a row that says so.
     ended: bool,
+    menu_bar: menu_bar::Bar,
+    /// Points added to the config's font size by Bigger and Smaller, until the next save.
+    font_step: f32,
     result: Result<(), Error>,
 }
 
@@ -379,7 +385,7 @@ impl App {
             .with_title_hidden(true);
         let window = Rc::new(event_loop.create_window(attributes)?);
         window.set_ime_allowed(true);
-        let size = self.config.font_size * font_scale(self.size, window.scale_factor());
+        let size = self.font_size() * font_scale(self.size, window.scale_factor());
         let renderer = renderer(&window, size, self.config.font_path.as_deref())?;
         let mut open = Open {
             window,
@@ -408,12 +414,16 @@ impl App {
 
     /// Redraws the font for a new display. Winit sends `Resized` after this only sometimes.
     fn scale_changed(&mut self, scale: f64) {
+        let points = self.font_size() * font_scale(self.size, scale);
         let Some(open) = &mut self.open else { return };
-        open.renderer
-            .set_font_size(self.config.font_size * font_scale(self.size, scale));
+        open.renderer.set_font_size(points);
         let size = open.window.inner_size();
         self.ime_cursor = None;
         self.resized(size);
+    }
+
+    fn font_size(&self) -> f32 {
+        (self.config.font_size + self.font_step).clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
     }
 
     /// Applies a saved config. The window keeps its size, so the grid gets new dimensions.
@@ -421,6 +431,7 @@ impl App {
         if config == self.config {
             return;
         }
+        self.font_step = 0.0;
         let old = std::mem::replace(&mut self.config, config);
         if self.config.keys.prefix != old.keys.prefix {
             self.prefix = Prefix::new(self.config.keys.prefix);
@@ -603,6 +614,15 @@ impl App {
             top_bar::draw(&mut self.composed, &bar);
             open.renderer.draw(&self.composed)?;
         }
+        let size = self.font_size();
+        self.menu_bar.update(menu_bar::State {
+            selection: self.selecting.current.is_some(),
+            tabs: self.labels.len(),
+            panes: self.panes.len(),
+            bigger: size < MAX_FONT_SIZE,
+            smaller: size > MIN_FONT_SIZE,
+            resized: self.font_step != 0.0,
+        });
         Ok(())
     }
 
@@ -653,7 +673,13 @@ impl App {
             Command::Zoom => proto::Request::Zoom,
             // The session stays in the core for the next window.
             Command::Detach => return event_loop.exit(),
-            // Only a key or the menu copies, so output alone can never reach the clipboard.
+            // A program dies with its pane, so this asks first as tmux does.
+            Command::ClosePane => {
+                let last = self.total == 1;
+                self.prompt = Some(Prompt::Close { pane, last });
+                return self.redraw_soon();
+            }
+            // Only this copies, so output alone can never reach the clipboard.
             Command::Copy => {
                 if let Some(selection) = self.selecting.current {
                     self.request(Request::Copy(pane, selection));
@@ -661,35 +687,69 @@ impl App {
                 return;
             }
             Command::Paste => return self.paste(),
-            Command::SelectAll => {
-                // Reading a selection clamps it to the rows held.
-                let focus = Position {
-                    row: usize::MAX,
-                    column: u16::MAX,
-                };
-                let anchor = Position::default();
-                self.selecting.current = Some(Selection { anchor, focus });
-                return self.redraw_soon();
-            }
+            Command::SelectAll => return self.select_all(),
             Command::Find => {
                 self.bar.get_or_insert_default();
                 return self.redraw_soon();
             }
-            // A program dies with its pane, so this asks first as tmux does.
-            Command::ClosePane => {
-                let last = self.total == 1;
-                self.prompt = Some(Prompt::Close { pane, last });
-                return self.redraw_soon();
+            Command::FontBigger | Command::FontSmaller | Command::FontReset => {
+                return self.step_font(command);
             }
+            Command::OpenConfig => return open_config(),
+            Command::OpenDocs => return launch(DOCS, false),
         };
         self.core(request);
+    }
+
+    fn select_all(&mut self) {
+        let Some(screen) = find(&self.panes, self.focused) else {
+            return;
+        };
+        let (held, last) = (&screen.held, screen.frame.columns.saturating_sub(1));
+        self.selecting.current = Some(Selection {
+            anchor: Position {
+                row: held.start,
+                column: 0,
+            },
+            focus: Position {
+                row: held.end.saturating_sub(1).max(held.start),
+                column: last,
+            },
+        });
+        self.redraw_soon();
+    }
+
+    fn step_font(&mut self, command: Command) {
+        let size = self.font_size();
+        self.font_step = match command {
+            Command::FontBigger => self.font_step + 1.0,
+            Command::FontSmaller => self.font_step - 1.0,
+            _ => 0.0,
+        };
+        // A step past a limit stays at it.
+        self.font_step = self.font_size() - self.config.font_size;
+        if self.font_size() != size
+            && let Some(open) = &self.open
+        {
+            let scale = open.window.scale_factor();
+            self.scale_changed(scale);
+        }
     }
 
     /// Handles a key that belongs to the window whatever else is going on, and returns whether
     /// it did. These come before the prefix, so that an armed prefix cannot swallow a paste.
     fn window_key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) -> bool {
         let key = &event.logical_key;
-        let edit = if input::is_paste(key, self.modifiers) {
+        if input::is_vi(key, self.modifiers) {
+            if !event.repeat {
+                self.toggle_vi();
+            }
+            return true;
+        }
+        // On macOS these are the menu bar's key equivalents, so they must not fire twice.
+        let command = if cfg!(target_os = "macos") {
+            None
+        } else if input::is_paste(key, self.modifiers) {
             Some(Command::Paste)
         } else if input::is_copy(key, self.modifiers) {
             Some(Command::Copy)
@@ -698,26 +758,13 @@ impl App {
         } else {
             None
         };
-        if let Some(command) = edit {
-            if !event.repeat {
-                self.command(event_loop, command);
-            }
-            return true;
+        let Some(command) = command else {
+            return false;
+        };
+        if !event.repeat {
+            self.command(event_loop, command);
         }
-        if input::is_vi(key, self.modifiers) {
-            if !event.repeat {
-                self.toggle_vi();
-            }
-            return true;
-        }
-        let tab = input::tab_key(key, self.modifiers).filter(|_| cfg!(target_os = "macos"));
-        if let Some(command) = tab {
-            if !event.repeat {
-                self.command(event_loop, command);
-            }
-            return true;
-        }
-        false
+        true
     }
 
     /// Hands a key to the search bar or vi mode, and returns whether either took it.
@@ -1184,6 +1231,14 @@ impl ApplicationHandler<Notice> for App {
                 }
             }
             Notice::Config(config) => self.configure(config),
+            // A prompt keeps every key until it is answered, menu keys too; only Quit, which
+            // leaves the session running, gets past it.
+            Notice::Command(command) if self.prompt.is_none() || command == Command::Detach => {
+                self.prefix.cancel();
+                self.menu = None;
+                self.command(event_loop, command);
+            }
+            Notice::Command(_) => {}
         }
     }
 
@@ -1242,6 +1297,64 @@ impl ApplicationHandler<Notice> for App {
     }
 }
 
+/// Where Help sends the browser.
+const DOCS: &str = concat!(
+    env!("CARGO_PKG_REPOSITORY"),
+    "/blob/main/docs/configuration.md"
+);
+
+/// Opens `target`, a file or URL, in the app the desktop picks for it, without waiting.
+/// `text` asks macOS for the text editor, as a `.toml` file may have no app of its own.
+fn launch(target: &str, text: bool) {
+    let mut command = std::process::Command::new(if cfg!(target_os = "macos") {
+        "/usr/bin/open"
+    } else {
+        "xdg-open"
+    });
+    if text && cfg!(target_os = "macos") {
+        command.arg("-t");
+    }
+    let spawned = command
+        .arg(target)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    match spawned {
+        // Reaped on a thread of its own, so it leaves no zombie and the window does not wait.
+        Ok(mut child) => drop(thread::spawn(move || child.wait())),
+        Err(error) => {
+            let _ = writeln!(io::stderr(), "pinfold: cannot open {target}: {error}");
+        }
+    }
+}
+
+/// Opens the config file, made empty first if there is none, so there is something to edit.
+fn open_config() {
+    let Some(path) = pinfold_config::path() else {
+        return;
+    };
+    let made = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| {
+            std::fs::OpenOptions::new()
+                .append(true)
+                .create(true)
+                .open(&path)
+        });
+    match made {
+        Ok(_) => launch(&path.to_string_lossy(), true),
+        Err(error) => {
+            let _ = writeln!(
+                io::stderr(),
+                "pinfold: cannot make {}: {error}",
+                path.display()
+            );
+        }
+    }
+}
+
 /// Reads the config file. A typo must not lock anyone out of their terminal, so a bad
 /// file means the defaults.
 fn config() -> Config {
@@ -1272,7 +1385,11 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
     let waker = link.waker();
     let (outbox, inbox) = outbox::channel();
     let latest = Arc::new(Latest::default());
-    let event_loop = EventLoop::with_user_event().build()?;
+    let mut builder = EventLoop::with_user_event();
+    // The menu bar below replaces winit's.
+    #[cfg(target_os = "macos")]
+    winit::platform::macos::EventLoopBuilderExtMacOS::with_default_menu(&mut builder, false);
+    let event_loop = builder.build()?;
     let (proxy, shared) = (event_loop.create_proxy(), latest.clone());
     thread::Builder::new()
         .name("pinfold-io".into())
@@ -1280,6 +1397,10 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
     // Before the file is first read, so a save between the two is not missed.
     let proxy = event_loop.create_proxy();
     reload::watch(move |config| proxy.send_event(Notice::Config(config)).is_ok())?;
+    let proxy = event_loop.create_proxy();
+    let menu_bar = menu_bar::Bar::install(move |command| {
+        let _ = proxy.send_event(Notice::Command(command));
+    });
     let config = config();
     let mut app = App {
         prefix: Prefix::new(config.keys.prefix),
@@ -1318,6 +1439,8 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
         bar: None,
         vi: None,
         ended: false,
+        menu_bar,
+        font_step: 0.0,
         result: Ok(()),
     };
     event_loop.run_app(&mut app)?;
