@@ -128,6 +128,9 @@ fn record(
         Method::WorkspaceOpen(_) => ("workspace.open", None, own.map_or("outside", |_| "self")),
         Method::GrantsList => ("grants.list", None, "outside"),
         Method::GrantsRevoke { .. } => ("grants.revoke", None, "outside"),
+        // The root and run lines are not recorded.
+        Method::WorkspaceTrustState(_) => ("workspace.trust_state", None, "outside"),
+        Method::WorkspaceAskTrust(..) => ("workspace.ask_trust", None, "outside"),
     };
     let mut reason = match result {
         Ok(_) => "allowed".to_owned(),

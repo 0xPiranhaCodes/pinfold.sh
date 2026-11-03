@@ -29,6 +29,8 @@ Every connection starts with `hello`:
 | `workspace.open`   | Version 2, a terminal, no pane | [`workspace.open.schema.json`](workspace.open.schema.json) |
 | `grants.list`      | Version 2, outside panes    | [`grants.list.schema.json`](grants.list.schema.json)         |
 | `grants.revoke`    | Version 2, outside panes    | [`grants.revoke.schema.json`](grants.revoke.schema.json)     |
+| `workspace.trust_state` | Version 2, outside panes | [`workspace.trust_state.schema.json`](workspace.trust_state.schema.json) |
+| `workspace.ask_trust` | Version 2, outside panes | [`workspace.ask_trust.schema.json`](workspace.ask_trust.schema.json) |
 
 A pane in reach is the caller's own, the `self` scope, or one it spawned, or one they spawned in
 turn, the `children` scope. `pane.spawn` opens a split or tab running the user's shell, never a
@@ -48,6 +50,15 @@ newest. A send carries at most 4096 bytes, and a pane takes at most 20 sends a s
 pane. Listing is read-only and revocation only removes authority, so neither raises another
 approval prompt. `pinfold ctl grants [--json]` lists lasting grants and `pinfold ctl grants
 revoke <id>` revokes one.
+
+`workspace.trust_state` and `workspace.ask_trust` are accepted only from an identified terminal
+outside every pane, and take a canonical project directory and the SHA-256 of its layout file.
+Trust is one hash per directory, kept in `trust.json` (mode 0600) in the state directory, at most
+1,000 directories with the oldest dropped; a file that will not parse is moved to
+`trust.json.bad` and trusts nothing. `workspace.ask_trust` parks for up to 60 seconds on a prompt
+in window chrome that shows the directory, whether its layout changed since it was trusted, and
+every `run` line, at most 64. `y` trusts and records the pair, and `n` or Esc refuses. A prompt
+too long for the window offers only refusal, and no API call can answer it. It runs nothing.
 
 A connection takes many requests, answered one at a time in order, each line at most 32 KiB.
 It must send `hello` within 2 seconds of connecting and end each line within 2 seconds of its
