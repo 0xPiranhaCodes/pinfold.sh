@@ -12,13 +12,28 @@ Every connection starts with `hello`:
 - **Version 1** allows only `window.open`. The core takes it for two minor versions, and the
   launcher still sends it, so a new `pinfold` opens a window on an older core.
 
-| Method        | Needs                    | Schema                                         |
-| ------------- | ------------------------ | ---------------------------------------------- |
-| `hello`       | First, once              | [`hello.schema.json`](hello.schema.json)         |
-| `window.open` | Any `hello`              | Takes nothing, returns `{}`                    |
-| `pane.list`   | Version 2 and a terminal | [`pane.list.schema.json`](pane.list.schema.json) |
+| Method             | Needs                       | Schema                                                       |
+| ------------------ | --------------------------- | ------------------------------------------------------------ |
+| `hello`            | First, once                 | [`hello.schema.json`](hello.schema.json)                     |
+| `window.open`      | Any `hello`                 | Takes nothing, returns `{}`                                  |
+| `pane.list`        | Version 2 and a terminal    | [`pane.list.schema.json`](pane.list.schema.json)             |
+| `pane.read`        | Version 2 and its own pane  | [`pane.read.schema.json`](pane.read.schema.json)             |
+| `pane.last_output` | Version 2 and its own pane  | [`pane.last_output.schema.json`](pane.last_output.schema.json) |
+| `pane.send`        | Version 2 and its own pane  | [`pane.send.schema.json`](pane.send.schema.json)             |
+| `pane.wait`        | Version 2 and its own pane  | [`pane.wait.schema.json`](pane.wait.schema.json)             |
+| `events.subscribe` | Version 2 and a terminal    | [`events.subscribe.schema.json`](events.subscribe.schema.json) |
+
+For now a caller reads and sends only to the pane it runs in, the `self` scope, and any other
+pane is refused. Reads return at most 2,000,000 bytes, keeping the newest. A send carries at
+most 4096 bytes, and a pane takes at most 20 sends a second.
+
+`pane.wait` waits on the caller's own pane for at most 10 minutes, and the core parks at most 64
+waits. `events.subscribe` sends `event` notifications on its connection. A connection with a
+wait or a subscription stays open past the usual limit, and is closed if 2 MiB of replies
+queue unread.
 
 `pinfold ctl list` prints `pane.list` as plain text, with `*` by the caller's own pane, and
 `pinfold ctl list --json` prints its result. Its title, directory and status come from what
-programs print, which can fake them: read them as hints, not facts. A core that refuses version 2 is older than the
-client, and `pinfold ctl` says to quit PinFold so that a new core starts.
+programs print, which can fake them: read them as hints, not facts. `pinfold ctl send <pane>
+<text>` types into a pane. A core that refuses version 2 is older than the client, and
+`pinfold ctl` says to quit PinFold so that a new core starts.

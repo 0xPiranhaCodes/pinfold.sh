@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "pane.wait",
+  "description": "Waits on the caller's own pane until its shell finishes a command, draws its next prompt or its program writes anything, or the pane closes, or the timeout passes. Needs hello version 2 and a caller in a pane; any other pane is refused. At most 64 waits are parked in the core at once, and past that a wait is refused as busy. A wait whose connection closes is dropped.",
+  "type": "object",
+  "properties": {
+    "params": {
+      "type": "object",
+      "required": ["pane", "until", "timeout_ms"],
+      "properties": {
+        "pane": {
+          "description": "\"self\", or the caller's own pane number. Other panes are refused.",
+          "oneOf": [{ "const": "self" }, { "type": "integer", "minimum": 0 }]
+        },
+        "until": {
+          "enum": ["exit", "prompt", "output"],
+          "description": "exit: OSC 133 D. prompt: OSC 133 A. output: any bytes from the program. Output can fake the marks."
+        },
+        "timeout_ms": { "type": "integer", "minimum": 0, "maximum": 600000 }
+      }
+    },
+    "result": {
+      "type": "object",
+      "required": ["outcome"],
+      "additionalProperties": false,
+      "properties": {
+        "outcome": {
+          "enum": ["exit", "prompt", "output", "closed", "timeout"],
+          "description": "What ended the wait. A timeout is a result, not an error."
+        },
+        "exit": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 255,
+          "description": "With exit only: the status the shell gave in its D mark, or null if it gave none."
+        }
+      }
+    }
+  }
+}

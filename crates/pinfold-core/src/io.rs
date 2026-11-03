@@ -17,8 +17,10 @@ use pinfold_sys::Terminal;
 use pinfold_sys::pty::Pty;
 
 use crate::link::{Host, LINK};
-use crate::marks::ShellPhase;
-use crate::search::{Direction, Position, Search, SearchStep, Selection};
+use crate::marks::{ShellMarks, ShellPhase};
+use crate::search::{
+    CopyStep, Copying, Direction, MAX_SELECTION, Position, Search, SearchStep, Selection,
+};
 use crate::vt::{AlacrittyEngine, VtEngine};
 use crate::{paste, shell};
 
@@ -31,6 +33,10 @@ pub const MAX_REPLIES: usize = 4 * 1024;
 /// Most input waiting for a program that is not reading it. Input past this is refused
 /// whole, since a paste cut short would lose its closing bracket.
 pub const MAX_INPUT: usize = pinfold_proto::link::MAX_INPUT;
+/// Most text one `pane.read` or `pane.last_output` returns (threat model, Limits).
+pub const MAX_READ: usize = MAX_SELECTION;
+/// Most `pane.send` calls a second to one pane (threat model, Limits).
+pub const SENDS_PER_SECOND: u32 = 20;
 /// Queue capacity an empty pane keeps, so one large paste does not cost memory for good.
 const KEPT_INPUT: usize = 4 * 1024;
 
@@ -103,9 +109,13 @@ struct Pane {
     readable: bool,
     closed: bool,
     dirty: bool,
+    /// Counts reads that found output, wrapping, for `pane.wait`.
+    output: u64,
     /// The running search, which gets one step per pass, so PTYs are served between steps.
     search: Option<Search>,
     found: Option<Selection>,
+    /// When the current second of `pane.send` calls began, and how many it has had.
+    sends: (Instant, u32),
 }
 
 impl Pane {
@@ -132,6 +142,15 @@ pub struct Listed<'a> {
     pub command: &'a str,
     /// `running`, `done`, `error` or `idle`, from OSC 133 marks, and `done` once it closed.
     pub status: &'static str,
+}
+
+/// What `pane.wait` watches in a pane, with nothing from its screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Progress {
+    /// Counts reads that found output, wrapping.
+    pub output: u64,
+    /// The shell's OSC 133 marks, which output can fake (T4).
+    pub marks: ShellMarks,
 }
 
 /// Every PTY and its terminal state, driven from a single thread.
@@ -209,8 +228,10 @@ impl Reactor {
             readable: true,
             closed: false,
             dirty: true,
+            output: 0,
             search: None,
             found: None,
+            sends: (Instant::now(), 0),
         });
         Ok(pane)
     }
@@ -255,13 +276,16 @@ impl Reactor {
         for pane in &mut self.panes {
             if pane.readable {
                 let mut master = pane.pty.master();
+                let mut fed = false;
                 let pumped = pump(
                     &mut master,
                     pane.engine.as_mut(),
                     &mut pane.replies,
                     &mut self.buffer,
-                    &mut pane.dirty,
+                    &mut fed,
                 );
+                pane.dirty |= fed;
+                pane.output = pane.output.wrapping_add(u64::from(fed));
                 pane.readable = pumped == Pumped::Budget;
                 pane.closed |= pumped == Pumped::Closed;
             }
@@ -320,6 +344,68 @@ impl Reactor {
         };
         let bracketed = engine.bracketed_paste();
         text.len() <= MAX_INPUT && self.write(pane, &paste::encode(text, bracketed))
+    }
+
+    /// Types `text` into a pane's program as it is, through the queue [`Reactor::write`] fills.
+    /// Refused with a reason past [`SENDS_PER_SECOND`] calls in a second, which count refusals
+    /// too, or if the queue has no room for all of it.
+    // shortcut: the second is per pane, which is per caller while the API has only the `self`
+    // scope. Key it by caller when a caller can send to other panes.
+    pub fn send(&mut self, pane: usize, text: &str, now: Instant) -> Result<(), &'static str> {
+        let Some(entry) = pane_mut(&mut self.panes, pane) else {
+            return Err("no such pane");
+        };
+        let (since, count) = &mut entry.sends;
+        if *count == 0 || now.duration_since(*since) >= Duration::from_secs(1) {
+            (*since, *count) = (now, 0);
+        }
+        if *count >= SENDS_PER_SECOND {
+            return Err("rate limited: at most 20 sends a second");
+        }
+        *count += 1;
+        if self.write(pane, text.as_bytes()) {
+            Ok(())
+        } else {
+            Err("the pane's input is full")
+        }
+    }
+
+    /// Returns a pane's history and screen as plain text, newest last, or with `lines` only the
+    /// last that many lines, without line ends after the last text. Past [`MAX_READ`] bytes the
+    /// oldest text goes, cut at a character.
+    #[must_use]
+    pub fn read(&self, pane: usize, lines: Option<usize>) -> Option<String> {
+        let everything = Selection {
+            anchor: Position::default(),
+            focus: Position {
+                row: usize::MAX,
+                column: u16::MAX,
+            },
+        };
+        let mut text = newest_text(self.engine(pane)?, everything);
+        if let Some(lines) = lines {
+            let start = match lines.checked_sub(1) {
+                None => text.len(),
+                Some(skipped) => text
+                    .rmatch_indices('\n')
+                    .nth(skipped)
+                    .map_or(0, |(at, _)| at + 1),
+            };
+            text.drain(..start);
+        }
+        Some(text)
+    }
+
+    /// Returns the output of a pane's last command, from its OSC 133 marks, as plain text with
+    /// [`Reactor::read`]'s limit. Nothing if the pane is unknown or has no marks.
+    #[must_use]
+    pub fn last_output(&self, pane: usize) -> Option<String> {
+        let engine = self.engine(pane)?;
+        let output = engine.last_output()?;
+        if output.focus < output.anchor {
+            return Some(String::new());
+        }
+        Some(newest_text(engine, output))
     }
 
     /// Resizes a pane's terminal and tells its program.
@@ -430,6 +516,17 @@ impl Reactor {
         })
     }
 
+    /// Returns what `pane.wait` watches in a pane, or nothing once it has closed.
+    #[must_use]
+    pub fn progress(&self, pane: usize) -> Option<Progress> {
+        let pane = self.pane(pane).filter(|pane| !pane.closed)?;
+        let marks = pane.engine.shell_marks();
+        Some(Progress {
+            output: pane.output,
+            marks,
+        })
+    }
+
     fn pane(&self, number: usize) -> Option<&Pane> {
         let index = self.panes.binary_search_by_key(&number, |pane| pane.number);
         self.panes.get(index.ok()?)
@@ -458,6 +555,30 @@ impl Reactor {
             let _ = self.poll.registry().deregister(&mut SourceFd(&fd));
         }
     }
+}
+
+/// Copies `selection` as plain text without line ends after it, keeping its newest
+/// [`MAX_READ`] bytes, cut at a character. The grid holds characters, so no escape is in it.
+// shortcut: one call on the reactor's thread, bounded by the store's caps. Step it between
+// turns, as a window's copy is, if reads ever hold up PTYs.
+fn newest_text(engine: &dyn VtEngine, selection: Selection) -> String {
+    let keep_newest = |text: &mut String| {
+        let mut from = text.len().saturating_sub(MAX_READ);
+        while !text.is_char_boundary(from) {
+            from += 1;
+        }
+        text.drain(..from);
+    };
+    let mut copy = Copying::unlimited(selection);
+    let mut text = String::new();
+    while engine.copy_step(&mut copy, &mut text) == CopyStep::Running {
+        if text.len() > 2 * MAX_READ {
+            keep_newest(&mut text);
+        }
+    }
+    text.truncate(text.trim_end_matches('\n').len());
+    keep_newest(&mut text);
+    text
 }
 
 fn pane_mut(panes: &mut [Pane], number: usize) -> Option<&mut Pane> {
@@ -723,6 +844,68 @@ mod tests {
         assert!(!reactor.write(pane, &vec![b'x'; room + 1]));
         assert_eq!(reactor.panes[pane].input.len(), queued);
         assert!(!reactor.paste(pane, &"x".repeat(MAX_INPUT + 1)));
+    }
+
+    #[test]
+    fn sends_past_20_a_second_or_a_full_queue_are_refused() {
+        let mut reactor = Reactor::new().unwrap();
+        let script = "stty raw -echo; echo ready; sleep 30";
+        let pane = reactor.spawn(shell(script), 24, 80).unwrap();
+        assert!(turn_until(&mut reactor, |r| on_screen(r, pane, "ready")));
+        let now = Instant::now();
+        for _ in 0..SENDS_PER_SECOND {
+            assert_eq!(reactor.send(pane, "x", now), Ok(()));
+        }
+        let refused = reactor.send(pane, "x", now + Duration::from_millis(999));
+        assert!(refused.unwrap_err().starts_with("rate limited"));
+        let next_second = now + Duration::from_secs(1);
+        assert_eq!(reactor.send(pane, "x", next_second), Ok(()));
+
+        assert!(reactor.write(pane, &vec![b'x'; MAX_INPUT]));
+        let queued = reactor.panes[pane].input.len();
+        let full = reactor.send(pane, &"x".repeat(MAX_INPUT - queued + 1), next_second);
+        assert_eq!(full, Err("the pane's input is full"));
+        assert_eq!(reactor.panes[pane].input.len(), queued);
+    }
+
+    #[test]
+    fn a_read_is_plain_text_newest_last_and_last_output_follows_the_marks() {
+        let mut reactor = Reactor::new().unwrap();
+        let script = r"printf '\033[1m[one]\033[0m\ntwo\n\033]133;C\007out\nput\n\033]133;D;0\007$ '; sleep 30";
+        let pane = reactor.spawn(shell(script), 24, 80).unwrap();
+        assert!(turn_until(&mut reactor, |r| on_screen(r, pane, "$")));
+        let read = |lines| reactor.read(pane, lines).unwrap();
+        assert_eq!(read(None), "[one]\ntwo\nout\nput\n$");
+        assert_eq!(read(Some(2)), "put\n$");
+        assert_eq!(read(Some(0)), "");
+        assert_eq!(read(Some(99)), read(None));
+        assert_eq!(reactor.last_output(pane).unwrap(), "out\nput");
+    }
+
+    #[test]
+    fn a_read_keeps_the_newest_2_mb() {
+        let mut engine = AlacrittyEngine::new(24, 400);
+        // About 4 MB: more than a read returns, and more rows than the store keeps.
+        for line in 0..10_000 {
+            engine.feed(
+                format!("{line:06}{}\r\n", "x".repeat(394)).as_bytes(),
+                &mut Vec::new(),
+            );
+        }
+        let everything = Selection {
+            anchor: Position::default(),
+            focus: Position {
+                row: usize::MAX,
+                column: u16::MAX,
+            },
+        };
+        let text = newest_text(&engine, everything);
+        assert!(
+            text.len() <= MAX_READ && text.len() > MAX_READ - 401,
+            "{}",
+            text.len()
+        );
+        assert!(text.ends_with(&format!("009999{}", "x".repeat(394))));
     }
 
     #[test]

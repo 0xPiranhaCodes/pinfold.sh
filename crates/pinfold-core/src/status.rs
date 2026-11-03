@@ -298,6 +298,7 @@ mod tests {
             phase,
             finished,
             exit,
+            prompts: 0,
         }
     }
 

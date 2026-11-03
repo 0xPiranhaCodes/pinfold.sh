@@ -11,3 +11,4 @@ pub mod shell;
 pub mod status;
 mod tabs;
 pub mod vt;
+pub mod wait;

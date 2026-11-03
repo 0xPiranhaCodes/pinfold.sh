@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use pinfold_api::control;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 /// How long a core that was just started gets to answer.
 const START_WAIT: Duration = Duration::from_secs(5);
@@ -66,9 +66,7 @@ fn launch() -> Result<(), Box<dyn Error>> {
 
 /// `pinfold ctl list`: prints the session's panes, as JSON with `json`. It starts no core.
 fn list(json: bool) -> Result<(), Box<dyn Error>> {
-    let path = control::socket_path(&control::runtime_dir());
-    let stream = connect(&path)?.ok_or("PinFold is not running")?;
-    let (hello, list) = control::list_panes(&stream)?;
+    let (hello, list) = control::list_panes(&running()?)?;
     let text = if json {
         format!("{list}\n")
     } else {
@@ -76,6 +74,21 @@ fn list(json: bool) -> Result<(), Box<dyn Error>> {
     };
     std::io::stdout().write_all(text.as_bytes())?;
     Ok(())
+}
+
+/// `pinfold ctl send <pane> <text>`: types `text` into a pane, which for now must be the
+/// caller's own. It starts no core.
+fn send(pane: &str, text: &str) -> Result<(), Box<dyn Error>> {
+    let pane: usize = pane.parse().map_err(|_| "the pane must be a number")?;
+    let params = json!({"pane": pane, "text": text});
+    control::ask(&running()?, "pane.send", &params)?;
+    Ok(())
+}
+
+/// Connects to the running core, and starts none.
+fn running() -> Result<UnixStream, Box<dyn Error>> {
+    let path = control::socket_path(&control::runtime_dir());
+    Ok(connect(&path)?.ok_or("PinFold is not running")?)
 }
 
 /// The panes as plain text, a line each, with `*` by the caller's own. A program chooses its own
@@ -119,8 +132,9 @@ fn main() -> ExitCode {
         [] => launch(),
         ["ctl", "list"] => list(false),
         ["ctl", "list", "--json"] => list(true),
+        ["ctl", "send", pane, text] => send(pane, text),
         _ => {
-            eprintln!("usage: pinfold [ctl list [--json]]");
+            eprintln!("usage: pinfold [ctl list [--json] | ctl send <pane> <text>]");
             return ExitCode::FAILURE;
         }
     };
@@ -141,7 +155,6 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn a_table_marks_the_callers_pane_and_dashes_what_is_unknown() {
