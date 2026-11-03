@@ -346,9 +346,12 @@ dependencies = [
  "alacritty_terminal",
  "lz4_flex",
  "mio",
+ "pinfold-api",
  "pinfold-mux",
  "pinfold-proto",
  "pinfold-sys",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -358,6 +361,7 @@ dependencies = [
  "libfuzzer-sys",
  "pinfold-api",
  "pinfold-core",
+ "pinfold-mux",
  "pinfold-proto",
 ]
 
@@ -365,6 +369,7 @@ dependencies = [
 name = "pinfold-mux"
 version = "0.0.0"
 dependencies = [
+ "pinfold-proto",
  "thiserror",
 ]
 
@@ -380,6 +385,7 @@ name = "pinfold-sys"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "signal-hook",
 ]
 
 [[package]]

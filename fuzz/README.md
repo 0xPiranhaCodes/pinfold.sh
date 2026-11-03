@@ -14,5 +14,9 @@ than tab or a line end comes out, or if the brackets are not exactly at the two 
 check. It fails on a panic, an out-of-memory or a hang, if a decoded message does not encode
 back to the bytes it came from, or if an applied frame's cells do not fit its size.
 
+`session_snapshot` parses and checks any bytes as a saved session, as a core does at start. It
+fails on a panic, an out-of-memory or a hang, or if a snapshot that passed its check does not
+rebuild into a session.
+
 `vt.dict` holds the escape sequences a mutator rarely writes by chance. It uses libFuzzer's
 format, which only knows the escapes `\\`, `\"` and `\xNN`.

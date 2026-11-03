@@ -2,19 +2,21 @@
 //! started, redacted. No scrollback, no screen and no environment, so the file holds nothing
 //! secret by design.
 
+use std::env;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::io::{self, ErrorKind, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use pinfold_api::control::{self, MAX_SEND};
 use pinfold_api::redact;
-use pinfold_mux::{LayoutTree, SessionTree, SplitDirection};
+use pinfold_mux::{LayoutTree, PaneId, Session, SessionTree, SplitDirection, TabTree};
 use serde::{Deserialize, Serialize};
 
 use crate::io::Reactor;
+use crate::tabs::FIRST_SIZE;
 
 /// The snapshot format this core writes.
 pub const VERSION: u32 = 1;
@@ -140,7 +142,115 @@ fn layout(tree: &LayoutTree) -> Layout {
     }
 }
 
+fn tree(layout: &Layout) -> LayoutTree {
+    match layout {
+        Layout::Pane(index) => LayoutTree::Pane(*index),
+        Layout::Split {
+            direction,
+            ratio,
+            first,
+            second,
+        } => LayoutTree::Split {
+            direction: match direction {
+                Way::Right => SplitDirection::Right,
+                Way::Down => SplitDirection::Down,
+            },
+            ratio: *ratio,
+            first: Box::new(tree(first)),
+            second: Box::new(tree(second)),
+        },
+    }
+}
+
+/// An error that names neither the file nor anything in it.
+fn invalid(why: &'static str) -> io::Error {
+    io::Error::new(ErrorKind::InvalidData, why)
+}
+
+/// Parses and checks a snapshot: this [`VERSION`], and a layout [`Session::from_tree`] takes.
+/// serde_json's nesting limit of 128 bounds the recursion.
+///
+/// ```
+/// use pinfold_core::snapshot;
+///
+/// assert!(snapshot::parse(br#"{"version":1,"tabs":[],"active":0,"panes":[]}"#).is_err());
+/// let one = br#"{"version":1,"tabs":[{"root":{"pane":0},"focus":0,"zoomed":false}],"active":0,"panes":[]}"#;
+/// assert_eq!(snapshot::parse(one)?.tabs.len(), 1);
+/// # Ok::<(), std::io::Error>(())
+/// ```
+///
+/// # Errors
+///
+/// An [`ErrorKind::InvalidData`] error, whose text is a fixed sentence, if the bytes fail.
+pub fn parse(bytes: &[u8]) -> io::Result<Snapshot> {
+    let snapshot: Snapshot =
+        serde_json::from_slice(bytes).map_err(|_| invalid("the snapshot does not parse"))?;
+    if snapshot.version != VERSION {
+        return Err(invalid("the snapshot's version is unknown"));
+    }
+    Session::from_tree(&snapshot.tree(), 0).map_err(|_| invalid("the snapshot's layout is bad"))?;
+    Ok(snapshot)
+}
+
+/// Reads and checks `sessions/<session>.json` in `state`, if there is one. The file is opened
+/// without following a symlink, must be a regular file of at most [`MAX_BYTES`], and must
+/// [`parse`]. One that fails is renamed to `<session>.json.bad`, replacing an older one, so it
+/// does not fail every start.
+///
+/// # Errors
+///
+/// Returns why the file failed, in words that name neither the file nor anything in it.
+pub fn load(state: &Path, session: &str) -> io::Result<Option<Snapshot>> {
+    let dir = state.join("sessions");
+    let path = dir.join(format!("{session}.json"));
+    let read = || {
+        let file = pinfold_sys::open_no_follow(&path)?;
+        if !file.metadata()?.is_file() {
+            return Err(invalid("the snapshot is not a regular file"));
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+        if bytes.len() > MAX_BYTES {
+            return Err(invalid("the snapshot is over 1 MiB"));
+        }
+        parse(&bytes)
+    };
+    match read() {
+        Ok(snapshot) => Ok(Some(snapshot)),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => {
+            // Renames the link itself, if it is one. A rename that fails leaves the next start
+            // to fail the same way.
+            let _ = fs::rename(&path, dir.join(format!("{session}.json.bad")));
+            Err(error)
+        }
+    }
+}
+
+/// Where a restored pane starts: its saved directory if that still is one, else `$HOME`.
+fn start_in(pane: Option<&Pane>) -> Option<PathBuf> {
+    let saved = pane.and_then(|pane| pane.cwd.as_deref()).map(Path::new);
+    let saved = saved.filter(|cwd| cwd.is_absolute() && cwd.is_dir());
+    saved
+        .map(Path::to_path_buf)
+        .or_else(|| env::var_os("HOME").map(PathBuf::from))
+}
+
 impl Snapshot {
+    /// The layout, as [`Session::from_tree`] takes it.
+    #[must_use]
+    pub fn tree(&self) -> SessionTree {
+        let tabs = self.tabs.iter().map(|tab| TabTree {
+            root: tree(&tab.root),
+            focus: tab.focus,
+            zoomed: tab.zoomed,
+        });
+        SessionTree {
+            tabs: tabs.collect(),
+            active: self.active,
+        }
+    }
+
     /// Writes the snapshot to `sessions/<session>.json` in `state` and returns its path. The
     /// directory is made 0700 and checked as the control directory is, and the file is written
     /// 0600 to a temporary file there, synced and renamed over the old one.
@@ -287,9 +397,41 @@ impl Reactor {
     }
 }
 
+impl Reactor {
+    /// Rebuilds the layout `snapshot` saved, with a new shell in each pane, started in the
+    /// pane's saved directory if that still is one, else in `$HOME`. A saved command never runs
+    /// from here (ADR-0034). Call it before any tab opens, as it replaces the session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the layout is bad or a shell cannot start, and then keeps no pane.
+    pub fn restore(&mut self, snapshot: &Snapshot) -> io::Result<()> {
+        let first = PaneId::try_from(self.next_pane).map_err(|_| invalid("no pane ids left"))?;
+        let (session, ids) = Session::from_tree(&snapshot.tree(), first)
+            .map_err(|_| invalid("the snapshot's layout is bad"))?;
+        // Panes are numbered in order from `first`, so pane `index` gets the id it was given.
+        for index in 0..ids.len() {
+            let mut command = (self.shell)();
+            if let Some(directory) = start_in(snapshot.panes.get(index)) {
+                command.current_dir(directory);
+            }
+            if let Err(error) = self.spawn(command, FIRST_SIZE.rows, FIRST_SIZE.cols) {
+                for started in first as usize..self.next_pane {
+                    self.drop_pane(started);
+                }
+                return Err(error);
+            }
+        }
+        self.session = session;
+        self.lay_out();
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
+    use std::process::Command;
 
     use super::*;
 
@@ -364,6 +506,58 @@ mod tests {
         assert!(!saver.is_due(now));
         assert!(saver.is_due(now + PERIOD));
         assert_eq!(saver.wait(now), None);
+    }
+
+    #[test]
+    fn a_bad_file_is_set_aside_and_a_fresh_session_starts() {
+        let state = std::env::temp_dir().join(format!("pinfold-bad-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        assert_eq!(load(&state, "default").unwrap(), None);
+        let path = sample().write(&state, "default").unwrap();
+        let bad = state.join("sessions/default.json.bad");
+        let big = format!("[{}0]", "0,".repeat(MAX_BYTES / 2));
+        for text in ["{", r#"{"version":2}"#, &big] {
+            fs::write(&path, text).unwrap();
+            assert!(load(&state, "default").is_err());
+            assert!(!path.exists());
+            // A newer bad file replaces the older one.
+            assert_eq!(fs::read_to_string(&bad).unwrap(), text);
+            assert_eq!(load(&state, "default").unwrap(), None);
+        }
+        // A symlink to a good snapshot is refused, and moved aside as a link.
+        let other = state.join("elsewhere.json");
+        fs::write(&other, serde_json::to_vec(&sample()).unwrap()).unwrap();
+        std::os::unix::fs::symlink(&other, &path).unwrap();
+        assert!(load(&state, "default").is_err());
+        assert!(fs::symlink_metadata(&bad).unwrap().is_symlink());
+
+        let mut reactor = Reactor::new().unwrap();
+        reactor.shell = || Command::new("cat");
+        let mut layout = sample();
+        layout.tabs[0].root = Layout::Pane(2);
+        assert!(reactor.restore(&layout).is_err());
+        assert_eq!(reactor.pane_count(), 0);
+        assert!(reactor.open_tab(Command::new("cat"), 24, 80).is_ok());
+        fs::remove_dir_all(&state).unwrap();
+    }
+
+    #[test]
+    fn a_restore_starts_a_shell_per_pane_in_the_saved_layout() {
+        let state = std::env::temp_dir().join(format!("pinfold-load-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        sample().write(&state, "default").unwrap();
+        let snapshot = load(&state, "default").unwrap().unwrap();
+        let mut reactor = Reactor::new().unwrap();
+        reactor.shell = || Command::new("cat");
+        reactor.restore(&snapshot).unwrap();
+        assert_eq!(reactor.pane_count(), 2);
+        assert_eq!(reactor.session.to_tree().0, snapshot.tree());
+        // The saved command is never the program.
+        assert!(reactor.list().all(|pane| pane.command == "cat"));
+        let home = env::var_os("HOME").map(PathBuf::from);
+        assert_eq!(start_in(Some(&Pane::new(Some("/no/such"), ""))), home);
+        assert_eq!(start_in(Some(&Pane::new(Some("/"), ""))), Some("/".into()));
+        fs::remove_dir_all(&state).unwrap();
     }
 
     #[test]
