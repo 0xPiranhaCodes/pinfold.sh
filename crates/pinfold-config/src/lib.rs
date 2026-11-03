@@ -2,6 +2,7 @@
 //!
 //! The file is untrusted input, so nothing here panics on what it holds.
 
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, Metadata, OpenOptions};
@@ -44,6 +45,27 @@ pub struct Config {
     pub keys: Keys,
     /// The `[api]` table.
     pub api: Api,
+    /// The `[agents.<name>]` tables: agent profiles, by name.
+    pub agents: BTreeMap<String, Agent>,
+}
+
+/// An `[agents.<name>]` table: how to start one agent.
+///
+/// ```
+/// let config = pinfold_config::parse(b"[agents.claude]\ncommand = [\"claude\"]\nsandbox = true")?;
+/// assert!(config.agents["claude"].sandbox);
+/// # Ok::<(), pinfold_config::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Agent {
+    /// The program and its arguments, run with no shell.
+    #[serde(deserialize_with = "command")]
+    pub command: Vec<String>,
+    /// Whether the agent runs in the system's sandbox, which hides [`private_dirs`] and other
+    /// panes' terminals from it.
+    #[serde(default)]
+    pub sandbox: bool,
 }
 
 /// The `[api]` table.
@@ -85,6 +107,7 @@ impl Default for Config {
             background_blur: false,
             keys: Keys::default(),
             api: Api::default(),
+            agents: BTreeMap::new(),
         }
     }
 }
@@ -142,6 +165,17 @@ fn protect<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Vec<Stri
         Ok(Some(patterns))
     } else {
         Err(de::Error::custom("protect patterns must not be empty"))
+    }
+}
+
+fn command<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    let command = Vec::<String>::deserialize(deserializer)?;
+    // A leading dash would be read as an option by the sandbox tool that runs the program.
+    match command.first() {
+        Some(program) if !program.is_empty() && !program.starts_with('-') => Ok(command),
+        _ => Err(de::Error::custom(
+            "command must start with a program, not be empty or start with -",
+        )),
     }
 }
 
@@ -208,6 +242,24 @@ fn state_dir_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathB
     }
     let base = absolute(xdg).or_else(|| Some(absolute(home)?.join(".local/state")))?;
     Some(base.join("pinfold"))
+}
+
+/// Returns what a sandboxed agent may not see: `~/.ssh`, the config file's directory and
+/// [`state_dir`]. The runtime directory is not among them, as an agent needs its socket to call
+/// the API, which knows each caller by its terminal.
+///
+/// ```
+/// for dir in pinfold_config::private_dirs() {
+///     assert!(dir.is_absolute());
+/// }
+/// ```
+pub fn private_dirs() -> Vec<PathBuf> {
+    let home = env::var_os("HOME").map(PathBuf::from);
+    let ssh = home
+        .filter(|home| home.is_absolute())
+        .map(|home| home.join(".ssh"));
+    let config = path().and_then(|path| Some(path.parent()?.to_path_buf()));
+    [ssh, config, state_dir()].into_iter().flatten().collect()
 }
 
 /// Reads the config file, following a symlink, or returns the defaults if there is none.
@@ -375,6 +427,23 @@ mod tests {
         assert!(message(b"font_size = \"big\"").contains("font_size"));
         assert_eq!(parse(b"font_size = 6").unwrap().font_size, 6.0);
         assert_eq!(parse(b"font_size = 72").unwrap().font_size, 72.0);
+    }
+
+    #[test]
+    fn an_agent_profile_is_read_and_unsandboxed_by_default() {
+        let config = parse(b"[agents.a]\ncommand = [\"/bin/a\", \"-x\"]\n[agents.b]\ncommand = [\"b\"]\nsandbox = true\n").unwrap();
+        assert_eq!(config.agents["a"].command, ["/bin/a", "-x"]);
+        assert!(!config.agents["a"].sandbox);
+        assert!(config.agents["b"].sandbox);
+        for command in ["[]", "[\"\"]", "[\"-p\"]"] {
+            let text = message(format!("[agents.a]\ncommand = {command}\n").as_bytes());
+            assert!(text.contains("line 2"), "{command}: {text}");
+            assert!(
+                text.contains("must start with a program"),
+                "{command}: {text}"
+            );
+        }
+        assert!(message(b"[agents.a]\nsandbox = true\n").contains("command"));
     }
 
     #[test]

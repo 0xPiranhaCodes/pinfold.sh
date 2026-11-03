@@ -14,6 +14,7 @@ variable is unset. Saving the file applies it to the running window within about
 | `keys.prefix`         | string | `"C-a"` | Prefix, `C-` and a lowercase letter                      |
 | `api.audit_log`       | bool   | `false` | Also write the API audit log to disk                     |
 | `api.protect`         | list   | below   | Command-line text that protects a pane from API sends    |
+| `agents.<name>`       | table  | none    | An [agent profile](#agent-profiles)                      |
 
 ```toml
 font_size = 14
@@ -90,6 +91,30 @@ protect = ["kubectl exec", "docker exec", "psql", "aws ssm", "mysql -h prod-db"]
 
 The window checks `api.protect` now, but the core does not read this file yet, so until it
 does the default list applies.
+
+## Agent profiles
+
+An `[agents.<name>]` table describes one agent. `command` is the program and its arguments,
+run with no shell; it must not be empty or start with `-`. `sandbox = true` runs it in the
+system's sandbox. The window does not start agent profiles yet.
+
+```toml
+[agents.claude]
+command = ["claude"]
+sandbox = true
+```
+
+The sandbox hides `~/.ssh`, the directory of this file, PinFold's state directory, and every
+other pane's terminal device. On macOS it is `/usr/bin/sandbox-exec`, which denies reads and
+writes there. On Linux it is bubblewrap, `bwrap` on `PATH`, which puts an empty directory over
+each one, gives the agent its own `/dev` and `/proc`, and needs unprivileged user namespaces.
+If the tool is missing or refuses, the agent does not start: it never runs unsandboxed. A
+directory that does not exist when the agent starts is not hidden on Linux.
+
+The agent stays in its pane's session with the pane as its controlling terminal, so the API
+still knows it as that pane, and its socket stays reachable. Only the agent reads that
+terminal, so typing into it with `TIOCSTI` reaches nothing outside the sandbox. Everything else
+in your home directory stays readable and writable.
 
 ## Keys
 
