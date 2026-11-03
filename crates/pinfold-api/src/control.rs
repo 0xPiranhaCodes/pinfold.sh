@@ -1951,7 +1951,7 @@ mod tests {
 
     #[test]
     fn a_socket_path_too_long_for_the_system_is_an_error() {
-        // Past `sun_path`: 104 bytes on macOS, 108 on Linux.
+        // Longer than `sun_path` holds on any supported system.
         let directory = fresh().with_file_name("d".repeat(120));
         match Control::bind(&directory) {
             Err(Error::Io(error)) => assert_eq!(error.kind(), io::ErrorKind::InvalidInput),

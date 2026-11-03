@@ -50,9 +50,10 @@ fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
     }
     // A socket's path must fit `sun_path`, which a long checkout path under the target overruns.
-    let api_dir = Removed(Path::new("/tmp").join(format!("pf{}", std::process::id())));
-    let _ = fs::remove_dir_all(&api_dir.0);
-    fs::create_dir(&api_dir.0).unwrap();
+    // Made here, so the guard removes only what this test created.
+    let api_dir = Path::new("/tmp").join(format!("pf{}", std::process::id()));
+    fs::create_dir(&api_dir).unwrap();
+    let api_dir = Removed(api_dir);
     fs::set_permissions(&api_dir.0, fs::Permissions::from_mode(0o700)).unwrap();
     let socket = api_dir.0.join("api.sock");
     let listener = UnixListener::bind(&socket).unwrap();
