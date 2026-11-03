@@ -73,8 +73,9 @@ fn launch() -> Result<(), Box<dyn Error>> {
 /// `pinfold up [dir]`: opens `dir`'s `.pinfold/layout.toml` in a window, or focuses its tabs if
 /// they are open. If the file has `run` lines and the directory is not trusted with its hash,
 /// the window asks first. The core, not this, reads the lines from the file again and types
-/// them, and only once trusted; refused, the layout opens as shells.
-fn up(dir: Option<&str>) -> Result<(), Box<dyn Error>> {
+/// them, and only once trusted. Refused, the layout opens as shells, and this says so and returns
+/// false, so `pinfold up` exits 1 and a script can tell the lines did not run.
+fn up(dir: Option<&str>) -> Result<bool, Box<dyn Error>> {
     let root = std::fs::canonicalize(dir.unwrap_or("."))?;
     let bytes = workspace::read(&root.join(".pinfold/layout.toml"), &root)?;
     let layout = workspace::parse(&bytes, &root)?;
@@ -82,6 +83,7 @@ fn up(dir: Option<&str>) -> Result<(), Box<dyn Error>> {
     let sha256 = trust::sha256(&bytes);
     control::open_window(&core(&control::runtime_dir())?)?;
     let asked = json!({"root": params["root"], "sha256": sha256});
+    let mut trusted = true;
     if !runs.is_empty()
         && control::ask(&running()?, "workspace.trust_state", &asked)?.1["trusted"] != true
     {
@@ -90,11 +92,12 @@ fn up(dir: Option<&str>) -> Result<(), Box<dyn Error>> {
             let count = runs.len();
             let lines = if count == 1 { "line" } else { "lines" };
             eprintln!("pinfold: {count} run {lines} did not run: {error}");
+            trusted = false;
         }
     }
     params["sha256"] = sha256.into();
     control::ask(&running()?, "workspace.open", &params)?;
-    Ok(())
+    Ok(trusted)
 }
 
 /// `workspace.open`'s parameters for `layout`, with each pane's cwd, or `root` for none, and
@@ -360,8 +363,11 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         [] => launch(),
-        ["up"] => up(None),
-        ["up", dir] => up(Some(dir)),
+        ["up"] | ["up", _] => match up(args.get(1).map(String::as_str)) {
+            Ok(true) => Ok(()),
+            Ok(false) => return ExitCode::FAILURE,
+            Err(error) => Err(error),
+        },
         ["ctl", "list"] => list(false),
         ["ctl", "list", "--json"] => list(true),
         ["ctl", "send", pane, text] => send(pane, text),

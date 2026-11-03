@@ -1758,8 +1758,8 @@ fn a_configured_protect_pattern_refuses_a_send_to_a_pane_that_runs_it() {
 
 /// Not a test: the window of
 /// [`up_runs_a_trusted_workspace_and_a_restore_runs_it_again_until_its_file_changes`], which
-/// checks that nothing ran before it trusts the workspace, then waits to see the run line's
-/// output in the pane. Once that is shown, a later window types a probe into the focused pane,
+/// refuses a first project, then checks that nothing ran before it trusts the second and waits
+/// to see the run line's output in the pane. Once that is shown, a later window types a probe into the focused pane,
 /// which runs after any line a restore typed.
 #[test]
 fn up_trust_window_process() {
@@ -1782,18 +1782,26 @@ fn up_trust_window_process() {
         until(&mut link, |_| probes() > before).unwrap();
         return;
     }
-    let mut prompt = None;
-    until(&mut link, |link| {
-        prompt = link.take_approval();
-        prompt.is_some()
-    })
-    .unwrap();
-    let prompt = prompt.unwrap();
-    assert_eq!(prompt.action, ApprovalAction::Trust);
-    assert!(prompt.texts[1].contains("space-ran"), "{:?}", prompt.texts);
-    assert!(!directory.join("ran").exists());
-    let (id, answer) = (prompt.id, ApprovalAnswer::AllowOnce);
-    assert!(link.send(Request::ApprovalAnswer { id, answer }));
+    for (project, answer) in [
+        ("/denied", ApprovalAnswer::Deny),
+        ("/up-", ApprovalAnswer::AllowOnce),
+    ] {
+        let mut prompt = None;
+        until(&mut link, |link| {
+            prompt = link.take_approval();
+            prompt.is_some()
+        })
+        .unwrap();
+        let prompt = prompt.unwrap();
+        assert_eq!(prompt.action, ApprovalAction::Trust);
+        assert!(prompt.texts[0].contains(project), "{:?}", prompt.texts);
+        assert!(prompt.texts[1].contains("space-ran"), "{:?}", prompt.texts);
+        assert!(!directory.join("ran").exists());
+        assert!(link.send(Request::ApprovalAnswer {
+            id: prompt.id,
+            answer
+        }));
+    }
     // The typed line shows `work''space-ran`; only its output shows this.
     until(&mut link, |link| shows(link, "workspace-ran")).unwrap();
     fs::write(directory.join("shown"), "yes").unwrap();
@@ -1816,25 +1824,42 @@ fn up_runs_a_trusted_workspace_and_a_restore_runs_it_again_until_its_file_change
 [[tabs.panes]]
 run = "echo work''space-ran | tee -a \"$PINFOLD_TEST_CLIENT/ran\""
 "#;
-    fs::write(project.join(".pinfold/layout.toml"), layout).unwrap();
-    let script = format!(
-        "'{}' up > up.tmp 2>&1; echo \"exit $?\" >> up.tmp; mv up.tmp '{}'",
-        session.directory.join("pinfold").display(),
-        session.directory.join("up").display()
+    let denied = session.directory.join("denied");
+    for dir in [&project, &denied] {
+        fs::create_dir_all(dir.join(".pinfold")).unwrap();
+        fs::write(dir.join(".pinfold/layout.toml"), layout).unwrap();
+    }
+    // Runs `pinfold up` in `dir` from a terminal outside any pane, and returns what it said.
+    let up = |dir: &Path| {
+        let script = format!(
+            "'{}' up > up.tmp 2>&1; echo \"exit $?\" >> up.tmp; mv up.tmp '{}'",
+            session.directory.join("pinfold").display(),
+            session.directory.join("up").display()
+        );
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", &script])
+            .current_dir(dir)
+            .env("XDG_RUNTIME_DIR", session.directory.join("run"))
+            .env("XDG_STATE_HOME", &state)
+            .env("HOME", &state)
+            .env("SHELL", "/bin/sh")
+            .env(CLIENT, &session.directory);
+        let _terminal = pinfold_sys::pty::Pty::spawn(command, 24, 80).unwrap();
+        assert!(session.wait_for("up"), "{}", session.read_log());
+        let said = session.read("up");
+        fs::remove_file(session.directory.join("up")).unwrap();
+        said
+    };
+    // Refused, the layout opens as shells, says so and exits 1.
+    let said = up(&denied);
+    assert!(
+        said.starts_with("pinfold: 1 run line did not run: "),
+        "{said}"
     );
-    let mut command = Command::new("/bin/sh");
-    command
-        .args(["-c", &script])
-        .current_dir(&project)
-        .env("XDG_RUNTIME_DIR", session.directory.join("run"))
-        .env("XDG_STATE_HOME", &state)
-        .env("HOME", &state)
-        .env("SHELL", "/bin/sh")
-        .env(CLIENT, &session.directory);
-    let _terminal = pinfold_sys::pty::Pty::spawn(command, 24, 80).unwrap();
+    assert!(said.ends_with("not trusted\nexit 1\n"), "{said}");
+    assert_eq!(up(&project), "exit 0\n");
     assert!(session.wait_for("shown"), "{}", session.read_log());
-    assert!(session.wait_for("up"), "{}", session.read_log());
-    assert_eq!(session.read("up"), "exit 0\n");
     assert_eq!(session.read("ran"), "workspace-ran\n");
 
     // The snapshot names the workspace and its hash, never its run line.
@@ -1842,8 +1867,9 @@ run = "echo work''space-ran | tee -a \"$PINFOLD_TEST_CLIENT/ran\""
     let saved = fs::read_to_string(path.trim()).unwrap();
     let snapshot: serde_json::Value = serde_json::from_str(&saved).unwrap();
     let root = fs::canonicalize(&project).unwrap();
-    assert_eq!(snapshot["workspaces"][0]["root"], root.to_str().unwrap());
-    assert_eq!(snapshot["workspaces"][0]["panes"], serde_json::json!([1]));
+    // The core's first shell, then the refused workspace's pane, then this one's.
+    assert_eq!(snapshot["workspaces"][1]["root"], root.to_str().unwrap());
+    assert_eq!(snapshot["workspaces"][1]["panes"], serde_json::json!([2]));
     assert!(!saved.contains("space-ran"), "{saved}");
     let core = session.read("core");
     assert!(kill(&core).status().unwrap().success());
