@@ -57,6 +57,8 @@ Entries are generated from Conventional Commits with git-cliff
 - `pinfold mcp` can spawn and close child panes through versioned MCP tools.
 - `pinfold mcp` has `events_next_v1`, which waits up to 30 seconds by default for the next pane opened, closed or status event, so an MCP client need not poll (ADR-0035).
 - Prefix keys work: `Ctrl+a`, or `keys.prefix`, then `c`, `n`, `p`, `0` to `9`, `|`, `-`, the arrows, `z`, `d` and `x`. `x` asks first, and says so in red when it would end the session. On macOS Command+T opens a tab and Command+1 to Command+9 go to one. A click focuses a pane or picks a tab, and the `+` button opens one. Bindings are in [docs/configuration.md](docs/configuration.md).
+- Cross-pane reads and sends ask through keyboard-only window chrome, with batched 30-minute grants that `pinfold ctl grants` lists and revokes.
+- Workspace trust: `workspace.ask_trust` shows a project directory and every `run` line in window chrome, and `y` records the directory and layout SHA-256 in a private `trust.json` that `workspace.trust_state` checks. Nothing runs yet. The link's version is now 7.
 - Cross-pane reads and sends ask through keyboard-only window chrome, with batched 30-minute grants that `pinfold ctl grants` lists and revokes. Approved actions and grant changes are recorded in the audit log.
 - `pinfold-core` runs as a hardened daemon with a private control socket that takes `hello` and `window.open`.
 - The core records each API request that reaches it in a hash-chained audit log, never pane contents or sent text; `audit.read`, `pinfold ctl log` and `pinfold ctl log --verify` read and check it, and `api.audit_log = true` also writes it to disk.
@@ -65,6 +67,7 @@ Entries are generated from Conventional Commits with git-cliff
 - `pinfold-mux` exports a session's layout as a plain tree that names panes by index, and rebuilds a session from one, refusing a bad tree with an error.
 - A TOML config file with `font_size` and `macos_option_as_alt`. A bad file means the defaults.
 - Workspace layout parsing for `.pinfold/layout.toml`, bounded to 32 tabs, 64 panes and 64 KiB, with unknown keys, symlinks and project-escaping working directories refused.
+- `pinfold up [dir]` opens a project's `.pinfold/layout.toml` as shells through the new `workspace.open` API method, and a second run focuses the open tabs instead of opening a copy. `run` lines wait for workspace trust.
 - Padding around the grid, and on macOS a full-height window under the native traffic lights, with `background_opacity` and `background_blur`.
 - Config hot reload: saving the file applies it to the running window, and a bad save keeps the current settings.
 - CJK text from a system font, opened only when the bundled font lacks a character.

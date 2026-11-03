@@ -1,5 +1,6 @@
 //! The `pinfold` launcher: starts the core if none answers, asks it for a window, and exits.
-//! `pinfold ctl` and `pinfold mcp` are thin clients of the core's API (ADR-0032).
+//! `pinfold ctl` and `pinfold mcp` are thin clients of the core's API (ADR-0032), and `pinfold
+//! up` opens a project's workspace through it.
 
 use std::error::Error;
 use std::io::{ErrorKind, Write};
@@ -10,12 +11,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use pinfold_api::control;
+use pinfold_config::workspace::{self, Layout, Split};
 use serde_json::{Value, json};
 
 /// How long a core that was just started gets to answer.
 const START_WAIT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(20);
-const USAGE: &str = "usage: pinfold [agent <name> [--right | --down | --tab] | \
+const USAGE: &str = "usage: pinfold [up [dir] | agent <name> [--right | --down | --tab] | \
     ctl list [--json] | ctl send <pane> <text> | \
     ctl grants [--json | revoke <id>] | ctl log [--json] [-n <count>] [--pane <pane>] | \
     ctl log --verify <file> | mcp]";
@@ -66,6 +68,52 @@ fn core(directory: &Path) -> Result<UnixStream, Box<dyn Error>> {
 fn launch() -> Result<(), Box<dyn Error>> {
     control::open_window(&core(&control::runtime_dir())?)?;
     Ok(())
+}
+
+/// `pinfold up [dir]`: opens `dir`'s `.pinfold/layout.toml` as shells in a window, or focuses
+/// its tabs if they are open. The file is untrusted, so its `run` lines wait for workspace trust.
+fn up(dir: Option<&str>) -> Result<(), Box<dyn Error>> {
+    let root = std::fs::canonicalize(dir.unwrap_or("."))?;
+    let layout = workspace::load(&root.join(".pinfold/layout.toml"), &root)?;
+    let (params, waiting) = request(&root, &layout)?;
+    control::open_window(&core(&control::runtime_dir())?)?;
+    control::ask(&running()?, "workspace.open", &params)?;
+    let commands = if waiting == 1 {
+        "command waits"
+    } else {
+        "commands wait"
+    };
+    if waiting > 0 {
+        eprintln!("pinfold: {waiting} {commands} for workspace trust (not yet available)");
+    }
+    Ok(())
+}
+
+/// `workspace.open`'s parameters for `layout`, with each pane's cwd, or `root` for none, and
+/// without its `run` lines, and how many `run` lines there are.
+fn request(root: &Path, layout: &Layout) -> Result<(Value, usize), Box<dyn Error>> {
+    let text = |path: &Path| {
+        path.to_str()
+            .map(str::to_owned)
+            .ok_or("a path is not UTF-8")
+    };
+    let mut tabs = Vec::new();
+    for tab in &layout.tabs {
+        let mut panes = Vec::new();
+        for (index, pane) in tab.panes.iter().enumerate() {
+            let cwd = text(pane.cwd.as_deref().unwrap_or(root))?;
+            panes.push(match (index, pane.split.unwrap_or(Split::Right)) {
+                (0, _) => json!({"cwd": cwd}),
+                (_, Split::Right) => json!({"split": "right", "cwd": cwd}),
+                (_, Split::Down) => json!({"split": "down", "cwd": cwd}),
+            });
+        }
+        tabs.push(json!({"panes": panes}));
+    }
+    let panes = layout.tabs.iter().flat_map(|tab| &tab.panes);
+    let waiting = panes.filter(|pane| pane.run.is_some()).count();
+    let params = json!({"root": text(root)?, "layout": {"tabs": tabs}});
+    Ok((params, waiting))
 }
 
 /// `pinfold ctl list`: prints the session's panes, as JSON with `json`. It starts no core.
@@ -261,6 +309,8 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         [] => launch(),
+        ["up"] => up(None),
+        ["up", dir] => up(Some(dir)),
         ["agent", name] | ["agent", name, "--right"] => agent(name, "right"),
         ["agent", name, "--down"] => agent(name, "down"),
         ["agent", name, "--tab"] => agent(name, "tab"),
@@ -287,7 +337,7 @@ fn main() -> ExitCode {
             eprintln!("pinfold: {error}");
             // A core started from a terminal logs there, so this may be an older core's.
             let log = control::log_path(&control::runtime_dir());
-            if args.is_empty() && log.exists() {
+            if (args.is_empty() || args[0] == "up") && log.exists() {
                 eprintln!("pinfold: see {}", log.display());
             }
             ExitCode::FAILURE
@@ -298,6 +348,22 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_request_holds_tabs_splits_and_cwds_and_counts_run_lines_without_sending_them() {
+        let root = std::env::temp_dir().canonicalize().unwrap();
+        let toml = b"[[tabs]]\n[[tabs.panes]]\nrun = 'make'\n\
+            [[tabs]]\n[[tabs.panes]]\ncwd = '.'\n[[tabs.panes]]\nsplit = 'down'\nrun = 'ls'\n\
+            [[tabs.panes]]\n";
+        let layout = workspace::parse(toml, &root).unwrap();
+        let (params, waiting) = request(&root, &layout).unwrap();
+        let cwd = root.to_str().unwrap();
+        let expected = json!({"root": cwd, "layout": {"tabs": [
+            {"panes": [{"cwd": cwd}]},
+            {"panes": [{"cwd": cwd}, {"split": "down", "cwd": cwd}, {"split": "right", "cwd": cwd}]},
+        ]}});
+        assert_eq!((params, waiting), (expected, 2));
+    }
 
     #[test]
     fn a_table_marks_the_callers_pane_and_dashes_what_is_unknown() {

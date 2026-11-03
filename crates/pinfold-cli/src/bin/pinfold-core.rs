@@ -10,9 +10,12 @@ use std::time::{Duration, Instant};
 use std::{env, thread};
 
 use pinfold_api::Log;
-use pinfold_api::control::{self, Control, Method, Request, Subscriber, Topics, Until, Wait};
+use pinfold_api::control::{
+    self, Control, Method, Request, Subscriber, Topics, Until, Wait, Workspace,
+};
 use pinfold_api::redact;
 use pinfold_api::spawn::Place;
+use pinfold_api::trust::{self, State};
 use pinfold_cli::audit;
 use pinfold_config::Agent;
 use pinfold_core::family::{self, Family, SplitWay};
@@ -20,6 +23,7 @@ use pinfold_core::grants::{Decision, Grants, Released};
 use pinfold_core::io::{Reactor, Waker};
 use pinfold_core::status::Status;
 use pinfold_core::wait::{Outcome, Waits};
+use pinfold_core::workspace::Workspaces;
 use pinfold_core::{sandbox, shell};
 use pinfold_proto::link::{ApprovalAction, ApprovalAnswer};
 use serde_json::{Value, json};
@@ -116,13 +120,15 @@ fn grants_list<T, C: pinfold_core::grants::Clock>(grants: &mut Grants<T, C>) -> 
 /// unidentified and may not list panes (threat model, caller identity point 3). Any caller with
 /// a terminal may, in a pane or not, as a list shows no screen and little a same-user `ps` does
 /// not. Spawns and closes reach only the caller's own pane and the panes it spawned, the `self`
-/// and `children` scopes. Pane contents go to the caller alone, never to a log. An agent
+/// and `children` scopes. Pane contents go to the caller alone, never to a log. Only a person's
+/// terminal outside any pane opens a workspace, so a pane's program cannot. An agent
 /// launches only by its profile's name in `agents`, the user's config.
 fn immediate<T, C: pinfold_core::grants::Clock>(
     reactor: &mut Reactor,
     family: &mut Family,
     agents: &BTreeMap<String, Agent>,
     grants: &mut Grants<T, C>,
+    workspaces: &mut Workspaces,
     request: &Request,
 ) -> Result<Value, String> {
     let identified = request.caller().is_some();
@@ -150,6 +156,9 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                     "audit.read",
                     "grants.list",
                     "grants.revoke",
+                    "workspace.open",
+                    "workspace.trust_state",
+                    "workspace.ask_trust",
                 ],
                 (false, _) => &["window.open"],
             };
@@ -173,8 +182,7 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
         Method::PaneSpawn(spawn) => {
             let own = own.ok_or("pane.spawn needs a caller in a pane")?;
             let of = spawn.of.unwrap_or(own);
-            let way = way(spawn.place);
-            let pane = family.spawn(reactor, own, of, way, spawn.cwd.as_deref())?;
+            let pane = family.spawn(reactor, own, of, way(spawn.place), spawn.cwd.as_deref())?;
             Ok(json!({"pane": pane}))
         }
         Method::AgentLaunch(launch) => {
@@ -231,6 +239,25 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
         Method::GrantsList | Method::GrantsRevoke { .. } => {
             Err("grant administration needs a terminal outside every pane".to_owned())
         }
+        Method::WorkspaceTrustState(workspace) if identified && own.is_none() => {
+            let state = trust::state(&trust_path()?, &canonical(workspace)?, &workspace.sha256);
+            Ok(json!({"trusted": state == State::Trusted, "changed": state == State::Changed}))
+        }
+        Method::WorkspaceTrustState(_) | Method::WorkspaceAskTrust(..) => {
+            Err("workspace trust needs a terminal outside every pane".to_owned())
+        }
+        // shortcut: the same guardrail as audit.read, not proof of a person; ask in the window
+        // once approval prompts cover it (#100).
+        Method::WorkspaceOpen(open) if identified && own.is_none() => {
+            let pane = |(place, cwd): &(Place, String)| (way(*place), cwd.clone());
+            let tabs = open.tabs.iter();
+            let tabs: Vec<Vec<_>> = tabs.map(|tab| tab.iter().map(pane).collect()).collect();
+            let opened = workspaces.open(reactor, &open.root, &tabs)?;
+            Ok(json!({"opened": opened}))
+        }
+        Method::WorkspaceOpen(_) => {
+            Err("workspace.open needs a caller in a terminal outside any pane".to_owned())
+        }
         // Never sent here: the loop opens windows, parks waits and keeps subscribers.
         Method::WindowOpen
         | Method::PaneWait(_)
@@ -242,12 +269,76 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
     }
 }
 
+/// The trust store, `trust.json` in the state directory.
+fn trust_path() -> Result<PathBuf, String> {
+    let dir = pinfold_config::state_dir().ok_or("no state directory: HOME is not set")?;
+    Ok(dir.join("trust.json"))
+}
+
+/// `root` itself, once checked to be a canonical directory, so what the prompt shows is what
+/// the store records.
+fn canonical(workspace: &Workspace) -> Result<String, String> {
+    match std::fs::canonicalize(&workspace.root) {
+        Ok(path) if path.is_dir() && path.as_os_str() == workspace.root.as_str() => {
+            Ok(workspace.root.clone())
+        }
+        _ => Err("params.root must be a canonical directory".to_owned()),
+    }
+}
+
+/// Parks a trust prompt for a caller in a terminal outside every pane. It runs nothing.
+fn ask_trust(reactor: &mut Reactor, grants: &mut Grants<Request>, log: &mut Log, request: Request) {
+    let Method::WorkspaceAskTrust(workspace, runs) = request.method() else {
+        return;
+    };
+    let own = request.caller().and_then(|caller| reactor.pane_of(caller));
+    if request.caller().is_none() || own.is_some() {
+        let reason = "workspace trust needs a terminal outside every pane";
+        return audit::reply(log, reactor, request, Err(reason.to_owned()));
+    }
+    let checked = trust_path().and_then(|path| Ok((path, canonical(workspace)?)));
+    let (path, root) = match checked {
+        Ok(checked) => checked,
+        Err(reason) => return audit::reply(log, reactor, request, Err(reason)),
+    };
+    let changed = trust::state(&path, &root, &workspace.sha256) == State::Changed;
+    let texts = std::iter::once(root).chain(runs.iter().cloned()).collect();
+    match grants.ask_trust(request, texts, changed, reactor.is_window_ready()) {
+        Decision::Ask(prompt) if reactor.ask_approval(&prompt) => {}
+        Decision::Ask(prompt) => {
+            answer_released(reactor, log, grants.answer(prompt.id, ApprovalAnswer::Deny));
+        }
+        Decision::Refuse(request, reason) => {
+            audit::reply(log, reactor, request, Err(reason.to_owned()));
+        }
+        // A trust prompt is never allowed before it is asked.
+        Decision::Allow(request) => {
+            audit::reply(log, reactor, request, Err("not asked".to_owned()))
+        }
+    }
+}
+
+/// The way a pane splits, or none for a new tab.
+fn way(place: Place) -> Option<SplitWay> {
+    match place {
+        Place::SplitRight => Some(SplitWay::Right),
+        Place::SplitDown => Some(SplitWay::Down),
+        Place::Tab => None,
+    }
+}
+
 fn answer_released(reactor: &mut Reactor, log: &mut Log, released: Vec<Released<Request>>) {
     for released in released {
-        let answer = if released.allowed {
-            pane_action(reactor, released.ticket.method(), true)
-        } else {
-            Err(released.reason.to_owned())
+        let answer = match released.ticket.method() {
+            Method::WorkspaceAskTrust(workspace, _) if released.allowed => {
+                trust_path().and_then(|path| {
+                    trust::record(&path, &workspace.root, &workspace.sha256)
+                        .map(|()| json!({"trusted": true}))
+                        .map_err(|error| format!("cannot write the trust store: {error}"))
+                })
+            }
+            method if released.allowed => pane_action(reactor, method, true),
+            _ => Err(released.reason.to_owned()),
         };
         audit::reply(log, reactor, released.ticket, answer);
     }
@@ -260,12 +351,13 @@ fn decide(
     family: &mut Family,
     agents: &BTreeMap<String, Agent>,
     grants: &mut Grants<Request>,
+    workspaces: &mut Workspaces,
     log: &mut Log,
     request: Request,
 ) {
     let own = request.caller().and_then(|caller| reactor.pane_of(caller));
     let Some((target, action, text)) = cross_pane(request.method()) else {
-        let answer = immediate(reactor, family, agents, grants, &request);
+        let answer = immediate(reactor, family, agents, grants, workspaces, &request);
         return audit::reply(log, reactor, request, answer);
     };
     let Some(caller) = own else {
@@ -304,15 +396,6 @@ fn decide(
         Decision::Ask(prompt) => {
             answer_released(reactor, log, grants.answer(prompt.id, ApprovalAnswer::Deny));
         }
-    }
-}
-
-/// A split's way, or none for a tab.
-fn way(place: Place) -> Option<SplitWay> {
-    match place {
-        Place::SplitRight => Some(SplitWay::Right),
-        Place::SplitDown => Some(SplitWay::Down),
-        Place::Tab => None,
     }
 }
 
@@ -429,6 +512,7 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
     let mut waits: Waits<Request> = Waits::default();
     let mut grants: Grants<Request> = Grants::default();
     let mut family = Family::default();
+    let mut workspaces = Workspaces::default();
     let mut subscribers: Vec<(Subscriber, Topics)> = Vec::new();
     let mut known = Seen::new();
     // Read once: the core takes no hot reload.
@@ -484,12 +568,16 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
                     let read = audit::read(&log, &reactor, &request);
                     audit::reply(&mut log, &reactor, request, read);
                 }
+                Method::WorkspaceAskTrust(..) => {
+                    ask_trust(&mut reactor, &mut grants, &mut log, request);
+                }
                 _ => {
                     decide(
                         &mut reactor,
                         &mut family,
                         &config.agents,
                         &mut grants,
+                        &mut workspaces,
                         &mut log,
                         request,
                     );
