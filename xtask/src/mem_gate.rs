@@ -31,8 +31,17 @@ pub const WINDOW_SETTLE: Duration = Duration::from_secs(7);
 /// Parts of the file names of `FALLBACKS` in `pinfold-render`, which keeps that list private.
 const CJK_FONTS: [&str; 4] = ["Hiragino", "AppleSDGothicNeo", "NotoSansCJK", "wqy-zenhei"];
 
+/// Read by `pinfold-ui`'s window, and only in a measured one.
+const MENU_VARIABLE: &str = "PINFOLD_MEASURE_MENU";
+
 /// ADR-0021 budgets with nothing to measure yet, and the issue that makes them measurable.
-const NOT_MEASURED: [(&str, &str); 1] = [("Window on Wayland", "a compositor in CI")];
+const NOT_MEASURED: [(&str, &str); 2] = [
+    ("Window on Wayland", "a compositor in CI"),
+    (
+        "Window with the Dock menu open",
+        "a way to right-click the Dock from a script",
+    ),
+];
 
 /// Which process of a core with a window to read.
 #[derive(Clone, Copy, PartialEq)]
@@ -56,6 +65,8 @@ pub struct Budget<'a> {
     /// The program prints a window's pid as its line, and this says which process to read. The
     /// two are separate processes and neither count holds the other (ADR-0003).
     pub window: Option<Side>,
+    /// Asks a measured window to open its right-click menu.
+    pub menu: bool,
 }
 
 /// Bytes, and whether a screen's CJK text went undrawn for want of a font.
@@ -84,6 +95,9 @@ fn measure_once(budget: &Budget, args: &[&str]) -> io::Result<Reading> {
     command.args(args).stdout(stdout);
     if let Some(screen) = budget.screen {
         command.env("SHELL", screen);
+    }
+    if budget.menu {
+        command.env(MENU_VARIABLE, "1");
     }
     // A core takes its session's socket, which a core the user is running holds.
     let runtime = std::env::temp_dir().join(format!("pinfold-gate-{}", std::process::id()));
@@ -215,6 +229,7 @@ mod tests {
             wait_for_line: false,
             screen: None,
             window: None,
+            menu: false,
         }
     }
 
@@ -245,6 +260,7 @@ mod tests {
             wait_for_line: false,
             screen: None,
             window: None,
+            menu: false,
         };
         assert!(!run(&[budget]));
     }
@@ -333,9 +349,34 @@ mod tests {
     }
 
     #[test]
+    fn the_menu_variable_matches_the_window() {
+        let window = include_str!("../../crates/pinfold-ui/src/window.rs");
+        assert!(window.contains(&format!("var_os(\"{MENU_VARIABLE}\")")));
+    }
+
+    #[test]
     fn the_cjk_font_names_match_the_renderer() {
         let fonts = include_str!("../../crates/pinfold-render/src/font.rs");
         assert!(CJK_FONTS.iter().all(|name| fonts.contains(name)));
+    }
+
+    #[test]
+    fn the_heavy_screen_text_holds_more_glyphs_than_a_full_cache() {
+        let screen = include_str!("../../tests/window/heavy-screen.txt");
+        let text = ["\x1b[0m", "\x1b[1m", "\x1b[3m"]
+            .iter()
+            .fold(screen.to_owned(), |text, sgr| text.replace(sgr, ""));
+        let glyphs: std::collections::HashSet<char> =
+            text.chars().filter(|c| !c.is_whitespace()).collect();
+        // Metal's atlas holds about 2,000 ASCII-sized glyphs (`metal.rs`).
+        assert!(glyphs.len() > 2_000, "{} glyphs", glyphs.len());
+        // full-cache.sh sizes its pages from this width, so that wrapped lines never scroll.
+        let script = include_str!("../../tests/window/full-cache.sh");
+        assert!(script.contains("(384 / columns + 2)"));
+        for line in text.lines() {
+            let width: usize = line.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum();
+            assert_eq!(width, 384);
+        }
     }
 
     #[test]

@@ -26,6 +26,8 @@ const FUZZ_SMOKE_SECONDS: u32 = 30;
 const FUZZ_TOOLCHAIN: &str = "+nightly-2026-10-15";
 /// Runs as the window's shell, from the workspace root like the other paths here.
 const HEAVY_SCREEN: &str = "tests/window/heavy-screen.sh";
+/// Pages through the heavy screen's text, so the window's glyph cache fills.
+const FULL_CACHE: &str = "tests/window/full-cache.sh";
 
 #[derive(Debug, PartialEq)]
 enum Task {
@@ -163,6 +165,7 @@ fn mem_gate_task() -> ExitCode {
             wait_for_line: false,
             screen: None,
             window: None,
+            menu: false,
         },
         mem_gate::Budget {
             metric: "10k lines of typical text",
@@ -174,6 +177,7 @@ fn mem_gate_task() -> ExitCode {
             wait_for_line: true,
             screen: None,
             window: None,
+            menu: false,
         },
         mem_gate::Budget {
             metric: "Scrollback at its cap",
@@ -185,6 +189,7 @@ fn mem_gate_task() -> ExitCode {
             wait_for_line: true,
             screen: None,
             window: None,
+            menu: false,
         },
         mem_gate::Budget {
             metric: "Each idle pane",
@@ -196,6 +201,7 @@ fn mem_gate_task() -> ExitCode {
             wait_for_line: false,
             screen: None,
             window: None,
+            menu: false,
         },
     ];
     if cfg!(target_os = "macos") {
@@ -209,6 +215,7 @@ fn mem_gate_task() -> ExitCode {
             wait_for_line: true,
             screen: None,
             window: Some(Side::Window),
+            menu: false,
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on macOS with text, 1512x1890",
@@ -220,6 +227,43 @@ fn mem_gate_task() -> ExitCode {
             wait_for_line: true,
             screen: Some(Path::new(HEAVY_SCREEN)),
             window: Some(Side::Window),
+            menu: false,
+        });
+        budgets.push(mem_gate::Budget {
+            metric: "Window on macOS with a full glyph cache, 1512x1890",
+            limit: mem_gate::WINDOW_LIMIT_HALF_RETINA,
+            program: &core,
+            args: &["--window", "1", "1512x1890"],
+            per_pane_over: None,
+            settle: mem_gate::WINDOW_SETTLE,
+            wait_for_line: true,
+            screen: Some(Path::new(FULL_CACHE)),
+            window: Some(Side::Window),
+            menu: false,
+        });
+        budgets.push(mem_gate::Budget {
+            metric: "Window on macOS with 8 tabs, 1512x1890",
+            limit: mem_gate::WINDOW_LIMIT_HALF_RETINA,
+            program: &core,
+            args: &["--window", "8", "1512x1890"],
+            per_pane_over: None,
+            settle: mem_gate::WINDOW_SETTLE,
+            wait_for_line: true,
+            screen: None,
+            window: Some(Side::Window),
+            menu: false,
+        });
+        budgets.push(mem_gate::Budget {
+            metric: "Window on macOS with its context menu open, 1512x1890",
+            limit: mem_gate::WINDOW_LIMIT_HALF_RETINA,
+            program: &core,
+            args: &["--window", "1", "1512x1890"],
+            per_pane_over: None,
+            settle: mem_gate::WINDOW_SETTLE,
+            wait_for_line: true,
+            screen: Some(Path::new(HEAVY_SCREEN)),
+            window: Some(Side::Window),
+            menu: true,
         });
         budgets.push(mem_gate::Budget {
             metric: "Core beside that window, 8 idle tabs",
@@ -231,6 +275,7 @@ fn mem_gate_task() -> ExitCode {
             wait_for_line: true,
             screen: None,
             window: Some(Side::Core),
+            menu: false,
         });
     }
     if cfg!(target_os = "linux") {
@@ -244,6 +289,7 @@ fn mem_gate_task() -> ExitCode {
             wait_for_line: true,
             screen: None,
             window: Some(Side::Window),
+            menu: false,
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on X11 with text, 1920x1080",
@@ -255,6 +301,43 @@ fn mem_gate_task() -> ExitCode {
             wait_for_line: true,
             screen: Some(Path::new(HEAVY_SCREEN)),
             window: Some(Side::Window),
+            menu: false,
+        });
+        budgets.push(mem_gate::Budget {
+            metric: "Window on X11 with a full glyph cache, 1920x1080",
+            limit: mem_gate::WINDOW_LIMIT_FULL_HD,
+            program: &core,
+            args: &["--window", "1", "1920x1080"],
+            per_pane_over: None,
+            settle: mem_gate::WINDOW_SETTLE,
+            wait_for_line: true,
+            screen: Some(Path::new(FULL_CACHE)),
+            window: Some(Side::Window),
+            menu: false,
+        });
+        budgets.push(mem_gate::Budget {
+            metric: "Window on X11 with 8 tabs, 1920x1080",
+            limit: mem_gate::WINDOW_LIMIT_FULL_HD,
+            program: &core,
+            args: &["--window", "8", "1920x1080"],
+            per_pane_over: None,
+            settle: mem_gate::WINDOW_SETTLE,
+            wait_for_line: true,
+            screen: None,
+            window: Some(Side::Window),
+            menu: false,
+        });
+        budgets.push(mem_gate::Budget {
+            metric: "Window on X11 with its context menu open, 1920x1080",
+            limit: mem_gate::WINDOW_LIMIT_FULL_HD,
+            program: &core,
+            args: &["--window", "1", "1920x1080"],
+            per_pane_over: None,
+            settle: mem_gate::WINDOW_SETTLE,
+            wait_for_line: true,
+            screen: Some(Path::new(HEAVY_SCREEN)),
+            window: Some(Side::Window),
+            menu: true,
         });
         budgets.push(mem_gate::Budget {
             metric: "Core beside that window, 8 idle tabs",
@@ -266,6 +349,7 @@ fn mem_gate_task() -> ExitCode {
             wait_for_line: true,
             screen: None,
             window: Some(Side::Core),
+            menu: false,
         });
     }
     if mem_gate::run(&budgets) {

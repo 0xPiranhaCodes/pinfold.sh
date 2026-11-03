@@ -450,6 +450,11 @@ impl App {
             .max(1);
         self.area = (rows.min(MAX_DIMENSION), columns.clamp(1, MAX_DIMENSION));
         self.request(Request::Resize(rows, columns.max(1)));
+        // `cargo xtask mem-gate` reads a measured window with its right-click menu open.
+        if self.size.is_some() && std::env::var_os("PINFOLD_MEASURE_MENU").is_some() {
+            let middle = (self.area.0 / 2, self.area.1 / 2);
+            self.menu = Some(Menu::open(middle, self.area, None));
+        }
     }
 
     /// Redraws the font for a new display. Winit sends `Resized` after this only sometimes.
