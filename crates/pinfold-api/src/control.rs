@@ -686,7 +686,7 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
 #[doc(hidden)]
 pub fn fuzz_request_line(line: &[u8]) {
     let line = &line[..line.len().min(MAX_LINE)];
-    for mut greeted in [false, true] {
+    for mut greeted in [0, OLDEST, VERSION] {
         let _ = answer(line, &mut greeted);
     }
 }
