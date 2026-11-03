@@ -1,7 +1,8 @@
 //! A sandboxed agent, run with the real `sandbox-exec` or bubblewrap, cannot read hidden
 //! directories or another pane's terminal or type into its own, writes only to its working
 //! directory but not its git hooks, reaches no Unix socket but the API's, nor on Linux with
-//! Landlock ABI 6 an abstract one, and keeps the caller identity the API gives its pane.
+//! Landlock ABI 6 an abstract one, and keeps the caller identity the API gives its pane. On Linux
+//! it commits into its shadow git directory, whose hooks and config the user's fetch never runs.
 
 use std::fs;
 use std::io::{ErrorKind, Read};
@@ -114,9 +115,27 @@ fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
            && echo git=moved || echo git=kept; \
          (echo x >'{home_dir}/work/.git/scratch') 2>/dev/null \
            && echo scratch=written || echo scratch=refused; \
+         (echo /tmp >'{home_dir}/work/.git/commondir') 2>/dev/null \
+           && echo commondir=written || echo commondir=refused; \
          git -C '{home_dir}/work' -c user.name=a -c user.email=a@example.com \
            commit -q --allow-empty -m x >/dev/null 2>&1 \
            && echo commit=done || echo commit=failed; \
+         if [ -n \"$GIT_DIR\" ]; then \
+           evil='{home_dir}/work/evil.sh'; \
+           printf '#!/bin/sh\\necho ran >>{home_dir}/work/ran\\n' >\"$evil\"; chmod +x \"$evil\"; \
+           mkdir -p \"$GIT_DIR/hooks\" \"$GIT_DIR/info\" '{home_dir}/work/hooks'; \
+           for hook in pre-commit post-checkout post-merge reference-transaction post-update \
+             update pre-receive post-receive pre-auto-gc; do \
+             cp \"$evil\" \"$GIT_DIR/hooks/$hook\"; cp \"$evil\" '{home_dir}/work/hooks/'$hook; \
+           done; \
+           echo '* filter=evil' >\"$GIT_DIR/info/attributes\"; \
+           git config core.hooksPath '{home_dir}/work/hooks' \
+           && git config core.fsmonitor \"$evil\" \
+           && git config filter.evil.clean \"$evil\" \
+           && git config filter.evil.smudge \"$evil\" \
+           && git config filter.evil.process \"$evil\" \
+           && git config uploadpack.packObjectsHook \"$evil\" && echo planted=yes; \
+         fi; \
          (exec 3<'{peer_tty}') 2>/dev/null && echo peer=open || echo peer=closed; \
          perl -e 'open(my $t, \"+<\", \"/dev/tty\") or die; my $c = \"x\"; \
          print ioctl($t, {tiocsti}, $c) ? \"sti=allowed\\n\" : \"sti=denied\\n\"'; \
@@ -128,12 +147,14 @@ fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
            ? \"abstract=open\\n\" : \"abstract=closed\\n\"' '{name}'; \
          perl -MSocket -e 'socket(my $s, PF_UNIX, SOCK_STREAM, 0) or die; \
          connect($s, pack_sockaddr_un($ARGV[0])) or die; sleep 2' '{api}'; \
-         echo done",
+         echo end=reached",
     );
     let program = ["/bin/sh".to_owned(), "-c".to_owned(), script];
     let hidden = [ssh, state];
     let work = sandbox::working_directory(&work, &hidden).unwrap();
-    let command = match sandbox::command(&program, &hidden, &work, &socket) {
+    // Where PinFold keeps it, in its data directory.
+    let shadow = home.join("data/agents/test/shadow");
+    let command = match sandbox::command(&program, &hidden, &work, &socket, Some(&shadow)) {
         Err(error) if cfg!(target_os = "linux") && error.kind() == ErrorKind::NotFound => {
             eprintln!("skipped: no bwrap");
             return;
@@ -148,7 +169,7 @@ fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
             Ok((caller, _)) => break caller,
             Err(error) if error.kind() == ErrorKind::WouldBlock => {
                 let late = start.elapsed() > Duration::from_secs(10);
-                assert!(!late, "no caller: {}", read_until(&pty, "done"));
+                assert!(!late, "no caller: {}", read_until(&pty, "end=reached"));
                 thread::sleep(Duration::from_millis(10));
             }
             Err(error) => panic!("{error}"),
@@ -157,29 +178,63 @@ fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
     let identity = pinfold_sys::peer_terminal(caller.as_fd()).unwrap();
     assert_eq!(identity, Some(pty.terminal()));
 
-    let output = read_until(&pty, "done");
+    let output = read_until(&pty, "end=reached");
     let (rc, out) = (
         home.join(".zshrc").exists(),
         work.path().join("out").exists(),
     );
     let hook = work.path().join(".git/hooks/pre-commit").exists();
+    let commondir = work.path().join(".git/commondir").exists();
     let config = fs::read(work.path().join(".git/config")).ok();
+    // What the user does next, outside the sandbox: fetch the agent's commits and look.
+    let git = |args: &[&str]| {
+        let mut git = Command::new("git");
+        git.arg("-C").arg(work.path()).args(args);
+        git.output().unwrap()
+    };
+    let _ = fs::remove_file(work.path().join("ran"));
+    let shadow = shadow.to_str().unwrap();
+    let fetch = git(&[
+        "fetch",
+        "-q",
+        "--no-tags",
+        shadow,
+        "+refs/heads/*:refs/remotes/agent-test/*",
+    ]);
+    let status = git(&["status", "--porcelain"]);
+    let fetched = git(&["log", "-1", "--format=%s", "--remotes=agent-test"]);
+    let own = git(&["rev-parse", "-q", "--verify", "HEAD"]);
+    let ran = work.path().join("ran").exists();
     fs::remove_dir_all(&home).unwrap();
     for path in &planted {
         fs::remove_file(path).unwrap();
     }
+    assert!(output.contains("end=reached"), "{output}");
     assert!(output.contains("hook=refused") && !hook, "{output}");
     assert!(
         output.contains("config=refused") && config == Some(config_before),
         "{output}"
     );
     assert!(output.contains("git=kept"), "{output}");
+    assert!(
+        output.contains("commondir=refused") && !commondir,
+        "{output}"
+    );
     assert!(output.contains("module=refused"), "{output}");
     assert!(output.contains("gitfile=refused"), "{output}");
-    // Linux keeps all of `.git` read-only, so commits happen outside the sandbox.
+    // Linux keeps all of `.git` read-only, so the agent commits into its shadow.
     if cfg!(target_os = "linux") {
         assert!(output.contains("scratch=refused"), "{output}");
-        assert!(output.contains("commit=failed"), "{output}");
+        assert!(output.contains("commit=done"), "{output}");
+        assert!(output.contains("planted=yes"), "{output}");
+        assert!(
+            fetch.status.success() && status.status.success(),
+            "{fetch:?} {status:?}"
+        );
+        assert_eq!(String::from_utf8_lossy(&fetched.stdout), "x\n");
+        // The user's own branch is unborn still, and nothing the agent planted ran.
+        assert!(!own.status.success(), "{own:?}");
+        assert!(!ran, "{output}");
     } else {
         assert!(output.contains("scratch=written"), "{output}");
         assert!(output.contains("commit=done"), "{output}");
@@ -241,7 +296,7 @@ fn planted_child() {
     fs::set_permissions(&work, fs::Permissions::from_mode(0o700)).unwrap();
     let work = sandbox::working_directory(&work, &[]).unwrap();
     let api = work.path().join("api.sock");
-    let result = sandbox::command(&["/bin/true".to_owned()], &[], &work, &api);
+    let result = sandbox::command(&["/bin/true".to_owned()], &[], &work, &api, None);
     fs::remove_dir(work.path()).unwrap();
     match result {
         Ok(command) => assert_ne!(command.get_program(), planted),

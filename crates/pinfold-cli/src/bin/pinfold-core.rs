@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::sync::mpsc::{self, Receiver, TrySendError};
 use std::sync::{Arc, Once};
@@ -210,7 +210,18 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                 let work = sandbox::working_directory(Path::new(&cwd), &hidden).map_err(refused)?;
                 let api = control::socket_path(&control::runtime_dir());
                 // A missing sandbox tool is an error, so the agent never runs unsandboxed.
-                let command = sandbox::command(&agent.command, &hidden, &work, &api);
+                // The agent's own git directory, one per profile and working directory (ADR-0039).
+                let name = Path::new(&launch.profile);
+                let named = matches!(
+                    name.components().collect::<Vec<_>>()[..],
+                    [Component::Normal(_)]
+                );
+                let shadow = pinfold_config::data_dir().filter(|_| named).map(|data| {
+                    let key = trust::sha256(work.path().as_os_str().as_encoded_bytes());
+                    data.join("agents").join(name).join(&key[..16])
+                });
+                let shadow = shadow.as_deref();
+                let command = sandbox::command(&agent.command, &hidden, &work, &api, shadow);
                 if cfg!(target_os = "linux") {
                     log_abstract_socket_gap();
                 }
