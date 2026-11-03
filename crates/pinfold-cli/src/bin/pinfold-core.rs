@@ -22,6 +22,7 @@ use pinfold_core::io::{Reactor, Waker};
 use pinfold_core::shell;
 use pinfold_core::status::Status;
 use pinfold_core::wait::{Outcome, Waits};
+use pinfold_core::workspace::Workspaces;
 use pinfold_proto::link::{ApprovalAction, ApprovalAnswer};
 use serde_json::{Value, json};
 
@@ -117,11 +118,13 @@ fn grants_list<T, C: pinfold_core::grants::Clock>(grants: &mut Grants<T, C>) -> 
 /// unidentified and may not list panes (threat model, caller identity point 3). Any caller with
 /// a terminal may, in a pane or not, as a list shows no screen and little a same-user `ps` does
 /// not. Spawns and closes reach only the caller's own pane and the panes it spawned, the `self`
-/// and `children` scopes. Pane contents go to the caller alone, never to a log.
+/// and `children` scopes. Pane contents go to the caller alone, never to a log. Only a person's
+/// terminal outside any pane opens a workspace, so a pane's program cannot.
 fn immediate<T, C: pinfold_core::grants::Clock>(
     reactor: &mut Reactor,
     family: &mut Family,
     grants: &mut Grants<T, C>,
+    workspaces: &mut Workspaces,
     request: &Request,
 ) -> Result<Value, String> {
     let identified = request.caller().is_some();
@@ -148,6 +151,7 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                     "audit.read",
                     "grants.list",
                     "grants.revoke",
+                    "workspace.open",
                     "workspace.trust_state",
                     "workspace.ask_trust",
                 ],
@@ -172,13 +176,8 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
         }
         Method::PaneSpawn(spawn) => {
             let own = own.ok_or("pane.spawn needs a caller in a pane")?;
-            let way = match spawn.place {
-                Place::SplitRight => Some(SplitWay::Right),
-                Place::SplitDown => Some(SplitWay::Down),
-                Place::Tab => None,
-            };
             let of = spawn.of.unwrap_or(own);
-            let pane = family.spawn(reactor, own, of, way, spawn.cwd.as_deref())?;
+            let pane = family.spawn(reactor, own, of, way(spawn.place), spawn.cwd.as_deref())?;
             Ok(json!({"pane": pane}))
         }
         Method::PaneClose { pane } => {
@@ -209,6 +208,18 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
         }
         Method::WorkspaceTrustState(_) | Method::WorkspaceAskTrust(..) => {
             Err("workspace trust needs a terminal outside every pane".to_owned())
+        }
+        // shortcut: the same guardrail as audit.read, not proof of a person; ask in the window
+        // once approval prompts cover it (#100).
+        Method::WorkspaceOpen(open) if identified && own.is_none() => {
+            let pane = |(place, cwd): &(Place, String)| (way(*place), cwd.clone());
+            let tabs = open.tabs.iter();
+            let tabs: Vec<Vec<_>> = tabs.map(|tab| tab.iter().map(pane).collect()).collect();
+            let opened = workspaces.open(reactor, &open.root, &tabs)?;
+            Ok(json!({"opened": opened}))
+        }
+        Method::WorkspaceOpen(_) => {
+            Err("workspace.open needs a caller in a terminal outside any pane".to_owned())
         }
         // Never sent here: the loop opens windows, parks waits and keeps subscribers.
         Method::WindowOpen
@@ -270,6 +281,15 @@ fn ask_trust(reactor: &mut Reactor, grants: &mut Grants<Request>, log: &mut Log,
     }
 }
 
+/// The way a pane splits, or none for a new tab.
+fn way(place: Place) -> Option<SplitWay> {
+    match place {
+        Place::SplitRight => Some(SplitWay::Right),
+        Place::SplitDown => Some(SplitWay::Down),
+        Place::Tab => None,
+    }
+}
+
 fn answer_released(reactor: &mut Reactor, log: &mut Log, released: Vec<Released<Request>>) {
     for released in released {
         let answer = match released.ticket.method() {
@@ -293,12 +313,13 @@ fn decide(
     reactor: &mut Reactor,
     family: &mut Family,
     grants: &mut Grants<Request>,
+    workspaces: &mut Workspaces,
     log: &mut Log,
     request: Request,
 ) {
     let own = request.caller().and_then(|caller| reactor.pane_of(caller));
     let Some((target, action, text)) = cross_pane(request.method()) else {
-        let answer = immediate(reactor, family, grants, &request);
+        let answer = immediate(reactor, family, grants, workspaces, &request);
         return audit::reply(log, reactor, request, answer);
     };
     let Some(caller) = own else {
@@ -453,6 +474,7 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
     let mut waits: Waits<Request> = Waits::default();
     let mut grants: Grants<Request> = Grants::default();
     let mut family = Family::default();
+    let mut workspaces = Workspaces::default();
     let mut subscribers: Vec<(Subscriber, Topics)> = Vec::new();
     let mut known = Seen::new();
     // Read once: the core takes no hot reload.
@@ -512,7 +534,14 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
                     ask_trust(&mut reactor, &mut grants, &mut log, request);
                 }
                 _ => {
-                    decide(&mut reactor, &mut family, &mut grants, &mut log, request);
+                    decide(
+                        &mut reactor,
+                        &mut family,
+                        &mut grants,
+                        &mut workspaces,
+                        &mut log,
+                        request,
+                    );
                 }
             }
         }

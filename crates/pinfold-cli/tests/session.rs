@@ -1141,6 +1141,77 @@ fn mcp_lists_tools_calls_the_core_as_its_pane_and_reports_a_refusal_as_a_tool_er
 }
 
 #[test]
+fn up_opens_a_workspace_as_shells_once_and_then_attaches_to_it() {
+    let window = format!("{NOTE_CORE}\n{}\n{STAY}", say_hello().unwrap());
+    let session = Session::new("u", Some(&window)).unwrap();
+    let project = session.directory.join("project");
+    for directory in ["a", "b", ".pinfold"] {
+        fs::create_dir_all(project.join(directory)).unwrap();
+    }
+    let layout = "[[tabs]]\n[[tabs.panes]]\ncwd = 'a'\nrun = 'make'\n\
+                  [[tabs]]\n[[tabs.panes]]\ncwd = 'b'\n";
+    fs::write(project.join(".pinfold/layout.toml"), layout).unwrap();
+    // Each shell says where it is, as OSC 7, and stays.
+    let shell = session.directory.join("shell");
+    let script = "#!/bin/sh\nprintf '\\033]7;file://%s\\007' \"$(pwd -P)\"\nexec sleep 60\n";
+    fs::write(&shell, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
+    let pinfold = session.directory.join("pinfold");
+    // Runs `arguments` in a terminal that is no pane, as a person would, and returns its output.
+    let in_terminal = |arguments: &str| {
+        let out = session.directory.join("out");
+        let script = format!(
+            "'{}' {arguments} > out.tmp 2>&1; echo \"exit $?\" >> out.tmp; mv out.tmp '{}'",
+            pinfold.display(),
+            out.display()
+        );
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", &script])
+            .current_dir(&project)
+            .env("XDG_RUNTIME_DIR", session.directory.join("run"))
+            .env("SHELL", &shell)
+            .env(CLIENT, &session.directory);
+        let _terminal = pinfold_sys::pty::Pty::spawn(command, 24, 80).unwrap();
+        assert!(session.wait_for("out"), "{}", session.read_log());
+        let text = session.read("out");
+        fs::remove_file(&out).unwrap();
+        text
+    };
+    let cwds = || {
+        let start = Instant::now();
+        loop {
+            let text = in_terminal("ctl list --json");
+            let list: serde_json::Value = serde_json::from_str(text.lines().next().unwrap())
+                .unwrap_or_else(|_| panic!("{text}"));
+            let panes = list["panes"].as_array().unwrap().iter();
+            let cwds: Vec<String> = panes
+                .map(|pane| pane["cwd"].as_str().unwrap_or_default().to_owned())
+                .collect();
+            if cwds.iter().all(|cwd| !cwd.is_empty()) || start.elapsed() > PATIENCE {
+                return cwds;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let canonical = |name: &str| project.join(name).canonicalize().unwrap();
+    let (a, b) = (canonical("a"), canonical("b"));
+
+    let said = in_terminal("up");
+    let waits = "pinfold: 1 command waits for workspace trust (not yet available)\nexit 0\n";
+    assert_eq!(said, waits);
+    // The core's first shell, then a tab in each cwd.
+    let opened = cwds();
+    assert_eq!(opened.len(), 3, "{opened:?}");
+    assert_eq!(opened[1..], [a.to_str().unwrap(), b.to_str().unwrap()]);
+
+    // A second `pinfold up` attaches and opens nothing.
+    assert_eq!(in_terminal("up"), waits);
+    assert_eq!(cwds(), opened);
+}
+
+#[test]
 fn mcp_waits_for_the_next_event_and_times_out_with_none() {
     let session = Session::new("x", None).unwrap();
     let call = |id: u32, name: &str, arguments: serde_json::Value| {
