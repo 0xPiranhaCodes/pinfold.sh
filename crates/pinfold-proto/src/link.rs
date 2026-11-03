@@ -37,7 +37,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 5;
+pub const VERSION: u16 = 6;
 
 /// Most rows or columns a screen can have, which the core clamps its panes to.
 pub const MAX_DIMENSION: u16 = 1024;
@@ -1643,7 +1643,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 5, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 6, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;

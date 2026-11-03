@@ -1358,7 +1358,7 @@ mod tests {
 
     #[test]
     fn a_second_open_starts_nothing_until_the_first_has_gone() {
-        let hello = r"printf '\003\000\000\000\000\005\000' >&3; exec cat <&3 >/dev/null";
+        let hello = r"printf '\003\000\000\000\000\006\000' >&3; exec cat <&3 >/dev/null";
         let (binary, log) = window_script("second-open", hello);
         let mut reactor = Reactor::new().unwrap();
         assert_eq!(spawn_window(&mut reactor, &binary), WindowOpen::Started);
