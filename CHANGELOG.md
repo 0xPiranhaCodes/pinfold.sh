@@ -29,6 +29,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Added
 
+- On Linux a sandboxed agent can commit: into a shadow git directory under `~/.local/share/pinfold/agents`, which borrows the repository's objects and whose hooks and config only the sandbox runs. `git fetch --no-tags <shadow> '+refs/heads/*:refs/remotes/agent-<profile>/*'` brings its commits into remote-tracking refs; the real `.git` stays read-only.
 - Right-click on an OSC 8 hyperlink adds Open Link and Copy Link to the menu. Open Link opens `http` and `https` links in the browser through `open` or `xdg-open`, never through a shell. Any other scheme, and web links with characters outside ASCII, ask first in a prompt PinFold draws, with the whole link shown and those characters escaped. Links over 2,048 bytes or that are not URIs are not offered. The window asks the core for the link under the cell, so the link is version 9.
 - On macOS, right-clicking the Dock icon offers New Tab, Split Right, Split Down, Detach and one item per tab with its agent state as glyph and word ([#114](https://github.com/0xPiranhaCodes/pinfold.sh/issues/114)).
 - A per-pane status state machine combines OSC 133 marks with authoritative API reports and rate-limited alerts.

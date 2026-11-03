@@ -136,9 +136,31 @@ directory. A relative `PATH` entry, such as `.` or an empty one, counts from the
 directory, so it refuses every launch, and so does a `PATH` entry that is a dangling symlink.
 
 Git runs what a repository's hooks and config name outside the sandbox, so the agent cannot
-change them. On Linux the working directory's whole `.git` is read-only: a sandboxed agent
-cannot write the repository's git metadata, so it cannot commit, and commits happen outside the
-sandbox. The `.git` of each submodule that `.gitmodules` lists is read-only too, whether it is
+change them. On Linux the working directory's whole `.git` is read-only, and the agent commits
+into a shadow git directory of its own instead
+([ADR-0039](adr/0039-shadow-git-directory.md)). The shadow is
+`$XDG_DATA_HOME/pinfold/agents/<profile>/<key>`, or under `~/.local/share` when that variable
+is unset, where the key is the first 16 hex digits of the SHA-256 of the working directory's
+resolved path. It is made private (mode 0700), and the agent does not start if it exists as a
+symlink, as another user's, or open to others. The sandbox does not hide it, so other sandboxed
+agents can read but not write it; it holds only the project's data, which they can read anyway. The agent's `GIT_DIR` points at it, with `GIT_WORK_TREE` set to the
+working directory. It starts, at the first launch, at your branch's commit and index, and it
+reads your objects through `objects/info/alternates`, so nothing is copied. Later launches keep
+it as the agent left it: delete it to start again from your current commit. It is not named
+`.git`, so git never finds it on its own, and its hooks and config run only inside the sandbox.
+To take the agent's commits, fetch them into remote-tracking refs:
+
+```sh
+git fetch --no-tags ~/.local/share/pinfold/agents/<profile>/<key> \
+  '+refs/heads/*:refs/remotes/agent-<profile>/*'
+```
+
+A local fetch runs none of the shadow's hooks or config, and it never touches your branches.
+Do not run other git commands with the shadow as their git directory, such as with `--git-dir`
+or from inside it: those run the hooks and config the agent wrote.
+Review `agent-<profile>/<branch>`, then merge or cherry-pick it. A working directory whose
+`.git` is a file, such as a linked worktree, gets no shadow, and there the agent cannot commit.
+The `.git` of each submodule that `.gitmodules` lists is read-only too, whether it is
 a file pointing into `.git/modules` or a repository of its own. On macOS the agent can commit,
 but it cannot write the hooks, config, worktree config, `commondir` or `gitdir` of the
 repository or of any submodule or linked worktree, make them where they are missing, rewrite a
