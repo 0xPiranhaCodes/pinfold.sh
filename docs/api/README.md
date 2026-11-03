@@ -20,6 +20,7 @@ Every connection starts with `hello`:
 | `pane.read`        | Version 2 and its own pane  | [`pane.read.schema.json`](pane.read.schema.json)             |
 | `pane.last_output` | Version 2 and its own pane  | [`pane.last_output.schema.json`](pane.last_output.schema.json) |
 | `pane.send`        | Version 2 and its own pane  | [`pane.send.schema.json`](pane.send.schema.json)             |
+| `session.save`     | Version 2, outside any pane | [`session.save.schema.json`](session.save.schema.json)       |
 
 For now a caller reads and sends only to the pane it runs in, the `self` scope, and any other
 pane is refused. Reads return at most 2,000,000 bytes, keeping the newest. A send carries at
@@ -28,5 +29,6 @@ most 4096 bytes, and a pane takes at most 20 sends a second.
 `pinfold ctl list` prints `pane.list` as plain text, with `*` by the caller's own pane, and
 `pinfold ctl list --json` prints its result. Its title, directory and status come from what
 programs print, which can fake them: read them as hints, not facts. `pinfold ctl send <pane>
-<text>` types into a pane. A core that refuses version 2 is older than the client, and
+<text>` types into a pane. `pinfold ctl session save`, from a terminal that is no pane, writes the
+session's snapshot and prints its path. A core that refuses version 2 is older than the client, and
 `pinfold ctl` says to quit PinFold so that a new core starts.

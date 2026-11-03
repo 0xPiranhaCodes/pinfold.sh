@@ -73,6 +73,9 @@ impl Session {
         let core = Command::new(self.directory.join("pinfold-core"))
             .args(arguments)
             .env("XDG_RUNTIME_DIR", self.directory.join("run"))
+            // The state directory, on macOS from HOME, so a test never writes the person's.
+            .env("XDG_STATE_HOME", self.directory.join("state"))
+            .env("HOME", self.directory.join("state"))
             .env("SHELL", &script)
             .env(CLIENT, &self.directory)
             .spawn()?;
@@ -544,4 +547,43 @@ fn hardening_twice_is_harmless() {
         .status()
         .unwrap();
     assert!(status.success());
+}
+
+#[test]
+fn ctl_session_save_writes_a_private_snapshot_only_from_outside_a_pane() {
+    use std::os::unix::fs::PermissionsExt;
+    let session = Session::new("n", None).unwrap();
+    let ctl = format!(
+        "'{}' ctl session save",
+        session.directory.join("pinfold").display()
+    );
+    let to = |name: &str| format!("> \"$PINFOLD_TEST_CLIENT/{name}\" 2>&1");
+    let inside = format!("{ctl} {}; exec sleep 30", to("in"));
+    let mut core = session.start_core(&["--idle", "1"], &inside).unwrap();
+    assert!(session.wait_for("in"), "{}", session.read_log());
+    let refused = session.read("in");
+    assert!(refused.contains("outside any pane"), "{refused}");
+
+    // The core's state directory, which `start_core` puts in the session's.
+    let state = session.directory.join("state");
+    let mut outside = Command::new("/bin/sh");
+    outside
+        .args(["-c", &format!("{ctl} {}", to("out"))])
+        .env("XDG_RUNTIME_DIR", session.directory.join("run"))
+        .env(CLIENT, &session.directory);
+    let _terminal = pinfold_sys::pty::Pty::spawn(outside, 24, 80).unwrap();
+    assert!(session.wait_for("out"));
+    let said = session.read("out");
+    let path = PathBuf::from(said.trim());
+    assert!(path.starts_with(&state), "{said}");
+    assert!(path.ends_with("sessions/default.json"), "{said}");
+    let mode = fs::metadata(&path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let snapshot: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(snapshot["version"], 1);
+    assert_eq!(snapshot["tabs"][0]["root"]["pane"], 0);
+    // The shell, whose temporary path redaction may take for a secret.
+    assert!(snapshot["panes"][0]["command"].is_string(), "{snapshot}");
+    core.kill().unwrap();
+    core.wait().unwrap();
 }

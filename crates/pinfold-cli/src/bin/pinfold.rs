@@ -85,6 +85,15 @@ fn send(pane: &str, text: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// `pinfold ctl session save`: writes the session's snapshot and prints its path. It starts
+/// no core.
+fn save() -> Result<(), Box<dyn Error>> {
+    let (_, saved) = control::ask(&running()?, "session.save", &json!({}))?;
+    let path = saved["path"].as_str().ok_or("the core named no file")?;
+    std::io::stdout().write_all(format!("{}\n", printable(path)).as_bytes())?;
+    Ok(())
+}
+
 /// Connects to the running core, and starts none.
 fn running() -> Result<UnixStream, Box<dyn Error>> {
     let path = control::socket_path(&control::runtime_dir());
@@ -133,8 +142,11 @@ fn main() -> ExitCode {
         ["ctl", "list"] => list(false),
         ["ctl", "list", "--json"] => list(true),
         ["ctl", "send", pane, text] => send(pane, text),
+        ["ctl", "session", "save"] => save(),
         _ => {
-            eprintln!("usage: pinfold [ctl list [--json] | ctl send <pane> <text>]");
+            eprintln!(
+                "usage: pinfold [ctl list [--json] | ctl send <pane> <text> | ctl session save]"
+            );
             return ExitCode::FAILURE;
         }
     };

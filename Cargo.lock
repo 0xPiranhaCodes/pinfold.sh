@@ -1313,6 +1313,7 @@ name = "pinfold-cli"
 version = "0.0.0"
 dependencies = [
  "pinfold-api",
+ "pinfold-config",
  "pinfold-core",
  "pinfold-proto",
  "pinfold-sys",
@@ -1341,10 +1342,13 @@ dependencies = [
  "insta",
  "lz4_flex",
  "mio",
+ "pinfold-api",
  "pinfold-mux",
  "pinfold-proto",
  "pinfold-sys",
  "proptest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

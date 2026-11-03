@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "session.save",
+  "description": "Writes the session's snapshot to sessions/default.json in the state directory (ADR-0034): the layout and, per pane, its OSC 7 directory and the program it started, redacted. No scrollback and no environment. The directory is 0700, the file 0600, written to a temporary file and renamed. Needs hello version 2 and a caller in a terminal outside every pane.",
+  "type": "object",
+  "properties": {
+    "params": {
+      "description": "session.save takes no arguments.",
+      "type": ["object", "array", "null"]
+    },
+    "result": {
+      "type": "object",
+      "required": ["path"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string", "description": "The file written." }
+      }
+    }
+  }
+}
