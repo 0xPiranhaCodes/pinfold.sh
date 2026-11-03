@@ -107,6 +107,14 @@ pub fn load(path: &Path, project: &Path) -> Result<Layout, Error> {
     if metadata.file_type().is_symlink() {
         return Err(Error::Symlink);
     }
+    // A symlinked `.pinfold` would read a file from outside the project.
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    let parent = fs::canonicalize(parent.unwrap_or(Path::new(".")))?;
+    if !parent.starts_with(fs::canonicalize(project).map_err(Error::Cwd)?) {
+        return Err(Error::Symlink);
+    }
     let file = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
@@ -143,7 +151,11 @@ pub fn parse(bytes: &[u8], project: &Path) -> Result<Layout, Error> {
     }
     let text = std::str::from_utf8(bytes).map_err(|_| Error::NotUtf8)?;
     let mut layout: Layout = toml::from_str(text).map_err(|error| {
-        let clean = |c: char| c.is_control() && c != '\n';
+        // Controls, and bidi and zero-width format characters, which could reorder the message.
+        let clean = |c: char| {
+            (c.is_control() && c != '\n')
+                || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}')
+        };
         Error::Invalid(error.to_string().replace(clean, "\u{fffd}"))
     })?;
     if layout.tabs.is_empty() || layout.tabs.iter().any(|tab| tab.panes.is_empty()) {
@@ -284,14 +296,36 @@ mod tests {
         let link = project.path().join("link.toml");
         symlink(&layout, &link).unwrap();
         assert!(matches!(load(&link, project.path()), Err(Error::Symlink)));
+        fs::create_dir(project.path().join("dir")).unwrap();
         assert!(matches!(
-            load(project.path(), project.path()),
+            load(&project.path().join("dir"), project.path()),
             Err(Error::NotAFile)
+        ));
+        // A symlinked `.pinfold` reaching outside the project.
+        let outside = tempdir().unwrap();
+        fs::write(outside.path().join("layout.toml"), PANE).unwrap();
+        symlink(outside.path(), project.path().join(".pinfold")).unwrap();
+        let through = project.path().join(".pinfold/layout.toml");
+        assert!(matches!(
+            load(&through, project.path()),
+            Err(Error::Symlink)
         ));
         fs::write(&layout, vec![b'#'; MAX_BYTES + 1]).unwrap();
         assert!(matches!(
             load(&layout, project.path()),
             Err(Error::TooLarge)
         ));
+    }
+
+    #[test]
+    fn errors_drop_bidi_and_control_characters() {
+        let project = tempdir().unwrap();
+        let Err(Error::Invalid(message)) = parse(
+            "[[tab]]\n\"a\u{202e}b\u{7}\" = 1\n".as_bytes(),
+            project.path(),
+        ) else {
+            panic!("expected an invalid layout");
+        };
+        assert!(!message.contains(['\u{202e}', '\u{7}']), "{message}");
     }
 }
