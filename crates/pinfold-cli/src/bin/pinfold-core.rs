@@ -14,6 +14,7 @@ use pinfold_core::family::{self, Family, SplitWay};
 use pinfold_core::io::{Reactor, Waker};
 use pinfold_core::shell;
 use pinfold_core::wait::{Outcome, Waits};
+use pinfold_core::workspace::Workspaces;
 use serde_json::{Value, json};
 
 const ROWS: u16 = 24;
@@ -58,8 +59,13 @@ fn listen(waker: Arc<Waker>) -> io::Result<Receiver<Request>> {
 /// pane or not, as a list shows no screen and little a same-user `ps` does not. Reads, sends and
 /// closes reach only the caller's own pane and the panes it spawned, the `self` and `children`
 /// scopes, until other scopes ask the person. Pane contents go to the caller alone, never to a
-/// log.
-fn answer(reactor: &mut Reactor, family: &mut Family, request: &Request) -> Result<Value, String> {
+/// log. Only a person's terminal outside any pane opens a workspace, so a pane's program cannot.
+fn answer(
+    reactor: &mut Reactor,
+    family: &mut Family,
+    workspaces: &mut Workspaces,
+    request: &Request,
+) -> Result<Value, String> {
     let identified = request.caller().is_some();
     let own = request.caller().and_then(|caller| reactor.pane_of(caller));
     match request.method() {
@@ -76,7 +82,12 @@ fn answer(reactor: &mut Reactor, family: &mut Family, request: &Request) -> Resu
                     "pane.close",
                     "events.subscribe",
                 ],
-                (true, None) => &["window.open", "pane.list", "events.subscribe"],
+                (true, None) => &[
+                    "window.open",
+                    "pane.list",
+                    "events.subscribe",
+                    "workspace.open",
+                ],
                 (false, _) => &["window.open"],
             };
             Ok(json!({"version": control::VERSION, "methods": methods, "pane": own}))
@@ -97,13 +108,8 @@ fn answer(reactor: &mut Reactor, family: &mut Family, request: &Request) -> Resu
         }
         Method::PaneSpawn(spawn) => {
             let own = own.ok_or("pane.spawn needs a caller in a pane")?;
-            let way = match spawn.place {
-                Place::SplitRight => Some(SplitWay::Right),
-                Place::SplitDown => Some(SplitWay::Down),
-                Place::Tab => None,
-            };
             let of = spawn.of.unwrap_or(own);
-            let pane = family.spawn(reactor, own, of, way, spawn.cwd.as_deref())?;
+            let pane = family.spawn(reactor, own, of, way(spawn.place), spawn.cwd.as_deref())?;
             Ok(json!({"pane": pane}))
         }
         Method::PaneClose { pane } => {
@@ -118,10 +124,29 @@ fn answer(reactor: &mut Reactor, family: &mut Family, request: &Request) -> Resu
             Ok(json!({"panes": panes.collect::<Vec<_>>()}))
         }
         Method::PaneList => Err("pane.list needs a caller in a terminal".to_owned()),
+        Method::WorkspaceOpen(open) if identified && own.is_none() => {
+            let pane = |(place, cwd): &(Place, String)| (way(*place), cwd.clone());
+            let tabs = open.tabs.iter();
+            let tabs: Vec<Vec<_>> = tabs.map(|tab| tab.iter().map(pane).collect()).collect();
+            let opened = workspaces.open(reactor, &open.root, &tabs)?;
+            Ok(json!({"opened": opened}))
+        }
+        Method::WorkspaceOpen(_) => {
+            Err("workspace.open needs a caller in a terminal outside any pane".to_owned())
+        }
         // Never sent here: the loop opens windows, parks waits and keeps subscribers.
         Method::WindowOpen | Method::PaneWait(_) | Method::EventsSubscribe(_) => {
             Err("not here".to_owned())
         }
+    }
+}
+
+/// The way a pane splits, or none for a new tab.
+fn way(place: Place) -> Option<SplitWay> {
+    match place {
+        Place::SplitRight => Some(SplitWay::Right),
+        Place::SplitDown => Some(SplitWay::Down),
+        Place::Tab => None,
     }
 }
 
@@ -226,6 +251,7 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
     let mut waiting = Vec::new();
     let mut waits: Waits<Request> = Waits::default();
     let mut family = Family::default();
+    let mut workspaces = Workspaces::default();
     let mut subscribers: Vec<(Subscriber, Topics)> = Vec::new();
     let mut known = Seen::new();
     loop {
@@ -262,7 +288,7 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
                     request.answer(Err(reason.to_owned()));
                 }
                 _ => {
-                    let answer = answer(&mut reactor, &mut family, &request);
+                    let answer = answer(&mut reactor, &mut family, &mut workspaces, &request);
                     request.answer(answer);
                 }
             }
