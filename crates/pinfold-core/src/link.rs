@@ -24,12 +24,15 @@ use mio::unix::SourceFd;
 use mio::{Interest, Token};
 use pinfold_proto::Frame;
 use pinfold_proto::link::{
-    self, Decoder, Notice, Refusal, Request, VERSION, encode_frame, encode_layout,
+    self, Approval, ApprovalAnswer, Decoder, Notice, Refusal, Request, VERSION, encode_frame,
+    encode_layout,
 };
 use pinfold_sys::socket;
 
+use crate::grants::{MAX_PENDING as MAX_APPROVALS, Prompt};
 use crate::io::{READ_BUDGET, Reactor};
 use crate::search::{CopyStep, Copying};
+use crate::status::Status;
 
 /// Beyond any pane number, like the waker's token.
 pub(crate) const LINK: Token = Token(usize::MAX - 1);
@@ -78,6 +81,12 @@ struct PaneLink {
     searching: bool,
     /// Whether it printed something while no window showed it.
     noisy: bool,
+    /// Whether it raised a "needs you" alert while hidden, and needs you still.
+    alerted: bool,
+    /// The state and source the window last heard of, while `naming`.
+    told: Option<(u8, bool)>,
+    /// The message the window last heard of, while `naming`.
+    message: String,
 }
 
 /// A copy, which takes a step per pass so a window cannot hold up PTYs with long ones.
@@ -105,7 +114,9 @@ struct Session {
     laid: Option<u64>,
     /// The tabs with news, as last sent.
     activity: u32,
-    /// Whether that may be out of date.
+    /// The tabs with a hidden pane that needs you, as last sent.
+    alerts: u32,
+    /// Whether those may be out of date.
     activity_changed: bool,
     /// The latest command refused. Only the last matters, so a burst of them costs nothing.
     refused: Option<Refusal>,
@@ -189,6 +200,11 @@ impl Session {
             Request::FullFrame { pane } => {
                 if let Some(state) = self.state(pane as usize).filter(|state| state.watched) {
                     state.synced = false;
+                }
+            }
+            Request::ApprovalAnswer { id, answer } => {
+                if reactor.approval_answers.len() < MAX_APPROVALS {
+                    reactor.approval_answers.push((id, answer));
                 }
             }
             Request::Quit => return Err(Ended),
@@ -286,6 +302,7 @@ impl Session {
             if naming && !state.naming {
                 state.cwd.clear();
                 state.named = false;
+                state.told = None;
             }
             state.naming = naming;
         }
@@ -306,25 +323,30 @@ impl Session {
         if self.pending() > 0 || !mem::take(&mut self.activity_changed) {
             return Ok(());
         }
-        let mut activity = 0;
+        let (mut activity, mut alerts) = (0, 0);
         for (index, tab) in reactor.session.tabs().iter().enumerate() {
             let shown = index == reactor.session.active();
-            let mut noisy = false;
+            let (mut noisy, mut alerted) = (false, false);
             for pane in tab.panes() {
                 let number = pane as usize;
                 let state = self.panes.iter_mut().find(|state| state.number == number);
                 if let Some(state) = state {
                     state.noisy &= !shown;
                     noisy |= state.noisy;
+                    state.alerted &= !shown;
+                    alerted |= state.alerted;
                 }
             }
-            if noisy {
-                activity |= 1u32.checked_shl(index as u32).unwrap_or(0);
-            }
+            let bit = 1u32.checked_shl(index as u32).unwrap_or(0);
+            activity |= if noisy { bit } else { 0 };
+            alerts |= if alerted { bit } else { 0 };
         }
-        if activity != self.activity {
-            self.activity = activity;
-            self.notice(&Notice::Activity { tabs: activity })?;
+        if (activity, alerts) != (self.activity, self.alerts) {
+            (self.activity, self.alerts) = (activity, alerts);
+            self.notice(&Notice::Activity {
+                tabs: activity,
+                alerts,
+            })?;
             self.flush()?;
         }
         Ok(())
@@ -365,6 +387,31 @@ impl Session {
         if dirty && !state.watched && !state.noisy {
             state.noisy = true;
             self.activity_changed = true;
+        }
+        // The tracker rate-limits alerts, so a flapping agent marks its tab once (T4).
+        let alert = reactor.take_alert(pane);
+        let status = reactor.status(pane);
+        let needs_you = status.is_some_and(|(status, ..)| status == Status::NeedsYou);
+        let alerted = needs_you && (state.alerted || (alert && !state.watched));
+        if alerted != state.alerted {
+            state.alerted = alerted;
+            self.activity_changed = true;
+        }
+        if state.naming
+            && let Some((status, reported, message)) = status
+        {
+            let told = Some((status as u8, reported));
+            if state.told != told || state.message != message {
+                state.told = told;
+                message.clone_into(&mut state.message);
+                let notice = Notice::Status {
+                    pane: pane as u32,
+                    state: status as u8,
+                    reported,
+                    message: &state.message,
+                };
+                notice.encode(&mut self.out).map_err(|_| Ended)?;
+            }
         }
         if state.watched && (dirty || !state.synced) {
             let Some(engine) = reactor.engine(pane) else {
@@ -591,6 +638,38 @@ impl Reactor {
         self.host.window.as_ref()?.child.as_ref().map(Child::id)
     }
 
+    /// Sends or updates a prompt over the inherited window link.
+    ///
+    /// Returns false when no ready window can show it or its bounded queue is full.
+    pub fn ask_approval(&mut self, prompt: &Prompt) -> bool {
+        let (Ok(caller), Ok(target)) = (u32::try_from(prompt.caller), u32::try_from(prompt.target))
+        else {
+            return false;
+        };
+        let Some(window) = self
+            .host
+            .window
+            .as_mut()
+            .filter(|window| window.session.greeted)
+        else {
+            return false;
+        };
+        let texts = prompt.texts.iter().map(String::as_str).collect();
+        let notice = Notice::Approval(Approval {
+            id: prompt.id,
+            caller,
+            target,
+            action: prompt.action,
+            texts,
+        });
+        window.session.notice(&notice).is_ok() && window.session.flush().is_ok()
+    }
+
+    /// Takes one answer that arrived over the inherited window link.
+    pub fn take_approval_answer(&mut self) -> Option<(u64, ApprovalAnswer)> {
+        self.approval_answers.pop()
+    }
+
     /// Serves `socket` as the window, and sends the version check.
     fn attach_window(&mut self, socket: UnixStream, child: Option<Child>) -> io::Result<()> {
         let fd = socket.as_raw_fd();
@@ -610,6 +689,7 @@ impl Reactor {
                 copying: None,
                 laid: None,
                 activity: 0,
+                alerts: 0,
                 activity_changed: false,
                 refused: None,
             },
@@ -677,6 +757,9 @@ mod tests {
         copied: Vec<String>,
         raises: usize,
         activity: u32,
+        alerts: u32,
+        /// The last status: pane, state, whether reported, and message.
+        status: Option<(u32, u8, bool, String)>,
         layouts: usize,
         active: u16,
         focused: u32,
@@ -701,6 +784,8 @@ mod tests {
                 copied: Vec::new(),
                 raises: 0,
                 activity: 0,
+                alerts: 0,
+                status: None,
                 layouts: 0,
                 active: 0,
                 focused: 0,
@@ -764,7 +849,15 @@ mod tests {
                         Notice::Searched { found, .. } => self.searched.push(found),
                         Notice::Copied { text, .. } => self.copied.push(text.to_owned()),
                         Notice::Raise => self.raises += 1,
-                        Notice::Activity { tabs } => self.activity = tabs,
+                        Notice::Activity { tabs, alerts } => {
+                            (self.activity, self.alerts) = (tabs, alerts);
+                        }
+                        Notice::Status {
+                            pane,
+                            state,
+                            reported,
+                            message,
+                        } => self.status = Some((pane, state, reported, message.to_owned())),
                         Notice::Layout(layout) => {
                             self.layouts += 1;
                             self.active = layout.active;
@@ -773,6 +866,7 @@ mod tests {
                             self.shown = layout.panes().collect();
                         }
                         Notice::Refused { reason } => self.refused.push(reason),
+                        Notice::Approval(_) => {}
                     }
                 }
             }
@@ -1318,7 +1412,7 @@ mod tests {
 
     #[test]
     fn a_second_open_starts_nothing_until_the_first_has_gone() {
-        let hello = r"printf '\003\000\000\000\000\004\000' >&3; exec cat <&3 >/dev/null";
+        let hello = r"printf '\003\000\000\000\000\007\000' >&3; exec cat <&3 >/dev/null";
         let (binary, log) = window_script("second-open", hello);
         let mut reactor = Reactor::new().unwrap();
         assert_eq!(spawn_window(&mut reactor, &binary), WindowOpen::Started);
@@ -1531,6 +1625,34 @@ mod tests {
         serve(&mut reactor, &mut peer, |_, p| {
             p.active == 0 && p.activity == 0
         });
+    }
+
+    #[test]
+    fn a_hidden_pane_that_needs_you_marks_its_tab_once_and_its_status_reaches_the_window() {
+        let (mut reactor, mut peer, first) = session(24, 80);
+        let first = first as usize;
+        serve(&mut reactor, &mut peer, |_, p| p.status.is_some());
+        assert_eq!(peer.status, Some((first as u32, 4, false, String::new())));
+        peer.send(Request::NewTab);
+        serve(&mut reactor, &mut peer, |_, p| p.active == 1);
+
+        let now = Instant::now();
+        let needs_you = Status::NeedsYou;
+        reactor.report_status(first, needs_you, "ok?", now).unwrap();
+        serve(&mut reactor, &mut peer, |_, p| p.alerts == 0b01);
+        let told = Some((first as u32, 0, true, "ok?".to_owned()));
+        serve(&mut reactor, &mut peer, |_, p| p.status == told);
+
+        // Another alert inside the rate limit raises none, so showing the tab clears the mark.
+        let running = Status::Running;
+        reactor.report_status(first, running, "", now).unwrap();
+        serve(&mut reactor, &mut peer, |_, p| p.alerts == 0);
+        reactor.report_status(first, needs_you, "", now).unwrap();
+        for _ in 0..3 {
+            reactor.turn(Some(Duration::from_millis(10))).unwrap();
+            peer.read();
+        }
+        assert_eq!(peer.alerts, 0, "rate limited");
     }
 
     #[test]

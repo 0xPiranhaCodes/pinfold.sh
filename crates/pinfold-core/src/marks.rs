@@ -35,6 +35,8 @@ pub struct ShellMarks {
     pub finished: u32,
     /// The exit status of the last finished command, if it gave one.
     pub exit: Option<u8>,
+    /// How many prompts have been drawn, wrapping, so a reader sees a new one at a prompt.
+    pub prompts: u32,
 }
 
 impl ShellMarks {
@@ -43,7 +45,10 @@ impl ShellMarks {
     fn apply(&mut self, text: &[u8]) -> bool {
         let mut fields = text.split(|&byte| byte == b';');
         self.phase = match fields.next() {
-            Some(b"A") => ShellPhase::Prompt,
+            Some(b"A") => {
+                self.prompts = self.prompts.wrapping_add(1);
+                ShellPhase::Prompt
+            }
             Some(b"B") => ShellPhase::Input,
             Some(b"C") => ShellPhase::Running,
             Some(b"D") => {
