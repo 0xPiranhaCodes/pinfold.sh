@@ -49,9 +49,9 @@ impl Workspaces {
             focus(reactor, panes[0]);
             return Ok(0);
         }
-        check(tabs)?;
+        let tabs = check(&root, tabs)?;
         let mut panes = Vec::new();
-        if let Err(reason) = open_all(reactor, tabs, &mut panes) {
+        if let Err(reason) = open_all(reactor, &tabs, &mut panes) {
             for pane in panes {
                 reactor.close_pane(pane);
             }
@@ -72,8 +72,9 @@ fn directory(path: &str) -> Option<PathBuf> {
 }
 
 /// Refuses a layout with no tab, an empty tab, a tab that does not start a tab and then split,
-/// more than the caps, or a cwd that is not a directory.
-fn check(tabs: &[Vec<Pane>]) -> Result<(), String> {
+/// more than the caps, or a cwd that is not a directory under `root`. Returns the tabs with each
+/// cwd canonical, as checked, so a later swap of the caller's path cannot redirect a shell.
+fn check(root: &Path, tabs: &[Vec<Pane>]) -> Result<Vec<Vec<Checked>>, String> {
     let count: usize = tabs.iter().map(Vec::len).sum();
     if tabs.is_empty() || tabs.len() > MAX_TABS || count > MAX_PANES {
         return Err(format!(
@@ -86,17 +87,24 @@ fn check(tabs: &[Vec<Pane>]) -> Result<(), String> {
         if !shaped {
             return Err("each tab starts with a pane and then splits".to_owned());
         }
-        if tab.iter().any(|pane| directory(&pane.1).is_none()) {
-            return Err("cwd must be an existing directory's absolute path".to_owned());
-        }
     }
-    Ok(())
+    let pane = |(way, cwd): &Pane| {
+        let cwd = directory(cwd).filter(|cwd| cwd.starts_with(root));
+        let reason = "cwd must be an existing directory in the project, its absolute path";
+        cwd.map(|cwd| (*way, cwd)).ok_or_else(|| reason.to_owned())
+    };
+    tabs.iter()
+        .map(|tab| tab.iter().map(pane).collect())
+        .collect()
 }
+
+/// A pane whose cwd is canonical and under the project's root.
+type Checked = (Option<SplitWay>, PathBuf);
 
 /// Opens each tab and its splits in the background, noting each pane in `panes`.
 fn open_all(
     reactor: &mut Reactor,
-    tabs: &[Vec<Pane>],
+    tabs: &[Vec<Checked>],
     panes: &mut Vec<usize>,
 ) -> Result<(), String> {
     for tab in tabs {
@@ -205,5 +213,33 @@ mod tests {
         );
         let wide = vec![tab("/", &[SplitWay::Right; MAX_PANES]); 1];
         refused(&mut workspaces, &mut reactor, "/", &wide);
+    }
+
+    #[test]
+    fn a_cwd_outside_the_project_or_a_symlink_out_of_it_refuses() {
+        let mut reactor = Reactor::new().unwrap();
+        reactor.shell = waiting;
+        let mut workspaces = Workspaces::default();
+        let root = std::env::temp_dir().join(format!("pinfold-ws-{}", std::process::id()));
+        fs::create_dir_all(root.join("inside")).unwrap();
+        std::os::unix::fs::symlink("/etc", root.join("out")).unwrap();
+        let text = |path: PathBuf| path.to_str().unwrap().to_owned();
+        let at = text(root.clone());
+        for cwd in [
+            "/etc".to_owned(),
+            text(std::env::temp_dir()),
+            text(root.join("out")),
+        ] {
+            assert!(
+                workspaces
+                    .open(&mut reactor, &at, &[tab(&cwd, &[])])
+                    .is_err(),
+                "{cwd}"
+            );
+            assert_eq!(reactor.pane_count(), 0);
+        }
+        let inside = [tab(&text(root.join("inside")), &[])];
+        assert_eq!(workspaces.open(&mut reactor, &at, &inside), Ok(1));
+        fs::remove_dir_all(&root).unwrap();
     }
 }
