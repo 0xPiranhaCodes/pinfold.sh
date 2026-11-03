@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "hello",
+  "description": "The first request on every connection. Version 1 allows only window.open; version 2 tells the caller what it may call and which pane it is in.",
+  "type": "object",
+  "properties": {
+    "params": {
+      "type": "object",
+      "required": ["version"],
+      "properties": {
+        "version": { "enum": [1, 2] }
+      }
+    },
+    "result": {
+      "oneOf": [
+        {
+          "description": "Version 1.",
+          "type": "object",
+          "required": ["version", "capabilities"],
+          "additionalProperties": false,
+          "properties": {
+            "version": { "const": 1 },
+            "capabilities": { "const": ["window.open"] }
+          }
+        },
+        {
+          "description": "Version 2.",
+          "type": "object",
+          "required": ["version", "methods", "pane"],
+          "additionalProperties": false,
+          "properties": {
+            "version": { "const": 2 },
+            "methods": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "The methods this caller may call."
+            },
+            "pane": {
+              "type": ["integer", "null"],
+              "minimum": 0,
+              "description": "The pane whose terminal and session the caller holds, or null outside a pane or when unidentified."
+            }
+          }
+        }
+      ]
+    }
+  }
+}

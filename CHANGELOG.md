@@ -29,6 +29,8 @@ Entries are generated from Conventional Commits with git-cliff
 - A 256 KiB hash-chained API audit log with optional private, rotating persistence. The file must be a regular file, not a symlink or FIFO, and after a failed write the log stops mirroring to disk and keeps only memory.
 - A native menu bar on macOS: PinFold, Shell, Edit, View, Window and Help, holding every Command shortcut, with new Select All, Bigger, Smaller, Actual Size, Settings and Help commands, and items greyed out when they cannot apply (ADR-0033).
 - ADR-0033: a native menu bar and Dock menu on macOS, and a right-click menu drawn in cells, all running the same commands as the keys.
+- `pane.read`, `pane.last_output` and `pane.send` for a caller's own pane (the `self` scope; other panes are refused): reads are plain text, newest last, at most 2,000,000 bytes, and `last_output` follows OSC 133 marks. A send carries at most 4096 bytes, a pane takes 20 a second, and a full input queue refuses it. `pinfold ctl send` types into a pane. JSON Schemas in [docs/api](docs/api/README.md) (ADR-0032 step 4).
+- Secret redaction for cross-pane text, covering private keys, provider tokens, JWTs, password pairs, the password in a URI and high-entropy strings.
 - The core serves up to 16 callers of its control socket at once on one `mio` thread, so a caller waiting for a window holds up no one (ADR-0032).
 - ADR-0032: the agent API gets one `mio` thread of its own, and M3 lands in eight steps. M1 and M2 are done.
 - `pane.wait` waits on the caller's own pane for a command's exit code, the next prompt, any output or a timeout, with at most 64 parked, and `events.subscribe` sends pane opened, closed and status events; a connection that lets 2 MiB queue unread is closed (ADR-0032 step 6).

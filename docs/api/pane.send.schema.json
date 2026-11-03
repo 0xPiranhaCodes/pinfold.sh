@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "pane.send",
+  "description": "Types text into a pane's program as it is, through the pane's input queue. Text over 4096 bytes is refused, not cut. A pane takes at most 20 sends a second: one more is refused as rate limited, as is a send when the pane's input queue is full. Needs hello version 2, and for now the pane must be the caller's own (the self scope).",
+  "type": "object",
+  "properties": {
+    "params": {
+      "type": "object",
+      "required": ["pane", "text"],
+      "properties": {
+        "pane": { "type": "integer", "minimum": 0, "description": "The pane's number, which must be the caller's own." },
+        "text": { "type": "string", "description": "At most 4096 bytes of UTF-8. It runs a command only if it carries the line end the program expects." }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

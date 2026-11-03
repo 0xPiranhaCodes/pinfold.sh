@@ -519,6 +519,26 @@ fn ctl_lists_the_sessions_panes_inside_and_outside_a_pane_and_not_without_a_term
 }
 
 #[test]
+fn a_pane_can_send_to_itself_and_not_to_another_pane() {
+    let session = Session::new("s", None).unwrap();
+    let ctl = format!("'{}' ctl", session.directory.join("pinfold").display());
+    let client = "\"$PINFOLD_TEST_CLIENT\"";
+    // Both panes send to pane 0: pane 0 reads what it typed, and pane 1 is refused.
+    let shell = format!(
+        "if {ctl} send 0 'typed\n' 2> {client}/e$$; then read line; echo \"$line\" > {client}/got; \
+         else mv {client}/e$$ {client}/refused; fi; exec sleep 30"
+    );
+    let mut core = session.start_core(&["--idle", "2"], &shell).unwrap();
+    assert!(session.wait_for("got"), "{}", session.read_log());
+    assert!(session.wait_for("refused"));
+    assert_eq!(session.read("got"), "typed\n");
+    let refused = session.read("refused");
+    assert!(refused.contains("only the caller's own pane"), "{refused}");
+    core.kill().unwrap();
+    core.wait().unwrap();
+}
+
+#[test]
 fn hardening_twice_is_harmless() {
     let status = Command::new(env::current_exe().unwrap())
         .args(["--exact", "harden_process"])

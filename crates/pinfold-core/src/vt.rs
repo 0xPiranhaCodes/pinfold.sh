@@ -14,7 +14,7 @@ use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, Processor};
 use pinfold_proto::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode};
 
-use crate::marks::{Marks, ShellMarks, WorkingDirectory};
+use crate::marks::{Marks, ShellMarks, ShellPhase, WorkingDirectory};
 use crate::scrollback::Scrollback;
 use crate::search::{self, CopyStep, Copying, Position, Search, SearchStep, Selection};
 
@@ -104,6 +104,12 @@ pub trait VtEngine {
 
     /// Returns the last valid OSC 7 directory, which is a hint that output can fake.
     fn cwd(&self) -> Option<&WorkingDirectory>;
+
+    /// Returns where the last command's output is: from the cursor at its OSC 133 `C` mark to
+    /// the cell before the cursor at the `D` mark after it, or to the end while it runs.
+    /// Nothing if no command has started. Output can fake the marks, and the range is empty
+    /// when its focus comes before its anchor.
+    fn last_output(&self) -> Option<Selection>;
 }
 
 /// The "Graphite Grid" ground and text colours (`docs/design/ui/`).
@@ -235,10 +241,16 @@ impl Scan {
     ///
     /// This follows the parser exactly: only `ESC ]` opens a string, with controls allowed
     /// between the two, and BEL, CAN, SUB or ESC ends one. A string cut short is still
-    /// dispatched when it ends.
-    // shortcut: marks apply on read, ahead of output a synchronized update holds back, fix
-    // this if marks ever need a position in the grid.
-    fn filter(&mut self, bytes: &[u8], marks: &mut Marks, mut pass: impl FnMut(&[u8])) {
+    /// dispatched when it ends. Bytes up to the end of an OSC 133 mark pass with the shell's
+    /// new phase, so the grid holds what came before the mark.
+    // shortcut: marks apply on read, ahead of output a synchronized update holds back, so a
+    // mark inside one takes the cursor from before the update. Fine for shells, which do not.
+    fn filter(
+        &mut self,
+        bytes: &[u8],
+        marks: &mut Marks,
+        mut pass: impl FnMut(&[u8], Option<ShellPhase>),
+    ) {
         let ends = |byte: &u8| matches!(byte, 0x07 | 0x18 | 0x1a | 0x1b);
         let (mut start, mut index) = (0, 0);
         while index < bytes.len() {
@@ -263,7 +275,7 @@ impl Scan {
                     index += 1;
                 }
                 Self::Osc(length) if length >= MAX_SEQUENCE => {
-                    pass(&bytes[start..index]);
+                    pass(&bytes[start..index], None);
                     index += bytes[index..]
                         .iter()
                         .position(ends)
@@ -280,17 +292,21 @@ impl Scan {
                 }
                 Self::Osc(length) => {
                     let byte = bytes[index];
-                    marks.byte(byte);
+                    let marked = marks.byte(byte);
                     *self = match byte {
                         0x1b => Self::Escape,
                         _ if ends(&byte) => Self::Ground,
                         _ => Self::Osc(length + 1),
                     };
                     index += 1;
+                    if marked {
+                        pass(&bytes[start..index], Some(marks.shell.phase));
+                        start = index;
+                    }
                 }
             }
         }
-        pass(&bytes[start..]);
+        pass(&bytes[start..], None);
     }
 }
 
@@ -305,6 +321,10 @@ pub struct AlacrittyEngine {
     /// The store's number for the view's top row, or nothing at the live screen. A number
     /// stays on its row as output arrives, so the view holds still without being told.
     view: Option<usize>,
+    /// The cursor at the last OSC 133 `C` mark, and at the `D` mark after it.
+    // shortcut: positions are rows at the width they were taken, so a resize between the marks
+    // and a read moves the range by the rows reflow adds or removes. Reflow them if that matters.
+    output: Option<(Position, Option<Position>)>,
 }
 
 impl AlacrittyEngine {
@@ -329,6 +349,7 @@ impl AlacrittyEngine {
             replies,
             scrollback,
             view: None,
+            output: None,
         }
     }
 
@@ -479,9 +500,23 @@ impl AlacrittyEngine {
 
 impl VtEngine for AlacrittyEngine {
     fn feed(&mut self, bytes: &[u8], replies: &mut Vec<u8>) {
-        let (parser, term) = (&mut self.parser, &mut self.term);
-        self.scan
-            .filter(bytes, &mut self.marks, |bytes| parser.advance(term, bytes));
+        let (parser, term, output) = (&mut self.parser, &mut self.term, &mut self.output);
+        let scrollback = &self.scrollback;
+        self.scan.filter(bytes, &mut self.marks, |bytes, mark| {
+            parser.advance(term, bytes);
+            let Some(phase) = mark else { return };
+            let cursor = term.grid().cursor.point;
+            let line = usize::try_from(cursor.line.0).unwrap_or(0);
+            let at = Position {
+                row: scrollback.lock().map_or(0, |store| store.end()) + line,
+                column: u16::try_from(cursor.column.0).unwrap_or(u16::MAX),
+            };
+            match (phase, output.as_mut()) {
+                (ShellPhase::Running, _) => *output = Some((at, None)),
+                (ShellPhase::Finished, Some((_, end))) => *end = Some(at),
+                _ => {}
+            }
+        });
         if parser.sync_bytes_count() > MAX_HELD {
             parser.stop_sync(term);
         }
@@ -645,6 +680,25 @@ impl VtEngine for AlacrittyEngine {
     fn cwd(&self) -> Option<&WorkingDirectory> {
         self.marks.cwd.as_ref()
     }
+
+    fn last_output(&self) -> Option<Selection> {
+        let (anchor, end) = self.output?;
+        let focus = match end {
+            None => Position {
+                row: usize::MAX,
+                column: u16::MAX,
+            },
+            Some(Position { row, column: 0 }) => Position {
+                row: row.checked_sub(1)?,
+                column: u16::MAX,
+            },
+            Some(Position { row, column }) => Position {
+                row,
+                column: column - 1,
+            },
+        };
+        Some(Selection { anchor, focus })
+    }
 }
 
 #[cfg(test)]
@@ -779,7 +833,7 @@ mod tests {
 
     fn filtered(scan: &mut Scan, bytes: &[u8]) -> Vec<u8> {
         let mut out = Vec::new();
-        scan.filter(bytes, &mut Marks::default(), |bytes| {
+        scan.filter(bytes, &mut Marks::default(), |bytes, _| {
             out.extend_from_slice(bytes);
         });
         out
