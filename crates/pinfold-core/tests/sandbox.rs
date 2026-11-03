@@ -115,6 +115,8 @@ fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
            && echo git=moved || echo git=kept; \
          (echo x >'{home_dir}/work/.git/scratch') 2>/dev/null \
            && echo scratch=written || echo scratch=refused; \
+         (echo /tmp >'{home_dir}/work/.git/commondir') 2>/dev/null \
+           && echo commondir=written || echo commondir=refused; \
          git -C '{home_dir}/work' -c user.name=a -c user.email=a@example.com \
            commit -q --allow-empty -m x >/dev/null 2>&1 \
            && echo commit=done || echo commit=failed; \
@@ -182,6 +184,7 @@ fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
         work.path().join("out").exists(),
     );
     let hook = work.path().join(".git/hooks/pre-commit").exists();
+    let commondir = work.path().join(".git/commondir").exists();
     let config = fs::read(work.path().join(".git/config")).ok();
     // What the user does next, outside the sandbox: fetch the agent's commits and look.
     let git = |args: &[&str]| {
@@ -213,6 +216,10 @@ fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
         "{output}"
     );
     assert!(output.contains("git=kept"), "{output}");
+    assert!(
+        output.contains("commondir=refused") && !commondir,
+        "{output}"
+    );
     assert!(output.contains("module=refused"), "{output}");
     assert!(output.contains("gitfile=refused"), "{output}");
     // Linux keeps all of `.git` read-only, so the agent commits into its shadow.
