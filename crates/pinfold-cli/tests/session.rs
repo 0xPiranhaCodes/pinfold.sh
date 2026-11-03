@@ -60,6 +60,9 @@ impl Session {
         let mut command = Command::new(self.directory.join("pinfold"));
         command
             .env("XDG_RUNTIME_DIR", self.directory.join("run"))
+            // As in `start_core`: the core it starts saves the session, never to the person's.
+            .env("XDG_STATE_HOME", self.directory.join("state"))
+            .env("HOME", self.directory.join("state"))
             .env("SHELL", shell)
             .env(CLIENT, &self.directory);
         command
@@ -78,10 +81,10 @@ impl Session {
         let core = Command::new(self.directory.join("pinfold-core"))
             .args(arguments)
             .env("XDG_RUNTIME_DIR", self.directory.join("run"))
+            .env("XDG_CONFIG_HOME", self.directory.join("config"))
             // The state directory, on macOS from HOME, so a test never writes the person's.
             .env("XDG_STATE_HOME", self.directory.join("state"))
             .env("HOME", self.directory.join("state"))
-            .env("XDG_CONFIG_HOME", self.directory.join("config"))
             .env("SHELL", &script)
             .env(CLIENT, &self.directory)
             .spawn()?;
@@ -1078,6 +1081,143 @@ fn a_pane_spawns_children_and_reaches_only_them() {
 }
 
 #[test]
+fn ctl_wait_prints_how_a_wait_ended_and_exits_0_1_or_2() {
+    let session = Session::new("cw", None).unwrap();
+    let ctl = format!("'{}' ctl wait", session.directory.join("pinfold").display());
+    // Each line notes what `ctl wait` printed and its exit status. The pane prints in the
+    // background over and over, so a wait parked late still sees a later line or mark.
+    let shell = format!(
+        r#"exec 3> "$PINFOLD_TEST_CLIENT/x$$"
+note() {{ "$@" >&3 2>/dev/null; echo "status $?" >&3; }}
+note {ctl} self --until output --timeout 1
+note {ctl} self --until idle --idle-ms 100 --timeout 20
+(while :; do echo ready-42; sleep 0.2; done) & loud=$!
+note {ctl} self --until match --pattern 'ready-\d+$' --timeout 20
+kill $loud
+(while :; do printf '\033]133;D;3\007'; sleep 0.2; done) & loud=$!
+note {ctl} self --until exit --timeout 20
+kill $loud
+note {ctl} self --until match --pattern '(' --timeout 1
+note {ctl} 9 --until exit --timeout 1
+note {ctl} self --until exit
+mv "$PINFOLD_TEST_CLIENT/x$$" "$PINFOLD_TEST_CLIENT/waited"
+exec sleep 30"#
+    );
+    let mut core = session.start_core(&["--idle", "1"], &shell).unwrap();
+    assert!(session.wait_for("waited"), "{}", session.read_log());
+    let expected = "timeout\nstatus 1\nidle\nstatus 0\nmatch ready-42\nstatus 0\nexit 3\n\
+                    status 0\nstatus 2\nstatus 2\nstatus 2\n";
+    assert_eq!(session.read("waited"), expected);
+    core.kill().unwrap();
+    core.wait().unwrap();
+}
+
+/// Names the directory of a run, in the pane that subscribes to output.
+const OUTPUT: &str = "PINFOLD_TEST_OUTPUT";
+
+/// Not a test: the first pane of [`output_events_and_match_waits_reach_only_the_callers_pane`].
+/// It subscribes to output, spawns a child, and notes what it hears from whom.
+#[test]
+fn output_process() {
+    let Some(directory) = env::var_os(OUTPUT) else {
+        return;
+    };
+    let subscribe = call(
+        2,
+        "events.subscribe",
+        serde_json::json!({"events": ["pane.output"]}),
+    );
+    let mut events = api(&[subscribe]).unwrap();
+    let own = next(&mut events, || Ok(())).unwrap()["result"]["pane"].clone();
+    next(&mut events, || Ok(())).unwrap();
+    let spawned = ask("pane.spawn", serde_json::json!({"where": "split-right"})).unwrap();
+    let child = spawned["result"]["pane"].clone();
+    let wait =
+        serde_json::json!({"pane": child, "until": "match", "pattern": "x", "timeout_ms": 1});
+    let refused = ask("pane.wait", wait).unwrap();
+    let text = "child password=hunter2\n";
+    let send = serde_json::json!({"pane": child, "text": text});
+    ask("pane.send", send).unwrap();
+    // The child has printed before the caller does, so its events would come first.
+    let start = Instant::now();
+    while start.elapsed() < PATIENCE {
+        let read = ask("pane.read", serde_json::json!({"pane": child})).unwrap();
+        if read["result"]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("child")
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let mut tty = fs::OpenOptions::new().write(true).open("/dev/tty").unwrap();
+    std::io::Write::write_all(&mut tty, b"own password=hunter2\n").unwrap();
+    let mut heard = format!("{own}\n{refused}\n");
+    while !heard.contains("own password=hunter2") {
+        let event = next(&mut events, || Ok(())).unwrap();
+        writeln!(heard, "{}", event["params"]).unwrap();
+    }
+    fs::write(Path::new(&directory).join("heard"), heard).unwrap();
+}
+
+/// Not a test: a terminal outside any pane in
+/// [`output_events_and_match_waits_reach_only_the_callers_pane`], which asks for output.
+#[test]
+fn outside_output_process() {
+    let Some(directory) = env::var_os(OUTPUT) else {
+        return;
+    };
+    let events = serde_json::json!({"events": ["pane.output"]});
+    let refused = ask("events.subscribe", events).unwrap();
+    fs::write(Path::new(&directory).join("outside"), refused.to_string()).unwrap();
+}
+
+#[test]
+fn output_events_and_match_waits_reach_only_the_callers_pane() {
+    let session = Session::new("o", None).unwrap();
+    let exe = env::current_exe().unwrap();
+    // The second pane is another of the person's, printing all along.
+    let shell = format!(
+        "if mkdir \"$PINFOLD_TEST_CLIENT/first\"; then {OUTPUT}=\"$PINFOLD_TEST_CLIENT\" exec '{}' \
+         --exact output_process; elif mkdir \"$PINFOLD_TEST_CLIENT/second\"; then \
+         while :; do echo other password=hunter2; sleep 0.1; done; fi; exec cat",
+        exe.display()
+    );
+    let mut core = session.start_core(&["--idle", "2"], &shell).unwrap();
+    assert!(session.wait_for("heard"), "{}", session.read_log());
+    let heard = session.read("heard");
+    let mut lines = heard.lines();
+    let own: u64 = lines.next().unwrap().parse().unwrap();
+    let refused = lines.next().unwrap();
+    assert!(
+        refused.contains("a match wait needs the caller's own pane"),
+        "{heard}"
+    );
+    for line in lines {
+        let event: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(event["event"], "pane.output", "{heard}");
+        assert_eq!(event["pane"], own, "another pane was heard: {heard}");
+    }
+
+    // A terminal that is no pane has no own pane to hear, so it is refused.
+    let mut outside = Command::new(&exe);
+    outside
+        .args(["--exact", "outside_output_process"])
+        .env("XDG_RUNTIME_DIR", session.directory.join("run"))
+        .env(OUTPUT, &session.directory);
+    let _terminal = pinfold_sys::pty::Pty::spawn(outside, 24, 80).unwrap();
+    assert!(session.wait_for("outside"), "{}", session.read_log());
+    let refused = session.read("outside");
+    assert!(
+        refused.contains("pane.output needs the caller's own pane"),
+        "{refused}"
+    );
+    core.kill().unwrap();
+    core.wait().unwrap();
+}
+
+#[test]
 fn mcp_lists_tools_calls_the_core_as_its_pane_and_reports_a_refusal_as_a_tool_error() {
     let session = Session::new("m", None).unwrap();
     let call = |id: u32, name: &str, arguments: serde_json::Value| {
@@ -1141,6 +1281,184 @@ fn mcp_lists_tools_calls_the_core_as_its_pane_and_reports_a_refusal_as_a_tool_er
     );
     core.kill().unwrap();
     core.wait().unwrap();
+}
+
+#[test]
+fn ctl_session_save_writes_a_private_snapshot_only_from_outside_a_pane() {
+    use std::os::unix::fs::PermissionsExt;
+    let session = Session::new("n", None).unwrap();
+    let ctl = format!(
+        "'{}' ctl session save",
+        session.directory.join("pinfold").display()
+    );
+    let to = |name: &str| format!("> \"$PINFOLD_TEST_CLIENT/{name}\" 2>&1");
+    let inside = format!("{ctl} {}; exec sleep 30", to("in"));
+    let mut core = session.start_core(&["--idle", "1"], &inside).unwrap();
+    assert!(session.wait_for("in"), "{}", session.read_log());
+    let refused = session.read("in");
+    assert!(refused.contains("outside any pane"), "{refused}");
+
+    // The core's state directory, which `start_core` puts in the session's.
+    let state = session.directory.join("state");
+    let mut outside = Command::new("/bin/sh");
+    outside
+        .args(["-c", &format!("{ctl} {}", to("out"))])
+        .env("XDG_RUNTIME_DIR", session.directory.join("run"))
+        .env(CLIENT, &session.directory);
+    let _terminal = pinfold_sys::pty::Pty::spawn(outside, 24, 80).unwrap();
+    assert!(session.wait_for("out"));
+    let said = session.read("out");
+    let path = PathBuf::from(said.trim());
+    assert!(path.starts_with(&state), "{said}");
+    assert!(path.ends_with("sessions/default.json"), "{said}");
+    let mode = fs::metadata(&path).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let snapshot: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(snapshot["version"], 1);
+    assert_eq!(snapshot["tabs"][0]["root"]["pane"], 0);
+    // The shell, whose temporary path redaction may take for a secret.
+    assert!(snapshot["panes"][0]["command"].is_string(), "{snapshot}");
+    core.kill().unwrap();
+    core.wait().unwrap();
+}
+
+#[test]
+fn sigterm_saves_the_session_before_the_core_exits() {
+    let session = Session::new("t", None).unwrap();
+    let mut core = session.start_core(&["--idle", "1"], NOTE_PANE).unwrap();
+    assert!(session.wait_for("pane"), "the pane's shell did not start");
+
+    let term = format!("kill -TERM {}", core.id());
+    let sent = Command::new("/bin/sh").args(["-c", &term]).status();
+    assert!(sent.unwrap().success());
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = core.try_wait().unwrap() {
+            break status;
+        }
+        assert!(start.elapsed() < PATIENCE, "the core outlived SIGTERM");
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert!(status.success(), "{}", session.read_log());
+
+    // `pinfold_config::state_dir` under the HOME and XDG_STATE_HOME that `start_core` sets.
+    let state = session
+        .directory
+        .join("state")
+        .join(if cfg!(target_os = "macos") {
+            "Library/Application Support/PinFold"
+        } else {
+            "pinfold"
+        });
+    let saved = fs::read(state.join("sessions/default.json")).unwrap();
+    let snapshot: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(snapshot["tabs"][0]["root"]["pane"], 0);
+}
+
+/// Runs `pinfold ctl <arguments>` in a terminal outside any pane and returns what it printed.
+fn ctl(session: &Session, arguments: &str, name: &str) -> Result<String> {
+    let pinfold = session.directory.join("pinfold");
+    let _ = fs::remove_file(session.directory.join(name));
+    let line = format!(
+        "'{}' {arguments} > \"$PINFOLD_TEST_CLIENT/{name}.tmp\" 2>&1; \
+         mv \"$PINFOLD_TEST_CLIENT/{name}.tmp\" \"$PINFOLD_TEST_CLIENT/{name}\"",
+        pinfold.display()
+    );
+    let mut outside = Command::new("/bin/sh");
+    outside
+        .args(["-c", &line])
+        .env("XDG_RUNTIME_DIR", session.directory.join("run"))
+        .env(CLIENT, &session.directory);
+    let _terminal = pinfold_sys::pty::Pty::spawn(outside, 24, 80)?;
+    assert!(session.wait_for(name), "ctl {arguments} said nothing");
+    Ok(session.read(name))
+}
+
+/// Saves the session once each of its `panes` has told the core its directory, and returns the
+/// snapshot.
+fn save_with_cwds(session: &Session, panes: usize) -> Result<serde_json::Value> {
+    let start = Instant::now();
+    loop {
+        // Until the core answers, ctl says why not, which is no JSON.
+        let said = ctl(session, "ctl list --json", "list")?;
+        let list: serde_json::Value = serde_json::from_str(&said).unwrap_or_default();
+        let listed = list["panes"].as_array().map_or(&[][..], Vec::as_slice);
+        if listed.len() == panes && listed.iter().all(|pane| pane["cwd"].is_string()) {
+            break;
+        }
+        assert!(start.elapsed() < PATIENCE, "{said}");
+        thread::sleep(Duration::from_millis(50));
+    }
+    let path = ctl(session, "ctl session save", "saved")?;
+    Ok(serde_json::from_slice(&fs::read(path.trim())?)?)
+}
+
+/// Not a test: the window of [`a_new_core_restores_the_layout_and_cwds_of_a_killed_one`],
+/// which splits the focused pane and leaves.
+#[test]
+fn split_client_process() {
+    if env::var_os(CLIENT).is_some() {
+        let mut link = Link::new(socket::take_link().unwrap()).unwrap();
+        assert!(link.resize(24, 80));
+        until(&mut link, |link| !link.screens().is_empty()).unwrap();
+        let pane = link.focused();
+        assert!(link.send(Request::Split {
+            pane,
+            way: SplitWay::Right
+        }));
+        until(&mut link, |link| link.screens().len() == 2).unwrap();
+    }
+}
+
+#[test]
+fn a_new_core_restores_the_layout_and_cwds_of_a_killed_one() {
+    let exe = env::current_exe().unwrap();
+    let window = format!("exec '{}' --exact split_client_process", exe.display());
+    let session = Session::new("r", Some(&window)).unwrap();
+    // Each pane works in a directory of its own, and says so with OSC 7. A restore keeps only a
+    // directory no one else can write, which Linux's sticky `/tmp` is not, so these live in the
+    // target directory.
+    let work =
+        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("restore-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&work);
+    fs::create_dir_all(&work).unwrap();
+    let tell = r#"printf '\033]7;file://%s\033\\' "$(pwd -P)""#;
+    let first = format!(
+        "d='{}/w'$$; mkdir \"$d\" && cd \"$d\"; {tell}; exec sleep 60",
+        work.display()
+    );
+    let mut core = session
+        .start_core(&["--window", "2", "80x24"], &first)
+        .unwrap();
+    let saved = save_with_cwds(&session, 3).unwrap();
+    assert_eq!(saved["tabs"].as_array().unwrap().len(), 2, "{saved}");
+    assert!(saved["tabs"][1]["root"]["split"].is_object(), "{saved}");
+    core.kill().unwrap();
+    core.wait().unwrap();
+
+    // The new core, started as a launcher starts it, rebuilds that layout with a shell in each
+    // saved directory.
+    let second = format!("pwd -P >> \"$PINFOLD_TEST_CLIENT/pwds\"; {tell}; exec sleep 60");
+    let mut core = session.start_core(&[], &second).unwrap();
+    let restored = save_with_cwds(&session, 3).unwrap();
+    assert_eq!(restored["tabs"], saved["tabs"]);
+    assert_eq!(restored["active"], saved["active"]);
+    let cwds = |snapshot: &serde_json::Value| {
+        let panes = snapshot["panes"].as_array().unwrap();
+        let cwds = panes
+            .iter()
+            .map(|pane| pane["cwd"].as_str().unwrap().to_owned());
+        cwds.collect::<Vec<_>>()
+    };
+    assert_eq!(cwds(&restored), cwds(&saved));
+    let mut pwds: Vec<String> = session.read("pwds").lines().map(str::to_owned).collect();
+    let mut expected = cwds(&saved);
+    pwds.sort();
+    expected.sort();
+    assert_eq!(pwds, expected);
+    core.kill().unwrap();
+    core.wait().unwrap();
+    fs::remove_dir_all(&work).unwrap();
 }
 
 #[test]
@@ -1436,184 +1754,6 @@ fn a_configured_protect_pattern_refuses_a_send_to_a_pane_that_runs_it() {
     assert_eq!(refused["isError"], true, "{refused}");
     let message = refused["content"][0]["text"].as_str().unwrap();
     assert!(message.contains("the pane is protected: rule"), "{refused}");
-}
-
-#[test]
-fn ctl_session_save_writes_a_private_snapshot_only_from_outside_a_pane() {
-    use std::os::unix::fs::PermissionsExt;
-    let session = Session::new("n", None).unwrap();
-    let ctl = format!(
-        "'{}' ctl session save",
-        session.directory.join("pinfold").display()
-    );
-    let to = |name: &str| format!("> \"$PINFOLD_TEST_CLIENT/{name}\" 2>&1");
-    let inside = format!("{ctl} {}; exec sleep 30", to("in"));
-    let mut core = session.start_core(&["--idle", "1"], &inside).unwrap();
-    assert!(session.wait_for("in"), "{}", session.read_log());
-    let refused = session.read("in");
-    assert!(refused.contains("outside any pane"), "{refused}");
-
-    // The core's state directory, which `start_core` puts in the session's.
-    let state = session.directory.join("state");
-    let mut outside = Command::new("/bin/sh");
-    outside
-        .args(["-c", &format!("{ctl} {}", to("out"))])
-        .env("XDG_RUNTIME_DIR", session.directory.join("run"))
-        .env(CLIENT, &session.directory);
-    let _terminal = pinfold_sys::pty::Pty::spawn(outside, 24, 80).unwrap();
-    assert!(session.wait_for("out"));
-    let said = session.read("out");
-    let path = PathBuf::from(said.trim());
-    assert!(path.starts_with(&state), "{said}");
-    assert!(path.ends_with("sessions/default.json"), "{said}");
-    let mode = fs::metadata(&path).unwrap().permissions().mode();
-    assert_eq!(mode & 0o777, 0o600);
-    let snapshot: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    assert_eq!(snapshot["version"], 1);
-    assert_eq!(snapshot["tabs"][0]["root"]["pane"], 0);
-    // The shell, whose temporary path redaction may take for a secret.
-    assert!(snapshot["panes"][0]["command"].is_string(), "{snapshot}");
-    core.kill().unwrap();
-    core.wait().unwrap();
-}
-
-#[test]
-fn sigterm_saves_the_session_before_the_core_exits() {
-    let session = Session::new("t", None).unwrap();
-    let mut core = session.start_core(&["--idle", "1"], NOTE_PANE).unwrap();
-    assert!(session.wait_for("pane"), "the pane's shell did not start");
-
-    let term = format!("kill -TERM {}", core.id());
-    let sent = Command::new("/bin/sh").args(["-c", &term]).status();
-    assert!(sent.unwrap().success());
-    let start = Instant::now();
-    let status = loop {
-        if let Some(status) = core.try_wait().unwrap() {
-            break status;
-        }
-        assert!(start.elapsed() < PATIENCE, "the core outlived SIGTERM");
-        thread::sleep(Duration::from_millis(20));
-    };
-    assert!(status.success(), "{}", session.read_log());
-
-    // `pinfold_config::state_dir` under the HOME and XDG_STATE_HOME that `start_core` sets.
-    let state = session
-        .directory
-        .join("state")
-        .join(if cfg!(target_os = "macos") {
-            "Library/Application Support/PinFold"
-        } else {
-            "pinfold"
-        });
-    let saved = fs::read(state.join("sessions/default.json")).unwrap();
-    let snapshot: serde_json::Value = serde_json::from_slice(&saved).unwrap();
-    assert_eq!(snapshot["tabs"][0]["root"]["pane"], 0);
-}
-
-/// Runs `pinfold ctl <arguments>` in a terminal outside any pane and returns what it printed.
-fn ctl(session: &Session, arguments: &str, name: &str) -> Result<String> {
-    let pinfold = session.directory.join("pinfold");
-    let _ = fs::remove_file(session.directory.join(name));
-    let line = format!(
-        "'{}' {arguments} > \"$PINFOLD_TEST_CLIENT/{name}.tmp\" 2>&1; \
-         mv \"$PINFOLD_TEST_CLIENT/{name}.tmp\" \"$PINFOLD_TEST_CLIENT/{name}\"",
-        pinfold.display()
-    );
-    let mut outside = Command::new("/bin/sh");
-    outside
-        .args(["-c", &line])
-        .env("XDG_RUNTIME_DIR", session.directory.join("run"))
-        .env(CLIENT, &session.directory);
-    let _terminal = pinfold_sys::pty::Pty::spawn(outside, 24, 80)?;
-    assert!(session.wait_for(name), "ctl {arguments} said nothing");
-    Ok(session.read(name))
-}
-
-/// Saves the session once each of its `panes` has told the core its directory, and returns the
-/// snapshot.
-fn save_with_cwds(session: &Session, panes: usize) -> Result<serde_json::Value> {
-    let start = Instant::now();
-    loop {
-        // Until the core answers, ctl says why not, which is no JSON.
-        let said = ctl(session, "ctl list --json", "list")?;
-        let list: serde_json::Value = serde_json::from_str(&said).unwrap_or_default();
-        let listed = list["panes"].as_array().map_or(&[][..], Vec::as_slice);
-        if listed.len() == panes && listed.iter().all(|pane| pane["cwd"].is_string()) {
-            break;
-        }
-        assert!(start.elapsed() < PATIENCE, "{said}");
-        thread::sleep(Duration::from_millis(50));
-    }
-    let path = ctl(session, "ctl session save", "saved")?;
-    Ok(serde_json::from_slice(&fs::read(path.trim())?)?)
-}
-
-/// Not a test: the window of [`a_new_core_restores_the_layout_and_cwds_of_a_killed_one`],
-/// which splits the focused pane and leaves.
-#[test]
-fn split_client_process() {
-    if env::var_os(CLIENT).is_some() {
-        let mut link = Link::new(socket::take_link().unwrap()).unwrap();
-        assert!(link.resize(24, 80));
-        until(&mut link, |link| !link.screens().is_empty()).unwrap();
-        let pane = link.focused();
-        assert!(link.send(Request::Split {
-            pane,
-            way: SplitWay::Right
-        }));
-        until(&mut link, |link| link.screens().len() == 2).unwrap();
-    }
-}
-
-#[test]
-fn a_new_core_restores_the_layout_and_cwds_of_a_killed_one() {
-    let exe = env::current_exe().unwrap();
-    let window = format!("exec '{}' --exact split_client_process", exe.display());
-    let session = Session::new("r", Some(&window)).unwrap();
-    // Each pane works in a directory of its own, and says so with OSC 7. A restore keeps only a
-    // directory no one else can write, which Linux's sticky `/tmp` is not, so these live in the
-    // target directory.
-    let work =
-        PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("restore-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&work);
-    fs::create_dir_all(&work).unwrap();
-    let tell = r#"printf '\033]7;file://%s\033\\' "$(pwd -P)""#;
-    let first = format!(
-        "d='{}/w'$$; mkdir \"$d\" && cd \"$d\"; {tell}; exec sleep 60",
-        work.display()
-    );
-    let mut core = session
-        .start_core(&["--window", "2", "80x24"], &first)
-        .unwrap();
-    let saved = save_with_cwds(&session, 3).unwrap();
-    assert_eq!(saved["tabs"].as_array().unwrap().len(), 2, "{saved}");
-    assert!(saved["tabs"][1]["root"]["split"].is_object(), "{saved}");
-    core.kill().unwrap();
-    core.wait().unwrap();
-
-    // The new core, started as a launcher starts it, rebuilds that layout with a shell in each
-    // saved directory.
-    let second = format!("pwd -P >> \"$PINFOLD_TEST_CLIENT/pwds\"; {tell}; exec sleep 60");
-    let mut core = session.start_core(&[], &second).unwrap();
-    let restored = save_with_cwds(&session, 3).unwrap();
-    assert_eq!(restored["tabs"], saved["tabs"]);
-    assert_eq!(restored["active"], saved["active"]);
-    let cwds = |snapshot: &serde_json::Value| {
-        let panes = snapshot["panes"].as_array().unwrap();
-        let cwds = panes
-            .iter()
-            .map(|pane| pane["cwd"].as_str().unwrap().to_owned());
-        cwds.collect::<Vec<_>>()
-    };
-    assert_eq!(cwds(&restored), cwds(&saved));
-    let mut pwds: Vec<String> = session.read("pwds").lines().map(str::to_owned).collect();
-    let mut expected = cwds(&saved);
-    pwds.sort();
-    expected.sort();
-    assert_eq!(pwds, expected);
-    core.kill().unwrap();
-    core.wait().unwrap();
-    fs::remove_dir_all(&work).unwrap();
 }
 
 /// Not a test: the window of

@@ -16,6 +16,7 @@ use pinfold_api::redact;
 use pinfold_api::spawn::Place;
 use pinfold_api::trust::{self, State};
 use pinfold_cli::audit;
+use pinfold_cli::output;
 use pinfold_config::workspace as layout;
 use pinfold_core::family::{self, Family, SplitWay};
 use pinfold_core::grants::{Decision, Grants, Released};
@@ -151,12 +152,12 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                     "pane.list",
                     "events.subscribe",
                     "audit.read",
+                    "session.save",
                     "grants.list",
                     "grants.revoke",
                     "workspace.open",
                     "workspace.trust_state",
                     "workspace.ask_trust",
-                    "session.save",
                 ],
                 (false, _) => &["window.open"],
             };
@@ -381,7 +382,8 @@ fn decide(
     }
 }
 
-/// Parks a wait on the caller's own pane or one it spawned, or refuses it.
+/// Parks a wait on the caller's own pane or one it spawned, or refuses it. Match and idle waits
+/// take only the caller's own pane.
 fn park(
     reactor: &Reactor,
     family: &mut Family,
@@ -396,10 +398,24 @@ fn park(
         Ok(pane) => pane,
         Err(reason) => return audit::reply(log, reactor, request, Err(reason.to_owned())),
     };
+    // shortcut: streamed output and match waits are self-only because redacting a stream needs whole-block state; extend to children with an ADR on streamed redaction.
+    let refusal = match wait.until {
+        Until::Match(_) => "a match wait needs the caller's own pane",
+        Until::Idle(_) => "an idle wait needs the caller's own pane",
+        _ => "",
+    };
+    if !refusal.is_empty() && own != Some(pane) {
+        return audit::reply(log, reactor, request, Err(refusal.to_owned()));
+    }
     let until = match wait.until {
         Until::Exit => pinfold_core::wait::Until::Exit,
         Until::Prompt => pinfold_core::wait::Until::Prompt,
         Until::Output => pinfold_core::wait::Until::Output,
+        Until::Idle(quiet) => pinfold_core::wait::Until::Idle(quiet),
+        Until::Match(pattern) => match pinfold_core::wait::Until::matching(&pattern) {
+            Ok(until) => until,
+            Err(reason) => return audit::reply(log, reactor, request, Err(reason)),
+        },
     };
     let deadline = Instant::now() + wait.timeout;
     if let Err(request) = waits.park(reactor, request, pane, until, deadline) {
@@ -410,6 +426,8 @@ fn park(
 /// The result of a wait that ended.
 fn ended(outcome: Outcome) -> Value {
     match outcome {
+        Outcome::Matched(line) => json!({"outcome": "match", "line": line}),
+        Outcome::Idle => json!({"outcome": "idle"}),
         Outcome::Exit(exit) => json!({"outcome": "exit", "exit": exit}),
         Outcome::Prompt => json!({"outcome": "prompt"}),
         Outcome::Output => json!({"outcome": "output"}),
@@ -621,11 +639,15 @@ fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result
     let mut log = audit::open(&config.api);
     let mut window = reactor.has_window();
     loop {
+        let now = Instant::now();
         let deadline = waits.deadline().into_iter().chain(grants.deadline()).min();
-        let wait = deadline.map(|at| at.saturating_duration_since(Instant::now()));
-        let saving = saver.as_ref().and_then(|saver| saver.wait(Instant::now()));
-        let wait = wait.into_iter().chain(saving).min();
-        reactor.turn(Some(wait.map_or(IDLE, |wait| wait.min(IDLE))))?;
+        let wait = deadline.map(|at| at.saturating_duration_since(now));
+        let wait = wait
+            .into_iter()
+            .chain(saver.as_ref().and_then(|saver| saver.wait(now)));
+        output::tap(&mut reactor, &waits, &subscribers);
+        reactor.turn(Some(wait.min().unwrap_or(IDLE)))?;
+        output::hand_out(&mut reactor, &mut waits, &subscribers);
         waits.retain(|request| !request.is_gone());
         grants.retain(|request| !request.is_gone());
         subscribers.retain(|(subscriber, _)| !subscriber.is_gone());
@@ -654,6 +676,16 @@ fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result
                     park(&reactor, &mut family, &mut waits, &mut log, request, wait);
                 }
                 // Every pane of the session, as for pane.list.
+                Method::EventsSubscribe(topics)
+                    if topics.output
+                        && request
+                            .caller()
+                            .and_then(|caller| reactor.pane_of(caller))
+                            .is_none() =>
+                {
+                    let reason = "pane.output needs the caller's own pane";
+                    audit::reply(&mut log, &reactor, request, Err(reason.to_owned()));
+                }
                 Method::EventsSubscribe(topics) if request.caller().is_some() => {
                     if subscribers.is_empty() {
                         known = seen(&reactor);
