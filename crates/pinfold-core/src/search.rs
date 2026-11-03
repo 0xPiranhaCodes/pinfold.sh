@@ -7,6 +7,8 @@
 use std::ops::Range;
 
 use alacritty_terminal::term::cell::{Cell, Flags};
+
+use crate::scrollback::MAX_ZEROWIDTH;
 pub use pinfold_proto::link::{Direction, MAX_QUERY, Position, Selection};
 
 /// Most rows one step of a search or copy reads, which is one or two blocks. See
@@ -332,7 +334,13 @@ impl Copying {
             tab = tab && column % TAB_STOP != 0 && cell.c == ' ';
             if !tab && !cell.flags.intersects(SPACERS) {
                 text.push(cell.c);
-                text.extend(cell.zerowidth().unwrap_or_default());
+                // As history keeps them, so a cell of endless marks cannot flood a copy.
+                text.extend(
+                    cell.zerowidth()
+                        .unwrap_or_default()
+                        .iter()
+                        .take(MAX_ZEROWIDTH),
+                );
             }
             tab |= cell.c == '\t';
         }

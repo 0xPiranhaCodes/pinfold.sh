@@ -12,6 +12,7 @@ Entries are generated from Conventional Commits with git-cliff
 ### Fixed
 
 - The link test that fills every tab and pane uses 128 by 128 panes instead of 1024 by 1024, so it no longer runs past its 20 second limit on CI's Intel Mac.
+- Session and control tests wait for observable events instead of idle-machine timing under load.
 - Missing file and status icons now use installed fallback fonts while preserving the selected text font and terminal cell size.
 - macOS title text and the grid's left edge align with the actual native window buttons, accounting for font size and display scale.
 
@@ -28,6 +29,7 @@ Entries are generated from Conventional Commits with git-cliff
 - Right-click in a pane opens a menu drawn in cells: Copy, Paste, Select All, Find, Split Right, Split Down, New Tab, Zoom and Close Pane. Arrows, Enter and Esc work it as well as the mouse. When a program has turned on mouse reporting, the click goes to it, and `Shift`+right-click opens the menu (ADR-0033).
 - A 256 KiB hash-chained API audit log with optional private, rotating persistence. The file must be a regular file, not a symlink or FIFO, and after a failed write the log stops mirroring to disk and keeps only memory.
 - A native menu bar on macOS: PinFold, Shell, Edit, View, Window and Help, holding every Command shortcut, with new Select All, Bigger, Smaller, Actual Size, Settings and Help commands, and items greyed out when they cannot apply (ADR-0033).
+- A control-socket connection takes many requests, one at a time: it must say `hello` within 2 s and end each line within 2 s of its first byte, and is closed after 60 s idle. Answers and events reach the API thread over bounded channels, and a subscriber that misses an event is closed (ADR-0032).
 - ADR-0033: a native menu bar and Dock menu on macOS, and a right-click menu drawn in cells, all running the same commands as the keys.
 - `pane.read`, `pane.last_output` and `pane.send` for a caller's own pane (the `self` scope; other panes are refused): reads are plain text, newest last, at most 2,000,000 bytes, and `last_output` follows OSC 133 marks. A send carries at most 4096 bytes, a pane takes 20 a second, and a full input queue refuses it. `pinfold ctl send` types into a pane. JSON Schemas in [docs/api](docs/api/README.md) (ADR-0032 step 4).
 - Secret redaction for cross-pane text, covering private keys, provider tokens, JWTs, password pairs, the password in a URI and high-entropy strings.
@@ -44,11 +46,13 @@ Entries are generated from Conventional Commits with git-cliff
 - Pill tabs in the top bar, with hover, a mark on a hidden tab that printed, a quiet look for an
   unfocused window, and no title row in fullscreen.
 - Tabs and splits for real. The core owns the session, so a new window finds the same tabs and panes, and only the panes of the active tab are sent to the window, so a hidden tab costs no frame copies. A session holds at most 32 tabs and 64 panes, and past that a command is refused with a note under the pane. Panes are drawn in cells with cell-drawn borders, the focused pane's in the focus accent.
+- `pinfold mcp` serves the API's pane tools over MCP on stdio, so an agent in a pane can list, read, wait on and type into its own pane.
 - Prefix keys work: `Ctrl+a`, or `keys.prefix`, then `c`, `n`, `p`, `0` to `9`, `|`, `-`, the arrows, `z`, `d` and `x`. `x` asks first, and says so in red when it would end the session. On macOS Command+T opens a tab and Command+1 to Command+9 go to one. A click focuses a pane or picks a tab, and the `+` button opens one. Bindings are in [docs/configuration.md](docs/configuration.md).
 - `pinfold-core` runs as a hardened daemon with a private control socket that takes `hello` and `window.open`.
-- The core records every API request it answers in a hash-chained audit log, never pane contents or sent text; `audit.read`, `pinfold ctl log` and `pinfold ctl log --verify` read and check it, and `api.audit_log = true` also writes it to disk.
+- The core records each API request that reaches it in a hash-chained audit log, never pane contents or sent text; `audit.read`, `pinfold ctl log` and `pinfold ctl log --verify` read and check it, and `api.audit_log = true` also writes it to disk.
 - `pinfold` is now a launcher: it starts the core if none answers, checks that the socket's owner is you, asks for a window and exits. The window is its own `pinfold-window` process on the link (ADR-0028), so a window that crashes or closes leaves every pane running and `pinfold` reattaches. A second `pinfold` brings the window to the front, and a window whose core dies says the session ended. `pinfold --size` is gone.
 - `cargo xtask mem-gate` measures the window and the core as separate processes, and the core beside a window.
+- `pinfold-mux` exports a session's layout as a plain tree that names panes by index, and rebuilds a session from one, refusing a bad tree with an error.
 - A TOML config file with `font_size` and `macos_option_as_alt`. A bad file means the defaults.
 - Padding around the grid, and on macOS a full-height window under the native traffic lights, with `background_opacity` and `background_blur`.
 - Config hot reload: saving the file applies it to the running window, and a bad save keeps the current settings.

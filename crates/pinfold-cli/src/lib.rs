@@ -3,6 +3,7 @@
 use std::io::{self, Write};
 
 pub mod audit;
+pub mod mcp;
 
 /// Reads the config file once, as the window does. A bad file means the defaults, which the
 /// log hears about.

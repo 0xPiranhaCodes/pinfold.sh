@@ -32,7 +32,8 @@ use std::os::fd::{AsFd, AsRawFd, BorrowedFd};
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{self, Sender};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
@@ -63,24 +64,33 @@ const MAX_LINE: usize = 32 * 1024;
 const READ_CHUNK: usize = 4096;
 /// Most bytes of text one `pane.send` carries. More is refused, not cut (threat model, Limits).
 pub const MAX_SEND: usize = 4096;
-/// Most bytes one connection may send: two requests, so it cannot stay and keep talking.
-const MAX_CONNECTION: u64 = 2 * MAX_LINE as u64;
 /// Most bytes queued for a peer. One that will not read past it is closed (ADR-0032 point 5).
 pub const MAX_OUTPUT: usize = 2 * 1024 * 1024;
 /// Most entries one `audit.read` returns.
 pub const MAX_AUDIT_READ: usize = 1000;
 /// Longest `pane.wait` a caller may ask for.
 pub const MAX_WAIT: Duration = Duration::from_secs(600);
-/// Longest a peer may spend sending, however it spaces its bytes, so it cannot hold a slot.
+/// Longest a peer may take to send its first request after it connects, and to end any line
+/// after its first byte, so one that trickles bytes cannot hold a slot.
 const TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a connection stays with no request in flight, wait or subscription (ADR-0032).
+const IDLE: Duration = Duration::from_secs(60);
+/// Most requests handed to the reactor and not yet taken back by this thread, each holding a
+/// ticket. The answer channel holds this many, so the reactor never finds it full.
+const ANSWERS: usize = 4 * MAX_PEERS;
+/// Most events one subscriber may have queued for this thread. One whose next event will not
+/// fit is closed, and its backlog never costs another subscriber an event.
+const EVENTS_EACH: usize = 64;
+/// Most events queued for this thread: every peer at its own limit, so the channel never fills.
+const EVENTS: usize = MAX_PEERS * EVENTS_EACH;
 /// How long the core waits for a window to say hello. Past it a launcher reports the window as
 /// not ready, so a hung one is heard of, and the window may still open.
 pub const OPEN_WAIT: Duration = Duration::from_secs(2);
 /// [`OPEN_WAIT`] for the first window of a core, which starts with nothing warm, so that a slow
 /// Mac does not report failure for a window that opens (`docs/spikes/m2-cold-start`).
 pub const FIRST_OPEN_WAIT: Duration = Duration::from_secs(10);
-/// Longest reply a client reads, the threat model's request limit.
-const MAX_REPLY: u64 = 1_000_000;
+/// Longest reply a client reads: the core closes a peer whose queue reaches [`MAX_OUTPUT`].
+const MAX_REPLY: u64 = MAX_OUTPUT as u64;
 /// Longest a launcher waits for each answer. It can queue behind one peer's first window, then
 /// have its own.
 const REPLY_WAIT: Duration = Duration::from_secs(FIRST_OPEN_WAIT.as_secs() + OPEN_WAIT.as_secs());
@@ -288,6 +298,8 @@ pub struct Control {
     listener: UnixListener,
     /// Held for the core's life. The system drops it on any exit, so a crash leaves no owner.
     _lock: File,
+    /// [`IDLE`], shorter in tests.
+    idle: Duration,
 }
 
 impl Control {
@@ -328,12 +340,18 @@ impl Control {
         Ok(Self {
             listener,
             _lock: lock,
+            idle: IDLE,
         })
     }
 
     /// Answers up to [`MAX_PEERS`] peers at once on this thread, for as long as the process
     /// lives (ADR-0032). `ask` is handed each request for the reactor and must not block: the
-    /// reactor answers the [`Request`] later. A peer that fails costs only its own connection.
+    /// reactor answers the [`Request`] later, or `ask` answers that the core is busy. A peer
+    /// that fails costs only its own connection.
+    ///
+    /// A connection takes many requests, one at a time, each line at most 32 KiB. It must send
+    /// its first within 2 seconds, end each line within 2 seconds of its first byte, and is
+    /// closed after 60 seconds with no request in flight, wait or subscription.
     ///
     /// # Errors
     ///
@@ -341,7 +359,9 @@ impl Control {
     pub fn serve(&self, mut ask: impl FnMut(Request)) -> io::Result<()> {
         let mut poll = Poll::new()?;
         let waker = Arc::new(Waker::new(poll.registry(), WAKE)?);
-        let (answers, answered) = mpsc::channel();
+        let (answers, answered) = mpsc::sync_channel(ANSWERS);
+        let (events_to, evented) = mpsc::sync_channel::<Event>(EVENTS);
+        let tickets = Arc::new(());
         self.listener.set_nonblocking(true)?;
         let listener = self.listener.as_raw_fd();
         poll.registry()
@@ -372,17 +392,21 @@ impl Control {
                     }
                 }
             }
-            while let Ok(((slot, generation), sent)) = answered.try_recv() {
-                let peer = peers.get_mut(slot).and_then(Option::as_mut);
-                match (
-                    peer.filter(|peer: &&mut Peer| peer.generation == generation),
-                    sent,
-                ) {
-                    (Some(peer), Sent::Answer(result)) => peer.answered(result),
-                    (Some(peer), Sent::Event(params)) => {
-                        peer.queue(&json!({"jsonrpc": "2.0", "method": "event", "params": params}));
+            loop {
+                while let Ok((peer, result, _ticket)) = answered.try_recv() {
+                    if let Some(peer) = at(&mut peers, peer) {
+                        peer.answered(result);
                     }
-                    (None, _) => {}
+                }
+                // A subscription is answered before its events, so answers are taken before
+                // each event to keep that order.
+                let Ok((peer, params, queued)) = evented.try_recv() else {
+                    break;
+                };
+                queued.fetch_sub(1, Ordering::Relaxed);
+                let event = json!({"jsonrpc": "2.0", "method": "event", "params": params});
+                if let Some(peer) = at(&mut peers, peer) {
+                    peer.queue(&event);
                 }
             }
             let now = Instant::now();
@@ -392,6 +416,10 @@ impl Control {
                 let (generation, caller) = (peer.generation, peer.caller);
                 let alive = Arc::downgrade(&peer.alive);
                 peer.step(now, &mut |method| {
+                    // Each ticket is at most one answer, so the answer channel cannot fill.
+                    if Arc::strong_count(&tickets) > ANSWERS {
+                        return None;
+                    }
                     let waits = match &method {
                         Method::WindowOpen => mem::replace(&mut wait, OPEN_WAIT),
                         // The reactor answers at the timeout, so this only catches one that cannot.
@@ -403,10 +431,13 @@ impl Control {
                         caller,
                         method,
                         alive: alive.clone(),
+                        until: now + waits,
                         answers: answers.clone(),
+                        events: events_to.clone(),
+                        ticket: Arc::clone(&tickets),
                         waker: Arc::clone(&waker),
                     });
-                    waits
+                    Some(waits)
                 });
                 peer.flush();
                 if peer.done(now) {
@@ -444,7 +475,7 @@ impl Control {
                 .is_ok()
             {
                 *generation += 1;
-                peers[slot] = Some(Peer::new(stream, *generation, caller));
+                peers[slot] = Some(Peer::new(stream, *generation, caller, self.idle));
             }
         }
     }
@@ -458,13 +489,25 @@ pub struct Request {
     peer: (usize, u64),
     caller: Option<Terminal>,
     method: Method,
-    /// Dead once the connection has closed.
-    alive: Weak<()>,
-    answers: Sender<Answer>,
+    /// Dead once the connection has closed, and true once it missed an event.
+    alive: Weak<AtomicBool>,
+    answers: SyncSender<Answer>,
+    events: SyncSender<Event>,
+    /// Counts this request until the API thread takes its answer (see [`ANSWERS`]).
+    ticket: Arc<()>,
+    /// When the peer stops waiting for the answer.
+    until: Instant,
     waker: Arc<Waker>,
 }
 
 impl Request {
+    /// Whether the peer has stopped waiting, so acting now could only repeat what a caller
+    /// that retries will ask for again.
+    #[must_use]
+    pub fn is_late(&self) -> bool {
+        Instant::now() >= self.until
+    }
+
     /// The terminal and session the caller held when it connected, or nothing if it had no
     /// terminal. Map it to a pane on the reactor's thread for each request, so a pane that has
     /// closed since stops matching.
@@ -482,7 +525,12 @@ impl Request {
     /// Answers the caller with the method's result, or a short reason, which must carry no
     /// pane contents, tokens or environment. A caller that has gone hears nothing.
     pub fn answer(self, result: Result<Value, String>) {
-        if self.answers.send((self.peer, Sent::Answer(result))).is_ok() {
+        // Never full while its ticket lives, and it never blocks the reactor.
+        if self
+            .answers
+            .try_send((self.peer, result, self.ticket))
+            .is_ok()
+        {
             let _ = self.waker.wake();
         }
     }
@@ -490,7 +538,7 @@ impl Request {
     /// Whether the caller's connection has closed, so a parked request can be dropped.
     #[must_use]
     pub fn is_gone(&self) -> bool {
-        self.alive.strong_count() == 0
+        gone(&self.alive)
     }
 
     /// Returns what sends events on this request's connection, once its subscription has been
@@ -500,7 +548,8 @@ impl Request {
         Subscriber {
             peer: self.peer,
             alive: self.alive.clone(),
-            answers: self.answers.clone(),
+            events: self.events.clone(),
+            queued: Arc::default(),
             waker: Arc::clone(&self.waker),
         }
     }
@@ -524,37 +573,60 @@ enum Asked {
 #[derive(Debug)]
 pub struct Subscriber {
     peer: (usize, u64),
-    alive: Weak<()>,
-    answers: Sender<Answer>,
+    alive: Weak<AtomicBool>,
+    events: SyncSender<Event>,
+    /// Its events sent and not yet taken by the API thread, at most [`EVENTS_EACH`].
+    queued: Arc<AtomicUsize>,
     waker: Arc<Waker>,
 }
 
 impl Subscriber {
-    /// Sends `{"method": "event", "params": params}`, which must carry no pane contents.
+    /// Sends `{"method": "event", "params": params}`, which must carry no pane contents. It never
+    /// blocks: past `EVENTS_EACH` (64) queued, the connection missed an event and is closed.
     pub fn send(&self, params: Value) {
-        if self.answers.send((self.peer, Sent::Event(params))).is_ok() {
-            let _ = self.waker.wake();
+        let room = self.queued.fetch_add(1, Ordering::Relaxed) < EVENTS_EACH;
+        let sent = room.then(|| {
+            self.events
+                .try_send((self.peer, params, Arc::clone(&self.queued)))
+        });
+        match sent {
+            Some(Ok(())) => {}
+            Some(Err(TrySendError::Disconnected(_))) => return,
+            None | Some(Err(TrySendError::Full(_))) => {
+                self.queued.fetch_sub(1, Ordering::Relaxed);
+                if let Some(missed) = self.alive.upgrade() {
+                    missed.store(true, Ordering::Relaxed);
+                }
+            }
         }
+        let _ = self.waker.wake();
     }
 
-    /// Whether the connection has closed, so the subscription can be dropped.
+    /// Whether the connection has closed or missed an event, so the subscription can be dropped.
     #[must_use]
     pub fn is_gone(&self) -> bool {
-        self.alive.strong_count() == 0
+        gone(&self.alive)
     }
 }
 
-/// What the reactor sends a peer.
-#[derive(Debug)]
-enum Sent {
-    /// The answer to its request.
-    Answer(Result<Value, String>),
-    /// An event for its subscription.
-    Event(Value),
+/// The peer in a slot, if it is still of that generation.
+fn at(peers: &mut [Option<Peer>], (slot, generation): (usize, u64)) -> Option<&mut Peer> {
+    let peer = peers.get_mut(slot).and_then(Option::as_mut);
+    peer.filter(|peer| peer.generation == generation)
 }
 
-/// What is sent to the peer in a slot, of a generation.
-type Answer = ((usize, u64), Sent);
+/// Whether a connection has closed or is closing because it missed an event.
+fn gone(alive: &Weak<AtomicBool>) -> bool {
+    alive
+        .upgrade()
+        .is_none_or(|missed| missed.load(Ordering::Relaxed))
+}
+
+/// An answer for the peer in a slot, of a generation, with its request's ticket.
+type Answer = ((usize, u64), Result<Value, String>, Arc<()>);
+/// An event for the peer in a slot, of a generation.
+/// An event for the peer in a slot, of a generation, with its subscriber's count of queued events.
+type Event = ((usize, u64), Value, Arc<AtomicUsize>);
 
 /// Refuses a socket whose other end is not `user`.
 fn check_peer(socket: BorrowedFd<'_>, user: u32) -> Result<(), Error> {
@@ -623,7 +695,12 @@ pub fn list_panes(stream: &UnixStream) -> Result<(Value, Value), Error> {
 /// As [`list_panes`].
 pub fn ask(stream: &UnixStream, method: &str, params: &Value) -> Result<(Value, Value), Error> {
     check_peer(stream.as_fd(), pinfold_sys::effective_uid())?;
-    stream.set_read_timeout(Some(REPLY_WAIT))?;
+    // `pane.wait` answers only when it ends, so its timeout comes on top.
+    let waits = params.get("timeout_ms").and_then(Value::as_u64);
+    let waits = waits
+        .map_or(Duration::ZERO, Duration::from_millis)
+        .min(MAX_WAIT);
+    stream.set_read_timeout(Some(REPLY_WAIT + waits))?;
     stream.set_write_timeout(Some(REPLY_WAIT))?;
     let hello = json!({"version": VERSION});
     let hello = json!({"jsonrpc": "2.0", "id": 1, "method": "hello", "params": hello});
@@ -638,23 +715,26 @@ struct Peer {
     generation: u64,
     /// The peer's terminal and session at accept, fixed for the connection.
     caller: Option<Terminal>,
-    /// Bytes read and not yet taken as lines.
+    /// Bytes read and not yet taken as lines, at most [`MAX_LINE`].
     input: Vec<u8>,
-    /// Bytes read in all, at most [`MAX_CONNECTION`].
-    taken: u64,
-    /// The peer sent all it may: it ended, failed, or reached the limit.
+    /// The peer ended or failed.
     ended: bool,
     /// The `hello` version, or 0 before it.
     greeted: u64,
     output: Vec<u8>,
     /// The connection ends once its output is written.
     closing: bool,
-    /// When reading stops, however the peer spaces its bytes.
+    /// When it is closed if it has no request in flight and no subscription.
     until: Instant,
+    /// [`IDLE`], or shorter in tests.
+    idle: Duration,
+    /// When the line it has begun must have ended.
+    line_by: Option<Instant>,
     /// The id of the request waiting for the reactor, what it was, and when it stops waiting.
     asked: Option<(Value, Asked, Instant)>,
-    /// Held while the connection lives, so the reactor can drop its waits and subscription.
-    alive: Arc<()>,
+    /// Held while the connection lives, so the reactor can drop its waits and subscription. Set
+    /// once its subscriber misses an event, which closes it.
+    alive: Arc<AtomicBool>,
     /// It has a subscription, so it stays past `until`.
     subscribed: bool,
     /// The peer closed its end or failed.
@@ -664,20 +744,22 @@ struct Peer {
 }
 
 impl Peer {
-    fn new(stream: UnixStream, generation: u64, caller: Option<Terminal>) -> Self {
+    fn new(stream: UnixStream, generation: u64, caller: Option<Terminal>, idle: Duration) -> Self {
         Self {
             stream,
             generation,
             caller,
             input: Vec::new(),
-            taken: 0,
             ended: false,
             greeted: 0,
             output: Vec::new(),
             closing: false,
+            // Its first request is due sooner than the idle limit.
             until: Instant::now() + TIMEOUT,
+            idle,
+            line_by: None,
             asked: None,
-            alive: Arc::new(()),
+            alive: Arc::new(AtomicBool::new(false)),
             subscribed: false,
             hung_up: false,
             gone: false,
@@ -688,31 +770,30 @@ impl Peer {
     fn deadline(&self) -> Option<Instant> {
         match &self.asked {
             Some((_, _, at)) => Some(*at),
-            None => (!self.subscribed).then_some(self.until),
+            None => [(!self.subscribed).then_some(self.until), self.line_by]
+                .into_iter()
+                .flatten()
+                .min(),
         }
     }
 
-    /// Whether `until` has passed for a peer it applies to.
+    /// Whether it is idle past its time, or slow to end a line.
     fn late(&self, now: Instant) -> bool {
-        now >= self.until && !self.subscribed
+        (now >= self.until && !self.subscribed) || self.line_by.is_some_and(|at| now >= at)
     }
 
-    /// Reads all the peer has sent, up to its limit.
+    /// Reads what the peer has sent while its buffer has room for a line. The rest waits in the
+    /// socket until the lines before it are taken.
     fn read(&mut self) {
         let mut buffer = [0; READ_CHUNK];
         while !self.ended {
-            let room = usize::try_from(MAX_CONNECTION - self.taken).unwrap_or(0);
+            let room = MAX_LINE.saturating_sub(self.input.len()).min(buffer.len());
             if room == 0 {
-                self.ended = true;
                 return;
             }
-            let room = room.min(buffer.len());
             match (&mut &self.stream).read(&mut buffer[..room]) {
                 Ok(0) => (self.ended, self.hung_up) = (true, true),
-                Ok(read) => {
-                    self.input.extend_from_slice(&buffer[..read]);
-                    self.taken += read as u64;
-                }
+                Ok(read) => self.input.extend_from_slice(&buffer[..read]),
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => return,
                 Err(_) => (self.ended, self.hung_up) = (true, true),
@@ -721,9 +802,10 @@ impl Peer {
     }
 
     /// Answers each whole line, in order, until one waits for the reactor. `ask` hands it the
-    /// method and returns how long the caller waits.
-    fn step(&mut self, now: Instant, ask: &mut impl FnMut(Method) -> Duration) {
+    /// method and returns how long the caller waits, or nothing if the core is busy.
+    fn step(&mut self, now: Instant, ask: &mut impl FnMut(Method) -> Option<Duration>) {
         while self.asked.is_none() && !self.closing {
+            self.read();
             let line = self
                 .input
                 .iter()
@@ -731,10 +813,16 @@ impl Peer {
                 .position(|&byte| byte == b'\n');
             let Some(end) = line else {
                 // A line past the limit, or a last one with no end.
-                self.closing = self.input.len() >= MAX_LINE || self.ended || self.late(now);
+                self.closing = self.input.len() >= MAX_LINE || self.ended;
+                self.line_by =
+                    (!self.input.is_empty()).then(|| self.line_by.unwrap_or(now + TIMEOUT));
                 return;
             };
             let line: Vec<u8> = self.input.drain(..=end).take(end).collect();
+            if self.input.is_empty() && self.input.capacity() > READ_CHUNK {
+                self.input = Vec::new();
+            }
+            (self.line_by, self.until) = (None, now + self.idle);
             match answer(&line, &mut self.greeted) {
                 Step::Reply(reply, go_on) => {
                     self.queue(&reply);
@@ -751,7 +839,10 @@ impl Peer {
                         Method::PaneWait(_) => Asked::Wait,
                         _ => Asked::Other,
                     };
-                    self.asked = Some((id, asked, now + ask(method)));
+                    match ask(method) {
+                        Some(waits) => self.asked = Some((id, asked, now + waits)),
+                        None => self.queue(&refuse(&id, REFUSED, "the core is busy").0),
+                    }
                 }
             }
         }
@@ -762,20 +853,21 @@ impl Peer {
         let Some((id, asked, _)) = self.asked.take() else {
             return;
         };
-        let (reply, go_on) = match (result, asked) {
+        // A refusal from the reactor keeps the connection, unlike a malformed request.
+        let reply = match (result, asked) {
             (Ok(result), _) => {
                 self.subscribed |= asked == Asked::Subscribe;
-                (done(&id, &result), true)
+                done(&id, &result)
             }
             (Err(reason), Asked::Open) => {
-                refuse(&id, NO_WINDOW, &format!("no window can open: {reason}"))
+                refuse(&id, NO_WINDOW, &format!("no window can open: {reason}")).0
             }
             (Err(reason), Asked::Subscribe | Asked::Wait | Asked::Other) => {
-                refuse(&id, REFUSED, &reason)
+                refuse(&id, REFUSED, &reason).0
             }
         };
         self.queue(&reply);
-        self.closing = !go_on;
+        self.until = Instant::now() + self.idle;
     }
 
     /// Tells a request that waited too long that the core did not answer in time.
@@ -790,6 +882,8 @@ impl Peer {
                 "the core is busy"
             };
             self.answered(Err(reason.to_owned()));
+            // Its late answer could be taken for the next request's, so the connection ends.
+            self.closing = true;
         }
     }
 
@@ -826,11 +920,12 @@ impl Peer {
         }
     }
 
-    /// Whether the connection is over: its queue overflowed, it hung up on a wait, it said its
-    /// last, or its time is up while it waits for nothing.
+    /// Whether the connection is over: its queue overflowed, it missed an event, it hung up on a
+    /// wait, it said its last, or its time is up while it waits for nothing.
     fn done(&self, now: Instant) -> bool {
         let waits = matches!(self.asked, Some((_, Asked::Wait, _)));
         self.gone
+            || self.alive.load(Ordering::Relaxed)
             || (self.hung_up && waits)
             || (self.asked.is_none()
                 && ((self.closing && self.output.is_empty()) || self.late(now)))
@@ -997,7 +1092,16 @@ fn audit_read(params: Option<&Value>) -> Option<Method> {
 /// Checks the shape of a pane method's `params`. Scope is the reactor's to check.
 fn pane_method(method: &str, params: Option<&Value>) -> Result<Method, &'static str> {
     let field = |name| params.and_then(|params| params.get(name));
-    let count = |value: &Value| value.as_u64().and_then(|count| usize::try_from(count).ok());
+    // JSON Schema's integer takes 1.0 as well as 1.
+    let count = |value: &Value| {
+        let integral = || {
+            value
+                .as_f64()
+                .filter(|n| n.fract() == 0.0 && (0.0..=1e15).contains(n))
+        };
+        let count = value.as_u64().or_else(|| integral().map(|n| n as u64));
+        count.and_then(|count| usize::try_from(count).ok())
+    };
     let pane = field("pane")
         .and_then(count)
         .ok_or("params.pane must be a pane number")?;
@@ -1043,6 +1147,7 @@ mod tests {
 
     const HELLO: &[u8] = br#"{"jsonrpc":"2.0","id":1,"method":"hello","params":{"version":1}}"#;
     const OPEN: &[u8] = br#"{"jsonrpc":"2.0","id":2,"method":"window.open"}"#;
+    const PATIENCE: Duration = Duration::from_secs(120);
 
     static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -1145,6 +1250,10 @@ mod tests {
             read(3, Some(5))
         );
         assert_eq!(
+            asked("pane.read", json!({"pane": 3.0, "lines": 5.0})),
+            read(3, Some(5))
+        );
+        assert_eq!(
             asked("pane.last_output", json!({"pane": 0})),
             Step::Ask(json!(2), Method::PaneLastOutput { pane: 0 })
         );
@@ -1152,6 +1261,7 @@ mod tests {
             json!(null),
             json!({"pane": -1}),
             json!({"pane": "1"}),
+            json!({"pane": 1.5}),
             json!([1]),
         ];
         for params in bad {
@@ -1319,8 +1429,9 @@ mod tests {
             let subscriber = request.subscriber();
             let subscribed = matches!(request.method(), Method::EventsSubscribe(_));
             request.answer(Ok(json!({})));
-            // Twice the cap, all queued before the API thread writes any of it.
-            let padding = "x".repeat(1024);
+            // Twice the cap, all queued before the API thread writes any of it, in fewer
+            // events than its queue holds.
+            let padding = "x".repeat(MAX_OUTPUT / 64);
             let count = if subscribed {
                 2 * MAX_OUTPUT / padding.len()
             } else {
@@ -1461,7 +1572,16 @@ mod tests {
         assert!(matches!(Control::bind(&directory), Err(Error::Running)));
         drop(first);
         assert!(socket_path(&directory).exists());
-        assert!(Control::bind(&directory).is_ok());
+        let start = Instant::now();
+        loop {
+            match Control::bind(&directory) {
+                Ok(_) => break,
+                Err(Error::Running) if start.elapsed() < PATIENCE => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                result => panic!("the dead core kept its session: {result:?}"),
+            }
+        }
     }
 
     #[test]
@@ -1567,6 +1687,126 @@ mod tests {
         let mut reply = String::new();
         BufReader::new(&peer).read_line(&mut reply).unwrap();
         assert!(reply.contains("hello comes first"), "{reply}");
+    }
+
+    /// Serves `serve` on a fresh core whose connections idle for at most `idle`.
+    fn core(serve: impl FnMut(Request) + Send + 'static, idle: Duration) -> PathBuf {
+        let directory = fresh();
+        let mut control = Control::bind(&directory).unwrap();
+        control.idle = idle;
+        thread::spawn(move || control.serve(serve));
+        socket_path(&directory)
+    }
+
+    /// Reads to the end, and returns the lines read and how long the core took to close.
+    fn until_closed(stream: &UnixStream) -> (Vec<Value>, Duration) {
+        let start = Instant::now();
+        let lines = BufReader::new(stream).lines().map(|line| line.unwrap());
+        let lines = lines
+            .map(|line| serde_json::from_str(&line).unwrap())
+            .collect();
+        (lines, start.elapsed())
+    }
+
+    #[test]
+    fn a_connection_takes_many_requests_and_closes_when_idle() {
+        let idle = TIMEOUT / 4;
+        let path = core(serving(Ok(json!({}))), idle);
+        let mut stream = UnixStream::connect(path).unwrap();
+        stream.set_read_timeout(Some(10 * TIMEOUT)).unwrap();
+        let mut lines = BufReader::new(stream.try_clone().unwrap()).lines();
+        stream.write_all(HELLO).unwrap();
+        writeln!(stream).unwrap();
+        assert!(lines.next().unwrap().unwrap().contains("\"id\":1"));
+        // Each answer resets the idle time, so three requests outlast it.
+        for id in 2..5 {
+            thread::sleep(idle * 2 / 3);
+            let open = json!({"jsonrpc": "2.0", "id": id, "method": "window.open"});
+            writeln!(stream, "{open}").unwrap();
+            let reply: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+            assert_eq!((&reply["id"], &reply["result"]), (&json!(id), &json!({})));
+        }
+        let (rest, after) = until_closed(&stream);
+        assert!(rest.is_empty(), "{rest:?}");
+        assert!(after >= idle / 2 && after < 2 * TIMEOUT, "{after:?}");
+    }
+
+    #[test]
+    fn the_first_request_and_each_line_come_soon_however_long_idle_is() {
+        let path = core(serving(Ok(json!({}))), 100 * TIMEOUT);
+        let silent = UnixStream::connect(&path).unwrap();
+        let (lines, after) = until_closed(&silent);
+        assert!(lines.is_empty() && after < 2 * TIMEOUT, "{after:?}");
+
+        let mut slow = UnixStream::connect(&path).unwrap();
+        slow.write_all(HELLO).unwrap();
+        writeln!(slow).unwrap();
+        let mut writer = slow.try_clone().unwrap();
+        thread::spawn(move || {
+            // Each byte comes well inside the deadline, but the line never ends.
+            while writer.write_all(b" ").is_ok() {
+                thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let (lines, after) = until_closed(&slow);
+        assert_eq!(lines.len(), 1);
+        assert!(after >= TIMEOUT / 2 && after < 2 * TIMEOUT, "{after:?}");
+    }
+
+    #[test]
+    fn a_full_request_channel_answers_busy_and_keeps_the_connection() {
+        // As the core asks its reactor, which here never takes the first request.
+        let (to, _held) = mpsc::sync_channel(1);
+        let serve = move |request: Request| {
+            if let Err(TrySendError::Full(request)) = to.try_send(request) {
+                request.answer(Err("the core is busy".to_owned()));
+            }
+        };
+        let path = core(serve, IDLE);
+        let hello = br#"{"jsonrpc":"2.0","id":1,"method":"hello","params":{"version":2}}"#;
+        let mut first = UnixStream::connect(&path).unwrap();
+        first.write_all(hello).unwrap();
+        writeln!(first).unwrap();
+        thread::sleep(Duration::from_millis(100));
+        let mut second = UnixStream::connect(&path).unwrap();
+        second.set_read_timeout(Some(TIMEOUT)).unwrap();
+        second.write_all(hello).unwrap();
+        writeln!(second, "\n{}", String::from_utf8_lossy(OPEN)).unwrap();
+        let mut lines = BufReader::new(&second).lines();
+        for id in [1, 2] {
+            let reply: Value = serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap();
+            assert_eq!(reply["id"], json!(id));
+            let message = reply["error"]["message"].as_str().unwrap();
+            assert!(message.ends_with("the core is busy"), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_subscriber_whose_events_overflow_is_closed() {
+        let (gone, subscribers) = mpsc::channel();
+        let serve = move |request: Request| {
+            let subscribed = matches!(request.method(), Method::EventsSubscribe(_));
+            let subscriber = request.subscriber();
+            request.answer(Ok(json!({})));
+            if subscribed {
+                // All sent before the API thread takes any, so the last one does not fit.
+                for _ in 0..=EVENTS_EACH {
+                    subscriber.send(json!({"event": "pane.status"}));
+                }
+                gone.send(subscriber).unwrap();
+            }
+        };
+        let line = r#"{"jsonrpc":"2.0","id":2,"method":"events.subscribe","params":{"events":["pane.status"]}}"#;
+        let stream = asking(serve, line);
+        let subscriber = subscribers.recv_timeout(TIMEOUT).unwrap();
+        assert!(subscriber.is_gone());
+        let (lines, after) = until_closed(&stream);
+        // What was queued before the missed event may still be written.
+        assert!(
+            lines.len() <= EVENTS_EACH + 2 && after < TIMEOUT,
+            "{} {after:?}",
+            lines.len()
+        );
     }
 
     #[test]
