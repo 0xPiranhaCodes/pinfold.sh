@@ -2,17 +2,20 @@
 
 use std::fs::File;
 use std::io;
-use std::mem::ManuallyDrop;
+use std::mem::{ManuallyDrop, MaybeUninit};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::ptr;
+
+use crate::Terminal;
 
 /// A child process attached to a PTY. Dropping it kills the child and closes the master.
 #[derive(Debug)]
 pub struct Pty {
     master: ManuallyDrop<File>,
     child: Child,
+    terminal: Terminal,
 }
 
 fn check(result: libc::c_int) -> io::Result<libc::c_int> {
@@ -78,6 +81,11 @@ impl Pty {
         }
         // SAFETY: `master` is open, and F_SETFL takes an integer flag.
         check(unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) })?;
+        let mut found = MaybeUninit::<libc::stat>::zeroed();
+        // SAFETY: `slave` is open, and `found` is valid for writes of a whole stat for the call.
+        check(unsafe { libc::fstat(slave.as_raw_fd(), found.as_mut_ptr()) })?;
+        // SAFETY: fstat succeeded, and all-zero bytes are valid for this integer struct.
+        let device = unsafe { found.assume_init() }.st_rdev as u32;
 
         command
             .stdin(Stdio::from(slave.try_clone()?))
@@ -97,8 +105,19 @@ impl Pty {
         let child = command.spawn()?;
         Ok(Self {
             master: ManuallyDrop::new(File::from(master)),
+            // The child leads its session, so the session's id is its pid.
+            terminal: Terminal {
+                device,
+                session: child.id(),
+            },
             child,
         })
+    }
+
+    /// The PTY and the session the child leads: a caller that holds both is in this pane.
+    #[must_use]
+    pub fn terminal(&self) -> Terminal {
+        self.terminal
     }
 
     /// The non-blocking master. Read and write through `&File`, and register it for polling.

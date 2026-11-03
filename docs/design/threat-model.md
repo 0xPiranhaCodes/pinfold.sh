@@ -82,7 +82,14 @@ into the core:
    `LOCAL_PEERPID` on macOS), finds its controlling terminal and session, and maps that
    to a pane. A caller must hold the pane's terminal and be in its session. On Linux,
    `SO_PEERPIDFD` guards this lookup against pid reuse. A pane's environment holds no credential, so reading another pane's
-   environment gives nothing.
+   environment gives nothing. The pair is read once, at accept, and mapped to a pane on each
+   request, so a pane that closes stops matching.
+
+   macOS does not use `LOCAL_PEERTOKEN`. Its audit token carries the pid version, but no
+   public call checks a running process against it or reads a terminal by it, so it cannot
+   close the race. macOS, like Linux before 6.5, keeps the window from `connect` to the lookup
+   at accept: a caller that exits there and whose pid then goes to a process in another pane's
+   session would be taken for that pane. The caller cannot choose which process gets its pid.
 3. **No terminal.** A caller with no controlling terminal is unidentified and gets no
    pane scopes. An MCP server must stay in its agent's session.
 4. **Outside a pane.** No token exists on disk. An owner-level action from outside a
@@ -127,8 +134,6 @@ environment.
 
 - Whether a build without the hardened runtime, such as Homebrew building from source, should
   refuse to run a session or warn about it. Only the core and window of `PinFold.app` have it.
-- How macOS closes the pid-reuse race. `LOCAL_PEERTOKEN` is the likely answer and is
-  untested.
 - How sandboxed agents block TIOCSTI while staying in their pane's session, tested with
   real bubblewrap and `sandbox-exec`.
 
