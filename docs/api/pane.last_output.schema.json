@@ -16,7 +16,7 @@
       "required": ["text"],
       "additionalProperties": false,
       "properties": {
-        "text": { "type": "string", "description": "At most 2,000,000 bytes of UTF-8." }
+        "text": { "type": "string", "description": "At most 1,000,000 bytes of UTF-8." }
       }
     }
   }
