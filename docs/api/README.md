@@ -44,10 +44,10 @@ waits. It waits for a command to exit, a prompt, any output, a later line that m
 of at most 1 KiB (`match`), or a quiet spell (`idle`); `match` and `idle` take only the
 caller's own pane. `events.subscribe` sends `event` notifications on its connection. Its
 `pane.output` events carry what the caller's own pane printed, up to 4 KiB each, and never
-another pane's, its children's included. Streaming another pane's text would need redaction that
-holds state across reads, which waits for an ADR. A connection is closed if 2 MiB of replies queue
-unread, or if the core has more events for it than it can queue, so a subscriber that was closed
-may have missed events.
+another pane's, its children's included; a caller outside any pane that asks for them is
+refused. Streaming another pane's text would need redaction that holds state across reads, which
+waits for an ADR. A connection is closed if 2 MiB of replies queue unread, or if the core has more
+events for it than it can queue, so a subscriber that was closed may have missed events.
 
 `pane.status` lets an agent say what state its own pane is in: `needs-you`, `running`, `done`,
 `error` or `idle`, with a message of at most 200 characters. A report outranks the pane's OSC 133

@@ -964,6 +964,18 @@ fn output_process() {
     fs::write(Path::new(&directory).join("heard"), heard).unwrap();
 }
 
+/// Not a test: a terminal outside any pane in
+/// [`output_events_and_match_waits_reach_only_the_callers_pane`], which asks for output.
+#[test]
+fn outside_output_process() {
+    let Some(directory) = env::var_os(OUTPUT) else {
+        return;
+    };
+    let events = serde_json::json!({"events": ["pane.output"]});
+    let refused = ask("events.subscribe", events).unwrap();
+    fs::write(Path::new(&directory).join("outside"), refused.to_string()).unwrap();
+}
+
 #[test]
 fn output_events_and_match_waits_reach_only_the_callers_pane() {
     let session = Session::new("o", None).unwrap();
@@ -990,6 +1002,20 @@ fn output_events_and_match_waits_reach_only_the_callers_pane() {
         assert_eq!(event["event"], "pane.output", "{heard}");
         assert_eq!(event["pane"], own, "another pane was heard: {heard}");
     }
+
+    // A terminal that is no pane has no own pane to hear, so it is refused.
+    let mut outside = Command::new(&exe);
+    outside
+        .args(["--exact", "outside_output_process"])
+        .env("XDG_RUNTIME_DIR", session.directory.join("run"))
+        .env(OUTPUT, &session.directory);
+    let _terminal = pinfold_sys::pty::Pty::spawn(outside, 24, 80).unwrap();
+    assert!(session.wait_for("outside"), "{}", session.read_log());
+    let refused = session.read("outside");
+    assert!(
+        refused.contains("pane.output needs the caller's own pane"),
+        "{refused}"
+    );
     core.kill().unwrap();
     core.wait().unwrap();
 }

@@ -206,7 +206,7 @@ pub struct Topics {
     pub closed: bool,
     /// `pane.status`.
     pub status: bool,
-    /// `pane.output`, for panes in the caller's reach only.
+    /// `pane.output`, for the caller's own pane only.
     pub output: bool,
 }
 

@@ -316,6 +316,16 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
                     park(&reactor, &mut family, &mut waits, &mut log, request, wait);
                 }
                 // Every pane of the session, as for pane.list.
+                Method::EventsSubscribe(topics)
+                    if topics.output
+                        && request
+                            .caller()
+                            .and_then(|caller| reactor.pane_of(caller))
+                            .is_none() =>
+                {
+                    let reason = "pane.output needs the caller's own pane";
+                    audit::reply(&mut log, &reactor, request, Err(reason.to_owned()));
+                }
                 Method::EventsSubscribe(topics) if request.caller().is_some() => {
                     if subscribers.is_empty() {
                         known = seen(&reactor);

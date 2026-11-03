@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "events.subscribe",
-  "description": "Subscribes the connection to events for every pane in the session, as pane.list sees them, and to pane.output for the caller's own pane only; other panes' output, its children's included, is never sent, and asking for it is no error. Needs hello version 2 and a caller with a controlling terminal. One subscription per connection; a second is refused. After the result the core sends notifications, {\"jsonrpc\": \"2.0\", \"method\": \"event\", \"params\": <event>}, with no id. A subscriber that lets 2 MiB of them queue unread is closed.",
+  "description": "Subscribes the connection to events for every pane in the session, as pane.list sees them, and to pane.output for the caller's own pane only; other panes' output, its children's included, is never sent, and asking for it is no error, but a caller outside any pane that asks for pane.output is refused. Needs hello version 2 and a caller with a controlling terminal. One subscription per connection; a second is refused. After the result the core sends notifications, {\"jsonrpc\": \"2.0\", \"method\": \"event\", \"params\": <event>}, with no id. A subscriber that lets 2 MiB of them queue unread is closed.",
   "type": "object",
   "properties": {
     "params": {
