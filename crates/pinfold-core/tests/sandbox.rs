@@ -1,7 +1,7 @@
 //! A sandboxed agent, run with the real `sandbox-exec` or bubblewrap, cannot read hidden
 //! directories or another pane's terminal or type into its own, writes only to its working
-//! directory but not its git hooks, reaches no Unix socket but the API's, and keeps the caller
-//! identity the API gives its pane.
+//! directory but not its git hooks, reaches no Unix socket but the API's, nor on Linux with
+//! Landlock ABI 6 an abstract one, and keeps the caller identity the API gives its pane.
 
 use std::fs;
 use std::io::{ErrorKind, Read};
@@ -70,6 +70,13 @@ fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
         .iter()
         .map(|path| UnixListener::bind(path).unwrap())
         .collect();
+    // An abstract socket, as X11 and session buses use, which only Landlock can scope.
+    #[cfg(target_os = "linux")]
+    let _abstract = {
+        use std::os::linux::net::SocketAddrExt;
+        let address = std::os::unix::net::SocketAddr::from_abstract_name(&name).unwrap();
+        UnixListener::bind_addr(&address).unwrap()
+    };
 
     // Another pane, whose terminal the agent must not open.
     let mut peer = Command::new("/bin/sh");
@@ -116,6 +123,9 @@ fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
          perl -MSocket -e 'for (@ARGV) {{ socket(my $s, PF_UNIX, SOCK_STREAM, 0) or die; \
          print connect($s, pack_sockaddr_un($_)) ? \"planted=open\\n\" : \"planted=closed\\n\" }}' \
          '{planted_paths}'; \
+         perl -MSocket -e 'socket(my $s, PF_UNIX, SOCK_STREAM, 0) or die; \
+         print connect($s, pack_sockaddr_un(\"\\0$ARGV[0]\")) \
+           ? \"abstract=open\\n\" : \"abstract=closed\\n\"' '{name}'; \
          perl -MSocket -e 'socket(my $s, PF_UNIX, SOCK_STREAM, 0) or die; \
          connect($s, pack_sockaddr_un($ARGV[0])) or die; sleep 2' '{api}'; \
          echo done",
@@ -178,6 +188,16 @@ fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
     let opened = output.matches("planted=open").count();
     let closed = output.matches("planted=closed").count();
     assert_eq!((opened, closed), (0, planted.len()), "{output}");
+    if cfg!(target_os = "linux") {
+        let scoped = pinfold_sys::landlock::abi().unwrap() >= pinfold_sys::landlock::SCOPED;
+        eprintln!("Landlock scopes abstract sockets: {scoped}");
+        let want = if scoped {
+            "abstract=closed"
+        } else {
+            "abstract=open"
+        };
+        assert!(output.contains(want), "{output}");
+    }
     assert!(output.contains("rc=refused") && !rc, "{output}");
     assert!(output.contains("work=written") && out, "{output}");
     assert!(!output.contains("SECRET-KEY"), "{output}");
