@@ -95,6 +95,11 @@ impl Queue {
                 .shown
                 .is_some_and(|shown| now.saturating_duration_since(shown) >= ARMED_AFTER);
         let answer = answer(key, armed, whole)?;
+        // Trust has no lasting grant to give; `a` there is not a key the legend offers.
+        if prompt.action == ApprovalAction::Trust && answer == ApprovalAnswer::AllowForThirtyMinutes
+        {
+            return None;
+        }
         let id = prompt.id;
         self.prompts.remove(0);
         self.shown = None;
@@ -118,6 +123,7 @@ fn lines(prompt: &Approval, queued: usize, columns: usize) -> Vec<String> {
     let action = match prompt.action {
         ApprovalAction::Read => "read",
         ApprovalAction::Send => "send to",
+        ApprovalAction::Trust => return trust_lines(prompt, queued, columns),
     };
     let border = format!("{:─<columns$}", "── Pinfold approval ");
     let mut lines: Vec<String> = vec![border.chars().take(columns.max(1)).collect()];
@@ -140,6 +146,32 @@ fn lines(prompt: &Approval, queued: usize, columns: usize) -> Vec<String> {
             visible(text)
         );
         lines.extend(wrap(&shown, columns));
+    }
+    lines
+}
+
+/// A trust prompt as rows: a border, the directory, then every `run` line in full, wrapped.
+fn trust_lines(prompt: &Approval, queued: usize, columns: usize) -> Vec<String> {
+    let border = format!("{:─<columns$}", "── Pinfold workspace trust ");
+    let mut lines: Vec<String> = vec![border.chars().take(columns.max(1)).collect()];
+    let (root, runs) = prompt
+        .texts
+        .split_first()
+        .map_or(("", &[][..]), |(root, runs)| (root.as_str(), runs));
+    let mut head = format!(" ◆ needs you  Trust the layout of {}", visible(root));
+    if queued > 1 {
+        let _ = write!(head, " (1 of {queued})");
+    }
+    if prompt.target == 1 {
+        head.push_str(", changed since it was trusted");
+    }
+    let _ = write!(head, "? It types {} run line(s):", runs.len());
+    lines.extend(wrap(&head, columns));
+    for (index, run) in runs.iter().enumerate() {
+        lines.extend(wrap(
+            &format!("run {}: {}", index + 1, visible(run)),
+            columns,
+        ));
     }
     lines
 }
@@ -185,7 +217,20 @@ fn banner(frame: &mut Frame, prompt: &Approval, queued: usize) {
             };
         }
     }
-    let legend = if whole {
+    let trust = prompt.action == ApprovalAction::Trust;
+    let legend = if whole && trust {
+        (
+            format!(" y trust · n/Esc don't trust · the {shown} rows above are this prompt"),
+            TEXT,
+        )
+    } else if trust {
+        (
+            format!(
+                " ✕ too long to show whole; only n/Esc don't trust is offered · the {shown} rows above are this prompt"
+            ),
+            RED,
+        )
+    } else if whole {
         (
             format!(
                 " y allow once · a allow 30 min · n/Esc deny · the {shown} rows above are this prompt"
@@ -365,6 +410,64 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("y allow once"), "{text}");
+    }
+
+    fn trust(runs: usize) -> Approval {
+        let mut texts = vec!["/home/me/project".to_owned()];
+        texts.extend((1..=runs).map(|run| format!("npm run task-{run}\u{1b}[2J")));
+        Approval {
+            id: 40 + runs as u64,
+            caller: 0,
+            target: 1,
+            action: ApprovalAction::Trust,
+            texts,
+        }
+    }
+
+    #[test]
+    fn a_trust_prompt_lists_the_directory_and_every_run_line() {
+        let prompt = trust(3);
+        let mut frame = frame(8, 80);
+        banner(&mut frame, &prompt, 1);
+        let text = text(&frame);
+        assert!(text.contains("── Pinfold workspace trust"), "{text}");
+        assert!(
+            text.contains("/home/me/project, changed since it was trusted"),
+            "{text}"
+        );
+        for run in 1..=3 {
+            let shown = format!("run {run}: npm run task-{run}<U+001B>[2J");
+            assert!(text.contains(&shown), "{text}");
+        }
+        assert!(text.contains("y trust · n/Esc don't trust"), "{text}");
+    }
+
+    #[test]
+    fn trust_is_not_offered_when_the_run_lines_do_not_fit_and_a_never_trusts() {
+        let start = Instant::now();
+        let later = start + ARMED_AFTER;
+        let mut queue = Queue::default();
+        queue.focus(true);
+        let _ = queue.add(trust(30));
+        let mut frame = frame(23, 80);
+        queue.draw(&mut frame, start);
+        let text = text(&frame);
+        assert!(text.contains("only n/Esc don't trust is offered"), "{text}");
+        assert!(!text.contains("y trust"), "{text}");
+        assert_eq!(queue.key(&Key::Character("y".into()), later, 23, 80), None);
+
+        let mut queue = Queue::default();
+        queue.focus(true);
+        let _ = queue.add(trust(2));
+        let _ = queue.add(trust(1));
+        queue.draw(&mut frame, start);
+        assert_eq!(queue.key(&Key::Character("a".into()), later, 23, 80), None);
+        assert_eq!(
+            queue.key(&Key::Character("y".into()), later, 23, 80),
+            Some((42, ApprovalAnswer::AllowOnce))
+        );
+        // Trust prompts never merge, even from the same directory.
+        assert!(!queue.is_empty());
     }
 
     fn read(target: u32) -> Approval {

@@ -3,10 +3,11 @@
 //!
 //! It takes `hello`, `window.open` and, after `hello` version 2, `pane.list`, `pane.read`,
 //! `pane.last_output`, `pane.send`, `pane.wait`, `events.subscribe`, `audit.read`,
-//! `grants.list` and `grants.revoke`, as newline-delimited JSON-RPC 2.0 (ADR-0009,
-//! ADR-0028, ADR-0032). `window.open` takes no arguments, so a caller
-//! cannot name a program. This only checks a request's shape: the reactor answers every
-//! [`Request`], checks its scope, parks waits and sends events, so nothing here reaches a pane.
+//! `grants.list`, `grants.revoke`, `workspace.trust_state` and `workspace.ask_trust`, as
+//! newline-delimited JSON-RPC 2.0 (ADR-0009, ADR-0028, ADR-0032). `window.open` takes no
+//! arguments, so a caller cannot name a program. This only checks a request's shape: the
+//! reactor answers every [`Request`], checks its scope, parks waits and sends events, so
+//! nothing here reaches a pane.
 //! Same-user controls are guardrails (threat model).
 //!
 //! ```no_run
@@ -176,7 +177,24 @@ pub enum Method {
         /// Stable grant id.
         id: u64,
     },
+    /// `workspace.trust_state`: whether a directory is trusted with a layout's hash.
+    WorkspaceTrustState(Workspace),
+    /// `workspace.ask_trust`: asks the window whether to trust a layout, showing every `run` line.
+    /// Accepted only from a terminal outside every pane.
+    WorkspaceAskTrust(Workspace, Vec<String>),
 }
+
+/// A workspace named by `workspace.trust_state` and `workspace.ask_trust`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Workspace {
+    /// The project directory, an absolute path the reactor makes canonical.
+    pub root: String,
+    /// The layout file's SHA-256, 64 lowercase hexadecimal digits.
+    pub sha256: String,
+}
+
+/// Most `run` lines one trust prompt shows.
+pub const MAX_RUNS: usize = 64;
 
 /// What `pane.wait` waits for, until its timeout.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -467,7 +485,8 @@ impl Control {
                         Method::PaneWait(Wait { timeout, .. }) => *timeout + OPEN_WAIT,
                         Method::PaneRead { .. }
                         | Method::PaneLastOutput { .. }
-                        | Method::PaneSend { .. } => APPROVAL_WAIT + OPEN_WAIT,
+                        | Method::PaneSend { .. }
+                        | Method::WorkspaceAskTrust(..) => APPROVAL_WAIT + OPEN_WAIT,
                         _ => OPEN_WAIT,
                     };
                     ask(Request {
@@ -1109,8 +1128,17 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
         _ if *greeted == 0 => refuse(Some(id), NO_HELLO, "hello comes first"),
         Some("window.open") => Step::Ask(id.clone(), Method::WindowOpen),
         Some(
-            method @ ("pane.list" | "pane.read" | "pane.last_output" | "pane.send" | "pane.spawn"
-            | "pane.close" | "workspace.open" | "grants.list" | "grants.revoke"),
+            method @ ("pane.list"
+            | "pane.read"
+            | "pane.last_output"
+            | "pane.send"
+            | "pane.spawn"
+            | "pane.close"
+            | "grants.list"
+            | "grants.revoke"
+            | "workspace.open"
+            | "workspace.trust_state"
+            | "workspace.ask_trust"),
         ) if *greeted < VERSION => refuse(
             Some(id),
             NO_METHOD,
@@ -1174,6 +1202,12 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
                 "grants.revoke takes a positive numeric id",
             ),
         },
+        Some(method @ ("workspace.trust_state" | "workspace.ask_trust")) => {
+            match workspace(method, request.get("params")) {
+                Ok(method) => Step::Ask(id.clone(), method),
+                Err(reason) => refuse(Some(id), BAD_PARAMS, reason),
+            }
+        }
         _ => refuse(Some(id), NO_METHOD, "unknown method"),
     }
 }
@@ -1298,6 +1332,39 @@ fn pane_method(method: &str, params: Option<&Value>) -> Result<Method, &'static 
         "pane.close" => Ok(Method::PaneClose { pane }),
         _ => Ok(Method::PaneLastOutput { pane }),
     }
+}
+
+/// Checks a workspace method's `params`: an absolute `root`, a lowercase hex `sha256`, and for
+/// `workspace.ask_trust` at most [`MAX_RUNS`] `runs` strings.
+fn workspace(method: &str, params: Option<&Value>) -> Result<Method, &'static str> {
+    let field = |name| params.and_then(|params| params.get(name));
+    let root = field("root")
+        .and_then(Value::as_str)
+        .filter(|root| root.starts_with('/'))
+        .ok_or("params.root must be an absolute path")?;
+    let sha256 = field("sha256")
+        .and_then(Value::as_str)
+        .filter(|hash| {
+            hash.len() == 64 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
+        .ok_or("params.sha256 must be 64 lowercase hexadecimal digits")?;
+    let workspace = Workspace {
+        root: root.to_owned(),
+        sha256: sha256.to_owned(),
+    };
+    if method == "workspace.trust_state" {
+        return Ok(Method::WorkspaceTrustState(workspace));
+    }
+    let runs = field("runs")
+        .and_then(Value::as_array)
+        .filter(|runs| runs.len() <= MAX_RUNS)
+        .and_then(|runs| {
+            runs.iter()
+                .map(|run| Some(run.as_str()?.to_owned()))
+                .collect()
+        })
+        .ok_or("params.runs must be at most 64 strings")?;
+    Ok(Method::WorkspaceAskTrust(workspace, runs))
 }
 
 /// Feeds one bounded request line through every parser state used by a control-socket peer.
@@ -1484,6 +1551,62 @@ mod tests {
         let line = br#"{"jsonrpc":"2.0","id":2,"method":"approval.answer","params":{"id":1,"answer":"allow"}}"#;
         let (reply, go_on) = replied(line, &mut VERSION.clone());
         assert_eq!((code(&reply), go_on), (Some(NO_METHOD), false));
+    }
+
+    #[test]
+    fn workspace_trust_takes_an_absolute_root_a_sha256_and_bounded_runs() {
+        let request = |method: &str, params: Value| {
+            json!({"jsonrpc": "2.0", "id": 3, "method": method, "params": params}).to_string()
+        };
+        let hash = "a".repeat(64);
+        let workspace = Workspace {
+            root: "/p".to_owned(),
+            sha256: hash.clone(),
+        };
+        let line = request(
+            "workspace.ask_trust",
+            json!({"root": "/p", "sha256": hash, "runs": ["make"]}),
+        );
+        let (reply, _) = replied(line.as_bytes(), &mut OLDEST.clone());
+        assert_eq!(code(&reply), Some(NO_METHOD));
+        let asked = answer(line.as_bytes(), &mut VERSION.clone());
+        let method = Method::WorkspaceAskTrust(workspace.clone(), vec!["make".to_owned()]);
+        assert_eq!(asked, Step::Ask(json!(3), method));
+        let line = request(
+            "workspace.trust_state",
+            json!({"root": "/p", "sha256": hash}),
+        );
+        let asked = answer(line.as_bytes(), &mut VERSION.clone());
+        assert_eq!(
+            asked,
+            Step::Ask(json!(3), Method::WorkspaceTrustState(workspace))
+        );
+        for (method, params) in [
+            (
+                "workspace.trust_state",
+                json!({"root": "p", "sha256": hash}),
+            ),
+            (
+                "workspace.trust_state",
+                json!({"root": "/p", "sha256": "A".repeat(64)}),
+            ),
+            (
+                "workspace.trust_state",
+                json!({"root": "/p", "sha256": "a"}),
+            ),
+            ("workspace.ask_trust", json!({"root": "/p", "sha256": hash})),
+            (
+                "workspace.ask_trust",
+                json!({"root": "/p", "sha256": hash, "runs": [1]}),
+            ),
+            (
+                "workspace.ask_trust",
+                json!({"root": "/p", "sha256": hash, "runs": vec![""; MAX_RUNS + 1]}),
+            ),
+        ] {
+            let (reply, _) = replied(request(method, params).as_bytes(), &mut VERSION.clone());
+            assert_eq!(code(&reply), Some(BAD_PARAMS), "{method}");
+        }
     }
 
     #[test]
