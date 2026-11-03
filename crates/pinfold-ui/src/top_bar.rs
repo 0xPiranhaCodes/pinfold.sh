@@ -28,21 +28,22 @@ pub const LEFT_POINTS: f64 = if cfg!(target_os = "macos") { 86.0 } else { 0.0 };
 const CHROME: u32 = DEFAULT_BACKGROUND;
 /// The active tab. The default blue is a running agent's colour, and a state is glyph, colour
 /// and word, so a tab must not look like one.
-const ACTIVE: u32 = 0x005c_d6cb;
-/// A tab that is not active, the new tab button, and the active tab of an unfocused window.
-const QUIET: u32 = 0x002b_2b2b;
-const HOVER: u32 = 0x003a_3a3a;
-const QUIET_TEXT: u32 = 0x009a_9a9a;
-const HOVER_TEXT: u32 = 0x00e8_e8e8;
+const ACTIVE: u32 = 0x0025_3c3b;
+const ACCENT: u32 = 0x005c_d6cb;
+/// An inactive tab or the new tab button.
+const QUIET: u32 = 0x001c_2026;
+const HOVER: u32 = 0x002b_323b;
+const QUIET_TEXT: u32 = 0x00b0_b8c4;
+const HOVER_TEXT: u32 = 0x00e2_e5ea;
 /// The number on a tab that is not active.
-const KEY_TEXT: u32 = 0x006a_6a6a;
-const NEW_TAB_TEXT: u32 = 0x00c8_c8c8;
-const TITLE: u32 = 0x008a_8a8a;
-const CLOCK_TEXT: u32 = 0x00e8_e8e8;
+const KEY_TEXT: u32 = 0x0090_9ba9;
+const NEW_TAB_TEXT: u32 = 0x00b0_b8c4;
+const TITLE: u32 = 0x009b_a5b3;
+const CLOCK_TEXT: u32 = 0x00e2_e5ea;
 /// The title and date of an unfocused window.
-const UNFOCUSED_TITLE: u32 = 0x005a_5a5a;
+const UNFOCUSED_TITLE: u32 = 0x0087_909e;
 /// The time and the cursor of an unfocused window.
-const UNFOCUSED: u32 = 0x008a_8a8a;
+const UNFOCUSED: u32 = 0x009b_a5b3;
 
 const FALLBACK: &str = "shell";
 /// Widest label in cells, so it stays a tab and cannot crowd out the clock.
@@ -251,8 +252,8 @@ pub fn hit(column: u16, tabs: &[impl AsRef<str>], activity: u32, columns: u16) -
 /// Returns a tab's fill, label colour and number colour.
 fn look<L>(index: usize, bar: &Bar<'_, L>) -> (u32, u32, u32) {
     match (index == bar.active, bar.focused) {
-        (true, true) => (ACTIVE, CHROME | BOLD, QUIET_TEXT),
-        (true, false) => (QUIET, CHROME | BOLD, KEY_TEXT),
+        (true, true) => (ACTIVE, ACCENT | BOLD, QUIET_TEXT),
+        (true, false) => (HOVER, HOVER_TEXT | BOLD, KEY_TEXT),
         _ if bar.hovered == Some(index) => (HOVER, HOVER_TEXT, QUIET_TEXT),
         _ => (QUIET, QUIET_TEXT, KEY_TEXT),
     }
@@ -274,7 +275,7 @@ fn strip(frame: &mut Frame, bar: &Bar<'_, impl AsRef<str>>, row: usize) {
         };
         let mut at = span.start + LEADING;
         if has_news(bar.activity, span.index) {
-            put(frame, row, at, ACTIVITY_MARK, ACTIVE, fill);
+            put(frame, row, at, ACTIVITY_MARK, ACCENT, fill);
             at += ACTIVITY;
         }
         write(frame, row, at, &fit(label, room), text);
@@ -580,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn one_focused_tab_is_a_teal_pill_with_its_key_then_the_button() {
+    fn one_focused_tab_has_a_tinted_pill_with_its_key_then_the_button() {
         let frame = tabs(60, &["agent"], 0);
         let row = strip_of(&frame);
         let cells = LEADING + "agent".len() + key_cells(0) + 1;
@@ -592,7 +593,7 @@ mod tests {
         assert_eq!(row[2].character, 'a');
         assert_eq!(
             (row[2].foreground, row[2].background),
-            (CHROME | BOLD, ACTIVE)
+            (ACCENT | BOLD, ACTIVE)
         );
         assert_eq!(row[cells - 1].character, RIGHT_CAP);
         assert_eq!(row[cells - 1].foreground, ACTIVE | TALL);
@@ -676,7 +677,7 @@ mod tests {
         let row = strip_of(&frame);
         let start = spans(&names, 0b10, 60).nth(1).unwrap().start;
         assert_eq!(row[start + 2].character, ACTIVITY_MARK);
-        assert_eq!(row[start + 2].foreground, ACTIVE);
+        assert_eq!(row[start + 2].foreground, ACCENT);
         assert_eq!(row[start + 4].character, 'b');
         assert!(
             spans(&names, 0b10, 60).nth(1).unwrap().end > spans(&names, 0, 60).nth(1).unwrap().end
@@ -720,10 +721,10 @@ mod tests {
         assert_eq!(frame.cells[43].foreground, UNFOCUSED_TITLE);
         assert_eq!(frame.cells[57].foreground, UNFOCUSED);
         let row = strip_of(&frame);
-        assert_eq!(row[0].foreground, QUIET | TALL);
+        assert_eq!(row[0].foreground, HOVER | TALL);
         assert_eq!(
             (row[2].foreground, row[2].background),
-            (CHROME | BOLD, QUIET)
+            (HOVER_TEXT | BOLD, HOVER)
         );
         assert_eq!(frame.cursor, Some((3, 2)));
         assert_eq!(

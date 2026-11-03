@@ -9,6 +9,10 @@ Entries are generated from Conventional Commits with git-cliff
 
 ## [Unreleased]
 
+### Changed
+
+- Refined window chrome with graphite tab surfaces, teal active labels, readable unfocused tabs, quieter search hints, and more space around the terminal.
+
 ### Added
 
 - Tests that fail if the core stops refusing a debugger, or a pane's shell starts refusing one, and `tests/hardening/audit.sh`, which attacks real binaries by hand and is where the threat model's table comes from.
