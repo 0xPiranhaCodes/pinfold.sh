@@ -26,6 +26,7 @@ Every connection starts with `hello`:
 | `events.subscribe` | Version 2 and a terminal    | [`events.subscribe.schema.json`](events.subscribe.schema.json) |
 | `pane.status`      | Version 2 and its own pane  | [`pane.status.schema.json`](pane.status.schema.json)         |
 | `audit.read`       | Version 2, outside any pane | [`audit.read.schema.json`](audit.read.schema.json)           |
+| `workspace.open`   | Version 2, a terminal, no pane | [`workspace.open.schema.json`](workspace.open.schema.json) |
 | `grants.list`      | Version 2, outside panes    | [`grants.list.schema.json`](grants.list.schema.json)         |
 | `grants.revoke`    | Version 2, outside panes    | [`grants.revoke.schema.json`](grants.revoke.schema.json)     |
 
@@ -92,6 +93,11 @@ programs print, which can fake them: read them as hints, not facts. `pinfold ctl
 [--pattern <regex>] [--idle-ms <n>] --timeout <s>` prints how the wait ended, and exits 0 if
 what it waited for happened, 1 on a timeout or a closed pane, and 2 on an error. A core that refuses version 2 is older than the client, and
 `pinfold ctl` says to quit PinFold so that a new core starts.
+
+`pinfold up [dir]` reads `<dir>/.pinfold/layout.toml`, the current directory's by default,
+starts a core and a window as `pinfold` does, and sends `workspace.open` with each pane's split
+and cwd. A second run for the same directory focuses its first open tab. `run` lines are not
+sent: they wait for workspace trust, and `pinfold up` says how many there are.
 
 ## MCP
 

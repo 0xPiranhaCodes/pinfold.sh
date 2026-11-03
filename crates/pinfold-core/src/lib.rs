@@ -17,3 +17,4 @@ mod tabs;
 pub mod tap;
 pub mod vt;
 pub mod wait;
+pub mod workspace;
