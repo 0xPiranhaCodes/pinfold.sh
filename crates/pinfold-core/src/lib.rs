@@ -11,5 +11,6 @@ pub mod search;
 pub mod shell;
 pub mod status;
 mod tabs;
+pub mod tap;
 pub mod vt;
 pub mod wait;

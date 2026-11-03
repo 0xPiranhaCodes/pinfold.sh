@@ -620,6 +620,10 @@ criteria = "safe-to-deploy"
 version = "0.9.5"
 criteria = "safe-to-deploy"
 
+[[exemptions.regex]]
+version = "1.13.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.regex-automata]]
 version = "0.4.18"
 criteria = "safe-to-deploy"

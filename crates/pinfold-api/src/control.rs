@@ -135,7 +135,7 @@ pub enum Method {
 }
 
 /// What `pane.wait` waits for, until its timeout.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Wait {
     /// The pane named, or nothing for `self`, the caller's own.
     pub pane: Option<usize>,
@@ -146,7 +146,7 @@ pub struct Wait {
 }
 
 /// What ends a `pane.wait`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Until {
     /// The shell finishes a command (OSC 133 `D`).
     Exit,
@@ -154,7 +154,15 @@ pub enum Until {
     Prompt,
     /// The program writes anything.
     Output,
+    /// A line printed later matches this regex, at most [`MAX_PATTERN`] bytes, which the
+    /// reactor compiles.
+    Match(String),
+    /// The program writes nothing for this long, from 100 ms to [`MAX_WAIT`].
+    Idle(Duration),
 }
+
+/// Longest `pane.wait` pattern.
+pub const MAX_PATTERN: usize = 1024;
 
 /// The events a subscriber asked for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -165,6 +173,8 @@ pub struct Topics {
     pub closed: bool,
     /// `pane.status`.
     pub status: bool,
+    /// `pane.output`, for panes in the caller's reach only.
+    pub output: bool,
 }
 
 /// Why the core cannot take the control socket.
@@ -506,6 +516,7 @@ impl Request {
     pub fn subscriber(&self) -> Subscriber {
         Subscriber {
             peer: self.peer,
+            caller: self.caller,
             alive: self.alive.clone(),
             answers: self.answers.clone(),
             waker: Arc::clone(&self.waker),
@@ -531,13 +542,21 @@ enum Asked {
 #[derive(Debug)]
 pub struct Subscriber {
     peer: (usize, u64),
+    caller: Option<Terminal>,
     alive: Weak<()>,
     answers: Sender<Answer>,
     waker: Arc<Waker>,
 }
 
 impl Subscriber {
-    /// Sends `{"method": "event", "params": params}`, which must carry no pane contents.
+    /// The subscriber's caller, as [`Request::caller`] gives it.
+    #[must_use]
+    pub fn caller(&self) -> Option<Terminal> {
+        self.caller
+    }
+
+    /// Sends `{"method": "event", "params": params}`, which carries pane contents only for a
+    /// pane in the caller's reach, redacted unless it is the caller's own.
     pub fn send(&self, params: Value) {
         if self.answers.send((self.peer, Sent::Event(params))).is_ok() {
             let _ = self.waker.wake();
@@ -629,8 +648,22 @@ pub fn list_panes(stream: &UnixStream) -> Result<(Value, Value), Error> {
 ///
 /// As [`list_panes`].
 pub fn ask(stream: &UnixStream, method: &str, params: &Value) -> Result<(Value, Value), Error> {
+    ask_longer(stream, method, params, Duration::ZERO)
+}
+
+/// As [`ask`], waiting `longer` for the answer as well, as a `pane.wait` needs.
+///
+/// # Errors
+///
+/// As [`ask`].
+pub fn ask_longer(
+    stream: &UnixStream,
+    method: &str,
+    params: &Value,
+    longer: Duration,
+) -> Result<(Value, Value), Error> {
     check_peer(stream.as_fd(), pinfold_sys::effective_uid())?;
-    stream.set_read_timeout(Some(REPLY_WAIT))?;
+    stream.set_read_timeout(Some(REPLY_WAIT + longer))?;
     stream.set_write_timeout(Some(REPLY_WAIT))?;
     let hello = json!({"version": VERSION});
     let hello = json!({"jsonrpc": "2.0", "id": 1, "method": "hello", "params": hello});
@@ -920,7 +953,7 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
             None => refuse(
                 Some(id),
                 BAD_PARAMS,
-                "pane.wait takes pane, until and timeout_ms",
+                "pane.wait takes pane, until, timeout_ms, and pattern or idle_ms",
             ),
         },
         Some("events.subscribe") => match topics(request.get("params")) {
@@ -953,6 +986,15 @@ fn wait(params: Option<&Value>) -> Option<Wait> {
         "exit" => Until::Exit,
         "prompt" => Until::Prompt,
         "output" => Until::Output,
+        "match" => {
+            let pattern = params.get("pattern")?.as_str()?;
+            (pattern.len() <= MAX_PATTERN).then(|| Until::Match(pattern.to_owned()))?
+        }
+        "idle" => {
+            let quiet = Duration::from_millis(params.get("idle_ms")?.as_u64()?);
+            let allowed = (Duration::from_millis(100)..=MAX_WAIT).contains(&quiet);
+            allowed.then_some(Until::Idle(quiet))?
+        }
         _ => return None,
     };
     let timeout = Duration::from_millis(params.get("timeout_ms")?.as_u64()?);
@@ -971,6 +1013,7 @@ fn topics(params: Option<&Value>) -> Option<Topics> {
             "pane.opened" => topics.opened = true,
             "pane.closed" => topics.closed = true,
             "pane.status" => topics.status = true,
+            "pane.output" => topics.output = true,
             _ => return None,
         }
     }
@@ -1218,13 +1261,34 @@ mod tests {
             panic!("pane 4 was refused");
         };
         assert_eq!((asked.pane, asked.until), (Some(4), Until::Output));
+        for (params, until) in [
+            (
+                json!({"until": "match", "pattern": "x".repeat(MAX_PATTERN)}),
+                Until::Match("x".repeat(MAX_PATTERN)),
+            ),
+            (
+                json!({"until": "idle", "idle_ms": 100}),
+                Until::Idle(Duration::from_millis(100)),
+            ),
+        ] {
+            let mut params = params;
+            params["pane"] = json!("self");
+            params["timeout_ms"] = json!(5);
+            let Step::Ask(_, Method::PaneWait(asked)) =
+                answer(wait(params).as_bytes(), &mut VERSION.clone())
+            else {
+                panic!("a well-formed wait was refused");
+            };
+            assert_eq!(asked.until, until);
+        }
 
         let subscribe = |events| request("events.subscribe", json!({"events": events}));
-        let line = subscribe(json!(["pane.opened", "pane.status"]));
+        let line = subscribe(json!(["pane.opened", "pane.status", "pane.output"]));
         let topics = Topics {
             opened: true,
             closed: false,
             status: true,
+            output: true,
         };
         let asked = answer(line.as_bytes(), &mut VERSION.clone());
         assert_eq!(asked, Step::Ask(json!(3), Method::EventsSubscribe(topics)));
@@ -1235,6 +1299,12 @@ mod tests {
             wait(json!({"pane": "other", "until": "exit", "timeout_ms": 1})),
             wait(json!({"pane": -1, "until": "exit", "timeout_ms": 1})),
             wait(json!({"pane": "self", "until": "never", "timeout_ms": 1})),
+            wait(json!({"pane": "self", "until": "match", "timeout_ms": 1})),
+            wait(
+                json!({"pane": "self", "until": "match", "pattern": "x".repeat(MAX_PATTERN + 1), "timeout_ms": 1}),
+            ),
+            wait(json!({"pane": "self", "until": "idle", "idle_ms": 99, "timeout_ms": 1})),
+            wait(json!({"pane": "self", "until": "idle", "idle_ms": 600_001, "timeout_ms": 1})),
             subscribe(json!([])),
             subscribe(json!(["pane.contents"])),
             request("events.subscribe", json!(null)),

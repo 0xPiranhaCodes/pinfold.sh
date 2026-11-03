@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 use std::{env, thread};
 
 use pinfold_api::control::{self, Control, Method, Request, Subscriber, Topics, Until, Wait};
+use pinfold_api::redact;
 use pinfold_api::spawn::Place;
+use pinfold_cli::output;
 use pinfold_core::family::{self, Family, SplitWay};
 use pinfold_core::io::{Reactor, Waker};
 use pinfold_core::shell;
@@ -123,11 +125,12 @@ fn answer(reactor: &mut Reactor, family: &mut Family, request: &Request) -> Resu
     }
 }
 
-/// Parks a wait on the caller's own pane or one it spawned, or refuses it.
+/// Parks a wait on the caller's own pane or one it spawned, or refuses it. Its ticket says
+/// whether the pane is the caller's own, which a matched line is not redacted for.
 fn park(
     reactor: &Reactor,
     family: &mut Family,
-    waits: &mut Waits<Request>,
+    waits: &mut Waits<(Request, bool)>,
     request: Request,
     wait: Wait,
 ) {
@@ -141,16 +144,25 @@ fn park(
         Until::Exit => pinfold_core::wait::Until::Exit,
         Until::Prompt => pinfold_core::wait::Until::Prompt,
         Until::Output => pinfold_core::wait::Until::Output,
+        Until::Idle(quiet) => pinfold_core::wait::Until::Idle(quiet),
+        Until::Match(pattern) => match pinfold_core::wait::Until::matching(&pattern) {
+            Ok(until) => until,
+            Err(reason) => return request.answer(Err(reason)),
+        },
     };
     let deadline = Instant::now() + wait.timeout;
-    if let Err(request) = waits.park(reactor, request, pane, until, deadline) {
+    let ticket = (request, own == Some(pane));
+    if let Err((request, _)) = waits.park(reactor, ticket, pane, until, deadline) {
         request.answer(Err("the core is busy".to_owned()));
     }
 }
 
 /// The result of a wait that ended.
-fn ended(outcome: Outcome) -> Value {
+fn ended(outcome: Outcome, own: bool) -> Value {
     match outcome {
+        Outcome::Matched(line) if own => json!({"outcome": "match", "line": line}),
+        Outcome::Matched(line) => json!({"outcome": "match", "line": redact(&line)}),
+        Outcome::Idle => json!({"outcome": "idle"}),
         Outcome::Exit(exit) => json!({"outcome": "exit", "exit": exit}),
         Outcome::Prompt => json!({"outcome": "prompt"}),
         Outcome::Output => json!({"outcome": "output"}),
@@ -222,7 +234,7 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
     // Who asked for the window, until it says hello or ends. A caller that timed out has gone
     // and hears nothing.
     let mut waiting = Vec::new();
-    let mut waits: Waits<Request> = Waits::default();
+    let mut waits: Waits<(Request, bool)> = Waits::default();
     let mut family = Family::default();
     let mut subscribers: Vec<(Subscriber, Topics)> = Vec::new();
     let mut known = Seen::new();
@@ -230,8 +242,10 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
         let wait = waits
             .deadline()
             .map(|at| at.saturating_duration_since(Instant::now()));
+        output::tap(&mut reactor, &mut family, &waits, &subscribers);
         reactor.turn(Some(wait.unwrap_or(IDLE)))?;
-        waits.retain(|request| !request.is_gone());
+        output::hand_out(&mut reactor, &mut family, &mut waits, &subscribers);
+        waits.retain(|(request, _)| !request.is_gone());
         subscribers.retain(|(subscriber, _)| !subscriber.is_gone());
         while let Ok(request) = asked.try_recv() {
             // Its peer has been told the core is busy, so acting now would surprise a retry.
@@ -265,8 +279,8 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
                 }
             }
         }
-        for (request, outcome) in waits.settle(&reactor, Instant::now()) {
-            request.answer(Ok(ended(outcome)));
+        for ((request, own), outcome) in waits.settle(&reactor, Instant::now()) {
+            request.answer(Ok(ended(outcome, own)));
         }
         if !subscribers.is_empty() {
             let now = seen(&reactor);
