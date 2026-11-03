@@ -17,7 +17,7 @@
     },
     "result": { "type": "object", "additionalProperties": false },
     "event": {
-      "description": "The params of a notification: pane numbers, status and exit status only, never screen contents or titles.",
+      "description": "The params of a notification: pane numbers, status, its source and exit status only, never screen contents, titles or messages.",
       "type": "object",
       "required": ["event", "pane"],
       "additionalProperties": false,
@@ -25,8 +25,12 @@
         "event": { "enum": ["pane.opened", "pane.closed", "pane.status"] },
         "pane": { "type": "integer", "minimum": 0 },
         "status": {
-          "enum": ["running", "done", "error", "idle"],
-          "description": "Not with pane.closed. As pane.list reports it, from OSC 133 marks that output can fake."
+          "enum": ["needs-you", "running", "done", "error", "idle"],
+          "description": "Not with pane.closed. As pane.list reports it."
+        },
+        "source": {
+          "enum": ["marks", "reported"],
+          "description": "Not with pane.closed. As pane.list reports it: marks, which output can fake, or a pane.status report."
         },
         "exit": {
           "type": ["integer", "null"],

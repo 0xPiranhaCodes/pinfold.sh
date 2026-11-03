@@ -122,6 +122,7 @@ fn record(
             ("pane.spawn", pane, "children")
         }
         Method::PaneClose { pane } => ("pane.close", Some(*pane), scope(*pane)),
+        Method::PaneStatus { pane, .. } => ("pane.status", Some(*pane), scope(*pane)),
         Method::AuditRead { pane, .. } => ("audit.read", *pane, "outside"),
     };
     let mut reason = match result {

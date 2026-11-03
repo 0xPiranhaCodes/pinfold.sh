@@ -37,7 +37,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 4;
+pub const VERSION: u16 = 5;
 
 /// Most rows or columns a screen can have, which the core clamps its panes to.
 pub const MAX_DIMENSION: u16 = 1024;
@@ -128,6 +128,11 @@ const LAYOUT: u8 = 5;
 const RAISE: u8 = 6;
 const REFUSED: u8 = 7;
 const ACTIVITY: u8 = 8;
+const STATUS: u8 = 9;
+
+/// How many agent states there are. [`Notice::Status`] numbers them in the order of the
+/// contributor rule: needs you, running, done, error, idle.
+pub const STATES: u8 = 5;
 
 const FLAG_FULL: u8 = 1;
 const FLAG_CURSOR: u8 = 1 << 1;
@@ -476,11 +481,25 @@ pub enum Notice<'a> {
         /// One bit per tab, lowest first, by the order of the last [`Notice::Layout`]. Thirty-two
         /// bits hold [`MAX_TABS`].
         tabs: u32,
+        /// The tabs, in the same bits, with a pane that raised a "needs you" alert while hidden
+        /// and needs you still.
+        alerts: u32,
     },
     /// A command was not carried out.
     Refused {
         /// Why.
         reason: Refusal,
+    },
+    /// The state of a pane that names its tab.
+    Status {
+        /// The pane.
+        pane: u32,
+        /// Below [`STATES`].
+        state: u8,
+        /// Whether the pane's agent reported it, rather than output's marks, which can fake it.
+        reported: bool,
+        /// The reported message, which the core has cleaned of control and bidi characters.
+        message: &'a str,
     },
 }
 
@@ -886,13 +905,26 @@ impl Notice<'_> {
                 LAYOUT
             }
             Self::Raise => RAISE,
-            Self::Activity { tabs } => {
-                out.extend_from_slice(&tabs.to_le_bytes());
-                ACTIVITY
-            }
+            Self::Activity { tabs, alerts } => put!(out, ACTIVITY, tabs, alerts),
             Self::Refused { reason } => {
                 out.push(*reason as u8);
                 REFUSED
+            }
+            Self::Status {
+                pane,
+                state,
+                reported,
+                message,
+            } => {
+                if *state >= STATES {
+                    out.truncate(start);
+                    return Err(Error::BadTag {
+                        field: "state",
+                        tag: *state,
+                    });
+                }
+                out.extend_from_slice(&[*state, u8::from(*reported)]);
+                put_tail(out, start, MAX_MESSAGE, STATUS, *pane, message.as_bytes())?
             }
         };
         finish(out, start, MAX_MESSAGE, kind)
@@ -923,7 +955,26 @@ impl Notice<'_> {
             },
             LAYOUT => Notice::Layout(read_layout(&mut body)?),
             RAISE => Notice::Raise,
-            ACTIVITY => Notice::Activity { tabs: body.u32()? },
+            ACTIVITY => Notice::Activity {
+                tabs: body.u32()?,
+                alerts: body.u32()?,
+            },
+            // The state and its source go ahead of the pane, as the message runs to the end.
+            STATUS => {
+                let state = body.u8()?;
+                if state >= STATES {
+                    return Err(Error::BadTag {
+                        field: "state",
+                        tag: state,
+                    });
+                }
+                Notice::Status {
+                    state,
+                    reported: body.tag("reported", &[false, true])?,
+                    pane: body.u32()?,
+                    message: body.text()?,
+                }
+            }
             REFUSED => Notice::Refused {
                 reason: body.tag(
                     "refusal",
@@ -1508,7 +1559,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 4, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 5, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -2228,6 +2279,37 @@ mod tests {
             let wire = raw(kind, &[0, 0, 0, 0, 0xff]);
             assert_eq!(notice_error(&wire), Err(Error::BadText));
         }
+        let wire = raw(STATUS, &[0, 1, 0, 0, 0, 0, 0xff]);
+        assert_eq!(notice_error(&wire), Err(Error::BadText));
+    }
+
+    #[test]
+    fn a_status_holds_a_known_state_either_way() {
+        let state = Error::BadTag {
+            field: "state",
+            tag: STATES,
+        };
+        assert_eq!(
+            notice_error(&raw(STATUS, &[STATES, 0, 0, 0, 0, 0])),
+            Err(state)
+        );
+        let reported = Error::BadTag {
+            field: "reported",
+            tag: 2,
+        };
+        assert_eq!(
+            notice_error(&raw(STATUS, &[0, 2, 0, 0, 0, 0])),
+            Err(reported)
+        );
+        let notice = Notice::Status {
+            pane: 0,
+            state: STATES,
+            reported: false,
+            message: "",
+        };
+        let mut out = vec![7];
+        assert_eq!(notice.encode(&mut out), Err(state));
+        assert_eq!(out, [7]);
     }
 
     #[test]
@@ -2571,6 +2653,23 @@ mod tests {
         #[test]
         fn cwd_round_trips(pane in any::<u32>(), path in any::<String>(), chunk in chunks()) {
             prop_assert!(notice_survives(&Notice::Cwd { pane, path: &path }, chunk), "changed on the link");
+        }
+
+        #[test]
+        fn status_round_trips(
+            pane in any::<u32>(),
+            state in 0..STATES,
+            reported in any::<bool>(),
+            message in any::<String>(),
+            chunk in chunks(),
+        ) {
+            let notice = Notice::Status { pane, state, reported, message: &message };
+            prop_assert!(notice_survives(&notice, chunk), "changed on the link");
+        }
+
+        #[test]
+        fn activity_round_trips(tabs in any::<u32>(), alerts in any::<u32>(), chunk in chunks()) {
+            prop_assert!(notice_survives(&Notice::Activity { tabs, alerts }, chunk), "changed on the link");
         }
 
         #[test]
