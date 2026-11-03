@@ -17,6 +17,7 @@
 //! # Ok::<(), std::io::Error>(())
 //! ```
 
+use std::collections::HashSet;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -26,7 +27,7 @@ use serde_json::{Value, json};
 
 /// Most pairs kept; trusting one more drops the oldest.
 pub const MAX_ENTRIES: usize = 1000;
-/// Largest file read: the cap of entries with long paths fits well within it.
+/// Largest file read or written: past it, writing drops the oldest pairs until the rest fit.
 const MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 /// What the store says about a directory and a layout's hash.
@@ -52,22 +53,29 @@ pub fn state(path: &Path, dir: &str, sha256: &str) -> State {
 }
 
 /// Records `dir` as trusted with `sha256`, replacing its earlier hash, and writes the store
-/// with mode 0600. Past [`MAX_ENTRIES`] the oldest pairs go.
+/// with mode 0600. Past [`MAX_ENTRIES`], or past the bytes the store may hold, the oldest pairs
+/// go.
 ///
 /// # Errors
 ///
-/// When the directory or the file cannot be written.
+/// When the directory or the file cannot be written, or the pair alone is too large to store.
 pub fn record(path: &Path, dir: &str, sha256: &str) -> io::Result<()> {
     let mut entries = load(path);
     entries.retain(|(known, _)| known != dir);
     entries.push((dir.to_owned(), sha256.to_owned()));
     let excess = entries.len().saturating_sub(MAX_ENTRIES);
     entries.drain(..excess);
-    let trusted: Vec<Value> = entries
-        .iter()
-        .map(|(dir, sha256)| json!({"dir": dir, "sha256": sha256}))
-        .collect();
-    let text = json!({"version": 1, "trusted": trusted}).to_string();
+    let mut text = serialize(&entries);
+    while text.len() as u64 > MAX_BYTES {
+        if entries.len() == 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the directory is too long to store",
+            ));
+        }
+        entries.remove(0);
+        text = serialize(&entries);
+    }
     let parent = path.parent().unwrap_or(Path::new("."));
     DirBuilder::new()
         .recursive(true)
@@ -88,8 +96,17 @@ pub fn record(path: &Path, dir: &str, sha256: &str) -> io::Result<()> {
     File::open(parent)?.sync_all()
 }
 
+fn serialize(entries: &[(String, String)]) -> String {
+    let trusted: Vec<Value> = entries
+        .iter()
+        .map(|(dir, sha256)| json!({"dir": dir, "sha256": sha256}))
+        .collect();
+    json!({"version": 1, "trusted": trusted}).to_string()
+}
+
 /// The pairs in the file, oldest first. A store that will not parse is moved aside to
-/// `trust.json.bad`, so it is not lost and not trusted, and the store starts empty.
+/// `trust.json.bad`, so it is not lost and not trusted, and the store starts empty. [`record`]
+/// never writes a directory twice, so a store that names one twice will not parse.
 fn load(path: &Path) -> Vec<(String, String)> {
     let mut bytes = Vec::new();
     let read = File::open(path).and_then(|file| file.take(MAX_BYTES + 1).read_to_end(&mut bytes));
@@ -120,7 +137,17 @@ fn parse(bytes: &[u8]) -> Option<Vec<(String, String)>> {
         let sha256 = entry.get("sha256")?.as_str()?;
         Some((dir.to_owned(), sha256.to_owned()))
     };
-    value.get("trusted")?.as_array()?.iter().map(pair).collect()
+    let entries: Vec<(String, String)> = value
+        .get("trusted")?
+        .as_array()?
+        .iter()
+        .map(pair)
+        .collect::<Option<_>>()?;
+    let mut dirs = HashSet::with_capacity(entries.len());
+    entries
+        .iter()
+        .all(|(dir, _)| dirs.insert(dir.as_str()))
+        .then_some(entries)
 }
 
 #[cfg(test)]
@@ -181,11 +208,27 @@ mod tests {
     }
 
     #[test]
+    fn the_store_stays_small_enough_to_read_back() {
+        let path = path();
+        let long = format!("/{}", "\u{1}".repeat(400_000));
+        for index in 0..4 {
+            record(&path, &format!("{long}{index}"), &hash(1)).unwrap();
+        }
+        assert!(fs::metadata(&path).unwrap().len() <= MAX_BYTES);
+        assert_eq!(state(&path, &format!("{long}3"), &hash(1)), State::Trusted);
+        assert_eq!(state(&path, &format!("{long}0"), &hash(1)), State::Unknown);
+        let huge = "/".repeat(usize::try_from(MAX_BYTES).unwrap());
+        assert!(record(&path, &huge, &hash(1)).is_err());
+        assert_eq!(state(&path, &format!("{long}3"), &hash(1)), State::Trusted);
+    }
+
+    #[test]
     fn a_corrupt_store_is_moved_aside_and_trusts_nothing() {
         for corrupt in [
             &b"{not json"[..],
             br#"{"version":2,"trusted":[]}"#,
             br#"{"version":1,"trusted":[{"dir":"/a"}]}"#,
+            br#"{"version":1,"trusted":[{"dir":"/a","sha256":"0"},{"dir":"/a","sha256":"1"}]}"#,
             b"\xff\xfe",
         ] {
             let path = path();
