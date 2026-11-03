@@ -1825,7 +1825,9 @@ mod tests {
         assert_eq!(request.caller(), expected);
         let mut over = UnixStream::connect(&path).unwrap();
         // macOS refuses the option with EINVAL once the core has closed it, which is the point.
-        let _ = over.set_read_timeout(Some(TIMEOUT / 2));
+        if let Err(error) = over.set_read_timeout(Some(TIMEOUT / 2)) {
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{error}");
+        }
         assert_eq!(over.read(&mut [0; 8]).unwrap(), 0);
         drop(held);
     }
