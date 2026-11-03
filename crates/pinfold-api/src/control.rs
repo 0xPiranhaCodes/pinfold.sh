@@ -169,6 +169,8 @@ pub enum Method {
     },
     /// `session.save`: write the session's snapshot now.
     SessionSave,
+    /// `workspace.open`, its shape checked.
+    WorkspaceOpen(crate::workspace::Open),
     /// `grants.list`, accepted only from a terminal outside every pane.
     GrantsList,
     /// `grants.revoke`, accepted only from a terminal outside every pane.
@@ -1095,7 +1097,8 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
         Some("window.open") => Step::Ask(id.clone(), Method::WindowOpen),
         Some(
             method @ ("pane.list" | "pane.read" | "pane.last_output" | "pane.send" | "pane.spawn"
-            | "pane.close" | "grants.list" | "grants.revoke" | "session.save"),
+            | "pane.close" | "workspace.open" | "grants.list" | "grants.revoke"
+            | "session.save"),
         ) if *greeted < VERSION => refuse(
             Some(id),
             NO_METHOD,
@@ -1135,6 +1138,14 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
         Some("pane.spawn") => match crate::spawn::params(request.get("params")) {
             Ok(spawn) => Step::Ask(id.clone(), Method::PaneSpawn(spawn)),
             Err(reason) => refuse(Some(id), BAD_PARAMS, reason),
+        },
+        Some("workspace.open") => match crate::workspace::params(request.get("params")) {
+            Some(open) => Step::Ask(id.clone(), Method::WorkspaceOpen(open)),
+            None => refuse(
+                Some(id),
+                BAD_PARAMS,
+                "workspace.open takes an absolute root and a layout of tabs, splits and cwds",
+            ),
         },
         Some(
             method

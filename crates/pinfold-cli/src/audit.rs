@@ -125,6 +125,8 @@ fn record(
         Method::PaneStatus { pane, .. } => ("pane.status", Some(*pane), scope(*pane)),
         Method::AuditRead { pane, .. } => ("audit.read", *pane, "outside"),
         Method::SessionSave => ("session.save", None, "outside"),
+        // A refused call from inside a pane is the caller's own, not one from outside.
+        Method::WorkspaceOpen(_) => ("workspace.open", None, own.map_or("outside", |_| "self")),
         Method::GrantsList => ("grants.list", None, "outside"),
         Method::GrantsRevoke { .. } => ("grants.revoke", None, "outside"),
     };
@@ -195,6 +197,20 @@ mod tests {
         let names = (record.method.as_str(), record.scope.as_str());
         assert_eq!((names, record.target), (("session.save", "outside"), None));
         assert_eq!(record.outcome, Outcome::Ok("allowed".to_owned()));
+    }
+
+    #[test]
+    fn a_workspace_open_is_outside_only_from_no_pane() {
+        let open = Method::WorkspaceOpen(pinfold_api::workspace::Open {
+            root: "/p".to_owned(),
+            tabs: Vec::new(),
+        });
+        let refused = Err("workspace.open needs a caller outside any pane".to_owned());
+        let scope = |own| record(&open, true, own, &refused).scope;
+        assert_eq!(
+            (scope(None).as_str(), scope(Some(1)).as_str()),
+            ("outside", "self")
+        );
     }
 
     #[test]

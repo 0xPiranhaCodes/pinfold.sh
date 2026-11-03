@@ -27,6 +27,7 @@ Every connection starts with `hello`:
 | `pane.status`      | Version 2 and its own pane  | [`pane.status.schema.json`](pane.status.schema.json)         |
 | `audit.read`       | Version 2, outside any pane | [`audit.read.schema.json`](audit.read.schema.json)           |
 | `session.save`     | Version 2, outside any pane | [`session.save.schema.json`](session.save.schema.json)       |
+| `workspace.open`   | Version 2, a terminal, no pane | [`workspace.open.schema.json`](workspace.open.schema.json) |
 | `grants.list`      | Version 2, outside panes    | [`grants.list.schema.json`](grants.list.schema.json)         |
 | `grants.revoke`    | Version 2, outside panes    | [`grants.revoke.schema.json`](grants.revoke.schema.json)     |
 
@@ -87,6 +88,11 @@ programs print, which can fake them: read them as hints, not facts. `pinfold ctl
 <text>` types into a pane. `pinfold ctl session save`, from a terminal that is no pane, writes the
 session's snapshot and prints its path. A core that refuses version 2 is older than the client, and
 `pinfold ctl` says to quit PinFold so that a new core starts.
+
+`pinfold up [dir]` reads `<dir>/.pinfold/layout.toml`, the current directory's by default,
+starts a core and a window as `pinfold` does, and sends `workspace.open` with each pane's split
+and cwd. A second run for the same directory focuses its first open tab. `run` lines are not
+sent: they wait for workspace trust, and `pinfold up` says how many there are.
 
 ## MCP
 
