@@ -2,6 +2,7 @@
 //!
 //! The file is untrusted input, so nothing here panics on what it holds.
 
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, Metadata, OpenOptions};
@@ -44,6 +45,27 @@ pub struct Config {
     pub keys: Keys,
     /// The `[api]` table.
     pub api: Api,
+    /// The `[agents.<name>]` tables: agent profiles, by name.
+    pub agents: BTreeMap<String, Agent>,
+}
+
+/// An `[agents.<name>]` table: how to start one agent.
+///
+/// ```
+/// let config = pinfold_config::parse(b"[agents.claude]\ncommand = [\"claude\"]\nsandbox = true")?;
+/// assert!(config.agents["claude"].sandbox);
+/// # Ok::<(), pinfold_config::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Agent {
+    /// The program and its arguments, run with no shell.
+    #[serde(deserialize_with = "command")]
+    pub command: Vec<String>,
+    /// Whether the agent runs in the system's sandbox, which hides [`private_dirs`] and other
+    /// panes' terminals from it.
+    #[serde(default)]
+    pub sandbox: bool,
 }
 
 /// The `[api]` table.
@@ -85,6 +107,7 @@ impl Default for Config {
             background_blur: false,
             keys: Keys::default(),
             api: Api::default(),
+            agents: BTreeMap::new(),
         }
     }
 }
@@ -142,6 +165,17 @@ fn protect<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Vec<Stri
         Ok(Some(patterns))
     } else {
         Err(de::Error::custom("protect patterns must not be empty"))
+    }
+}
+
+fn command<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    let command = Vec::<String>::deserialize(deserializer)?;
+    // A leading dash would be read as an option by the sandbox tool that runs the program.
+    match command.first() {
+        Some(program) if !program.is_empty() && !program.starts_with('-') => Ok(command),
+        _ => Err(de::Error::custom(
+            "command must start with a program, not be empty or start with -",
+        )),
     }
 }
 
@@ -208,6 +242,58 @@ fn state_dir_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathB
     }
     let base = absolute(xdg).or_else(|| Some(absolute(home)?.join(".local/state")))?;
     Some(base.join("pinfold"))
+}
+
+/// Returns what a sandboxed agent may not see: `~/.ssh`, the config file's directory and
+/// [`state_dir`], each also as it resolves through symlinks, so a config file linked from a
+/// dotfiles repo hides that repo's directory too. The runtime directory is not among them, as an
+/// agent needs its socket to call the API, which knows each caller by its terminal.
+///
+/// ```
+/// for dir in pinfold_config::private_dirs() {
+///     assert!(dir.is_absolute());
+/// }
+/// ```
+pub fn private_dirs() -> Vec<PathBuf> {
+    private_dirs_from(
+        env::var_os("XDG_CONFIG_HOME"),
+        env::var_os("XDG_STATE_HOME"),
+        env::var_os("HOME"),
+    )
+}
+
+fn private_dirs_from(
+    xdg_config: Option<OsString>,
+    xdg_state: Option<OsString>,
+    home: Option<OsString>,
+) -> Vec<PathBuf> {
+    let ssh = home
+        .clone()
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
+        .map(|home| home.join(".ssh"));
+    let config = path_from(xdg_config, home.clone());
+    // The file's own target, which may sit in another directory than the link.
+    let target = config.as_ref().and_then(|path| fs::canonicalize(path).ok());
+    let parent = |path: Option<PathBuf>| Some(path?.parent()?.to_path_buf());
+    let mut dirs = Vec::new();
+    for dir in [
+        ssh,
+        parent(config),
+        parent(target),
+        state_dir_from(xdg_state, home),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let real = fs::canonicalize(&dir).ok();
+        for dir in [Some(dir), real].into_iter().flatten() {
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+    }
+    dirs
 }
 
 /// Reads the config file, following a symlink, or returns the defaults if there is none.
@@ -378,6 +464,23 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_profile_is_read_and_unsandboxed_by_default() {
+        let config = parse(b"[agents.a]\ncommand = [\"/bin/a\", \"-x\"]\n[agents.b]\ncommand = [\"b\"]\nsandbox = true\n").unwrap();
+        assert_eq!(config.agents["a"].command, ["/bin/a", "-x"]);
+        assert!(!config.agents["a"].sandbox);
+        assert!(config.agents["b"].sandbox);
+        for command in ["[]", "[\"\"]", "[\"-p\"]"] {
+            let text = message(format!("[agents.a]\ncommand = {command}\n").as_bytes());
+            assert!(text.contains("line 2"), "{command}: {text}");
+            assert!(
+                text.contains("must start with a program"),
+                "{command}: {text}"
+            );
+        }
+        assert!(message(b"[agents.a]\nsandbox = true\n").contains("command"));
+    }
+
+    #[test]
     fn a_font_path_is_read() {
         assert_eq!(parse(b"").unwrap().font_path, None);
         let config = parse(b"font_path = \"/fonts/Mono.ttf\"").unwrap();
@@ -499,6 +602,37 @@ mod tests {
         }
         assert_eq!(path_from(None, None), None);
         assert_eq!(path_from(None, some("")), None);
+    }
+
+    #[test]
+    fn private_dirs_hide_where_a_linked_config_really_lives() {
+        let root = tempdir().unwrap();
+        let (home, dotfiles) = (root.path().join("home"), root.path().join("dotfiles"));
+        fs::create_dir_all(home.join(".config/pinfold")).unwrap();
+        fs::create_dir_all(&dotfiles).unwrap();
+        fs::write(dotfiles.join("pinfold.toml"), "").unwrap();
+        symlink(
+            dotfiles.join("pinfold.toml"),
+            home.join(".config/pinfold/pinfold.toml"),
+        )
+        .unwrap();
+        // Each link leads somewhere else, so each resolution is checked on its own.
+        let keys = root.path().join("keys");
+        fs::create_dir_all(&keys).unwrap();
+        symlink(&keys, home.join(".ssh")).unwrap();
+        let dirs = private_dirs_from(None, None, Some(home.clone().into()));
+        let dotfiles = fs::canonicalize(&dotfiles).unwrap();
+        let keys = fs::canonicalize(&keys).unwrap();
+        assert!(dirs.contains(&home.join(".ssh")), "{dirs:?}");
+        assert!(dirs.contains(&keys), "{dirs:?}");
+        assert!(dirs.contains(&home.join(".config/pinfold")), "{dirs:?}");
+        assert!(dirs.contains(&dotfiles), "{dirs:?}");
+        // A directory that is already real is listed once.
+        assert!(
+            dirs.iter()
+                .all(|dir| dirs.iter().filter(|other| *other == dir).count() == 1)
+        );
+        assert!(private_dirs_from(None, None, None).is_empty());
     }
 
     #[test]
