@@ -886,7 +886,7 @@ fn a_pane_spawns_children_and_reaches_only_them() {
 
 #[test]
 fn ctl_wait_prints_how_a_wait_ended_and_exits_0_1_or_2() {
-    let session = Session::new("x", None).unwrap();
+    let session = Session::new("cw", None).unwrap();
     let ctl = format!("'{}' ctl wait", session.directory.join("pinfold").display());
     // Each line notes what `ctl wait` printed and its exit status. The pane prints in the
     // background over and over, so a wait parked late still sees a later line or mark.
