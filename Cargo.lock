@@ -1342,10 +1342,13 @@ dependencies = [
  "insta",
  "lz4_flex",
  "mio",
+ "pinfold-api",
  "pinfold-mux",
  "pinfold-proto",
  "pinfold-sys",
  "proptest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

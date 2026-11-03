@@ -3,11 +3,11 @@
 //!
 //! It takes `hello`, `window.open` and, after `hello` version 2, `pane.list`, `pane.read`,
 //! `pane.last_output`, `pane.send`, `pane.wait`, `events.subscribe`, `audit.read`,
-//! `grants.list`, `grants.revoke`, `workspace.trust_state` and `workspace.ask_trust`, as
-//! newline-delimited JSON-RPC 2.0 (ADR-0009, ADR-0028, ADR-0032). `window.open` takes no
-//! arguments, so a caller cannot name a program. This only checks a request's shape: the
-//! reactor answers every [`Request`], checks its scope, parks waits and sends events, so
-//! nothing here reaches a pane.
+//! `grants.list`, `grants.revoke`, `workspace.trust_state`, `workspace.ask_trust` and
+//! `session.save`, as newline-delimited JSON-RPC 2.0 (ADR-0009, ADR-0028, ADR-0032).
+//! `window.open` takes no arguments, so a caller cannot name a program. This only checks a
+//! request's shape: the reactor answers every [`Request`], checks its scope, parks waits and
+//! sends events, so nothing here reaches a pane.
 //! Same-user controls are guardrails (threat model).
 //!
 //! ```no_run
@@ -53,7 +53,7 @@ pub const OLDEST: u64 = 1;
 pub const STACK: usize = 256 * 1024;
 
 /// The session's name in its file names. There is one session until M2 adds attach.
-const SESSION: &str = "default";
+pub const SESSION: &str = "default";
 /// Most peers served at once (ADR-0032). Past it a new peer is closed unread.
 pub const MAX_PEERS: usize = 16;
 /// Most peers of one caller identity, where all unidentified peers count as one (ADR-0032).
@@ -170,6 +170,8 @@ pub enum Method {
         /// The pane's number.
         pane: usize,
     },
+    /// `session.save`: write the session's snapshot now.
+    SessionSave,
     /// `workspace.open`, its shape checked.
     WorkspaceOpen(crate::workspace::Open),
     /// `grants.list`, accepted only from a terminal outside every pane.
@@ -319,7 +321,11 @@ pub fn start_log(directory: &Path) -> Result<File, Error> {
 }
 
 /// Makes `directory` if it is missing, and refuses it unless only this user can reach it.
-fn checked(directory: &Path) -> Result<(), Error> {
+///
+/// # Errors
+///
+/// Returns an error if it cannot be made, or is a symlink, someone else's or open to others.
+pub fn checked(directory: &Path) -> Result<(), Error> {
     match DirBuilder::new().mode(0o700).create(directory) {
         Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error.into()),
         _ => {}
@@ -1122,6 +1128,7 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
             | "workspace.open"
             | "workspace.trust_state"
             | "workspace.ask_trust"
+            | "session.save"
             | "agent.launch"),
         ) if *greeted < VERSION => refuse(
             Some(id),
@@ -1129,6 +1136,7 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
             &format!("{method} needs hello version 2"),
         ),
         Some("pane.list") => Step::Ask(id.clone(), Method::PaneList),
+        Some("session.save") => Step::Ask(id.clone(), Method::SessionSave),
         Some(method @ ("pane.wait" | "events.subscribe" | "audit.read" | "pane.status"))
             if *greeted < VERSION =>
         {
@@ -1441,6 +1449,13 @@ mod tests {
             answer(list, &mut greeted),
             Step::Ask(json!(2), Method::PaneList)
         );
+        let save = br#"{"jsonrpc":"2.0","id":3,"method":"session.save"}"#;
+        assert_eq!(
+            answer(save, &mut greeted),
+            Step::Ask(json!(3), Method::SessionSave)
+        );
+        let (reply, _) = replied(save, &mut OLDEST.clone());
+        assert_eq!(code(&reply), Some(NO_METHOD));
     }
 
     /// A request for a pane method with these params.

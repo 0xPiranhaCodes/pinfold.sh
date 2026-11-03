@@ -20,7 +20,7 @@ const POLL: Duration = Duration::from_millis(20);
 const USAGE: &str = "usage: pinfold [up [dir] | agent <name> [--right | --down | --tab] | \
     ctl list [--json] | ctl send <pane> <text> | \
     ctl grants [--json | revoke <id>] | ctl log [--json] [-n <count>] [--pane <pane>] | \
-    ctl log --verify <file> | mcp]";
+    ctl log --verify <file> | ctl session save | mcp]";
 
 /// Connects to a core at `path`. Nothing listening is no error, as that is what starts one.
 fn connect(path: &Path) -> std::io::Result<Option<UnixStream>> {
@@ -142,6 +142,15 @@ fn send(pane: &str, text: &str) -> Result<(), Box<dyn Error>> {
 fn agent(name: &str, place: &str) -> Result<(), Box<dyn Error>> {
     let params = json!({"profile": name, "place": place});
     control::ask(&running()?, "agent.launch", &params)?;
+    Ok(())
+}
+
+/// `pinfold ctl session save`: writes the session's snapshot and prints its path. It starts
+/// no core.
+fn save() -> Result<(), Box<dyn Error>> {
+    let (_, saved) = control::ask(&running()?, "session.save", &json!({}))?;
+    let path = saved["path"].as_str().ok_or("the core named no file")?;
+    std::io::stdout().write_all(format!("{}\n", printable(path)).as_bytes())?;
     Ok(())
 }
 
@@ -317,6 +326,7 @@ fn main() -> ExitCode {
         ["ctl", "list"] => list(false),
         ["ctl", "list", "--json"] => list(true),
         ["ctl", "send", pane, text] => send(pane, text),
+        ["ctl", "session", "save"] => save(),
         ["ctl", "log", ref rest @ ..] => log(rest),
         ["mcp"] => {
             let socket = control::socket_path(&control::runtime_dir());
