@@ -75,7 +75,10 @@ pub fn foreground(master: BorrowedFd<'_>) -> io::Result<Foreground> {
     // SAFETY: tcgetattr succeeded, and all-zero bytes are valid for this integer struct.
     let flags = unsafe { mode.assume_init() }.c_lflag;
     let echo_off = flags & libc::ECHO == 0 && flags & libc::ICANON != 0;
-    let pids = platform::members(group as libc::pid_t)?;
+    let pids = with_leader(
+        group as libc::pid_t,
+        platform::members(group as libc::pid_t)?,
+    )?;
     if pids.len() > MAX_GROUP {
         return Err(io::Error::other("the foreground group is too large"));
     }
@@ -84,8 +87,7 @@ pub fn foreground(master: BorrowedFd<'_>) -> io::Result<Foreground> {
         match process(pid) {
             Ok(member) => members.push(member),
             // It exited, or is a zombie on macOS, since it was listed, so it reads nothing.
-            Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) if exited(&error) => {}
             Err(error) => return Err(error),
         }
     }
@@ -115,6 +117,59 @@ fn process(pid: libc::pid_t) -> io::Result<Process> {
 /// How many more times a command line that could not be read is tried.
 const ARGV_TRIES: usize = 4;
 
+/// Whether an error says the process has exited, so it reads nothing.
+fn exited(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(libc::ESRCH) || error.kind() == io::ErrorKind::NotFound
+}
+
+/// Refuses a group that still has processes but not its leader, which a scan that missed one
+/// would also look like. A group with none left is one the shell is about to take back.
+fn with_leader(group: libc::pid_t, pids: Vec<libc::pid_t>) -> io::Result<Vec<libc::pid_t>> {
+    if pids.is_empty() || pids.contains(&group) {
+        Ok(pids)
+    } else {
+        Err(io::Error::other(
+            "the foreground group's leader was not found",
+        ))
+    }
+}
+
+/// The pids in `group`, from each process's `/proc/<pid>/stat`, one past the cap at most. A
+/// process that exited is skipped. Any other failure, or a stat that does not parse, is an
+/// error, as that process could be in the group.
+#[cfg(any(target_os = "linux", test))]
+fn scan(
+    group: libc::pid_t,
+    stats: impl Iterator<Item = (libc::pid_t, io::Result<Vec<u8>>)>,
+) -> io::Result<Vec<libc::pid_t>> {
+    let mut found = Vec::new();
+    for (pid, stat) in stats {
+        let stat = match stat {
+            Ok(stat) => stat,
+            Err(error) if exited(&error) => continue,
+            Err(error) => return Err(error),
+        };
+        // The name may hold spaces and brackets, so the fields start after the last ')'.
+        let rest = stat
+            .rsplit(|&byte| byte == b')')
+            .next()
+            .filter(|_| stat.contains(&b')'));
+        let pgrp = rest.and_then(|rest| {
+            let rest = String::from_utf8_lossy(rest);
+            rest.split_whitespace().nth(2)?.parse::<libc::pid_t>().ok()
+        });
+        match pgrp {
+            Some(pgrp) if pgrp == group => found.push(pid),
+            Some(_) => {}
+            None => return Err(io::Error::other("a process stat did not parse")),
+        }
+        if found.len() > MAX_GROUP {
+            break;
+        }
+    }
+    Ok(found)
+}
+
 fn lossy(args: impl Iterator<Item = impl AsRef<[u8]>>) -> Vec<String> {
     args.map(|arg| String::from_utf8_lossy(arg.as_ref()).into_owned())
         .collect()
@@ -126,27 +181,14 @@ mod platform {
 
     /// Every pid whose `/proc` stat names `group`, stopping one past the cap.
     pub fn members(group: libc::pid_t) -> io::Result<Vec<libc::pid_t>> {
-        let mut found = Vec::new();
+        let mut pids = Vec::new();
         for entry in std::fs::read_dir("/proc")? {
-            let Some(pid) = entry?.file_name().to_str().and_then(|n| n.parse().ok()) else {
-                continue;
-            };
-            // A process that exits during the scan has left the group too.
-            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-                continue;
-            };
-            // The name may hold spaces and brackets, so the fields start after the last ')'.
-            let pgrp = stat
-                .rsplit_once(')')
-                .and_then(|(_, rest)| rest.split_whitespace().nth(2)?.parse::<libc::pid_t>().ok());
-            if pgrp == Some(group) {
-                found.push(pid);
-                if found.len() > super::MAX_GROUP {
-                    break;
-                }
+            if let Some(pid) = entry?.file_name().to_str().and_then(|n| n.parse().ok()) {
+                pids.push(pid);
             }
         }
-        Ok(found)
+        let stat = |pid| (pid, std::fs::read(format!("/proc/{pid}/stat")));
+        super::scan(group, pids.into_iter().map(stat))
     }
 
     pub fn name_and_euid(pid: libc::pid_t) -> io::Result<(String, u32)> {
@@ -281,6 +323,43 @@ mod tests {
 
     fn named(found: &Foreground, name: &str) -> bool {
         found.members.iter().any(|member| member.name == name)
+    }
+
+    #[test]
+    fn a_scan_skips_only_processes_that_exited() {
+        let stat = |text: &str| Ok(text.as_bytes().to_vec());
+        let stats = || {
+            vec![
+                (100, stat("100 (sh) S 1 100 100 34816")),
+                (101, Err(io::Error::from(io::ErrorKind::NotFound))),
+                (102, Err(io::Error::from_raw_os_error(libc::ESRCH))),
+                (103, stat("103 (a b) c)) R 100 100 100 34816")),
+                (104, stat("104 (other) S 1 7 7 0")),
+                (105, Ok(b"105 (\xff) S 1 100 100 0".to_vec())),
+            ]
+            .into_iter()
+        };
+        assert_eq!(scan(100, stats()).unwrap(), vec![100, 103, 105]);
+
+        let refused = stats().chain([(106, Err(io::Error::from(io::ErrorKind::PermissionDenied)))]);
+        assert_eq!(
+            scan(100, refused).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(scan(100, stats().chain([(107, stat("107 no brackets"))])).is_err());
+        assert!(scan(100, stats().chain([(108, stat("108 (x) S 1"))])).is_err());
+        let many = (0..1000).map(|pid| (pid, stat("1 (x) S 1 100 100 0")));
+        assert_eq!(scan(100, many).unwrap().len(), MAX_GROUP + 1);
+    }
+
+    #[test]
+    fn a_group_without_its_leader_is_refused_unless_it_is_empty() {
+        assert_eq!(with_leader(100, vec![100, 101]).unwrap(), vec![100, 101]);
+        assert!(with_leader(100, vec![101]).is_err());
+        assert_eq!(
+            with_leader(100, Vec::new()).unwrap(),
+            Vec::<libc::pid_t>::new()
+        );
     }
 
     #[test]
