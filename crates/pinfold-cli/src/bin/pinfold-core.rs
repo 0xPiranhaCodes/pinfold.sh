@@ -24,7 +24,7 @@ use pinfold_core::shell;
 use pinfold_core::snapshot::{self, Saver, Snapshot};
 use pinfold_core::status::Status;
 use pinfold_core::wait::{Outcome, Waits};
-use pinfold_core::workspace::{Opened, Workspaces};
+use pinfold_core::workspace::Workspaces;
 use pinfold_proto::link::{ApprovalAction, ApprovalAnswer};
 use serde_json::{Value, json};
 
@@ -230,12 +230,11 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
             let tabs: Vec<Vec<_>> = tabs.map(|tab| tab.iter().map(pane).collect()).collect();
             let sha256 = open.sha256.as_deref();
             let opened = workspaces.open(reactor, &open.root, sha256, &tabs)?;
-            if let (Some(sha256), false) = (sha256, opened.is_empty()) {
+            let root = Path::new(&open.root);
+            let runs = sha256.and_then(|sha256| trusted_runs(root, sha256, opened.len()));
+            if let (Some(runs), false) = (runs, opened.is_empty()) {
                 let panes: Vec<_> = opened.iter().copied().map(Some).collect();
-                run_trusted(
-                    reactor,
-                    &(PathBuf::from(&open.root), Some(sha256.to_owned()), panes),
-                );
+                type_runs(reactor, &panes, &runs);
             }
             Ok(json!({"opened": opened.len()}))
         }
@@ -471,33 +470,28 @@ fn wants(topics: Topics, event: &Value) -> bool {
     }
 }
 
-/// Types each `run` line of an opened workspace into its pane, then a newline, through the
-/// pane's input queue: the core never runs one itself. The lines come from the layout file read
-/// again, never from a caller or a snapshot, and only if those bytes still have the workspace's
-/// hash and the trust store holds the canonical root with it (ADR-0034, points 5 and 6).
-fn run_trusted(reactor: &mut Reactor, (root, sha256, panes): &Opened) {
-    let Some(runs) = sha256
-        .as_deref()
-        .and_then(|sha256| trusted_runs(root, sha256))
-    else {
-        return;
-    };
-    // Another shape than the panes opened is another file: nothing of it runs.
-    if runs.len() != panes.len() {
-        return;
-    }
-    for (pane, run) in panes.iter().zip(runs) {
+/// A trusted layout's panes in the file's order: each one's directory and `run` line.
+type Runs = Vec<(PathBuf, Option<String>)>;
+
+/// Types each `run` line into its pane, then a newline, through the pane's input queue as keys
+/// go: the core never runs one itself. The pane is a shell the core just started, so the checks
+/// that keep an API send out of a program's prompt would only race its start.
+fn type_runs(reactor: &mut Reactor, panes: &[Option<usize>], runs: &Runs) {
+    for (pane, (_, run)) in panes.iter().zip(runs) {
         // One line each, as the prompt showed it: no control character can end or edit it.
-        let run = run.filter(|run| !run.chars().any(char::is_control));
+        let run = run
+            .as_ref()
+            .filter(|run| !run.chars().any(char::is_control));
         if let (Some(pane), Some(run)) = (pane, run) {
-            let _ = reactor.send(*pane, &format!("{run}\n"), Instant::now());
+            reactor.write(*pane, format!("{run}\n").as_bytes());
         }
     }
 }
 
-/// The `run` lines of the layout at `root`, a pane each in the file's order, if `root` is
-/// canonical, its layout's bytes hash to `sha256`, and that pair is trusted.
-fn trusted_runs(root: &Path, sha256: &str) -> Option<Vec<Option<String>>> {
+/// The panes of the layout at `root`, read again, never taken from a caller or a snapshot, if
+/// `root` is canonical, the file's bytes hash to `sha256`, the trust store holds `root` with that
+/// hash (ADR-0034, points 5 and 6), and it has `panes` panes, as another shape is another file.
+fn trusted_runs(root: &Path, sha256: &str, panes: usize) -> Option<Runs> {
     if std::fs::canonicalize(root).ok()? != root {
         return None;
     }
@@ -508,12 +502,13 @@ fn trusted_runs(root: &Path, sha256: &str) -> Option<Vec<Option<String>>> {
         return None;
     }
     let tabs = layout::parse(&bytes, root).ok()?.tabs;
-    Some(
-        tabs.into_iter()
-            .flat_map(|tab| tab.panes)
-            .map(|pane| pane.run)
-            .collect(),
-    )
+    let pane = |pane: layout::Pane| (pane.cwd.unwrap_or_else(|| root.to_path_buf()), pane.run);
+    let runs: Runs = tabs
+        .into_iter()
+        .flat_map(|tab| tab.panes)
+        .map(pane)
+        .collect();
+    (runs.len() == panes).then_some(runs)
 }
 
 /// The session's snapshot, with the workspaces it opened.
@@ -541,10 +536,29 @@ fn save(saver: &mut Saver, reactor: &Reactor, workspaces: &Workspaces) {
 fn restore_session(reactor: &mut Reactor, workspaces: &mut Workspaces, state: &Path) -> bool {
     let restored = snapshot::load(state, control::SESSION).and_then(|snapshot| {
         snapshot
-            .map(|snapshot| {
+            .map(|mut snapshot| {
+                let trusted = snapshot.workspaces.iter().map(|saved| {
+                    trusted_runs(Path::new(&saved.root), &saved.sha256, saved.panes.len())
+                });
+                let trusted: Vec<_> = trusted.collect();
+                // A trusted line runs where its file says, never where output said the pane was.
+                for (saved, runs) in snapshot.workspaces.iter().zip(&trusted) {
+                    for (index, (cwd, _)) in saved.panes.iter().zip(runs.iter().flatten()) {
+                        if let Some(pane) = index.and_then(|index| snapshot.panes.get_mut(index)) {
+                            pane.cwd = cwd.to_str().map(str::to_owned);
+                        }
+                    }
+                }
                 reactor.restore(&snapshot)?;
-                for opened in workspaces.restored(reactor, &snapshot.workspaces) {
-                    run_trusted(reactor, opened);
+                let opened = workspaces.restored(reactor, &snapshot.workspaces);
+                for ((_, _, panes), runs) in opened.iter().zip(trusted) {
+                    // A directory restore refuses starts a shell in `$HOME`: nothing runs there.
+                    let kept = |(cwd, run): (PathBuf, Option<String>)| {
+                        let run = run.filter(|_| snapshot::is_private(&cwd));
+                        (cwd, run)
+                    };
+                    let runs: Runs = runs.into_iter().flatten().map(kept).collect();
+                    type_runs(reactor, panes, &runs);
                 }
                 Ok(())
             })

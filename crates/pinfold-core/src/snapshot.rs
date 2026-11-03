@@ -247,7 +247,13 @@ pub fn load(state: &Path, session: &str) -> io::Result<Option<Snapshot>> {
 /// this user or root and writable by no one else. The saved directory comes from OSC 7, which
 /// any program in a pane can print, and a shell started in a planted directory can run its code
 /// (a direnv `.envrc`, git hooks or fsmonitor in a prompt). A sticky `/tmp` is refused too.
-fn is_private(path: &Path) -> bool {
+/// A restore starts a pane in `$HOME` instead.
+///
+/// ```
+/// assert!(!pinfold_core::snapshot::is_private(std::path::Path::new("relative")));
+/// ```
+#[must_use]
+pub fn is_private(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     use std::path::Component;
 

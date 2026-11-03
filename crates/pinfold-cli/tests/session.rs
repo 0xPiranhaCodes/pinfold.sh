@@ -1721,7 +1721,22 @@ run = "echo work''space-ran | tee -a \"$PINFOLD_TEST_CLIENT/ran\""
     // Each restore types the trusted line once; a probe typed after it shows when it would have run.
     let restore = |ran: &str| {
         let mut core = session.start_core(&[], "exec /bin/sh").unwrap();
-        let launched = session.launch().unwrap();
+        // Until the core answers, a launcher would start one of its own.
+        let start = Instant::now();
+        while serde_json::from_str::<serde_json::Value>(
+            &ctl(&session, "ctl list --json", "list").unwrap(),
+        )
+        .is_err()
+        {
+            assert!(start.elapsed() < PATIENCE, "{}", session.read_log());
+            thread::sleep(Duration::from_millis(20));
+        }
+        let mut launcher = session.launcher("/bin/sh");
+        let launched = launcher
+            .env("XDG_STATE_HOME", &state)
+            .env("HOME", &state)
+            .output()
+            .unwrap();
         assert!(launched.status.success(), "{launched:?}");
         let start = Instant::now();
         while probes(&session.read("ran")) < probes(ran) {
