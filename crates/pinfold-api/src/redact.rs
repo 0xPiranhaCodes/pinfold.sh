@@ -113,7 +113,7 @@ fn uri_password_at(bytes: &[u8], index: usize) -> Option<(usize, usize)> {
     }
     let user_start: usize = bytes[..colon]
         .iter()
-        .rposition(|byte| ends_authority(*byte) || matches!(byte, b':' | b'@'))
+        .rposition(|byte| ends_authority(*byte) || *byte == b':')
         .map_or(0, |position| position + 1);
     if user_start == colon || !bytes[..user_start].ends_with(b"://") {
         return None;

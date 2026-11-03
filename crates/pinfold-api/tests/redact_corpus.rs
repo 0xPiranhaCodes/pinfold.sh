@@ -182,6 +182,11 @@ fn uri_passwords_keep_the_user_and_host() {
         redact("custom+scheme://user:x@host.example/path"),
         "custom+scheme://user:«redacted:password»@host.example/path"
     );
+    // Clients split user-info at the last `@`, so the user may hold one.
+    assert_eq!(
+        redact("https://alice@corp.com:hunter2@host/"),
+        "https://alice@corp.com:«redacted:password»@host/"
+    );
     let token = format!("ghp_{}", "a1B2".repeat(9));
     let url = format!("https://{token}:x-oauth-basic@github.com/o/r");
     let redacted = redact(&url);
