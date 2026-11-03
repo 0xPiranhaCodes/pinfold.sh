@@ -1,11 +1,13 @@
-//! The seccomp filter bubblewrap puts a sandboxed agent under on Linux (ADR-0020 point 5):
-//! `ioctl(_, TIOCSTI, _)` fails with `EPERM`, and everything else is allowed.
+//! The seccomp filter bubblewrap puts a sandboxed agent under on Linux (ADR-0020 point 5,
+//! ADR-0037): `ioctl(_, TIOCSTI, _)` fails with `EPERM`, and so does every x32 call on x86_64.
+//! A call made under another architecture's numbering, such as i386's, kills the process.
+//! Everything else is allowed.
 
 use std::io;
 use std::os::fd::OwnedFd;
 
 /// Returns a pipe holding the filter as classic BPF, for bubblewrap's `--seccomp`, on fd 3 or
-/// above and close-on-exec.
+/// above and close-on-exec. bwrap reads it to the end, so each launch needs its own.
 ///
 /// # Errors
 ///

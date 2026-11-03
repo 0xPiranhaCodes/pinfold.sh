@@ -179,7 +179,8 @@ fn resolve(path: &Path) -> PathBuf {
 
 /// Returns the command that runs `program` with `hidden` unreadable, only `work` and temporary
 /// directories writable and, of Unix sockets, only the API's at `api` reachable, for
-/// [`Reactor::spawn`](crate::io::Reactor::spawn).
+/// [`Reactor::spawn`](crate::io::Reactor::spawn). Spawn it once: on Linux its seccomp filter is
+/// read to the end by the first launch.
 ///
 /// # Errors
 ///
@@ -252,7 +253,7 @@ pub fn command(
     let mut command = Command::new(tool);
     command.args(args);
     if let Some(filter) = filter {
-        pinfold_sys::inherit(&mut command, filter);
+        pinfold_sys::inherit(&mut command, filter)?;
     }
     for name in SOCKET_VARS {
         command.env_remove(name);
