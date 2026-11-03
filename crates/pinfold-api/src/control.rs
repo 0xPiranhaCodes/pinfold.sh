@@ -1,9 +1,10 @@
 //! The control socket: how a launcher finds the core and asks it for a window, and how
 //! `pinfold ctl` lists panes.
 //!
-//! It takes `hello`, `window.open` and, after `hello` version 2, `pane.list`, as
-//! newline-delimited JSON-RPC 2.0 (ADR-0009, ADR-0028, ADR-0032). `window.open` takes no
-//! arguments, so a caller cannot name a program. The reactor answers every [`Request`], so
+//! It takes `hello`, `window.open` and, after `hello` version 2, `pane.list`, `pane.read`,
+//! `pane.last_output` and `pane.send`, as newline-delimited JSON-RPC 2.0 (ADR-0009, ADR-0028,
+//! ADR-0032). `window.open` takes no arguments, so a caller cannot name a program. This only
+//! checks a request's shape: the reactor answers every [`Request`] and checks its scope, so
 //! nothing here reaches a pane. Same-user controls are guardrails (threat model).
 //!
 //! ```no_run
@@ -55,8 +56,12 @@ pub const MAX_PEERS: usize = 16;
 pub const MAX_PER_CALLER: usize = 4;
 const LISTENER: Token = Token(usize::MAX);
 const WAKE: Token = Token(usize::MAX - 1);
-/// Longest request, far above what `hello` and `window.open` need.
-const MAX_LINE: usize = 4096;
+/// Longest request: a `pane.send` of [`MAX_SEND`] bytes, each escaped as `\u0000`, fits.
+const MAX_LINE: usize = 32 * 1024;
+/// Most bytes one read from a peer takes, so a peer's buffer grows only with what it sent.
+const READ_CHUNK: usize = 4096;
+/// Most bytes of text one `pane.send` carries. More is refused, not cut (threat model, Limits).
+pub const MAX_SEND: usize = 4096;
 /// Most bytes one connection may send: two requests, so it cannot stay and keep talking.
 const MAX_CONNECTION: u64 = 2 * MAX_LINE as u64;
 /// Longest a peer may spend sending, however it spaces its bytes, so it cannot hold a slot.
@@ -76,13 +81,15 @@ const REPLY_WAIT: Duration = Duration::from_secs(FIRST_OPEN_WAIT.as_secs() + OPE
 const PARSE_ERROR: i64 = -32700;
 const NOT_A_REQUEST: i64 = -32600;
 const NO_METHOD: i64 = -32601;
+const BAD_PARAMS: i64 = -32602;
 const BAD_VERSION: i64 = -32001;
 const NO_HELLO: i64 = -32002;
 const NO_WINDOW: i64 = -32003;
 const REFUSED: i64 = -32004;
 
-/// What a caller asks the reactor for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// What a caller asks the reactor for, with arguments of a checked shape. Whether the caller
+/// may reach `pane` is the reactor's to check.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Method {
     /// `hello` version 2, which needs the caller's pane.
     Hello,
@@ -90,6 +97,25 @@ pub enum Method {
     WindowOpen,
     /// `pane.list`.
     PaneList,
+    /// `pane.read`: a pane's history and screen as plain text, or its last `lines` lines.
+    PaneRead {
+        /// The pane's number.
+        pane: usize,
+        /// How many of the newest lines, or all of them.
+        lines: Option<usize>,
+    },
+    /// `pane.last_output`: the output of the pane's last command, from OSC 133 marks.
+    PaneLastOutput {
+        /// The pane's number.
+        pane: usize,
+    },
+    /// `pane.send`: text for a pane's program, at most [`MAX_SEND`] bytes.
+    PaneSend {
+        /// The pane's number.
+        pane: usize,
+        /// The text, typed as it is.
+        text: String,
+    },
 }
 
 /// Why the core cannot take the control socket.
@@ -306,17 +332,19 @@ impl Control {
                 peer.expire(now);
                 let (generation, caller) = (peer.generation, peer.caller);
                 peer.step(now, &mut |method| {
+                    let waits = match method {
+                        Method::WindowOpen => mem::replace(&mut wait, OPEN_WAIT),
+                        _ => OPEN_WAIT,
+                    };
                     ask(Request {
                         peer: (slot, generation),
                         caller,
                         method,
+                        until: now + waits,
                         answers: answers.clone(),
                         waker: Arc::clone(&waker),
                     });
-                    match method {
-                        Method::WindowOpen => mem::replace(&mut wait, OPEN_WAIT),
-                        Method::Hello | Method::PaneList => OPEN_WAIT,
-                    }
+                    waits
                 });
                 peer.flush();
                 if peer.done(now) {
@@ -368,11 +396,20 @@ pub struct Request {
     peer: (usize, u64),
     caller: Option<Terminal>,
     method: Method,
+    /// When the peer stops waiting for the answer.
+    until: Instant,
     answers: Sender<Answer>,
     waker: Arc<Waker>,
 }
 
 impl Request {
+    /// Whether the peer has stopped waiting, so acting now could only repeat what a caller
+    /// that retries will ask for again.
+    #[must_use]
+    pub fn is_late(&self) -> bool {
+        Instant::now() >= self.until
+    }
+
     /// The terminal and session the caller held when it connected, or nothing if it had no
     /// terminal. Map it to a pane on the reactor's thread for each request, so a pane that has
     /// closed since stops matching.
@@ -383,8 +420,8 @@ impl Request {
 
     /// What the caller asks for.
     #[must_use]
-    pub fn method(&self) -> Method {
-        self.method
+    pub fn method(&self) -> &Method {
+        &self.method
     }
 
     /// Answers the caller with the method's result, or a short reason, which must carry no
@@ -455,14 +492,24 @@ pub fn open_window(stream: &UnixStream) -> Result<(), Error> {
 ///
 /// [`Error::Old`] for a core that refuses `hello` version 2, and as [`open_window`] otherwise.
 pub fn list_panes(stream: &UnixStream) -> Result<(Value, Value), Error> {
+    ask(stream, "pane.list", &json!({}))
+}
+
+/// Says `hello` version 2 to the core on `stream`, calls `method` with `params`, and returns
+/// both results: a `pinfold ctl` command's whole conversation. Errors as [`list_panes`] does.
+///
+/// # Errors
+///
+/// As [`list_panes`].
+pub fn ask(stream: &UnixStream, method: &str, params: &Value) -> Result<(Value, Value), Error> {
     check_peer(stream.as_fd(), pinfold_sys::effective_uid())?;
     stream.set_read_timeout(Some(REPLY_WAIT))?;
     stream.set_write_timeout(Some(REPLY_WAIT))?;
     let hello = json!({"version": VERSION});
     let hello = json!({"jsonrpc": "2.0", "id": 1, "method": "hello", "params": hello});
     let hello = call(stream, &hello)?;
-    let list = json!({"jsonrpc": "2.0", "id": 2, "method": "pane.list"});
-    Ok((hello, call(stream, &list)?))
+    let asked = json!({"jsonrpc": "2.0", "id": 2, "method": method, "params": params});
+    Ok((hello, call(stream, &asked)?))
 }
 
 /// One connection on the API thread.
@@ -484,8 +531,9 @@ struct Peer {
     closing: bool,
     /// When reading stops, however the peer spaces its bytes.
     until: Instant,
-    /// The request waiting for the reactor, and when it stops waiting.
-    asked: Option<(Value, Method, Instant)>,
+    /// The id of the request waiting for the reactor, whether it opens a window, and when it
+    /// stops waiting.
+    asked: Option<(Value, bool, Instant)>,
 }
 
 impl Peer {
@@ -512,7 +560,7 @@ impl Peer {
 
     /// Reads all the peer has sent, up to its limit.
     fn read(&mut self) {
-        let mut buffer = [0; MAX_LINE];
+        let mut buffer = [0; READ_CHUNK];
         while !self.ended {
             let room = usize::try_from(MAX_CONNECTION - self.taken).unwrap_or(0);
             if room == 0 {
@@ -553,22 +601,23 @@ impl Peer {
                     self.queue(&reply);
                     self.closing = !go_on;
                 }
-                Step::Ask(id, method) => self.asked = Some((id, method, now + ask(method))),
+                Step::Ask(id, method) => {
+                    let opens = method == Method::WindowOpen;
+                    self.asked = Some((id, opens, now + ask(method)));
+                }
             }
         }
     }
 
     /// Hands the waiting request its answer.
     fn answered(&mut self, result: Result<Value, String>) {
-        let Some((id, method, _)) = self.asked.take() else {
+        let Some((id, opens, _)) = self.asked.take() else {
             return;
         };
-        let (reply, go_on) = match (result, method) {
+        let (reply, go_on) = match (result, opens) {
             (Ok(result), _) => (done(&id, &result), true),
-            (Err(reason), Method::WindowOpen) => {
-                refuse(&id, NO_WINDOW, &format!("no window can open: {reason}"))
-            }
-            (Err(reason), Method::Hello | Method::PaneList) => refuse(&id, REFUSED, &reason),
+            (Err(reason), true) => refuse(&id, NO_WINDOW, &format!("no window can open: {reason}")),
+            (Err(reason), false) => refuse(&id, REFUSED, &reason),
         };
         self.queue(&reply);
         self.closing = !go_on;
@@ -576,13 +625,14 @@ impl Peer {
 
     /// Tells a request that waited too long that the core did not answer in time.
     fn expire(&mut self, now: Instant) {
-        let Some((_, method, at)) = &self.asked else {
+        let Some((_, opens, at)) = &self.asked else {
             return;
         };
         if now >= *at {
-            let reason = match method {
-                Method::WindowOpen => "the window is not ready and may still open",
-                Method::Hello | Method::PaneList => "the core is busy",
+            let reason = if *opens {
+                "the window is not ready and may still open"
+            } else {
+                "the core is busy"
             };
             self.answered(Err(reason.to_owned()));
         }
@@ -674,11 +724,63 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
         },
         _ if *greeted == 0 => refuse(Some(id), NO_HELLO, "hello comes first"),
         Some("window.open") => Step::Ask(id.clone(), Method::WindowOpen),
-        Some("pane.list") if *greeted < VERSION => {
-            refuse(Some(id), NO_METHOD, "pane.list needs hello version 2")
+        Some(method @ ("pane.list" | "pane.read" | "pane.last_output" | "pane.send"))
+            if *greeted < VERSION =>
+        {
+            refuse(
+                Some(id),
+                NO_METHOD,
+                &format!("{method} needs hello version 2"),
+            )
         }
         Some("pane.list") => Step::Ask(id.clone(), Method::PaneList),
+        Some(method @ ("pane.read" | "pane.last_output" | "pane.send")) => {
+            match pane_method(method, request.get("params")) {
+                Ok(method) => Step::Ask(id.clone(), method),
+                Err(reason) => refuse(Some(id), BAD_PARAMS, reason),
+            }
+        }
         _ => refuse(Some(id), NO_METHOD, "unknown method"),
+    }
+}
+
+/// Checks the shape of a pane method's `params`. Scope is the reactor's to check.
+fn pane_method(method: &str, params: Option<&Value>) -> Result<Method, &'static str> {
+    let field = |name| params.and_then(|params| params.get(name));
+    // JSON Schema's integer takes 1.0 as well as 1.
+    let count = |value: &Value| {
+        let integral = || {
+            value
+                .as_f64()
+                .filter(|n| n.fract() == 0.0 && (0.0..=1e15).contains(n))
+        };
+        let count = value.as_u64().or_else(|| integral().map(|n| n as u64));
+        count.and_then(|count| usize::try_from(count).ok())
+    };
+    let pane = field("pane")
+        .and_then(count)
+        .ok_or("params.pane must be a pane number")?;
+    match method {
+        "pane.read" => {
+            let lines = match field("lines") {
+                None | Some(Value::Null) => None,
+                Some(lines) => Some(count(lines).ok_or("params.lines must be a count")?),
+            };
+            Ok(Method::PaneRead { pane, lines })
+        }
+        "pane.send" => {
+            let text = field("text")
+                .and_then(Value::as_str)
+                .ok_or("params.text must be a string")?;
+            if text.len() > MAX_SEND {
+                return Err("params.text is over 4096 bytes");
+            }
+            Ok(Method::PaneSend {
+                pane,
+                text: text.to_owned(),
+            })
+        }
+        _ => Ok(Method::PaneLastOutput { pane }),
     }
 }
 
@@ -779,6 +881,78 @@ mod tests {
         );
     }
 
+    /// A request for a pane method with these params.
+    fn pane_request(method: &str, params: &Value) -> String {
+        json!({"jsonrpc": "2.0", "id": 2, "method": method, "params": params}).to_string()
+    }
+
+    #[test]
+    fn pane_methods_need_version_2_and_well_formed_params() {
+        let read = pane_request("pane.read", &json!({"pane": 3}));
+        let (reply, _) = replied(read.as_bytes(), &mut OLDEST.clone());
+        assert_eq!(code(&reply), Some(NO_METHOD));
+        let asked = |method, params| {
+            answer(
+                pane_request(method, &params).as_bytes(),
+                &mut VERSION.clone(),
+            )
+        };
+        let read = |pane, lines| Step::Ask(json!(2), Method::PaneRead { pane, lines });
+        assert_eq!(asked("pane.read", json!({"pane": 3})), read(3, None));
+        assert_eq!(
+            asked("pane.read", json!({"pane": 3, "lines": 5})),
+            read(3, Some(5))
+        );
+        assert_eq!(
+            asked("pane.read", json!({"pane": 3.0, "lines": 5.0})),
+            read(3, Some(5))
+        );
+        assert_eq!(
+            asked("pane.last_output", json!({"pane": 0})),
+            Step::Ask(json!(2), Method::PaneLastOutput { pane: 0 })
+        );
+        let bad = [
+            json!(null),
+            json!({"pane": -1}),
+            json!({"pane": "1"}),
+            json!({"pane": 1.5}),
+            json!([1]),
+        ];
+        for params in bad {
+            let line = pane_request("pane.last_output", &params);
+            let (reply, go_on) = replied(line.as_bytes(), &mut VERSION.clone());
+            assert_eq!((code(&reply), go_on), (Some(BAD_PARAMS), false), "{params}");
+        }
+        let line = pane_request("pane.read", &json!({"pane": 3, "lines": -1}));
+        let (reply, _) = replied(line.as_bytes(), &mut VERSION.clone());
+        assert_eq!(code(&reply), Some(BAD_PARAMS));
+    }
+
+    #[test]
+    fn a_send_over_4096_bytes_is_refused_whole() {
+        let send = |text: &str| pane_request("pane.send", &json!({"pane": 1, "text": text}));
+        // The longest a send's line can be: every byte escaped.
+        let most = "\0".repeat(MAX_SEND);
+        let line = send(&most);
+        assert!(line.len() <= MAX_LINE, "{}", line.len());
+        assert_eq!(
+            answer(line.as_bytes(), &mut VERSION.clone()),
+            Step::Ask(
+                json!(2),
+                Method::PaneSend {
+                    pane: 1,
+                    text: most
+                }
+            )
+        );
+        let line = send(&"x".repeat(MAX_SEND + 1));
+        let (reply, go_on) = replied(line.as_bytes(), &mut VERSION.clone());
+        assert_eq!((code(&reply), go_on), (Some(BAD_PARAMS), false));
+        let line = pane_request("pane.send", &json!({"pane": 1}));
+        let (reply, _) = replied(line.as_bytes(), &mut VERSION.clone());
+        assert_eq!(code(&reply), Some(BAD_PARAMS));
+    }
+
     #[test]
     fn ctl_hears_the_reactors_answers_and_is_told_to_restart_an_old_core() {
         let directory = fresh();
@@ -807,7 +981,7 @@ mod tests {
 
     #[test]
     fn only_hello_and_window_open_exist() {
-        for method in ["pane.read", "pane.write", "window.close", "", "HELLO"] {
+        for method in ["pane.write", "window.close", "", "HELLO"] {
             let line = json!({"jsonrpc": "2.0", "id": 1, "method": method}).to_string();
             let mut greeted = OLDEST;
             let (reply, go_on) = replied(line.as_bytes(), &mut greeted);

@@ -7,6 +7,8 @@
 use std::ops::Range;
 
 use alacritty_terminal::term::cell::{Cell, Flags};
+
+use crate::scrollback::MAX_ZEROWIDTH;
 pub use pinfold_proto::link::{Direction, MAX_QUERY, Position, Selection};
 
 /// Most rows one step of a search or copy reads, which is one or two blocks. See
@@ -237,6 +239,8 @@ pub struct Copying {
     /// The text given so far.
     bytes: usize,
     full: bool,
+    /// Most text it gives.
+    limit: usize,
 }
 
 impl Copying {
@@ -253,6 +257,16 @@ impl Copying {
             end,
             bytes: 0,
             full: false,
+            limit: MAX_SELECTION,
+        }
+    }
+
+    /// Prepares a copy of `selection` with no limit, for a reader that keeps only the newest
+    /// text of each step.
+    pub(crate) fn unlimited(selection: Selection) -> Self {
+        Self {
+            limit: usize::MAX,
+            ..Self::new(selection)
         }
     }
 
@@ -320,7 +334,13 @@ impl Copying {
             tab = tab && column % TAB_STOP != 0 && cell.c == ' ';
             if !tab && !cell.flags.intersects(SPACERS) {
                 text.push(cell.c);
-                text.extend(cell.zerowidth().unwrap_or_default());
+                // As history keeps them, so a cell of endless marks cannot flood a copy.
+                text.extend(
+                    cell.zerowidth()
+                        .unwrap_or_default()
+                        .iter()
+                        .take(MAX_ZEROWIDTH),
+                );
             }
             tab |= cell.c == '\t';
         }
@@ -328,7 +348,7 @@ impl Copying {
             text.push('\n');
         }
         let bytes = self.bytes + (text.len() - length);
-        self.full = bytes > MAX_SELECTION;
+        self.full = bytes > self.limit;
         if self.full {
             text.truncate(length);
         } else {
