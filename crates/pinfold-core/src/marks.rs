@@ -38,8 +38,9 @@ pub struct ShellMarks {
 }
 
 impl ShellMarks {
-    /// Applies the text after `133;`. Options after a mark are ignored.
-    fn apply(&mut self, text: &[u8]) {
+    /// Applies the text after `133;`, and returns whether it was a mark. Options after a mark
+    /// are ignored.
+    fn apply(&mut self, text: &[u8]) -> bool {
         let mut fields = text.split(|&byte| byte == b';');
         self.phase = match fields.next() {
             Some(b"A") => ShellPhase::Prompt,
@@ -49,15 +50,16 @@ impl ShellMarks {
                 self.exit = match fields.next() {
                     Some(field) if !field.contains(&b'=') => match exit_status(field) {
                         Some(exit) => Some(exit),
-                        None => return,
+                        None => return false,
                     },
                     _ => None,
                 };
                 self.finished = self.finished.wrapping_add(1);
                 ShellPhase::Finished
             }
-            _ => return,
+            _ => return false,
         };
+        true
     }
 }
 
@@ -142,16 +144,17 @@ impl Marks {
     /// Takes the next byte of a string, including the one that ends it.
     ///
     /// BEL and ESC finish a string as they do for the parser, which acts at the ESC of an
-    /// ST. CAN and SUB cancel one, though the parser would still act on what it has.
+    /// ST. CAN and SUB cancel one, though the parser would still act on what it has. Returns
+    /// whether the byte ended an OSC 133 mark.
     #[inline]
-    pub(crate) fn byte(&mut self, byte: u8) {
+    pub(crate) fn byte(&mut self, byte: u8) -> bool {
         if !self.open {
-            return;
+            return false;
         }
         match byte {
             0x07 | 0x1b => {
                 self.open = false;
-                self.finish();
+                return self.finish();
             }
             0x18 | 0x1a => self.open = false,
             _ => {
@@ -160,15 +163,19 @@ impl Marks {
                 self.open = [b"133;".as_slice(), b"7;"].iter().any(matches);
             }
         }
+        false
     }
 
-    fn finish(&mut self) {
+    /// Applies a finished string, and returns whether it was an OSC 133 mark.
+    fn finish(&mut self) -> bool {
         if let Some(text) = self.text.strip_prefix(b"133;") {
-            self.shell.apply(text);
-        } else if let Some(url) = self.text.strip_prefix(b"7;")
+            return self.shell.apply(text);
+        }
+        if let Some(url) = self.text.strip_prefix(b"7;")
             && let Some(cwd) = working_directory(url)
         {
             self.cwd = Some(cwd);
         }
+        false
     }
 }
