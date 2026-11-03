@@ -60,6 +60,9 @@ impl Session {
         let mut command = Command::new(self.directory.join("pinfold"));
         command
             .env("XDG_RUNTIME_DIR", self.directory.join("run"))
+            // As in `start_core`: the core it starts saves the session, never to the person's.
+            .env("XDG_STATE_HOME", self.directory.join("state"))
+            .env("HOME", self.directory.join("state"))
             .env("SHELL", shell)
             .env(CLIENT, &self.directory);
         command
@@ -1317,6 +1320,39 @@ fn ctl_session_save_writes_a_private_snapshot_only_from_outside_a_pane() {
     assert!(snapshot["panes"][0]["command"].is_string(), "{snapshot}");
     core.kill().unwrap();
     core.wait().unwrap();
+}
+
+#[test]
+fn sigterm_saves_the_session_before_the_core_exits() {
+    let session = Session::new("t", None).unwrap();
+    let mut core = session.start_core(&["--idle", "1"], NOTE_PANE).unwrap();
+    assert!(session.wait_for("pane"), "the pane's shell did not start");
+
+    let term = format!("kill -TERM {}", core.id());
+    let sent = Command::new("/bin/sh").args(["-c", &term]).status();
+    assert!(sent.unwrap().success());
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = core.try_wait().unwrap() {
+            break status;
+        }
+        assert!(start.elapsed() < PATIENCE, "the core outlived SIGTERM");
+        thread::sleep(Duration::from_millis(20));
+    };
+    assert!(status.success(), "{}", session.read_log());
+
+    // `pinfold_config::state_dir` under the HOME and XDG_STATE_HOME that `start_core` sets.
+    let state = session
+        .directory
+        .join("state")
+        .join(if cfg!(target_os = "macos") {
+            "Library/Application Support/PinFold"
+        } else {
+            "pinfold"
+        });
+    let saved = fs::read(state.join("sessions/default.json")).unwrap();
+    let snapshot: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+    assert_eq!(snapshot["tabs"][0]["root"]["pane"], 0);
 }
 
 #[test]

@@ -11,7 +11,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mio::unix::SourceFd;
+use mio::unix::{SourceFd, pipe};
 use mio::{Events, Interest, Poll, Token};
 use pinfold_mux::{Session, Size};
 use pinfold_proto::link::ApprovalAnswer;
@@ -47,6 +47,8 @@ const KEPT_INPUT: usize = 4 * 1024;
 const EVENT_CAPACITY: usize = 64;
 /// Beyond any pane number, so a wake-up is never mistaken for PTY activity.
 const WAKE: Token = Token(usize::MAX);
+/// SIGTERM or SIGHUP, through the self-pipe of [`Reactor::watch_signals`].
+const SIGNAL: Token = Token(usize::MAX - 2);
 
 /// How a pass over one pane ended.
 #[derive(Debug, PartialEq)]
@@ -193,6 +195,9 @@ pub struct Reactor {
     pub(crate) shell: fn() -> Command,
     buffer: Vec<u8>,
     pub(crate) host: Host,
+    /// The read end of the self-pipe, kept open while it is polled.
+    signals: Option<pipe::Receiver>,
+    terminated: bool,
     /// Answers accepted only from the inherited window link.
     pub(crate) approval_answers: Vec<(u64, ApprovalAnswer)>,
     pub(crate) protect: Protect,
@@ -219,6 +224,8 @@ impl Reactor {
             shell: shell::command,
             buffer: vec![0; READ_BUDGET],
             host: Host::default(),
+            signals: None,
+            terminated: false,
             approval_answers: Vec::new(),
             protect: Protect::default(),
         })
@@ -297,6 +304,8 @@ impl Reactor {
             result => result?,
         }
         for event in &self.events {
+            // Never read, as the core exits once it has saved.
+            self.terminated |= event.token() == SIGNAL;
             if event.token() == LINK {
                 self.host.wake();
             }
@@ -536,6 +545,35 @@ impl Reactor {
     #[must_use]
     pub fn engine(&self, pane: usize) -> Option<&(dyn VtEngine + Send)> {
         self.pane(pane).map(|pane| pane.engine.as_ref())
+    }
+
+    /// Makes SIGTERM and SIGHUP end a [`Reactor::turn`] and set [`Reactor::is_terminated`],
+    /// instead of ending the process, so the caller can save first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pipe cannot be made or polled, or the system refuses a handler.
+    pub fn watch_signals(&mut self) -> io::Result<()> {
+        let (sender, mut receiver) = pipe::new()?;
+        self.poll
+            .registry()
+            .register(&mut receiver, SIGNAL, Interest::READABLE)?;
+        pinfold_sys::on_terminate(&sender.into())?;
+        self.signals = Some(receiver);
+        Ok(())
+    }
+
+    /// Returns whether SIGTERM or SIGHUP has arrived since [`Reactor::watch_signals`].
+    #[must_use]
+    pub fn is_terminated(&self) -> bool {
+        self.terminated
+    }
+
+    /// Returns whether the last [`Reactor::turn`] saw any event, such as output, a request or a
+    /// window's message. A turn that only timed out saw none.
+    #[must_use]
+    pub fn was_active(&self) -> bool {
+        !self.events.is_empty()
     }
 
     /// Returns how many panes there are. A pane of a tab goes when its program exits or a window

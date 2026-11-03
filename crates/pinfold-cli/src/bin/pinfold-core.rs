@@ -21,6 +21,7 @@ use pinfold_core::family::{self, Family, SplitWay};
 use pinfold_core::grants::{Decision, Grants, Released};
 use pinfold_core::io::{Reactor, Waker};
 use pinfold_core::shell;
+use pinfold_core::snapshot::Saver;
 use pinfold_core::status::Status;
 use pinfold_core::wait::{Outcome, Waits};
 use pinfold_core::workspace::Workspaces;
@@ -479,11 +480,26 @@ fn wants(topics: Topics, event: &Value) -> bool {
     }
 }
 
+/// Saves the session, logging a failure by its kind alone, which names no path or pane. A
+/// failed save stops nothing.
+fn save(saver: &mut Saver, reactor: &Reactor) {
+    if let Err(error) = saver.save(&reactor.snapshot()) {
+        let _ = writeln!(
+            io::stderr(),
+            "pinfold-core: cannot save the session: {}",
+            error.kind()
+        );
+    }
+}
+
 /// Runs `panes` shells, a tab each, until every pane has gone and no window is left to tell, or
-/// until killed. With a size, it opens a window for `cargo xtask mem-gate` and prints its pid.
+/// until SIGTERM or SIGHUP, saving the session on the way out, when the window closes and a
+/// minute after a change (ADR-0034). With a size, it opens a window for `cargo xtask mem-gate` and prints its pid.
 fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
     let binary = window_binary()?;
     let mut reactor = Reactor::new()?;
+    reactor.watch_signals()?;
+    let mut saver = pinfold_config::state_dir().map(|state| Saver::new(state, control::SESSION));
     let asked = listen(reactor.waker())?;
     for _ in 0..panes {
         reactor
@@ -512,11 +528,16 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
         reactor.set_patterns(patterns);
     }
     let mut log = audit::open(&config.api);
+    let mut window = reactor.has_window();
     loop {
+        let now = Instant::now();
         let deadline = waits.deadline().into_iter().chain(grants.deadline()).min();
-        let wait = deadline.map(|at| at.saturating_duration_since(Instant::now()));
+        let wait = deadline.map(|at| at.saturating_duration_since(now));
+        let wait = wait
+            .into_iter()
+            .chain(saver.as_ref().and_then(|saver| saver.wait(now)));
         output::tap(&mut reactor, &waits, &subscribers);
-        reactor.turn(Some(wait.unwrap_or(IDLE)))?;
+        reactor.turn(Some(wait.min().unwrap_or(IDLE)))?;
         output::hand_out(&mut reactor, &mut waits, &subscribers);
         waits.retain(|request| !request.is_gone());
         grants.retain(|request| !request.is_gone());
@@ -611,7 +632,19 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
                 audit::reply(&mut log, &reactor, request, result);
             }
         }
-        if reactor.pane_count() == 0 && !reactor.has_window() {
+        let ending = reactor.is_terminated() || reactor.pane_count() == 0 && !reactor.has_window();
+        if let Some(saver) = saver.as_mut() {
+            let now = Instant::now();
+            if reactor.was_active() {
+                saver.touch(now);
+            }
+            let closed = window && !reactor.has_window();
+            if ending || closed || saver.is_due(now) {
+                save(saver, &reactor);
+            }
+        }
+        window = reactor.has_window();
+        if ending {
             return Ok(());
         }
     }

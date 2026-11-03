@@ -43,6 +43,19 @@ pub fn footprint(pid: u32) -> io::Result<u64> {
     platform::footprint(pid)
 }
 
+/// Writes a byte to `pipe` on each SIGTERM and SIGHUP, the self-pipe the core polls to save its
+/// session before it exits. Neither signal ends the process after this, so the reader must.
+///
+/// # Errors
+///
+/// Returns an error if the descriptor cannot be copied or the system refuses a handler.
+pub fn on_terminate(pipe: &OwnedFd) -> io::Result<()> {
+    for signal in [libc::SIGTERM, libc::SIGHUP] {
+        signal_hook::low_level::pipe::register_raw(signal, pipe.try_clone()?)?;
+    }
+    Ok(())
+}
+
 /// Returns the user this process acts as.
 pub fn effective_uid() -> u32 {
     // SAFETY: geteuid takes no arguments, cannot fail and touches no memory.
