@@ -8,9 +8,10 @@ use std::sync::mpsc::{self, Receiver, TrySendError};
 use std::time::{Duration, Instant};
 use std::{env, thread};
 
-use pinfold_api::control::{self, Control, Method, Request};
+use pinfold_api::control::{self, Control, Method, Request, Subscriber, Topics, Until, Wait};
 use pinfold_core::io::{Reactor, Waker};
 use pinfold_core::shell;
+use pinfold_core::wait::{Outcome, Waits};
 use serde_json::{Value, json};
 
 const ROWS: u16 = 24;
@@ -72,8 +73,10 @@ fn answer(reactor: &mut Reactor, request: &Request) -> Result<Value, String> {
                     "pane.read",
                     "pane.last_output",
                     "pane.send",
+                    "pane.wait",
+                    "events.subscribe",
                 ],
-                (true, None) => &["window.open", "pane.list"],
+                (true, None) => &["window.open", "pane.list", "events.subscribe"],
                 (false, _) => &["window.open"],
             };
             Ok(json!({"version": control::VERSION, "methods": methods, "pane": own}))
@@ -98,8 +101,82 @@ fn answer(reactor: &mut Reactor, request: &Request) -> Result<Value, String> {
             Ok(json!({"panes": panes.collect::<Vec<_>>()}))
         }
         Method::PaneList => Err("pane.list needs a caller in a terminal".to_owned()),
-        // Never sent here: the loop opens windows.
-        Method::WindowOpen => Err("no window here".to_owned()),
+        // Never sent here: the loop opens windows, parks waits and keeps subscribers.
+        Method::WindowOpen | Method::PaneWait(_) | Method::EventsSubscribe(_) => {
+            Err("not here".to_owned())
+        }
+    }
+}
+
+/// Parks a wait on the caller's own pane, the only one it may wait on in this step, or refuses
+/// it.
+fn park(reactor: &Reactor, waits: &mut Waits<Request>, request: Request, wait: Wait) {
+    let own = request.caller().and_then(|caller| reactor.pane_of(caller));
+    let Some(pane) = own.filter(|own| wait.pane.is_none_or(|pane| pane == *own)) else {
+        let reason = "pane.wait waits only on the caller's own pane";
+        return request.answer(Err(reason.to_owned()));
+    };
+    let until = match wait.until {
+        Until::Exit => pinfold_core::wait::Until::Exit,
+        Until::Prompt => pinfold_core::wait::Until::Prompt,
+        Until::Output => pinfold_core::wait::Until::Output,
+    };
+    let deadline = Instant::now() + wait.timeout;
+    if let Err(request) = waits.park(reactor, request, pane, until, deadline) {
+        request.answer(Err("the core is busy".to_owned()));
+    }
+}
+
+/// The result of a wait that ended.
+fn ended(outcome: Outcome) -> Value {
+    match outcome {
+        Outcome::Exit(exit) => json!({"outcome": "exit", "exit": exit}),
+        Outcome::Prompt => json!({"outcome": "prompt"}),
+        Outcome::Output => json!({"outcome": "output"}),
+        Outcome::Closed => json!({"outcome": "closed"}),
+        Outcome::Timeout => json!({"outcome": "timeout"}),
+    }
+}
+
+/// Each pane's number, status and exit status, which is all an event tells.
+type Seen = Vec<(usize, &'static str, Option<u8>)>;
+
+fn seen(reactor: &Reactor) -> Seen {
+    let exit = |pane| {
+        reactor
+            .progress(pane)
+            .and_then(|progress| progress.marks.exit)
+    };
+    let panes = reactor.list();
+    panes
+        .map(|pane| (pane.id, pane.status, exit(pane.id)))
+        .collect()
+}
+
+/// The events between two looks at the panes, with nothing from a screen or title.
+fn changes(before: &Seen, after: &Seen) -> Vec<Value> {
+    let gone = before
+        .iter()
+        .filter(|was| after.iter().all(|pane| pane.0 != was.0));
+    let mut events: Vec<Value> = gone
+        .map(|&(id, ..)| json!({"event": "pane.closed", "pane": id}))
+        .collect();
+    for &(id, status, exit) in after {
+        let event = match before.iter().find(|was| was.0 == id) {
+            None => "pane.opened",
+            Some(&was) if was != (id, status, exit) => "pane.status",
+            Some(_) => continue,
+        };
+        events.push(json!({"event": event, "pane": id, "status": status, "exit": exit}));
+    }
+    events
+}
+
+fn wants(topics: Topics, event: &Value) -> bool {
+    match event["event"].as_str() {
+        Some("pane.opened") => topics.opened,
+        Some("pane.closed") => topics.closed,
+        _ => topics.status,
     }
 }
 
@@ -124,23 +201,60 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
     // Who asked for the window, until it says hello or ends. A caller that timed out has gone
     // and hears nothing.
     let mut waiting = Vec::new();
+    let mut waits: Waits<Request> = Waits::default();
+    let mut subscribers: Vec<(Subscriber, Topics)> = Vec::new();
+    let mut known = Seen::new();
     loop {
-        reactor.turn(Some(IDLE))?;
+        let wait = waits
+            .deadline()
+            .map(|at| at.saturating_duration_since(Instant::now()));
+        reactor.turn(Some(wait.unwrap_or(IDLE)))?;
+        waits.retain(|request| !request.is_gone());
+        subscribers.retain(|(subscriber, _)| !subscriber.is_gone());
         while let Ok(request) = asked.try_recv() {
             // Its peer has been told the core is busy, so acting now would surprise a retry.
             if *request.method() != Method::WindowOpen && request.is_late() {
                 continue;
             }
-            if *request.method() != Method::WindowOpen {
-                let answer = answer(&mut reactor, &request);
-                request.answer(answer);
-                continue;
+            match request.method().clone() {
+                Method::WindowOpen => match reactor.spawn_window(&binary) {
+                    Ok(_) => waiting.push(request),
+                    // The system's words alone, which name no pane, secret or variable.
+                    Err(error) => {
+                        request.answer(Err(format!("cannot start pinfold-window: {error}")));
+                    }
+                },
+                Method::PaneWait(wait) => park(&reactor, &mut waits, request, wait),
+                // Every pane of the session, as for pane.list.
+                Method::EventsSubscribe(topics) if request.caller().is_some() => {
+                    if subscribers.is_empty() {
+                        known = seen(&reactor);
+                    }
+                    subscribers.push((request.subscriber(), topics));
+                    request.answer(Ok(json!({})));
+                }
+                Method::EventsSubscribe(_) => {
+                    let reason = "events.subscribe needs a caller in a terminal";
+                    request.answer(Err(reason.to_owned()));
+                }
+                _ => {
+                    let answer = answer(&mut reactor, &request);
+                    request.answer(answer);
+                }
             }
-            match reactor.spawn_window(&binary) {
-                Ok(_) => waiting.push(request),
-                // The system's words alone, which name no pane, secret or variable.
-                Err(error) => request.answer(Err(format!("cannot start pinfold-window: {error}"))),
+        }
+        for (request, outcome) in waits.settle(&reactor, Instant::now()) {
+            request.answer(Ok(ended(outcome)));
+        }
+        if !subscribers.is_empty() {
+            let now = seen(&reactor);
+            for event in changes(&known, &now) {
+                let to = subscribers
+                    .iter()
+                    .filter(|(_, topics)| wants(*topics, &event));
+                to.for_each(|(subscriber, _)| subscriber.send(event.clone()));
             }
+            known = now;
         }
         let ended = !reactor.has_window();
         if ended || reactor.is_window_ready() {

@@ -17,7 +17,7 @@ use pinfold_sys::Terminal;
 use pinfold_sys::pty::Pty;
 
 use crate::link::{Host, LINK};
-use crate::marks::ShellPhase;
+use crate::marks::{ShellMarks, ShellPhase};
 use crate::search::{
     CopyStep, Copying, Direction, MAX_SELECTION, Position, Search, SearchStep, Selection,
 };
@@ -109,6 +109,8 @@ struct Pane {
     readable: bool,
     closed: bool,
     dirty: bool,
+    /// Counts reads that found output, wrapping, for `pane.wait`.
+    output: u64,
     /// The running search, which gets one step per pass, so PTYs are served between steps.
     search: Option<Search>,
     found: Option<Selection>,
@@ -140,6 +142,15 @@ pub struct Listed<'a> {
     pub command: &'a str,
     /// `running`, `done`, `error` or `idle`, from OSC 133 marks, and `done` once it closed.
     pub status: &'static str,
+}
+
+/// What `pane.wait` watches in a pane, with nothing from its screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Progress {
+    /// Counts reads that found output, wrapping.
+    pub output: u64,
+    /// The shell's OSC 133 marks, which output can fake (T4).
+    pub marks: ShellMarks,
 }
 
 /// Every PTY and its terminal state, driven from a single thread.
@@ -217,6 +228,7 @@ impl Reactor {
             readable: true,
             closed: false,
             dirty: true,
+            output: 0,
             search: None,
             found: None,
             sends: (Instant::now(), 0),
@@ -264,13 +276,16 @@ impl Reactor {
         for pane in &mut self.panes {
             if pane.readable {
                 let mut master = pane.pty.master();
+                let mut fed = false;
                 let pumped = pump(
                     &mut master,
                     pane.engine.as_mut(),
                     &mut pane.replies,
                     &mut self.buffer,
-                    &mut pane.dirty,
+                    &mut fed,
                 );
+                pane.dirty |= fed;
+                pane.output = pane.output.wrapping_add(u64::from(fed));
                 pane.readable = pumped == Pumped::Budget;
                 pane.closed |= pumped == Pumped::Closed;
             }
@@ -498,6 +513,17 @@ impl Reactor {
                 command: &pane.program,
                 status,
             }
+        })
+    }
+
+    /// Returns what `pane.wait` watches in a pane, or nothing once it has closed.
+    #[must_use]
+    pub fn progress(&self, pane: usize) -> Option<Progress> {
+        let pane = self.pane(pane).filter(|pane| !pane.closed)?;
+        let marks = pane.engine.shell_marks();
+        Some(Progress {
+            output: pane.output,
+            marks,
         })
     }
 

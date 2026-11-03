@@ -6,6 +6,7 @@
 
 use std::error::Error;
 use std::fmt::Write as _;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -22,6 +23,8 @@ const CLIENT: &str = "PINFOLD_TEST_CLIENT";
 const HARDEN: &str = "PINFOLD_TEST_HARDEN";
 /// Set in a process that should panic.
 const PANIC: &str = "PINFOLD_TEST_PANIC";
+/// Names the directory of a run, in the pane that calls the API.
+const API: &str = "PINFOLD_TEST_API";
 const PATIENCE: Duration = Duration::from_secs(30);
 
 type Result<T = ()> = std::result::Result<T, Box<dyn Error>>;
@@ -544,4 +547,149 @@ fn hardening_twice_is_harmless() {
         .status()
         .unwrap();
     assert!(status.success());
+}
+
+/// Says hello version 2 on a new connection and sends `lines`.
+fn api(lines: &[serde_json::Value]) -> Result<std::io::Lines<std::io::BufReader<UnixStream>>> {
+    use std::io::{BufRead, BufReader, Write};
+    let path = control::socket_path(&control::runtime_dir());
+    let mut stream = UnixStream::connect(path)?;
+    stream.set_read_timeout(Some(Duration::from_millis(200)))?;
+    let hello = r#"{"jsonrpc":"2.0","id":1,"method":"hello","params":{"version":2}}"#;
+    writeln!(stream, "{hello}")?;
+    for line in lines {
+        writeln!(stream, "{line}")?;
+    }
+    Ok(BufReader::new(stream).lines())
+}
+
+/// The next whole line, waiting out read timeouts, after `tick` on each.
+fn next(
+    lines: &mut std::io::Lines<std::io::BufReader<UnixStream>>,
+    mut tick: impl FnMut() -> Result,
+) -> Result<serde_json::Value> {
+    let start = Instant::now();
+    while start.elapsed() < PATIENCE {
+        match lines.next() {
+            Some(Ok(line)) => return Ok(serde_json::from_str(&line)?),
+            Some(Err(error)) if error.kind() == std::io::ErrorKind::WouldBlock => tick()?,
+            _ => return Err("the core hung up".into()),
+        }
+    }
+    Err("the core said nothing".into())
+}
+
+/// Not a test: the first pane of [`a_caller_waits_on_its_pane_and_hears_panes_open_and_close`].
+/// It subscribes, waits on itself, and notes what it hears.
+#[test]
+fn api_process() {
+    let Some(directory) = env::var_os(API) else {
+        return;
+    };
+    let directory = Path::new(&directory);
+    let subscribe = serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "events.subscribe",
+        "params": {"events": ["pane.opened", "pane.closed"]}});
+    let mut events = api(&[subscribe]).unwrap();
+    for _ in 0..2 {
+        next(&mut events, || Ok(())).unwrap();
+    }
+    fs::write(directory.join("subscribed"), "").unwrap();
+
+    let wait = |id, until, timeout_ms| {
+        serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "pane.wait",
+            "params": {"pane": "self", "until": until, "timeout_ms": timeout_ms}})
+    };
+    let mut waits = api(&[wait(2, "prompt", 300), wait(3, "exit", 20_000)]).unwrap();
+    let mut heard = String::new();
+    for _ in 0..2 {
+        writeln!(heard, "{}", next(&mut waits, || Ok(())).unwrap()).unwrap();
+    }
+    // Marked until heard, as nothing says when the core has parked the wait.
+    let mut tty = fs::OpenOptions::new().write(true).open("/dev/tty").unwrap();
+    let mut mark = || Ok(std::io::Write::write_all(&mut tty, b"\x1b]133;D;7\x07")?);
+    writeln!(heard, "{}", next(&mut waits, &mut mark).unwrap()).unwrap();
+    fs::write(directory.join("waited"), heard).unwrap();
+
+    let (mut opened, mut closed) = (None, None);
+    while closed.is_none() {
+        let event = next(&mut events, || Ok(())).unwrap();
+        let params = event["params"].clone();
+        match params["event"].as_str() {
+            Some("pane.opened") => opened = Some(params),
+            _ => closed = Some(params),
+        }
+    }
+    let heard = format!(
+        "{}\n{}\n",
+        opened.unwrap_or_default(),
+        closed.unwrap_or_default()
+    );
+    fs::write(directory.join("events"), heard).unwrap();
+}
+
+/// Not a test: the window of [`a_caller_waits_on_its_pane_and_hears_panes_open_and_close`],
+/// which opens a tab once the first pane has subscribed.
+#[test]
+fn tab_process() {
+    let Some(directory) = env::var_os(CLIENT) else {
+        return;
+    };
+    let directory = Path::new(&directory);
+    fs::write(
+        directory.join("core"),
+        std::os::unix::process::parent_id().to_string(),
+    )
+    .unwrap();
+    let mut link = Link::new(socket::take_link().unwrap()).unwrap();
+    assert!(link.resize(24, 80));
+    let subscribed = |_: &mut Link| directory.join("subscribed").exists();
+    until(&mut link, subscribed).unwrap();
+    assert!(link.send(Request::NewTab));
+    until(&mut link, |_| directory.join("events").exists()).unwrap();
+}
+
+#[test]
+fn a_caller_waits_on_its_pane_and_hears_panes_open_and_close() {
+    let exe = env::current_exe().unwrap();
+    let window = format!("exec '{}' --exact tab_process", exe.display());
+    let session = Session::new("w", Some(&window)).unwrap();
+    // The first pane is the caller; the tab's pane ends a moment after it opens.
+    let shell = session.directory.join("shell");
+    let script = format!(
+        "#!/bin/sh\nif mkdir \"$PINFOLD_TEST_CLIENT/first\"; then exec '{}' --exact api_process; fi\nsleep 1\n",
+        exe.display()
+    );
+    fs::write(&shell, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut launcher = session.launcher(shell.to_str().unwrap());
+    let launched = launcher.env(API, &session.directory).output().unwrap();
+    assert!(launched.status.success(), "{launched:?}");
+
+    assert!(session.wait_for("waited"), "{}", session.read_log());
+    let waited: Vec<serde_json::Value> = session
+        .read("waited")
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(waited[0]["result"]["version"], 2);
+    let methods = waited[0]["result"]["methods"].to_string();
+    assert!(methods.contains("pane.wait") && methods.contains("events.subscribe"));
+    assert_eq!(
+        waited[1]["result"],
+        serde_json::json!({"outcome": "timeout"})
+    );
+    let exited = serde_json::json!({"outcome": "exit", "exit": 7});
+    assert_eq!(waited[2]["result"], exited);
+
+    assert!(session.wait_for("events"), "{}", session.read_log());
+    let events = session.read("events");
+    let mut events = events
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap());
+    let opened =
+        serde_json::json!({"event": "pane.opened", "pane": 1, "status": "idle", "exit": null});
+    assert_eq!(events.next(), Some(opened));
+    let closed = serde_json::json!({"event": "pane.closed", "pane": 1});
+    assert_eq!(events.next(), Some(closed));
 }
