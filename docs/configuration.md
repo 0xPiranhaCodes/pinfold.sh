@@ -96,7 +96,7 @@ does the default list applies.
 
 An `[agents.<name>]` table describes one agent. `command` is the program and its arguments,
 run with no shell; it must not be empty or start with `-`. `sandbox = true` runs it in the
-system's sandbox. The window does not start agent profiles yet.
+system's sandbox. Nothing starts agent profiles yet: launching one is follow-up work.
 
 ```toml
 [agents.claude]
@@ -113,9 +113,12 @@ If the tool is missing or refuses, the agent does not start: it never runs unsan
 directory that does not exist when the agent starts is not hidden on Linux.
 
 The agent stays in its pane's session with the pane as its controlling terminal, so the API
-still knows it as that pane, and its socket stays reachable. Only the agent reads that
-terminal, so typing into it with `TIOCSTI` reaches nothing outside the sandbox. Everything else
-in your home directory stays readable and writable.
+still knows it as that pane, and its socket stays reachable. On macOS the sandbox denies typing
+into that terminal with `TIOCSTI`. On Linux it does not yet, but only the agent reads that
+terminal, so such input reaches nothing outside the sandbox. Linux 6.2 and later refuse
+`TIOCSTI` to unprivileged programs when `sysctl dev.tty.legacy_tiocsti` prints `0`, the default
+on kernels built without `CONFIG_LEGACY_TIOCSTI`; check it there.
+Everything else in your home directory stays readable and writable.
 
 ## Keys
 

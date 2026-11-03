@@ -2,8 +2,9 @@
 //!
 //! The sandbox wraps the pane's whole program: `sandbox-exec` on macOS and bubblewrap on Linux.
 //! Neither starts a session, so the agent keeps the pane's controlling terminal and session, by
-//! which the API knows it. Nothing outside the sandbox reads that terminal, so TIOCSTI, which
-//! only reaches the caller's own terminal, can type into sandboxed programs alone.
+//! which the API knows it. On macOS the rules deny TIOCSTI. On Linux nothing blocks it yet, but
+//! nothing outside the sandbox reads that terminal, so TIOCSTI, which only reaches the caller's
+//! own terminal, can type into sandboxed programs alone.
 //!
 //! A missing tool is an error: a pane that asked for a sandbox never runs without one.
 
@@ -12,10 +13,11 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// The macOS rules: everything is allowed but the hidden directories and every terminal by
-/// name. A pane's own terminal is already open, and `/dev/tty` still reaches it.
+/// The macOS rules: everything is allowed but the hidden directories, every terminal by name and
+/// TIOCSTI (`0x80017472`). A pane's own terminal is already open, and `/dev/tty` still reaches it.
 const PROFILE: &str = "(version 1)(allow default)\
-(deny file-read* file-write* (regex #\"^/dev/ttys[0-9]+$\"))";
+(deny file-read* file-write* (regex #\"^/dev/ttys[0-9]+$\"))\
+(deny file-ioctl (ioctl-command 2147578994))";
 
 /// Returns the command that runs `program` with `hidden` unreadable, for
 /// [`Reactor::spawn`](crate::io::Reactor::spawn).
@@ -84,7 +86,8 @@ fn macos_args(hidden: &[PathBuf], program: &[String]) -> Vec<OsString> {
 }
 
 /// `bwrap`'s arguments: the real root, a private `/dev` and `/proc`, and an empty directory over
-/// each hidden one. A missing directory is skipped, as bwrap would make it outside the sandbox.
+/// each hidden one. A missing directory is skipped, as bwrap would make it outside the sandbox, and
+/// so is one inside another hidden directory, which that one's mount already covers.
 fn linux_args(hidden: &[PathBuf], program: &[String]) -> Vec<OsString> {
     let fixed = [
         "--bind",
@@ -97,7 +100,14 @@ fn linux_args(hidden: &[PathBuf], program: &[String]) -> Vec<OsString> {
         "/proc",
     ];
     let mut args: Vec<OsString> = fixed.map(OsString::from).into();
-    for path in hidden.iter().filter(|path| path.is_dir()) {
+    let mounted: Vec<&PathBuf> = hidden.iter().filter(|path| path.is_dir()).collect();
+    for path in &mounted {
+        if mounted
+            .iter()
+            .any(|outer| outer != path && path.starts_with(outer))
+        {
+            continue;
+        }
         args.extend([OsString::from("--tmpfs"), path.into()]);
     }
     args.push("--".into());
@@ -151,11 +161,16 @@ mod tests {
     #[test]
     fn linux_covers_existing_paths_and_keeps_the_session() {
         let root = std::env::temp_dir();
-        let hidden = [root.clone(), PathBuf::from("/nowhere/.ssh")];
+        let inner = root.join(format!("pinfold-nested-{}", std::process::id()));
+        std::fs::create_dir_all(&inner).unwrap();
+        // A directory inside another hidden one, before or after it, needs no mount of its own.
+        let hidden = [inner.clone(), root.clone(), PathBuf::from("/nowhere/.ssh")];
         let args = linux_args(&hidden, &["agent".to_owned()]);
+        std::fs::remove_dir(&inner).unwrap();
         let args = strings(&args);
         let tmpfs = ["--tmpfs", root.to_str().unwrap(), "--", "agent"];
         assert_eq!(args[args.len() - 4..], tmpfs);
+        assert_eq!(args.iter().filter(|arg| **arg == "--tmpfs").count(), 1);
         assert!(!args.contains(&"/nowhere/.ssh"));
         assert!(!args.contains(&"--new-session"));
     }

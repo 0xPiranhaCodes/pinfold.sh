@@ -616,13 +616,22 @@ mod tests {
             home.join(".config/pinfold/pinfold.toml"),
         )
         .unwrap();
-        symlink(&dotfiles, home.join(".ssh")).unwrap();
+        // Each link leads somewhere else, so each resolution is checked on its own.
+        let keys = root.path().join("keys");
+        fs::create_dir_all(&keys).unwrap();
+        symlink(&keys, home.join(".ssh")).unwrap();
         let dirs = private_dirs_from(None, None, Some(home.clone().into()));
         let dotfiles = fs::canonicalize(&dotfiles).unwrap();
+        let keys = fs::canonicalize(&keys).unwrap();
         assert!(dirs.contains(&home.join(".ssh")), "{dirs:?}");
+        assert!(dirs.contains(&keys), "{dirs:?}");
         assert!(dirs.contains(&home.join(".config/pinfold")), "{dirs:?}");
         assert!(dirs.contains(&dotfiles), "{dirs:?}");
-        assert_eq!(dirs.iter().filter(|dir| **dir == dotfiles).count(), 1);
+        // A directory that is already real is listed once.
+        assert!(
+            dirs.iter()
+                .all(|dir| dirs.iter().filter(|other| *other == dir).count() == 1)
+        );
         assert!(private_dirs_from(None, None, None).is_empty());
     }
 
