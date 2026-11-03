@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "workspace.ask_trust",
+  "description": "Asks in window chrome whether to trust a layout, showing the directory and every run line, and records the pair if trusted. Refusal is an error. Needs hello version 2 and an identified terminal outside every pane.",
+  "type": "object",
+  "properties": {
+    "params": {
+      "type": "object",
+      "required": ["root", "sha256", "runs"],
+      "properties": {
+        "root": { "type": "string", "pattern": "^/", "description": "The canonical project directory." },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "runs": { "type": "array", "maxItems": 64, "items": { "type": "string" } }
+      }
+    },
+    "result": {
+      "type": "object",
+      "required": ["trusted"],
+      "additionalProperties": false,
+      "properties": {
+        "trusted": { "const": true }
+      }
+    }
+  }
+}

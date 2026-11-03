@@ -9,9 +9,12 @@ use std::time::{Duration, Instant};
 use std::{env, thread};
 
 use pinfold_api::Log;
-use pinfold_api::control::{self, Control, Method, Request, Subscriber, Topics, Until, Wait};
+use pinfold_api::control::{
+    self, Control, Method, Request, Subscriber, Topics, Until, Wait, Workspace,
+};
 use pinfold_api::redact;
 use pinfold_api::spawn::Place;
+use pinfold_api::trust::{self, State};
 use pinfold_cli::audit;
 use pinfold_core::family::{self, Family, SplitWay};
 use pinfold_core::grants::{Decision, Grants, Released};
@@ -150,6 +153,8 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                     "grants.list",
                     "grants.revoke",
                     "workspace.open",
+                    "workspace.trust_state",
+                    "workspace.ask_trust",
                 ],
                 (false, _) => &["window.open"],
             };
@@ -208,6 +213,13 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
         Method::GrantsList | Method::GrantsRevoke { .. } => {
             Err("grant administration needs a terminal outside every pane".to_owned())
         }
+        Method::WorkspaceTrustState(workspace) if identified && own.is_none() => {
+            let state = trust::state(&trust_path()?, &canonical(workspace)?, &workspace.sha256);
+            Ok(json!({"trusted": state == State::Trusted, "changed": state == State::Changed}))
+        }
+        Method::WorkspaceTrustState(_) | Method::WorkspaceAskTrust(..) => {
+            Err("workspace trust needs a terminal outside every pane".to_owned())
+        }
         // shortcut: the same guardrail as audit.read, not proof of a person; ask in the window
         // once approval prompts cover it (#100).
         Method::WorkspaceOpen(open) if identified && own.is_none() => {
@@ -231,6 +243,55 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
     }
 }
 
+/// The trust store, `trust.json` in the state directory.
+fn trust_path() -> Result<PathBuf, String> {
+    let dir = pinfold_config::state_dir().ok_or("no state directory: HOME is not set")?;
+    Ok(dir.join("trust.json"))
+}
+
+/// `root` itself, once checked to be a canonical directory, so what the prompt shows is what
+/// the store records.
+fn canonical(workspace: &Workspace) -> Result<String, String> {
+    match std::fs::canonicalize(&workspace.root) {
+        Ok(path) if path.is_dir() && path.as_os_str() == workspace.root.as_str() => {
+            Ok(workspace.root.clone())
+        }
+        _ => Err("params.root must be a canonical directory".to_owned()),
+    }
+}
+
+/// Parks a trust prompt for a caller in a terminal outside every pane. It runs nothing.
+fn ask_trust(reactor: &mut Reactor, grants: &mut Grants<Request>, log: &mut Log, request: Request) {
+    let Method::WorkspaceAskTrust(workspace, runs) = request.method() else {
+        return;
+    };
+    let own = request.caller().and_then(|caller| reactor.pane_of(caller));
+    if request.caller().is_none() || own.is_some() {
+        let reason = "workspace trust needs a terminal outside every pane";
+        return audit::reply(log, reactor, request, Err(reason.to_owned()));
+    }
+    let checked = trust_path().and_then(|path| Ok((path, canonical(workspace)?)));
+    let (path, root) = match checked {
+        Ok(checked) => checked,
+        Err(reason) => return audit::reply(log, reactor, request, Err(reason)),
+    };
+    let changed = trust::state(&path, &root, &workspace.sha256) == State::Changed;
+    let texts = std::iter::once(root).chain(runs.iter().cloned()).collect();
+    match grants.ask_trust(request, texts, changed, reactor.is_window_ready()) {
+        Decision::Ask(prompt) if reactor.ask_approval(&prompt) => {}
+        Decision::Ask(prompt) => {
+            answer_released(reactor, log, grants.answer(prompt.id, ApprovalAnswer::Deny));
+        }
+        Decision::Refuse(request, reason) => {
+            audit::reply(log, reactor, request, Err(reason.to_owned()));
+        }
+        // A trust prompt is never allowed before it is asked.
+        Decision::Allow(request) => {
+            audit::reply(log, reactor, request, Err("not asked".to_owned()))
+        }
+    }
+}
+
 /// The way a pane splits, or none for a new tab.
 fn way(place: Place) -> Option<SplitWay> {
     match place {
@@ -242,10 +303,16 @@ fn way(place: Place) -> Option<SplitWay> {
 
 fn answer_released(reactor: &mut Reactor, log: &mut Log, released: Vec<Released<Request>>) {
     for released in released {
-        let answer = if released.allowed {
-            pane_action(reactor, released.ticket.method(), true)
-        } else {
-            Err(released.reason.to_owned())
+        let answer = match released.ticket.method() {
+            Method::WorkspaceAskTrust(workspace, _) if released.allowed => {
+                trust_path().and_then(|path| {
+                    trust::record(&path, &workspace.root, &workspace.sha256)
+                        .map(|()| json!({"trusted": true}))
+                        .map_err(|error| format!("cannot write the trust store: {error}"))
+                })
+            }
+            method if released.allowed => pane_action(reactor, method, true),
+            _ => Err(released.reason.to_owned()),
         };
         audit::reply(log, reactor, released.ticket, answer);
     }
@@ -473,6 +540,9 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
                 Method::AuditRead { .. } => {
                     let read = audit::read(&log, &reactor, &request);
                     audit::reply(&mut log, &reactor, request, read);
+                }
+                Method::WorkspaceAskTrust(..) => {
+                    ask_trust(&mut reactor, &mut grants, &mut log, request);
                 }
                 _ => {
                     decide(
