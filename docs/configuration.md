@@ -78,8 +78,23 @@ Press the prefix, then one of these. The prefix pressed twice sends it to the pr
 | `z`                | Zoom the pane                                                |
 | `d`                | Close the window. The session stays, and `pinfold` reopens it |
 
-On macOS, Command+T opens a tab and Command+1 to Command+9 go to tabs from the first. A tab
-closes with its last pane, and the session ends with its last tab.
+A tab closes with its last pane, and the session ends with its last tab.
+
+On macOS the menu bar runs the same commands, and its keys are the Command shortcuts. Items
+that cannot apply, such as Copy with nothing selected, are greyed out, and their keys do
+nothing.
+
+| Menu    | Items                                                                       |
+| ------- | --------------------------------------------------------------------------- |
+| PinFold | About, Settings `⌘,` (opens this file), Hide `⌘H`, Quit `⌘Q` (closes the window, as `d` does) |
+| Shell   | New Tab `⌘T`, Split Right `⌘D`, Split Down `⇧⌘D`, Close Pane `⌘W`, Detach   |
+| Edit    | Copy `⌘C`, Paste `⌘V`, Select All `⌘A`, Find `⌘F`                           |
+| View    | Zoom Pane, Bigger `⌘=`, Smaller `⌘-`, Actual Size `⌘0`, Toggle Full Screen  |
+| Window  | Minimize `⌘M`, Next Tab `⇧⌘]`, Previous Tab `⇧⌘[`, Tab 1 to 9 `⌘1`–`⌘9`      |
+| Help    | PinFold Help `⌘?` (opens this page)                                         |
+
+Bigger and Smaller last until the file is next saved. Elsewhere, Ctrl+Shift+C, V and F copy,
+paste and find.
 
 Paste, copy, find and vi mode keys always work, and they cancel a pressed prefix. A key
 that composes text in an input method never counts as the prefix.
