@@ -37,7 +37,7 @@
         "text": {
           "type": "string",
           "maxLength": 4096,
-          "description": "With pane.output only: what the pane printed, as plain text without escape sequences, at most 4096 bytes an event. Redacted unless the pane is the caller's own."
+          "description": "With pane.output only: what the pane printed, as plain text without escape sequences, at most 4096 bytes an event. The caller's own pane's text comes as it is printed. Another pane's comes redacted and in whole lines, an unfinished line going out once it passes 4 KiB, and a PEM block whole once its END line comes; a block over 64 KiB is dropped and sent as one [redacted] line."
         }
       }
     }

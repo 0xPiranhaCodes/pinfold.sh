@@ -14,7 +14,7 @@
         },
         "until": {
           "enum": ["exit", "prompt", "output", "match", "idle"],
-          "description": "exit: OSC 133 D. prompt: OSC 133 A. output: any bytes from the program. match: a line printed after the wait began, as plain text without escape sequences, matches pattern; the line being printed is tried as it grows, and its newest 64 KiB are kept. idle: the program writes nothing for idle_ms. Output can fake the marks."
+          "description": "exit: OSC 133 D. prompt: OSC 133 A. output: any bytes from the program. match: a line printed after the wait began, as plain text without escape sequences, matches pattern. Each finished line is tried once, keeping its newest 64 KiB, and the newest 4 KiB of the line being printed is tried as it grows. On a pane other than the caller's own, the pattern sees only the redacted line, so it cannot probe a secret. idle: the program writes nothing for idle_ms. Output can fake the marks."
         },
         "pattern": {
           "type": "string",
@@ -47,7 +47,7 @@
         },
         "line": {
           "type": "string",
-          "description": "With match only: the line that matched, without its line end. Redacted unless the pane is the caller's own."
+          "description": "With match only: the line that matched, without its line end. Redacted, as it was matched, unless the pane is the caller's own."
         }
       }
     }

@@ -35,7 +35,8 @@ bytes, and a pane takes at most 20 sends a second.
 waits. It waits for a command to exit, a prompt, any output, a later line that matches a regex
 of at most 1 KiB (`match`), or a quiet spell (`idle`). `events.subscribe` sends `event`
 notifications on its connection. Its `pane.output` events carry what a pane in reach printed, up
-to 4 KiB each, redacted unless the pane is the caller's own, and never another pane's. A connection with a
+to 4 KiB each, and never another pane's. Another pane's come redacted, in whole lines and whole
+PEM blocks, so a secret split across reads is still caught. A connection with a
 wait or a subscription stays open past the usual limit, and is closed if 2 MiB of replies
 queue unread.
 
