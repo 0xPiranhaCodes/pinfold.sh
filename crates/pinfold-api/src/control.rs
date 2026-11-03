@@ -1824,7 +1824,8 @@ mod tests {
         let expected = pinfold_sys::peer_terminal(probe.accept().unwrap().0.as_fd()).unwrap();
         assert_eq!(request.caller(), expected);
         let mut over = UnixStream::connect(&path).unwrap();
-        over.set_read_timeout(Some(TIMEOUT / 2)).unwrap();
+        // macOS refuses the option with EINVAL once the core has closed it, which is the point.
+        let _ = over.set_read_timeout(Some(TIMEOUT / 2));
         assert_eq!(over.read(&mut [0; 8]).unwrap(), 0);
         drop(held);
     }
