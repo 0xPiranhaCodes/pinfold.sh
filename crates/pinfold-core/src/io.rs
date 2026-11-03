@@ -974,7 +974,9 @@ mod tests {
     #[test]
     fn sends_past_20_a_second_or_a_full_queue_are_refused() {
         let mut reactor = Reactor::new().unwrap();
-        let script = "stty raw -echo; echo ready; sleep 30";
+        // The shell's own `read` holds the foreground: a program it started could still be
+        // starting, and a loaded machine can then hide its arguments, which protects the pane.
+        let script = "stty raw -echo; echo ready; read line";
         let pane = reactor.spawn(shell(script), 24, 80).unwrap();
         assert!(turn_until(&mut reactor, |r| on_screen(r, pane, "ready")));
         let now = Instant::now();
