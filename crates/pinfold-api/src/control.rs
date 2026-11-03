@@ -77,8 +77,8 @@ pub const OPEN_WAIT: Duration = Duration::from_secs(2);
 /// [`OPEN_WAIT`] for the first window of a core, which starts with nothing warm, so that a slow
 /// Mac does not report failure for a window that opens (`docs/spikes/m2-cold-start`).
 pub const FIRST_OPEN_WAIT: Duration = Duration::from_secs(10);
-/// Longest reply a client reads, the threat model's request limit.
-const MAX_REPLY: u64 = 1_000_000;
+/// Longest reply a client reads: a 2,000,000-byte `pane.read` with every byte escaped by JSON.
+const MAX_REPLY: u64 = 16_000_000;
 /// Longest a launcher waits for each answer. It can queue behind one peer's first window, then
 /// have its own.
 const REPLY_WAIT: Duration = Duration::from_secs(FIRST_OPEN_WAIT.as_secs() + OPEN_WAIT.as_secs());

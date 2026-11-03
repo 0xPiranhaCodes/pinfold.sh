@@ -703,8 +703,8 @@ fn mcp_calls_the_core_as_its_pane_and_reports_a_refusal_as_a_tool_error() {
     };
     let requests = [
         serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
-        call(2, "pane_list", serde_json::json!({})),
-        call(3, "pane_read", serde_json::json!({"pane": 1})),
+        call(2, "pane_list_v1", serde_json::json!({})),
+        call(3, "pane_read_v1", serde_json::json!({"pane": 1})),
     ];
     let input: String = requests
         .iter()

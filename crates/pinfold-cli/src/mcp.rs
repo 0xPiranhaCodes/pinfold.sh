@@ -23,27 +23,27 @@ const BAD_PARAMS: i64 = -32602;
 /// Each tool, the API method it calls, and that method's schema.
 const TOOLS: [(&str, &str, &str); 5] = [
     (
-        "pane_list",
+        "pane_list_v1",
         "pane.list",
         include_str!("../../../docs/api/pane.list.schema.json"),
     ),
     (
-        "pane_read",
+        "pane_read_v1",
         "pane.read",
         include_str!("../../../docs/api/pane.read.schema.json"),
     ),
     (
-        "pane_last_output",
+        "pane_last_output_v1",
         "pane.last_output",
         include_str!("../../../docs/api/pane.last_output.schema.json"),
     ),
     (
-        "pane_send",
+        "pane_send_v1",
         "pane.send",
         include_str!("../../../docs/api/pane.send.schema.json"),
     ),
     (
-        "pane_wait",
+        "pane_wait_v1",
         "pane.wait",
         include_str!("../../../docs/api/pane.wait.schema.json"),
     ),
@@ -160,7 +160,7 @@ fn tools() -> Vec<Value> {
             }
             input["type"] = json!("object");
             let mut description = schema["description"].as_str().unwrap_or("").to_owned();
-            if *name == "pane_list" {
+            if *name == "pane_list_v1" {
                 description += " The result's caller_pane is the caller's own pane, or null.";
             }
             json!({"name": name, "description": description, "inputSchema": input})
@@ -233,11 +233,11 @@ mod tests {
         let tools = replies[0]["result"]["tools"].as_array().unwrap();
         let names: Vec<_> = tools.iter().map(|tool| tool["name"].clone()).collect();
         let expected = [
-            "pane_list",
-            "pane_read",
-            "pane_last_output",
-            "pane_send",
-            "pane_wait",
+            "pane_list_v1",
+            "pane_read_v1",
+            "pane_last_output_v1",
+            "pane_send_v1",
+            "pane_wait_v1",
         ];
         assert_eq!(names, expected);
         for tool in tools {
@@ -278,7 +278,7 @@ mod tests {
     #[test]
     fn a_tool_call_with_no_core_is_a_tool_error() {
         let replies = replies(
-            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pane_list\"}}\n",
+            b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"pane_list_v1\"}}\n",
         );
         let result = &replies[0]["result"];
         assert_eq!(result["isError"], true);
