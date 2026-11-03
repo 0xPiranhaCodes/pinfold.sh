@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
-use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TrySendError};
+use std::sync::{Arc, Once};
 use std::time::{Duration, Instant};
 use std::{env, thread};
 
@@ -211,6 +211,9 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                 let api = control::socket_path(&control::runtime_dir());
                 // A missing sandbox tool is an error, so the agent never runs unsandboxed.
                 let command = sandbox::command(&agent.command, &hidden, &work, &api);
+                if cfg!(target_os = "linux") {
+                    log_abstract_socket_gap();
+                }
                 let cwd = work
                     .path()
                     .to_str()
@@ -570,6 +573,20 @@ fn trusted_runs(root: &Path, sha256: &str, panes: usize) -> Option<Runs> {
         .map(pane)
         .collect();
     (runs.len() == panes).then_some(runs)
+}
+
+/// Says once that sandboxed agents can reach abstract Unix sockets, if Landlock is below ABI 6.
+fn log_abstract_socket_gap() {
+    static SAID: Once = Once::new();
+    if pinfold_sys::landlock::abi().is_ok_and(|abi| abi < pinfold_sys::landlock::SCOPED) {
+        SAID.call_once(|| {
+            let _ = writeln!(
+                io::stderr(),
+                "pinfold-core: Landlock is below ABI 6 here, so sandboxed agents can reach \
+                 abstract Unix sockets"
+            );
+        });
+    }
 }
 
 /// The session's snapshot, with the workspaces it opened.
