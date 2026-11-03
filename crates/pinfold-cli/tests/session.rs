@@ -943,8 +943,62 @@ fn mcp_lists_tools_calls_the_core_as_its_pane_and_reports_a_refusal_as_a_tool_er
             "pane_spawn_v1",
             "pane_close_v1",
             "pane_wait_v1",
+            "events_next_v1",
         ]
     );
+    core.kill().unwrap();
+    core.wait().unwrap();
+}
+
+#[test]
+fn mcp_waits_for_the_next_event_and_times_out_with_none() {
+    let session = Session::new("x", None).unwrap();
+    let call = |id: u32, name: &str, arguments: serde_json::Value| {
+        let params = serde_json::json!({"name": name, "arguments": arguments});
+        serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": params})
+    };
+    // The spawned tab's shell ends two seconds after it opens, while the next call waits.
+    let requests = [
+        call(1, "pane_spawn_v1", serde_json::json!({"where": "tab"})),
+        call(
+            2,
+            "events_next_v1",
+            serde_json::json!({"events": ["pane.closed"], "timeout_ms": 60_000}),
+        ),
+        call(
+            3,
+            "events_next_v1",
+            serde_json::json!({"events": ["pane.opened"], "timeout_ms": 100}),
+        ),
+    ];
+    let input: String = requests
+        .iter()
+        .map(|request| format!("{request}\n"))
+        .collect();
+    fs::write(session.directory.join("requests"), input).unwrap();
+    let mcp = format!("'{}' mcp", session.directory.join("pinfold").display());
+    let client = "\"$PINFOLD_TEST_CLIENT\"";
+    let shell = format!(
+        "if mkdir {client}/first; then {mcp} < {client}/requests > {client}/o && \
+         mv {client}/o {client}/out; exec sleep 30; fi; sleep 2"
+    );
+    let mut core = session.start_core(&["--idle", "1"], &shell).unwrap();
+    assert!(session.wait_for("out"), "{}", session.read_log());
+
+    let out = session.read("out");
+    let texts: Vec<serde_json::Value> = out
+        .lines()
+        .map(|line| {
+            let reply: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(reply["result"]["isError"], false, "{out}");
+            serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+        })
+        .collect();
+    assert_eq!(texts.len(), 3, "{out}");
+    assert_eq!(texts[0], serde_json::json!({"pane": 1}), "{out}");
+    let closed = serde_json::json!({"event": "pane.closed", "pane": 1});
+    assert_eq!(texts[1], closed, "{out}");
+    assert_eq!(texts[2], serde_json::json!({"timeout": true}), "{out}");
     core.kill().unwrap();
     core.wait().unwrap();
 }
