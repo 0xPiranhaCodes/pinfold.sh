@@ -5,6 +5,7 @@
 //! blocks. That is the backpressure.
 
 use std::io::{self, ErrorKind, Read, Write};
+use std::mem;
 use std::os::fd::AsRawFd;
 use std::process::Command;
 use std::sync::Arc;
@@ -17,10 +18,10 @@ use pinfold_sys::Terminal;
 use pinfold_sys::pty::Pty;
 
 use crate::link::{Host, LINK};
-use crate::marks::{ShellMarks, ShellPhase};
-use crate::search::{
-    CopyStep, Copying, Direction, MAX_SELECTION, Position, Search, SearchStep, Selection,
-};
+use crate::marks::ShellMarks;
+use crate::protect::Protect;
+use crate::search::{CopyStep, Copying, Direction, Position, Search, SearchStep, Selection};
+use crate::status::{self, Status, Tracker};
 use crate::tap::Tap;
 use crate::vt::{AlacrittyEngine, VtEngine};
 use crate::{paste, shell};
@@ -34,8 +35,9 @@ pub const MAX_REPLIES: usize = 4 * 1024;
 /// Most input waiting for a program that is not reading it. Input past this is refused
 /// whole, since a paste cut short would lose its closing bracket.
 pub const MAX_INPUT: usize = pinfold_proto::link::MAX_INPUT;
-/// Most text one `pane.read` or `pane.last_output` returns (threat model, Limits).
-pub const MAX_READ: usize = MAX_SELECTION;
+/// Most text one `pane.read` or `pane.last_output` returns. Half the API's 2 MiB output cap, so
+/// the reply fits even when JSON escapes every byte (`"` and `\` become two).
+pub const MAX_READ: usize = 1_000_000;
 /// Most `pane.send` calls a second to one pane (threat model, Limits).
 pub const SENDS_PER_SECOND: u32 = 20;
 /// Queue capacity an empty pane keeps, so one large paste does not cost memory for good.
@@ -123,6 +125,12 @@ struct Pane {
     found: Option<Selection>,
     /// When the current second of `pane.send` calls began, and how many it has had.
     sends: (Instant, u32),
+    /// Its status, from OSC 133 marks until its agent reports one with `pane.status`.
+    status: Tracker,
+    /// The last reported message, already sanitized.
+    message: String,
+    /// Whether it raised a "needs you" alert that no window has taken yet.
+    alerted: bool,
 }
 
 impl Pane {
@@ -135,8 +143,8 @@ impl Pane {
     }
 }
 
-/// What `pane.list` tells of a pane. The title, directory and status come from output, which
-/// can fake them (T4).
+/// What `pane.list` tells of a pane. The title, directory and a status from marks come from
+/// output, which can fake them (T4).
 #[derive(Debug, PartialEq, Eq)]
 pub struct Listed<'a> {
     /// The pane's number.
@@ -147,8 +155,13 @@ pub struct Listed<'a> {
     pub cwd: Option<&'a str>,
     /// The program the pane started, without its arguments.
     pub command: &'a str,
-    /// `running`, `done`, `error` or `idle`, from OSC 133 marks, and `done` once it closed.
-    pub status: &'static str,
+    /// What its agent reported last, or else what its OSC 133 marks say, and `done` once it
+    /// closed.
+    pub status: Status,
+    /// Whether `status` is a report from a caller in the pane rather than from marks.
+    pub reported: bool,
+    /// The reported message, without control or bidi characters. Empty if none.
+    pub message: &'a str,
 }
 
 /// What `pane.wait` watches in a pane, with nothing from its screen.
@@ -179,6 +192,7 @@ pub struct Reactor {
     pub(crate) shell: fn() -> Command,
     buffer: Vec<u8>,
     pub(crate) host: Host,
+    pub(crate) protect: Protect,
 }
 
 impl Reactor {
@@ -202,6 +216,7 @@ impl Reactor {
             shell: shell::command,
             buffer: vec![0; READ_BUDGET],
             host: Host::default(),
+            protect: Protect::default(),
         })
     }
 
@@ -240,6 +255,9 @@ impl Reactor {
             search: None,
             found: None,
             sends: (Instant::now(), 0),
+            status: Tracker::default(),
+            message: String::new(),
+            alerted: false,
         });
         Ok(pane)
     }
@@ -262,6 +280,7 @@ impl Reactor {
             .panes
             .iter()
             .filter_map(|pane| pane.engine.sync_deadline())
+            .chain(self.protect.deadline())
             .min()
             .map(|deadline| deadline.saturating_duration_since(now));
         let timeout = if unfinished {
@@ -281,6 +300,7 @@ impl Reactor {
                 pane.readable |= !pane.closed && (event.is_readable() || event.is_read_closed());
             }
         }
+        self.send_due(Instant::now());
         for pane in &mut self.panes {
             if pane.readable {
                 let mut master = pane.pty.master();
@@ -297,6 +317,12 @@ impl Reactor {
                 pane.output = pane.output.wrapping_add(u64::from(fed));
                 pane.readable = pumped == Pumped::Budget;
                 pane.closed |= pumped == Pumped::Closed;
+                if fed {
+                    // Marks never say "needs you", so only an error can alert here, and
+                    // nothing draws those yet.
+                    let marks = pane.engine.shell_marks();
+                    let _ = pane.status.observe_shell(marks, Instant::now());
+                }
             }
             if pane
                 .engine
@@ -357,7 +383,8 @@ impl Reactor {
 
     /// Types `text` into a pane's program as it is, through the queue [`Reactor::write`] fills.
     /// Refused with a reason past [`SENDS_PER_SECOND`] calls in a second, which count refusals
-    /// too, or if the queue has no room for all of it.
+    /// too, while the pane is protected or still taking a split send, or if the queue has no
+    /// room for all of it.
     // shortcut: the second is per pane, which is per caller while the API has only the `self`
     // scope. Key it by caller when a caller can send to other panes.
     pub fn send(&mut self, pane: usize, text: &str, now: Instant) -> Result<(), &'static str> {
@@ -372,11 +399,40 @@ impl Reactor {
             return Err("rate limited: at most 20 sends a second");
         }
         *count += 1;
+        if let Some(reason) = self.protection(pane) {
+            return Err(reason.refusal());
+        }
+        if self.protect.is_sending(pane) {
+            return Err("the pane is still taking an earlier send");
+        }
         if self.write(pane, text.as_bytes()) {
             Ok(())
         } else {
             Err("the pane's input is full")
         }
+    }
+
+    /// Sets a pane's status from its own agent, which outranks its OSC 133 marks from then on
+    /// (T4). The message is sanitized and kept for the window's chrome. A report of "needs
+    /// you" alerts, at most once per [`status::ALERT_INTERVAL`].
+    ///
+    /// # Errors
+    ///
+    /// Refused with a reason if the pane is unknown or has closed.
+    pub fn report_status(
+        &mut self,
+        pane: usize,
+        status: Status,
+        message: &str,
+        now: Instant,
+    ) -> Result<(), &'static str> {
+        let pane = pane_mut(&mut self.panes, pane)
+            .filter(|pane| !pane.closed)
+            .ok_or("no such pane")?;
+        pane.message = status::sanitize(message);
+        let alert = pane.status.report(status, now);
+        pane.alerted |= alert.is_some_and(|alert| alert.status() == Status::NeedsYou);
+        Ok(())
     }
 
     /// Returns a pane's history and screen as plain text, newest last, or with `lines` only the
@@ -506,14 +562,7 @@ impl Reactor {
     /// Describes every pane for `pane.list`, in order of number, with nothing from a screen.
     pub fn list(&self) -> impl Iterator<Item = Listed<'_>> {
         self.panes.iter().map(|pane| {
-            let marks = pane.engine.shell_marks();
-            let status = match (pane.closed, marks.phase) {
-                (true, _) => "done",
-                (_, ShellPhase::Running) => "running",
-                (_, ShellPhase::Finished) if marks.exit.is_some_and(|exit| exit != 0) => "error",
-                (_, ShellPhase::Finished) => "done",
-                _ => "idle",
-            };
+            let (status, reported, message) = pane_status(pane);
             let cwd = pane.engine.cwd().map(|cwd| cwd.path.as_str());
             Listed {
                 id: pane.number,
@@ -521,8 +570,22 @@ impl Reactor {
                 cwd,
                 command: &pane.program,
                 status,
+                reported,
+                message,
             }
         })
+    }
+
+    /// Returns a pane's status, whether its agent reported it, and the reported message.
+    #[must_use]
+    pub fn status(&self, pane: usize) -> Option<(Status, bool, &str)> {
+        self.pane(pane).map(pane_status)
+    }
+
+    /// Returns whether a pane raised a "needs you" alert since the last call, and clears that.
+    /// A window takes it to mark the pane's tab while it is hidden.
+    pub fn take_alert(&mut self, pane: usize) -> bool {
+        pane_mut(&mut self.panes, pane).is_some_and(|pane| mem::take(&mut pane.alerted))
     }
 
     /// Returns what `pane.wait` watches in a pane, or nothing once it has closed.
@@ -549,6 +612,11 @@ impl Reactor {
     pub fn take_text(&mut self, pane: usize) -> Option<String> {
         let tap = pane_mut(&mut self.panes, pane)?.tap.as_deref_mut()?;
         Some(tap.take())
+    }
+
+    /// A pane's PTY, for [`Reactor::protection`].
+    pub(crate) fn pty(&self, pane: usize) -> Option<&Pty> {
+        Some(&self.pane(pane)?.pty)
     }
 
     fn pane(&self, number: usize) -> Option<&Pane> {
@@ -603,6 +671,17 @@ fn newest_text(engine: &dyn VtEngine, selection: Selection) -> String {
     text.truncate(text.trim_end_matches('\n').len());
     keep_newest(&mut text);
     text
+}
+
+/// A closed pane is done, whatever was said before.
+fn pane_status(pane: &Pane) -> (Status, bool, &str) {
+    if pane.closed {
+        (Status::Done, false, "")
+    } else if pane.status.from_output() {
+        (pane.status.status(), false, "")
+    } else {
+        (pane.status.status(), true, &pane.message)
+    }
 }
 
 fn pane_mut(panes: &mut [Pane], number: usize) -> Option<&mut Pane> {
@@ -721,16 +800,58 @@ mod tests {
         let mut reactor = Reactor::new().unwrap();
         let marks = r"printf '\033]7;file:///tmp/work\007\033]133;C\007secret'; sleep 30";
         let pane = reactor.spawn(shell(marks), 24, 80).unwrap();
-        let listed = |reactor: &Reactor| reactor.list().any(|pane| pane.status == "running");
+        let listed = |reactor: &Reactor| reactor.list().any(|pane| pane.status == Status::Running);
         assert!(turn_until(&mut reactor, listed));
         let expected = Listed {
             id: pane,
             title: Some("work"),
             cwd: Some("/tmp/work"),
             command: "/bin/sh",
-            status: "running",
+            status: Status::Running,
+            reported: false,
+            message: "",
         };
         assert_eq!(reactor.list().collect::<Vec<_>>(), [expected]);
+    }
+
+    #[test]
+    fn a_report_outranks_later_marks_alerts_once_and_keeps_a_clean_message() {
+        let mut reactor = Reactor::new().unwrap();
+        let script = r"printf '\033]133;C\007'; read line; printf '\033]133;D;0\007'; sleep 30";
+        let pane = reactor.spawn(shell(script), 24, 80).unwrap();
+        let running =
+            |reactor: &Reactor| reactor.status(pane).map(|s| s.0) == Some(Status::Running);
+        assert!(turn_until(&mut reactor, running));
+        assert_eq!(reactor.status(pane), Some((Status::Running, false, "")));
+
+        let now = Instant::now();
+        reactor
+            .report_status(pane, Status::NeedsYou, "ok?\u{1b}[2J\u{202e}", now)
+            .unwrap();
+        assert_eq!(
+            reactor.status(pane),
+            Some((Status::NeedsYou, true, "ok?[2J"))
+        );
+        reactor
+            .report_status(pane, Status::Running, "", now)
+            .unwrap();
+        reactor
+            .report_status(pane, Status::NeedsYou, "ok?", now)
+            .unwrap();
+        assert!(reactor.take_alert(pane));
+        assert!(!reactor.take_alert(pane), "one alert, rate limited");
+
+        // The shell finishes its command, which a report outranks (T4).
+        assert!(reactor.write(pane, b"\n"));
+        let finished = |reactor: &Reactor| reactor.progress(pane).unwrap().marks.finished == 1;
+        assert!(turn_until(&mut reactor, finished));
+        assert_eq!(reactor.status(pane), Some((Status::NeedsYou, true, "ok?")));
+        let listed = reactor.list().next().unwrap();
+        assert_eq!((listed.status, listed.reported), (Status::NeedsYou, true));
+        assert_eq!(
+            reactor.report_status(pane + 1, Status::Done, "", now),
+            Err("no such pane")
+        );
     }
 
     #[test]

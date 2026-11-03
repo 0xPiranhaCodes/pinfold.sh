@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "pane.send",
-  "description": "Types text into a pane's program as it is, through the pane's input queue. Text over 4096 bytes is refused, not cut. A pane takes at most 20 sends a second: one more is refused as rate limited, as is a send when the pane's input queue is full. Needs hello version 2, and the pane must be the caller's own or one it spawned, or one they spawned (the self and children scopes).",
+  "description": "Types text into a pane's program as it is, through the pane's input queue. Text over 4096 bytes is refused, not cut. A pane takes at most 20 sends a second: one more is refused as rate limited, as is a send when the pane's input queue is full. A protected pane refuses a send with the error \"the pane is protected: <reason>\", where the reason is ssh, sudo, root, echo-off, marked or rule, never the command line. A pane is protected while any process in its foreground group is ssh, mosh, sudo, su or doas, runs as root, matches a configured command-line pattern or cannot be read, while the terminal reads a password (echo off), or while the person marked it. A send to a pane other than the caller's own is refused whole, with \"the text has control characters\", if it holds a control character other than tab, line feed and carriage return, and otherwise goes a line at a time, split after each line feed and carriage return. The first line goes now. Each next one goes once 150 ms have passed and the pane's own program, such as its shell, holds the terminal's foreground again, after a check just before it is written, so text that starts ssh cannot type into it. A check that finds the pane protected, a foreground still held by another program after 10 s, or a full input queue drops the rest, after the reply. Such a send is refused while the pane still has lines of an earlier one to go. Needs hello version 2, and the pane must be the caller's own or one it spawned, or one they spawned (the self and children scopes). A send to the caller's own pane is never split.",
   "type": "object",
   "properties": {
     "params": {
@@ -14,7 +14,10 @@
     },
     "result": {
       "type": "object",
-      "additionalProperties": false
+      "additionalProperties": false,
+      "properties": {
+        "lines": { "type": "integer", "minimum": 1, "description": "Only for a send to another pane: how many lines the text has. The first was queued; later ones may still be dropped if the pane becomes protected." }
+      }
     }
   }
 }

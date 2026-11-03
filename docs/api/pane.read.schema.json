@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "pane.read",
-  "description": "Returns a pane's history and screen as plain text, with no escape sequences, newest last and with no line ends after the last text. At most 2,000,000 bytes: past that the oldest text goes, cut at a character. Needs hello version 2, and the pane must be the caller's own or one it spawned, or one they spawned (the self and children scopes). Reads of the caller's own pane are not redacted.",
+  "description": "Returns a pane's history and screen as plain text, with no escape sequences, newest last and with no line ends after the last text. At most 1,000,000 bytes: past that the oldest text goes, cut at a character. Needs hello version 2, and the pane must be the caller's own or one it spawned, or one they spawned (the self and children scopes). Reads of the caller's own pane are not redacted.",
   "type": "object",
   "properties": {
     "params": {
@@ -17,7 +17,7 @@
       "required": ["text"],
       "additionalProperties": false,
       "properties": {
-        "text": { "type": "string", "description": "At most 2,000,000 bytes of UTF-8." }
+        "text": { "type": "string", "description": "At most 1,000,000 bytes of UTF-8." }
       }
     }
   }

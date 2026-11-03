@@ -8,17 +8,22 @@ use std::sync::mpsc::{self, Receiver, TrySendError};
 use std::time::{Duration, Instant};
 use std::{env, thread};
 
+use pinfold_api::Log;
 use pinfold_api::control::{self, Control, Method, Request, Subscriber, Topics, Until, Wait};
 use pinfold_api::spawn::Place;
+use pinfold_cli::audit;
 use pinfold_cli::output;
 use pinfold_core::family::{self, Family, SplitWay};
 use pinfold_core::io::{Reactor, Waker};
 use pinfold_core::shell;
+use pinfold_core::status::Status;
 use pinfold_core::wait::{Outcome, Waits};
 use serde_json::{Value, json};
 
 const ROWS: u16 = 24;
 const COLUMNS: u16 = 80;
+// A read with every byte escaped by JSON still fits in a peer's output queue.
+const _: () = assert!(2 * pinfold_core::io::MAX_READ + 4096 < control::MAX_OUTPUT);
 const IDLE: Duration = Duration::from_secs(3600);
 
 /// Returns the window binary beside this one. It is resolved once, so nothing later can name
@@ -74,8 +79,9 @@ fn answer(reactor: &mut Reactor, family: &mut Family, request: &Request) -> Resu
                     "pane.spawn",
                     "pane.close",
                     "events.subscribe",
+                    "pane.status",
                 ],
-                (true, None) => &["window.open", "pane.list", "events.subscribe"],
+                (true, None) => &["window.open", "pane.list", "events.subscribe", "audit.read"],
                 (false, _) => &["window.open"],
             };
             Ok(json!({"version": control::VERSION, "methods": methods, "pane": own}))
@@ -91,8 +97,29 @@ fn answer(reactor: &mut Reactor, family: &mut Family, request: &Request) -> Resu
             }
         }
         Method::PaneSend { pane, text } => {
-            let sent = reactor.send(family.reach(reactor, own, *pane)?, text, Instant::now());
+            let target = family.reach(reactor, own, *pane)?;
+            // Another pane takes a line at a time, each checked for protection before it goes.
+            let sent = if own == Some(target) {
+                reactor.send(target, text, Instant::now())
+            } else {
+                reactor.send_lines(target, text, Instant::now()).map(drop)
+            };
             sent.map(|()| json!({})).map_err(str::to_owned)
+        }
+        Method::PaneStatus {
+            pane,
+            state,
+            message,
+        } => {
+            let status = Status::from_name(state).ok_or("unknown state")?;
+            let set = reactor.report_status(
+                own.filter(|own| own == pane)
+                    .ok_or("only the caller's own pane can report its status")?,
+                status,
+                message,
+                Instant::now(),
+            );
+            set.map(|()| json!({})).map_err(str::to_owned)
         }
         Method::PaneSpawn(spawn) => {
             let own = own.ok_or("pane.spawn needs a caller in a pane")?;
@@ -111,16 +138,20 @@ fn answer(reactor: &mut Reactor, family: &mut Family, request: &Request) -> Resu
         }
         Method::PaneList if identified => {
             let panes = reactor.list().map(|pane| {
+                // A message is the caller's own business: other panes' stay in the window.
+                let message = (pane.reported && own == Some(pane.id)).then_some(pane.message);
                 json!({"id": pane.id, "title": pane.title, "cwd": pane.cwd,
-                       "command": pane.command, "status": pane.status})
+                       "command": pane.command, "status": pane.status.name(),
+                       "source": source(pane.reported), "message": message})
             });
             Ok(json!({"panes": panes.collect::<Vec<_>>()}))
         }
         Method::PaneList => Err("pane.list needs a caller in a terminal".to_owned()),
         // Never sent here: the loop opens windows, parks waits and keeps subscribers.
-        Method::WindowOpen | Method::PaneWait(_) | Method::EventsSubscribe(_) => {
-            Err("not here".to_owned())
-        }
+        Method::WindowOpen
+        | Method::PaneWait(_)
+        | Method::EventsSubscribe(_)
+        | Method::AuditRead { .. } => Err("not here".to_owned()),
     }
 }
 
@@ -130,6 +161,7 @@ fn park(
     reactor: &Reactor,
     family: &mut Family,
     waits: &mut Waits<Request>,
+    log: &mut Log,
     request: Request,
     wait: Wait,
 ) {
@@ -137,7 +169,7 @@ fn park(
     let target = wait.pane.or(own).ok_or(family::NOT_YOURS);
     let pane = match target.and_then(|pane| family.reach(reactor, own, pane)) {
         Ok(pane) => pane,
-        Err(reason) => return request.answer(Err(reason.to_owned())),
+        Err(reason) => return audit::reply(log, reactor, request, Err(reason.to_owned())),
     };
     // shortcut: streamed output and match waits are self-only because redacting a stream needs whole-block state; extend to children with an ADR on streamed redaction.
     let refusal = match wait.until {
@@ -146,7 +178,7 @@ fn park(
         _ => "",
     };
     if !refusal.is_empty() && own != Some(pane) {
-        return request.answer(Err(refusal.to_owned()));
+        return audit::reply(log, reactor, request, Err(refusal.to_owned()));
     }
     let until = match wait.until {
         Until::Exit => pinfold_core::wait::Until::Exit,
@@ -155,12 +187,12 @@ fn park(
         Until::Idle(quiet) => pinfold_core::wait::Until::Idle(quiet),
         Until::Match(pattern) => match pinfold_core::wait::Until::matching(&pattern) {
             Ok(until) => until,
-            Err(reason) => return request.answer(Err(reason)),
+            Err(reason) => return audit::reply(log, reactor, request, Err(reason)),
         },
     };
     let deadline = Instant::now() + wait.timeout;
     if let Err(request) = waits.park(reactor, request, pane, until, deadline) {
-        request.answer(Err("the core is busy".to_owned()));
+        audit::reply(log, reactor, request, Err("the core is busy".to_owned()));
     }
 }
 
@@ -177,8 +209,13 @@ fn ended(outcome: Outcome) -> Value {
     }
 }
 
-/// Each pane's number, status and exit status, which is all an event tells.
-type Seen = Vec<(usize, &'static str, Option<u8>)>;
+/// Where a status came from: output's marks, which it can fake, or its agent's report (T4).
+fn source(reported: bool) -> &'static str {
+    if reported { "reported" } else { "marks" }
+}
+
+/// Each pane's number, status, its source and exit status, which is all an event tells.
+type Seen = Vec<(usize, &'static str, &'static str, Option<u8>)>;
 
 fn seen(reactor: &Reactor) -> Seen {
     let exit = |pane| {
@@ -188,7 +225,10 @@ fn seen(reactor: &Reactor) -> Seen {
     };
     let panes = reactor.list();
     panes
-        .map(|pane| (pane.id, pane.status, exit(pane.id)))
+        .map(|pane| {
+            let status = pane.status.name();
+            (pane.id, status, source(pane.reported), exit(pane.id))
+        })
         .collect()
 }
 
@@ -200,13 +240,15 @@ fn changes(before: &Seen, after: &Seen) -> Vec<Value> {
     let mut events: Vec<Value> = gone
         .map(|&(id, ..)| json!({"event": "pane.closed", "pane": id}))
         .collect();
-    for &(id, status, exit) in after {
+    for &(id, status, source, exit) in after {
         let event = match before.iter().find(|was| was.0 == id) {
             None => "pane.opened",
-            Some(&was) if was != (id, status, exit) => "pane.status",
+            Some(&was) if was != (id, status, source, exit) => "pane.status",
             Some(_) => continue,
         };
-        events.push(json!({"event": event, "pane": id, "status": status, "exit": exit}));
+        let event = json!({"event": event, "pane": id, "status": status, "source": source,
+                           "exit": exit});
+        events.push(event);
     }
     events
 }
@@ -244,6 +286,9 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
     let mut family = Family::default();
     let mut subscribers: Vec<(Subscriber, Topics)> = Vec::new();
     let mut known = Seen::new();
+    // Read once: the core takes no hot reload.
+    let config = pinfold_cli::config();
+    let mut log = audit::open(&config.api);
     loop {
         let wait = waits
             .deadline()
@@ -263,30 +308,37 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
                     Ok(_) => waiting.push(request),
                     // The system's words alone, which name no pane, secret or variable.
                     Err(error) => {
-                        request.answer(Err(format!("cannot start pinfold-window: {error}")));
+                        let reason = format!("cannot start pinfold-window: {error}");
+                        audit::reply(&mut log, &reactor, request, Err(reason));
                     }
                 },
-                Method::PaneWait(wait) => park(&reactor, &mut family, &mut waits, request, wait),
+                Method::PaneWait(wait) => {
+                    park(&reactor, &mut family, &mut waits, &mut log, request, wait);
+                }
                 // Every pane of the session, as for pane.list.
                 Method::EventsSubscribe(topics) if request.caller().is_some() => {
                     if subscribers.is_empty() {
                         known = seen(&reactor);
                     }
                     subscribers.push((request.subscriber(), topics));
-                    request.answer(Ok(json!({})));
+                    audit::reply(&mut log, &reactor, request, Ok(json!({})));
                 }
                 Method::EventsSubscribe(_) => {
                     let reason = "events.subscribe needs a caller in a terminal";
-                    request.answer(Err(reason.to_owned()));
+                    audit::reply(&mut log, &reactor, request, Err(reason.to_owned()));
+                }
+                Method::AuditRead { .. } => {
+                    let read = audit::read(&log, &reactor, &request);
+                    audit::reply(&mut log, &reactor, request, read);
                 }
                 _ => {
                     let answer = answer(&mut reactor, &mut family, &request);
-                    request.answer(answer);
+                    audit::reply(&mut log, &reactor, request, answer);
                 }
             }
         }
         for (request, outcome) in waits.settle(&reactor, Instant::now()) {
-            request.answer(Ok(ended(outcome)));
+            audit::reply(&mut log, &reactor, request, Ok(ended(outcome)));
         }
         if !subscribers.is_empty() {
             let now = seen(&reactor);
@@ -302,11 +354,12 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
         if ended || reactor.is_window_ready() {
             for request in waiting.drain(..) {
                 let reason = "the window ended before it was ready";
-                request.answer(if ended {
+                let result = if ended {
                     Err(reason.to_owned())
                 } else {
                     Ok(json!({}))
-                });
+                };
+                audit::reply(&mut log, &reactor, request, result);
             }
         }
         if reactor.pane_count() == 0 && !reactor.has_window() {

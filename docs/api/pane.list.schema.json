@@ -17,7 +17,7 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["id", "title", "cwd", "command", "status"],
+            "required": ["id", "title", "cwd", "command", "status", "source", "message"],
             "additionalProperties": false,
             "properties": {
               "id": { "type": "integer", "minimum": 0, "description": "The pane's number, never reused in a session." },
@@ -25,8 +25,16 @@
               "cwd": { "type": ["string", "null"], "description": "The last directory the pane reported with OSC 7. Program output can fake it." },
               "command": { "type": "string", "description": "The program the pane started, without its arguments." },
               "status": {
-                "enum": ["running", "done", "error", "idle"],
-                "description": "From the shell's OSC 133 marks, which output can fake; done once the pane's program has ended."
+                "enum": ["needs-you", "running", "done", "error", "idle"],
+                "description": "The last pane.status report, or else the shell's OSC 133 marks, which output can fake; done once the pane's program has ended."
+              },
+              "source": {
+                "enum": ["marks", "reported"],
+                "description": "Where status came from: OSC 133 marks, which output can fake, or a pane.status report from a caller in the pane."
+              },
+              "message": {
+                "type": ["string", "null"],
+                "description": "The reported message, cleaned of control and bidi characters, for the caller's own pane only; null for other panes and when source is marks. Events never carry it."
               }
             }
           }

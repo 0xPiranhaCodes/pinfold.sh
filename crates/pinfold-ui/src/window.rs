@@ -96,6 +96,7 @@ struct Shown {
     tabs: Vec<Tab>,
     active: usize,
     activity: u32,
+    alerts: u32,
     focused: u32,
     total: usize,
     /// Whether what is above, past the screens' contents, changed since the window read it.
@@ -132,9 +133,12 @@ fn publish(link: &mut Link, shown: &mut Shown) -> bool {
         for (ours, tab) in shown.tabs.iter_mut().zip(link.tabs()) {
             ours.pane = tab.pane;
             ours.cwd.clone_from(&tab.cwd);
+            ours.status = tab.status;
+            ours.message.clone_from(&tab.message);
         }
         shown.active = link.active();
         shown.activity = link.activity();
+        shown.alerts = link.alerts();
         shown.focused = link.focused();
         shown.total = link.total();
         shown.laid = true;
@@ -298,8 +302,12 @@ struct App {
     /// The tabs' labels, made safe to draw.
     labels: Vec<String>,
     active: usize,
-    /// Which tabs have news, one bit each.
+    /// Which tabs have a mark, news or a state, one bit each.
     activity: u32,
+    /// Each tab's state, as its pill shows it.
+    states: Vec<u8>,
+    /// The active tab's state, whether its agent reported it, and its message.
+    status: Option<(u8, bool, String)>,
     /// The tab under the pointer.
     over_tab: Option<usize>,
     /// Whether the system says this window has the keyboard.
@@ -466,7 +474,14 @@ impl App {
             top_bar::label(&tab.cwd, label);
         }
         self.active = shown.active;
-        self.activity = shown.activity;
+        let tabs = shown.tabs.iter().enumerate();
+        self.states.clear();
+        self.states
+            .extend(tabs.map(|(index, tab)| top_bar::tab_state(tab.status, shown.alerts, index)));
+        self.activity = shown.activity | top_bar::marked(&self.states);
+        let active = shown.tabs.get(shown.active);
+        self.status =
+            active.and_then(|tab| Some((tab.status?.0, tab.status?.1, tab.message.clone())));
         self.total = shown.total;
         // Another pane may have closed under the question.
         if let Some(Prompt::Close { last, .. }) = &mut self.prompt {
@@ -605,6 +620,9 @@ impl App {
                 tabs: &self.labels,
                 active: self.active,
                 activity: self.activity,
+                states: &self.states,
+                status: (self.status.as_ref())
+                    .map(|(state, reported, message)| (*state, *reported, message.as_str())),
                 hovered: self.over_tab,
                 focused: self.has_focus,
                 title: !open.fullscreen,
@@ -1421,6 +1439,8 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
         labels: Vec::new(),
         active: 0,
         activity: 0,
+        states: Vec::new(),
+        status: None,
         over_tab: None,
         has_focus: true,
         on_title: false,
