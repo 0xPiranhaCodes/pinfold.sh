@@ -33,6 +33,7 @@ Entries are generated from Conventional Commits with git-cliff
 - Secret redaction for cross-pane text, covering private keys, provider tokens, JWTs, password pairs, the password in a URI and high-entropy strings.
 - The core serves up to 16 callers of its control socket at once on one `mio` thread, so a caller waiting for a window holds up no one (ADR-0032).
 - ADR-0032: the agent API gets one `mio` thread of its own, and M3 lands in eight steps. M1 and M2 are done.
+- `pane.wait` waits on the caller's own pane for a command's exit code, the next prompt, any output or a timeout, with at most 64 parked, and `events.subscribe` sends pane opened, closed and status events; a connection that lets 2 MiB queue unread is closed (ADR-0032 step 6).
 - Fuzz targets `api_request` and `api_params` feed arbitrary control-socket request lines and `hello` parameters to the API parser, in the fuzz smoke run on each PR and nightly.
 - Tests that fail if the core stops refusing a debugger, or a pane's shell starts refusing one, and `tests/hardening/audit.sh`, which attacks real binaries by hand and is where the threat model's table comes from.
 - ADR-0031: a macOS beta comes before v0.1, which covers macOS and Linux.
