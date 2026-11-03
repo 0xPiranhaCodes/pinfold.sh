@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "pane.wait",
-  "description": "Waits on the caller's own pane until its shell finishes a command, draws its next prompt or its program writes anything, or the pane closes, or the timeout passes. Needs hello version 2 and a caller in a pane; any other pane is refused. At most 64 waits are parked in the core at once, and past that a wait is refused as busy. A wait whose connection closes is dropped.",
+  "description": "Waits on the caller's own pane, or one it spawned, until its shell finishes a command, draws its next prompt or its program writes anything, or the pane closes, or the timeout passes. Needs hello version 2 and a caller in a pane; a pane it did not spawn is refused. At most 64 waits are parked in the core at once, and past that a wait is refused as busy. A wait whose connection closes is dropped.",
   "type": "object",
   "properties": {
     "params": {
@@ -9,7 +9,7 @@
       "required": ["pane", "until", "timeout_ms"],
       "properties": {
         "pane": {
-          "description": "\"self\", or the caller's own pane number. Other panes are refused.",
+          "description": "\"self\", or the number of the caller's own pane or one it spawned. Other panes are refused.",
           "oneOf": [{ "const": "self" }, { "type": "integer", "minimum": 0 }]
         },
         "until": {
