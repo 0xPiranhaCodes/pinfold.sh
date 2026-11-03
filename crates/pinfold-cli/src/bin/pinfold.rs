@@ -1,5 +1,5 @@
 //! The `pinfold` launcher: starts the core if none answers, asks it for a window, and exits.
-//! `pinfold ctl` is a thin client of the core's API (ADR-0032).
+//! `pinfold ctl` and `pinfold mcp` are thin clients of the core's API (ADR-0032).
 
 use std::error::Error;
 use std::io::{ErrorKind, Write};
@@ -174,12 +174,17 @@ fn main() -> ExitCode {
         ["ctl", "list"] => list(false),
         ["ctl", "list", "--json"] => list(true),
         ["ctl", "send", pane, text] => send(pane, text),
+        ["mcp"] => {
+            let socket = control::socket_path(&control::runtime_dir());
+            pinfold_cli::mcp::serve(std::io::stdin().lock(), std::io::stdout().lock(), &socket)
+                .map_err(Into::into)
+        }
         ["ctl", "grants"] => grants(false),
         ["ctl", "grants", "--json"] => grants(true),
         ["ctl", "grants", "revoke", id] => revoke(id),
         _ => {
             eprintln!(
-                "usage: pinfold [ctl list [--json] | ctl send <pane> <text> | ctl grants [--json | revoke <id>]]"
+                "usage: pinfold [ctl list [--json] | ctl send <pane> <text> | ctl grants [--json | revoke <id>] | mcp]"
             );
             return ExitCode::FAILURE;
         }

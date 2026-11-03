@@ -10,6 +10,8 @@ use std::{env, thread};
 
 use pinfold_api::control::{self, Control, Method, Request, Subscriber, Topics, Until, Wait};
 use pinfold_api::redact;
+use pinfold_api::spawn::Place;
+use pinfold_core::family::{self, Family, SplitWay};
 use pinfold_core::grants::{Decision, Grants, Released};
 use pinfold_core::io::{Reactor, Waker};
 use pinfold_core::shell;
@@ -19,6 +21,8 @@ use serde_json::{Value, json};
 
 const ROWS: u16 = 24;
 const COLUMNS: u16 = 80;
+// A read with every byte escaped by JSON still fits in a peer's output queue.
+const _: () = assert!(2 * pinfold_core::io::MAX_READ + 4096 < control::MAX_OUTPUT);
 const IDLE: Duration = Duration::from_secs(3600);
 
 /// Returns the window binary beside this one. It is resolved once, so nothing later can name
@@ -98,9 +102,14 @@ fn grants_list<T, C: pinfold_core::grants::Clock>(grants: &mut Grants<T, C>) -> 
     json!({"grants": listed.collect::<Vec<_>>()})
 }
 
-/// Answers an immediate method, after approval methods have been separated out.
+/// Answers a request that opens no window and needs no approval. A caller with no terminal is
+/// unidentified and may not list panes (threat model, caller identity point 3). Any caller with
+/// a terminal may, in a pane or not, as a list shows no screen and little a same-user `ps` does
+/// not. Spawns and closes reach only the caller's own pane and the panes it spawned, the `self`
+/// and `children` scopes. Pane contents go to the caller alone, never to a log.
 fn immediate<T, C: pinfold_core::grants::Clock>(
     reactor: &mut Reactor,
+    family: &mut Family,
     grants: &mut Grants<T, C>,
     request: &Request,
 ) -> Result<Value, String> {
@@ -116,6 +125,8 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                     "pane.last_output",
                     "pane.send",
                     "pane.wait",
+                    "pane.spawn",
+                    "pane.close",
                     "events.subscribe",
                 ],
                 (true, None) => &[
@@ -128,6 +139,21 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                 (false, _) => &["window.open"],
             };
             Ok(json!({"version": control::VERSION, "methods": methods, "pane": own}))
+        }
+        Method::PaneSpawn(spawn) => {
+            let own = own.ok_or("pane.spawn needs a caller in a pane")?;
+            let way = match spawn.place {
+                Place::SplitRight => Some(SplitWay::Right),
+                Place::SplitDown => Some(SplitWay::Down),
+                Place::Tab => None,
+            };
+            let of = spawn.of.unwrap_or(own);
+            let pane = family.spawn(reactor, own, of, way, spawn.cwd.as_deref())?;
+            Ok(json!({"pane": pane}))
+        }
+        Method::PaneClose { pane } => {
+            let closed = family.close(reactor, own, *pane);
+            closed.map(|()| json!({})).map_err(str::to_owned)
         }
         Method::PaneList if identified => {
             let panes = reactor.list().map(|pane| {
@@ -165,10 +191,17 @@ fn answer_released(reactor: &mut Reactor, released: Vec<Released<Request>>) {
     }
 }
 
-fn decide(reactor: &mut Reactor, grants: &mut Grants<Request>, request: Request) {
+/// Answers a request at once, or parks a read or send outside the caller's `self` and
+/// `children` scopes on a window approval.
+fn decide(
+    reactor: &mut Reactor,
+    family: &mut Family,
+    grants: &mut Grants<Request>,
+    request: Request,
+) {
     let own = request.caller().and_then(|caller| reactor.pane_of(caller));
     let Some((target, action, text)) = cross_pane(request.method()) else {
-        let answer = immediate(reactor, grants, &request);
+        let answer = immediate(reactor, family, grants, &request);
         return request.answer(answer);
     };
     let Some(caller) = own else {
@@ -177,8 +210,9 @@ fn decide(reactor: &mut Reactor, grants: &mut Grants<Request>, request: Request)
     if reactor.engine(target).is_none() {
         return request.answer(Err("no such pane".to_owned()));
     }
-    if caller == target {
-        let answer = pane_action(reactor, request.method(), false);
+    if family.reach(reactor, own, target).is_ok() {
+        // Text from any pane but the caller's own is redacted (threat model, Secret redaction).
+        let answer = pane_action(reactor, request.method(), caller != target);
         return request.answer(answer);
     }
     match grants.decide(
@@ -202,13 +236,19 @@ fn decide(reactor: &mut Reactor, grants: &mut Grants<Request>, request: Request)
     }
 }
 
-/// Parks a wait on the caller's own pane, the only one it may wait on in this step, or refuses
-/// it.
-fn park(reactor: &Reactor, waits: &mut Waits<Request>, request: Request, wait: Wait) {
+/// Parks a wait on the caller's own pane or one it spawned, or refuses it.
+fn park(
+    reactor: &Reactor,
+    family: &mut Family,
+    waits: &mut Waits<Request>,
+    request: Request,
+    wait: Wait,
+) {
     let own = request.caller().and_then(|caller| reactor.pane_of(caller));
-    let Some(pane) = own.filter(|own| wait.pane.is_none_or(|pane| pane == *own)) else {
-        let reason = "pane.wait waits only on the caller's own pane";
-        return request.answer(Err(reason.to_owned()));
+    let target = wait.pane.or(own).ok_or(family::NOT_YOURS);
+    let pane = match target.and_then(|pane| family.reach(reactor, own, pane)) {
+        Ok(pane) => pane,
+        Err(reason) => return request.answer(Err(reason.to_owned())),
     };
     let until = match wait.until {
         Until::Exit => pinfold_core::wait::Until::Exit,
@@ -297,6 +337,7 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
     let mut waiting = Vec::new();
     let mut waits: Waits<Request> = Waits::default();
     let mut grants: Grants<Request> = Grants::default();
+    let mut family = Family::default();
     let mut subscribers: Vec<(Subscriber, Topics)> = Vec::new();
     let mut known = Seen::new();
     loop {
@@ -326,7 +367,7 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
                         request.answer(Err(format!("cannot start pinfold-window: {error}")));
                     }
                 },
-                Method::PaneWait(wait) => park(&reactor, &mut waits, request, wait),
+                Method::PaneWait(wait) => park(&reactor, &mut family, &mut waits, request, wait),
                 // Every pane of the session, as for pane.list.
                 Method::EventsSubscribe(topics) if request.caller().is_some() => {
                     if subscribers.is_empty() {
@@ -340,7 +381,7 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
                     request.answer(Err(reason.to_owned()));
                 }
                 _ => {
-                    decide(&mut reactor, &mut grants, request);
+                    decide(&mut reactor, &mut family, &mut grants, request);
                 }
             }
         }

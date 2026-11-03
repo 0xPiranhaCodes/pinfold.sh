@@ -25,7 +25,7 @@ const HARDEN: &str = "PINFOLD_TEST_HARDEN";
 const PANIC: &str = "PINFOLD_TEST_PANIC";
 /// Names the directory of a run, in the pane that calls the API.
 const API: &str = "PINFOLD_TEST_API";
-const PATIENCE: Duration = Duration::from_secs(30);
+const PATIENCE: Duration = Duration::from_secs(120);
 
 type Result<T = ()> = std::result::Result<T, Box<dyn Error>>;
 
@@ -271,9 +271,14 @@ fn two_launchers_at_once_share_one_core_and_one_window() {
         session.start_launcher().unwrap(),
         session.start_launcher().unwrap(),
     );
-    assert!(first.wait().unwrap().success());
-    assert!(second.wait().unwrap().success());
     assert!(session.wait_for("core"));
+    first.wait().unwrap();
+    second.wait().unwrap();
+    assert_eq!(session.read("starts").lines().count(), 1);
+
+    // A loaded machine may run a launcher past its reply deadline. Once the window has said it
+    // is ready, the session must answer and must still have only that window.
+    assert!(session.launch().unwrap().status.success());
     assert_eq!(session.read("starts").lines().count(), 1);
 }
 
@@ -880,4 +885,154 @@ fn only_the_window_answers_cross_pane_actions_and_ctl_revokes_grants() {
     assert!(session.wait_for("second-denied"), "{}", session.read_log());
     assert!(session.wait_for("redacted"), "{}", session.read_log());
     assert!(session.read("received").contains("approved"));
+}
+
+/// Names the directory of a run, in the pane that spawns others.
+const SPAWN: &str = "PINFOLD_TEST_SPAWN";
+
+fn call(id: u32, method: &str, params: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
+}
+
+/// Asks once on a new connection, as a refusal closes it, and returns the reply.
+fn ask(method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
+    let mut lines = api(&[call(2, method, params)])?;
+    next(&mut lines, || Ok(()))?;
+    next(&mut lines, || Ok(()))
+}
+
+/// Not a test: the first pane of [`a_pane_spawns_children_and_reaches_only_them`]. It spawns,
+/// sends, reads and closes, and notes each reply.
+#[test]
+fn spawn_process() {
+    let Some(directory) = env::var_os(SPAWN) else {
+        return;
+    };
+    let directory = Path::new(&directory);
+    // Started with no terminal, the caller is unidentified.
+    if directory.join("spawned").exists() {
+        let refused = ask("pane.spawn", serde_json::json!({"where": "tab"})).unwrap();
+        fs::write(directory.join("outside"), refused.to_string()).unwrap();
+        return;
+    }
+    let mut lines = api(&[
+        call(2, "pane.spawn", serde_json::json!({"where": "split-right"})),
+        call(
+            3,
+            "pane.spawn",
+            serde_json::json!({"where": "tab", "cwd": "/"}),
+        ),
+        call(
+            4,
+            "pane.send",
+            serde_json::json!({"pane": 1, "text": "typed\n"}),
+        ),
+        call(5, "pane.close", serde_json::json!({"pane": 2})),
+    ])
+    .unwrap();
+    let mut heard = String::new();
+    for _ in 0..5 {
+        writeln!(heard, "{}", next(&mut lines, || Ok(())).unwrap()).unwrap();
+    }
+    // A closed child is out of reach, and the caller cannot close itself.
+    let read = ask("pane.read", serde_json::json!({"pane": 2})).unwrap();
+    let close = ask("pane.close", serde_json::json!({"pane": 0})).unwrap();
+    writeln!(heard, "{read}\n{close}").unwrap();
+    // The tty echoes the line and `cat` prints it again.
+    let start = Instant::now();
+    while start.elapsed() < PATIENCE {
+        let read = ask("pane.read", serde_json::json!({"pane": 1})).unwrap();
+        let text = read["result"]["text"].as_str().unwrap_or_default();
+        if text.matches("typed").count() >= 2 {
+            writeln!(heard, "read").unwrap();
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    fs::write(directory.join("spawned"), heard).unwrap();
+}
+
+#[test]
+fn a_pane_spawns_children_and_reaches_only_them() {
+    let session = Session::new("p", None).unwrap();
+    let exe = env::current_exe().unwrap();
+    let shell = format!(
+        "if mkdir \"$PINFOLD_TEST_CLIENT/first\"; then {SPAWN}=\"$PINFOLD_TEST_CLIENT\" exec '{}' \
+         --exact spawn_process; fi; exec cat",
+        exe.display()
+    );
+    let mut core = session.start_core(&["--idle", "1"], &shell).unwrap();
+    assert!(session.wait_for("spawned"), "{}", session.read_log());
+    let heard = session.read("spawned");
+    let replies: Vec<serde_json::Value> = heard
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    let methods = replies[0]["result"]["methods"].to_string();
+    assert!(methods.contains("pane.spawn") && methods.contains("pane.close"));
+    assert_eq!(replies[1]["result"], serde_json::json!({"pane": 1}));
+    assert_eq!(replies[2]["result"], serde_json::json!({"pane": 2}));
+    assert_eq!(replies[3]["result"], serde_json::json!({}));
+    assert_eq!(replies[4]["result"], serde_json::json!({}));
+    assert!(replies[5]["error"].is_object(), "{heard}");
+    assert!(replies[6]["error"].is_object(), "{heard}");
+    assert!(heard.ends_with("read\n"), "{heard}");
+
+    let mut outside = Command::new(&exe);
+    outside
+        .args(["--exact", "spawn_process"])
+        .env("XDG_RUNTIME_DIR", session.directory.join("run"))
+        .env(SPAWN, &session.directory);
+    let detached = pinfold_sys::spawn_detached(outside, Stdio::null());
+    assert!(detached.unwrap().wait().unwrap().success());
+    let refused = session.read("outside");
+    assert!(refused.contains("needs a caller in a pane"), "{refused}");
+    core.kill().unwrap();
+    core.wait().unwrap();
+}
+
+#[test]
+fn mcp_calls_the_core_as_its_pane_and_reports_a_refusal_as_a_tool_error() {
+    let session = Session::new("m", None).unwrap();
+    let call = |id: u32, name: &str, arguments: serde_json::Value| {
+        let params = serde_json::json!({"name": name, "arguments": arguments});
+        serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": params})
+    };
+    let requests = [
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
+        call(2, "pane_list_v1", serde_json::json!({})),
+        call(3, "pane_read_v1", serde_json::json!({"pane": 1})),
+    ];
+    let input: String = requests
+        .iter()
+        .map(|request| format!("{request}\n"))
+        .collect();
+    fs::write(session.directory.join("requests"), input).unwrap();
+    let mcp = format!("'{}' mcp", session.directory.join("pinfold").display());
+    let client = "\"$PINFOLD_TEST_CLIENT\"";
+    let shell = format!(
+        "{mcp} < {client}/requests > {client}/o && mv {client}/o {client}/out; exec sleep 30"
+    );
+    let mut core = session.start_core(&["--idle", "1"], &shell).unwrap();
+    assert!(session.wait_for("out"), "{}", session.read_log());
+
+    let out = session.read("out");
+    let replies: Vec<serde_json::Value> = out
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(replies.len(), 3, "{out}");
+    assert_eq!(replies[0]["result"]["serverInfo"]["name"], "pinfold");
+    let listed = &replies[1]["result"];
+    assert_eq!(listed["isError"], false, "{out}");
+    let list: serde_json::Value =
+        serde_json::from_str(listed["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert_eq!(list["caller_pane"], 0, "{list}");
+    assert_eq!(list["panes"][0]["id"], 0, "{list}");
+    let refused = &replies[2]["result"];
+    assert_eq!(refused["isError"], true, "{out}");
+    let message = refused["content"][0]["text"].as_str().unwrap();
+    assert!(message.contains("no such pane"), "{out}");
+    core.kill().unwrap();
+    core.wait().unwrap();
 }

@@ -90,8 +90,8 @@ pub const APPROVAL_WAIT: Duration = Duration::from_secs(60);
 /// [`OPEN_WAIT`] for the first window of a core, which starts with nothing warm, so that a slow
 /// Mac does not report failure for a window that opens (`docs/spikes/m2-cold-start`).
 pub const FIRST_OPEN_WAIT: Duration = Duration::from_secs(10);
-/// Longest reply a client reads, the threat model's request limit.
-const MAX_REPLY: u64 = 1_000_000;
+/// Longest reply a client reads: the core closes a peer whose queue reaches [`MAX_OUTPUT`].
+const MAX_REPLY: u64 = MAX_OUTPUT as u64;
 /// Longest a client waits for an answer, including a cross-pane approval prompt.
 const REPLY_WAIT: Duration = Duration::from_secs(APPROVAL_WAIT.as_secs() + OPEN_WAIT.as_secs());
 
@@ -137,6 +137,13 @@ pub enum Method {
     PaneWait(Wait),
     /// `events.subscribe`, its shape checked.
     EventsSubscribe(Topics),
+    /// `pane.spawn`, its shape checked.
+    PaneSpawn(crate::spawn::Spawn),
+    /// `pane.close`: a pane the caller spawned.
+    PaneClose {
+        /// The pane's number.
+        pane: usize,
+    },
     /// `grants.list`, accepted only from a terminal outside every pane.
     GrantsList,
     /// `grants.revoke`, accepted only from a terminal outside every pane.
@@ -697,7 +704,12 @@ pub fn list_panes(stream: &UnixStream) -> Result<(Value, Value), Error> {
 /// As [`list_panes`].
 pub fn ask(stream: &UnixStream, method: &str, params: &Value) -> Result<(Value, Value), Error> {
     check_peer(stream.as_fd(), pinfold_sys::effective_uid())?;
-    stream.set_read_timeout(Some(REPLY_WAIT))?;
+    // `pane.wait` answers only when it ends, so its timeout comes on top.
+    let waits = params.get("timeout_ms").and_then(Value::as_u64);
+    let waits = waits
+        .map_or(Duration::ZERO, Duration::from_millis)
+        .min(MAX_WAIT);
+    stream.set_read_timeout(Some(REPLY_WAIT + waits))?;
     stream.set_write_timeout(Some(REPLY_WAIT))?;
     let hello = json!({"version": VERSION});
     let hello = json!({"jsonrpc": "2.0", "id": 1, "method": "hello", "params": hello});
@@ -987,8 +999,8 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
         _ if *greeted == 0 => refuse(Some(id), NO_HELLO, "hello comes first"),
         Some("window.open") => Step::Ask(id.clone(), Method::WindowOpen),
         Some(
-            method @ ("pane.list" | "pane.read" | "pane.last_output" | "pane.send" | "grants.list"
-            | "grants.revoke"),
+            method @ ("pane.list" | "pane.read" | "pane.last_output" | "pane.send" | "pane.spawn"
+            | "pane.close" | "grants.list" | "grants.revoke"),
         ) if *greeted < VERSION => refuse(
             Some(id),
             NO_METHOD,
@@ -1012,7 +1024,11 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
             Some(topics) => Step::Ask(id.clone(), Method::EventsSubscribe(topics)),
             None => refuse(Some(id), BAD_PARAMS, "events.subscribe takes known events"),
         },
-        Some(method @ ("pane.read" | "pane.last_output" | "pane.send")) => {
+        Some("pane.spawn") => match crate::spawn::params(request.get("params")) {
+            Ok(spawn) => Step::Ask(id.clone(), Method::PaneSpawn(spawn)),
+            Err(reason) => refuse(Some(id), BAD_PARAMS, reason),
+        },
+        Some(method @ ("pane.read" | "pane.last_output" | "pane.send" | "pane.close")) => {
             match pane_method(method, request.get("params")) {
                 Ok(method) => Step::Ask(id.clone(), method),
                 Err(reason) => refuse(Some(id), BAD_PARAMS, reason),
@@ -1103,6 +1119,7 @@ fn pane_method(method: &str, params: Option<&Value>) -> Result<Method, &'static 
                 text: text.to_owned(),
             })
         }
+        "pane.close" => Ok(Method::PaneClose { pane }),
         _ => Ok(Method::PaneLastOutput { pane }),
     }
 }
@@ -1125,6 +1142,7 @@ mod tests {
 
     const HELLO: &[u8] = br#"{"jsonrpc":"2.0","id":1,"method":"hello","params":{"version":1}}"#;
     const OPEN: &[u8] = br#"{"jsonrpc":"2.0","id":2,"method":"window.open"}"#;
+    const PATIENCE: Duration = Duration::from_secs(120);
 
     static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -1234,6 +1252,15 @@ mod tests {
             asked("pane.last_output", json!({"pane": 0})),
             Step::Ask(json!(2), Method::PaneLastOutput { pane: 0 })
         );
+        assert_eq!(
+            asked("pane.close", json!({"pane": 4})),
+            Step::Ask(json!(2), Method::PaneClose { pane: 4 })
+        );
+        let spawn = pane_request("pane.spawn", &json!({"where": "tab", "command": "sh"}));
+        let (reply, _) = replied(spawn.as_bytes(), &mut VERSION.clone());
+        assert_eq!(code(&reply), Some(BAD_PARAMS));
+        let (reply, _) = replied(spawn.as_bytes(), &mut OLDEST.clone());
+        assert_eq!(code(&reply), Some(NO_METHOD));
         let bad = [
             json!(null),
             json!({"pane": -1}),
@@ -1539,7 +1566,16 @@ mod tests {
         assert!(matches!(Control::bind(&directory), Err(Error::Running)));
         drop(first);
         assert!(socket_path(&directory).exists());
-        assert!(Control::bind(&directory).is_ok());
+        let start = Instant::now();
+        loop {
+            match Control::bind(&directory) {
+                Ok(_) => break,
+                Err(Error::Running) if start.elapsed() < PATIENCE => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                result => panic!("the dead core kept its session: {result:?}"),
+            }
+        }
     }
 
     #[test]
