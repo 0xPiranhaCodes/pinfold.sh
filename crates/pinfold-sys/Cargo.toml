@@ -13,6 +13,9 @@ publish.workspace = true
 copypasta = { version = "0.10.2", optional = true }
 libc = "0.2.191"
 raw-window-handle = { version = "0.6.2", optional = true }
+# Its safe self-pipe handler, already built for alacritty_terminal. Off by default: its
+# channel and iterator, which the core does not use.
+signal-hook = { version = "0.4.6", default-features = false }
 
 [features]
 # Off in the core, which never touches the clipboard.

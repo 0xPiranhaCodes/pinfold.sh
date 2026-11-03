@@ -11,6 +11,7 @@ use std::{env, thread};
 use pinfold_api::control::{self, Control, Method, Request};
 use pinfold_core::io::{Reactor, Waker};
 use pinfold_core::shell;
+use pinfold_core::snapshot::Saver;
 use serde_json::{Value, json};
 
 const ROWS: u16 = 24;
@@ -113,11 +114,26 @@ fn answer(reactor: &mut Reactor, request: &Request) -> Result<Value, String> {
     }
 }
 
+/// Saves the session, logging a failure by its kind alone, which names no path or pane. A
+/// failed save stops nothing.
+fn save(saver: &mut Saver, reactor: &Reactor) {
+    if let Err(error) = saver.save(&reactor.snapshot()) {
+        let _ = writeln!(
+            io::stderr(),
+            "pinfold-core: cannot save the session: {}",
+            error.kind()
+        );
+    }
+}
+
 /// Runs `panes` shells, a tab each, until every pane has gone and no window is left to tell, or
-/// until killed. With a size, it opens a window for `cargo xtask mem-gate` and prints its pid.
+/// until SIGTERM or SIGHUP, saving the session on the way out, when the window closes and a
+/// minute after a change (ADR-0034). With a size, it opens a window for `cargo xtask mem-gate` and prints its pid.
 fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
     let binary = window_binary()?;
     let mut reactor = Reactor::new()?;
+    reactor.watch_signals()?;
+    let mut saver = pinfold_config::state_dir().map(|state| Saver::new(state, control::SESSION));
     let asked = listen(reactor.waker())?;
     for _ in 0..panes {
         reactor
@@ -134,8 +150,10 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
     // Who asked for the window, until it says hello or ends. A caller that timed out has gone
     // and hears nothing.
     let mut waiting = Vec::new();
+    let mut window = reactor.has_window();
     loop {
-        reactor.turn(Some(IDLE))?;
+        let wait = saver.as_ref().and_then(|saver| saver.wait(Instant::now()));
+        reactor.turn(Some(wait.map_or(IDLE, |wait| wait.min(IDLE))))?;
         while let Ok(request) = asked.try_recv() {
             // Its peer has been told the core is busy, so acting now would surprise a retry.
             if *request.method() != Method::WindowOpen && request.is_late() {
@@ -163,7 +181,19 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
                 });
             }
         }
-        if reactor.pane_count() == 0 && !reactor.has_window() {
+        let ending = reactor.is_terminated() || reactor.pane_count() == 0 && !reactor.has_window();
+        if let Some(saver) = saver.as_mut() {
+            let now = Instant::now();
+            if reactor.was_active() {
+                saver.touch(now);
+            }
+            let closed = window && !reactor.has_window();
+            if ending || closed || saver.is_due(now) {
+                save(saver, &reactor);
+            }
+        }
+        window = reactor.has_window();
+        if ending {
             return Ok(());
         }
     }
