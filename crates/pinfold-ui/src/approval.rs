@@ -10,17 +10,17 @@ use winit::keyboard::{Key, NamedKey};
 use crate::link::Approval;
 use crate::paste::{self, AMBER, GROUND, RED, TEXT};
 
-/// How long a prompt is shown before a key can answer it, so typing already under way in a
-/// pane cannot answer a prompt that appeared mid-word.
+/// How long a prompt is on screen in a focused window before an allow key counts, so typing
+/// already under way in a pane cannot allow a prompt that appeared mid-word.
 pub const ARMED_AFTER: Duration = Duration::from_millis(500);
+/// Most prompts waiting at once; past this a new one is denied at once.
+pub const MAX_QUEUED: usize = 16;
+/// Pane text while a prompt is up, so lookalike rows a pane draws read as pane text.
+const MUTED: u32 = 0x0055_5a63;
 
-/// Turns only the documented, non-repeating window key into an answer, once the prompt has
-/// been shown for [`ARMED_AFTER`]. When the whole request did not fit on screen, only denial
-/// is accepted, so nothing unseen can be approved.
-pub fn answer(key: &Key, shown_for: Duration, shown_whole: bool) -> Option<ApprovalAnswer> {
-    if shown_for < ARMED_AFTER {
-        return None;
-    }
+/// Turns only the documented, non-repeating window key into an answer. Denial always counts.
+/// Allowing needs the prompt `armed` and shown whole, so nothing unseen can be approved.
+pub fn answer(key: &Key, armed: bool, shown_whole: bool) -> Option<ApprovalAnswer> {
     let answer = match key {
         Key::Character(key) if key.eq_ignore_ascii_case("y") => ApprovalAnswer::AllowOnce,
         Key::Character(key) if key.eq_ignore_ascii_case("a") => {
@@ -30,45 +30,57 @@ pub fn answer(key: &Key, shown_for: Duration, shown_whole: bool) -> Option<Appro
         Key::Named(NamedKey::Escape) => ApprovalAnswer::Deny,
         _ => return None,
     };
-    (shown_whole || answer == ApprovalAnswer::Deny).then_some(answer)
+    (answer == ApprovalAnswer::Deny || (armed && shown_whole)).then_some(answer)
 }
 
-/// Prompts waiting for a key, oldest first, and when the one on screen was last changed.
+/// Prompts waiting for a key, oldest first.
+#[derive(Default)]
 pub struct Queue {
     prompts: Vec<Approval>,
-    shown: Instant,
+    /// When the prompt on screen was first drawn in a focused window; `None` until then.
+    shown: Option<Instant>,
+    focused: bool,
 }
 
 impl Queue {
-    /// An empty queue.
-    pub fn new(now: Instant) -> Self {
-        Self {
-            prompts: Vec::new(),
-            shown: now,
-        }
-    }
-
     /// Whether no prompt waits.
     pub fn is_empty(&self) -> bool {
         self.prompts.is_empty()
     }
 
-    /// Adds a prompt, or replaces the batch it grew from. Either may change what is on
-    /// screen, so the arming delay starts again.
-    pub fn add(&mut self, approval: Approval, now: Instant) {
-        self.shown = now;
+    /// Adds a prompt, or replaces the batch it grew from. When the prompt on screen changes the
+    /// arming delay starts again. Returns the id of a new prompt the full queue denies.
+    pub fn add(&mut self, approval: Approval) -> Option<u64> {
         match self
             .prompts
-            .iter_mut()
-            .find(|known| known.same_batch(&approval))
+            .iter()
+            .position(|known| known.same_batch(&approval))
         {
-            Some(known) => *known = approval,
-            None => self.prompts.push(approval),
+            Some(index) => {
+                if index == 0 {
+                    self.shown = None;
+                }
+                self.prompts[index] = approval;
+            }
+            None if self.prompts.len() >= MAX_QUEUED => return Some(approval.id),
+            None => {
+                if self.prompts.is_empty() {
+                    self.shown = None;
+                }
+                self.prompts.push(approval);
+            }
         }
+        None
+    }
+
+    /// Notes window focus. Allow keys are unarmed until the prompt is drawn while focused.
+    pub fn focus(&mut self, focused: bool) {
+        self.focused = focused;
+        self.shown = None;
     }
 
     /// Answers the prompt on screen with `key`, in a pane area of `rows` × `columns`. The next
-    /// prompt then comes up unarmed, so a key meant for this one cannot answer it.
+    /// prompt then comes up unarmed, so a key meant for this one cannot allow it.
     pub fn key(
         &mut self,
         key: &Key,
@@ -78,29 +90,37 @@ impl Queue {
     ) -> Option<(u64, ApprovalAnswer)> {
         let prompt = self.prompts.first()?;
         let whole = fits(prompt, self.prompts.len(), rows, columns);
-        let shown_for = now.saturating_duration_since(self.shown);
-        let answer = answer(key, shown_for, whole)?;
+        let armed = self.focused
+            && self
+                .shown
+                .is_some_and(|shown| now.saturating_duration_since(shown) >= ARMED_AFTER);
+        let answer = answer(key, armed, whole)?;
         let id = prompt.id;
         self.prompts.remove(0);
-        self.shown = now;
+        self.shown = None;
         Some((id, answer))
     }
 
-    /// Draws the prompt on screen, if any.
-    pub fn draw(&self, frame: &mut Frame) {
+    /// Draws the prompt on screen, if any, and starts its arming delay in a focused window.
+    pub fn draw(&mut self, frame: &mut Frame, now: Instant) {
         if let Some(prompt) = self.prompts.first() {
             banner(frame, prompt, self.prompts.len());
+            if self.focused && self.shown.is_none() {
+                self.shown = Some(now);
+            }
         }
     }
 }
 
-/// The request as rows of at most `columns` characters: who asks what, then every send text
-/// in full, wrapped, after its number and byte length.
+/// The request as rows of at most `columns` characters: a border, who asks what, then every
+/// send text in full, wrapped, after its number and byte length.
 fn lines(prompt: &Approval, queued: usize, columns: usize) -> Vec<String> {
     let action = match prompt.action {
         ApprovalAction::Read => "read",
         ApprovalAction::Send => "send to",
     };
+    let border = format!("{:─<columns$}", "── Pinfold approval ");
+    let mut lines: Vec<String> = vec![border.chars().take(columns.max(1)).collect()];
     let mut head = format!(
         " ◆ needs you  Pane {} asks to {action} pane {}",
         prompt.caller, prompt.target
@@ -111,7 +131,7 @@ fn lines(prompt: &Approval, queued: usize, columns: usize) -> Vec<String> {
     if !prompt.texts.is_empty() {
         let _ = write!(head, ", {} text(s):", prompt.texts.len());
     }
-    let mut lines = wrap(&head, columns);
+    lines.extend(wrap(&head, columns));
     for (index, text) in prompt.texts.iter().enumerate() {
         let shown = format!(
             "text {} ({} bytes): {}",
@@ -132,17 +152,21 @@ fn wrap(text: &str, columns: usize) -> Vec<String> {
         .collect()
 }
 
-/// Whether the whole request, with `queued` prompts waiting, fits in a pane area of `rows` × `columns`.
+/// Whether the whole request, with `queued` prompts waiting, fits in a pane area of
+/// `rows` × `columns`.
 pub fn fits(prompt: &Approval, queued: usize, rows: u16, columns: u16) -> bool {
     lines(prompt, queued, usize::from(columns)).len() <= usize::from(rows)
 }
 
-/// Draws the request over the bottom of the pane area, after all pane cells, and the key
-/// legend on its own chrome row, which is never cut. A request too long to show whole offers
-/// only denial.
+/// Mutes every pane cell, draws the request over the bottom of the pane area under a border
+/// row, and the key legend on its own chrome row, which is never cut. The legend says how many
+/// rows above are the prompt's. A request too long to show whole offers only denial.
 fn banner(frame: &mut Frame, prompt: &Approval, queued: usize) {
     let columns = usize::from(frame.columns);
     let rows = usize::from(frame.rows);
+    for cell in &mut frame.cells {
+        cell.foreground = MUTED;
+    }
     let lines = lines(prompt, queued, columns);
     let whole = lines.len() <= rows;
     let shown = lines.len().min(rows);
@@ -151,7 +175,7 @@ fn banner(frame: &mut Frame, prompt: &Approval, queued: usize) {
         let Some(cells) = frame.cells.get_mut(start..start + columns) else {
             break;
         };
-        let colour = if offset == 0 { AMBER } else { TEXT };
+        let colour = if offset <= 1 { AMBER } else { TEXT };
         let mut characters = line.chars();
         for cell in cells {
             *cell = Cell {
@@ -163,12 +187,16 @@ fn banner(frame: &mut Frame, prompt: &Approval, queued: usize) {
     }
     let legend = if whole {
         (
-            " y allow once · a allow 30 min · n/Esc deny".to_owned(),
+            format!(
+                " y allow once · a allow 30 min · n/Esc deny · the {shown} rows above are this prompt"
+            ),
             TEXT,
         )
     } else {
         (
-            " ✕ too long to show whole; only n/Esc deny is offered".to_owned(),
+            format!(
+                " ✕ too long to show whole; only n/Esc deny is offered · the {shown} rows above are this prompt"
+            ),
             RED,
         )
     };
@@ -205,31 +233,32 @@ mod tests {
     #[test]
     fn only_the_documented_keys_answer() {
         assert_eq!(
-            answer(&Key::Character("y".into()), ARMED_AFTER, true),
+            answer(&Key::Character("y".into()), true, true),
             Some(ApprovalAnswer::AllowOnce)
         );
         assert_eq!(
-            answer(&Key::Character("a".into()), ARMED_AFTER, true),
+            answer(&Key::Character("a".into()), true, true),
             Some(ApprovalAnswer::AllowForThirtyMinutes)
         );
         assert_eq!(
-            answer(&Key::Character("n".into()), ARMED_AFTER, true),
+            answer(&Key::Character("n".into()), true, true),
             Some(ApprovalAnswer::Deny)
         );
         assert_eq!(
-            answer(&Key::Named(NamedKey::Escape), ARMED_AFTER, true),
+            answer(&Key::Named(NamedKey::Escape), true, true),
             Some(ApprovalAnswer::Deny)
         );
-        let partial = |key: &str| answer(&Key::Character(key.into()), ARMED_AFTER, false);
+        let partial = |key: &str| answer(&Key::Character(key.into()), true, false);
         assert_eq!(partial("y"), None);
         assert_eq!(partial("a"), None);
         assert_eq!(partial("n"), Some(ApprovalAnswer::Deny));
-        let early = ARMED_AFTER - Duration::from_millis(1);
-        assert_eq!(answer(&Key::Character("y".into()), early, true), None);
+        // Unarmed, allowing does nothing and denying still works.
+        assert_eq!(answer(&Key::Character("y".into()), false, true), None);
         assert_eq!(
-            answer(&Key::Named(NamedKey::Enter), ARMED_AFTER, true),
-            None
+            answer(&Key::Named(NamedKey::Escape), false, true),
+            Some(ApprovalAnswer::Deny)
         );
+        assert_eq!(answer(&Key::Named(NamedKey::Enter), true, true), None);
     }
 
     #[test]
@@ -313,7 +342,7 @@ mod tests {
         assert!(text.contains("too long to show whole"), "{text}");
         assert!(!text.contains("y allow once"), "{text}");
         let y = &Key::Character("y".into());
-        assert_eq!(answer(y, ARMED_AFTER, fits(&prompt, 1, 23, 80)), None);
+        assert_eq!(answer(y, true, fits(&prompt, 1, 23, 80)), None);
     }
 
     #[test]
@@ -337,36 +366,100 @@ mod tests {
         assert!(text.contains("y allow once"), "{text}");
     }
 
-    #[test]
-    fn a_key_for_the_first_prompt_cannot_answer_the_next_before_it_is_armed() {
-        let read = |target| Approval {
+    fn read(target: u32) -> Approval {
+        Approval {
             id: u64::from(target),
             caller: 0,
             target,
             action: ApprovalAction::Read,
             texts: Vec::new(),
-        };
+        }
+    }
+
+    #[test]
+    fn a_key_for_the_first_prompt_cannot_allow_the_next_before_it_is_armed() {
         let start = Instant::now();
-        let mut queue = Queue::new(start);
-        queue.add(read(1), start);
-        queue.add(read(2), start);
-        let mut frame = frame(3, 80);
-        queue.draw(&mut frame);
-        assert!(text(&frame).contains("(1 of 2)"), "{}", text(&frame));
+        let mut queue = Queue::default();
+        queue.focus(true);
+        assert_eq!(queue.add(read(1)), None);
+        assert_eq!(queue.add(read(2)), None);
+        let mut frame = frame(5, 80);
+        queue.draw(&mut frame, start);
+        let shown = text(&frame);
+        assert!(shown.contains("(1 of 2)"), "{shown}");
+        assert!(shown.contains("── Pinfold approval"), "{shown}");
+        assert!(
+            shown.contains("the 2 rows above are this prompt"),
+            "{shown}"
+        );
+        assert!(
+            frame.cells[..80]
+                .iter()
+                .all(|cell| cell.foreground == MUTED)
+        );
         let y = Key::Character("y".into());
         let armed = start + ARMED_AFTER;
         assert_eq!(
             queue.key(&y, armed, 22, 80),
             Some((1, ApprovalAnswer::AllowOnce))
         );
-        assert_eq!(queue.key(&y, armed, 22, 80), None);
-        let later = armed + ARMED_AFTER - Duration::from_millis(1);
-        assert_eq!(queue.key(&y, later, 22, 80), None);
+        // Not drawn yet, so not armed however late the key comes.
+        assert_eq!(queue.key(&y, armed + ARMED_AFTER, 22, 80), None);
+        queue.draw(&mut frame, armed);
+        let early = armed + ARMED_AFTER - Duration::from_millis(1);
+        assert_eq!(queue.key(&y, early, 22, 80), None);
         assert!(!queue.is_empty());
         assert_eq!(
             queue.key(&y, armed + ARMED_AFTER, 22, 80),
             Some((2, ApprovalAnswer::AllowOnce))
         );
         assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn allow_needs_focus_and_regaining_it_rearms() {
+        let start = Instant::now();
+        let mut queue = Queue::default();
+        let _ = queue.add(read(1));
+        let mut frame = frame(5, 80);
+        let y = Key::Character("y".into());
+        queue.draw(&mut frame, start);
+        assert_eq!(queue.key(&y, start + ARMED_AFTER * 4, 22, 80), None);
+        queue.focus(true);
+        queue.draw(&mut frame, start + ARMED_AFTER);
+        assert_eq!(queue.key(&y, start + ARMED_AFTER, 22, 80), None);
+        queue.focus(false);
+        queue.focus(true);
+        queue.draw(&mut frame, start + ARMED_AFTER * 2);
+        assert_eq!(queue.key(&y, start + ARMED_AFTER * 2, 22, 80), None);
+        assert_eq!(
+            queue.key(&y, start + ARMED_AFTER * 3, 22, 80),
+            Some((1, ApprovalAnswer::AllowOnce))
+        );
+    }
+
+    #[test]
+    fn only_a_new_head_rearms_deny_needs_no_arming_and_the_queue_is_capped() {
+        let start = Instant::now();
+        let mut queue = Queue::default();
+        queue.focus(true);
+        let _ = queue.add(read(1));
+        let mut frame = frame(5, 80);
+        queue.draw(&mut frame, start);
+        // Prompts joining behind the head do not hold it unarmed.
+        for target in 2..=MAX_QUEUED as u32 {
+            assert_eq!(queue.add(read(target)), None);
+        }
+        assert_eq!(queue.add(read(99)), Some(99));
+        let y = Key::Character("y".into());
+        assert_eq!(
+            queue.key(&y, start + ARMED_AFTER, 22, 80),
+            Some((1, ApprovalAnswer::AllowOnce))
+        );
+        let escape = Key::Named(NamedKey::Escape);
+        assert_eq!(
+            queue.key(&escape, start, 22, 80),
+            Some((2, ApprovalAnswer::Deny))
+        );
     }
 }

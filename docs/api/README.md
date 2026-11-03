@@ -33,8 +33,9 @@ program the caller names, and a program in that pane is that pane, not its paren
 
 `pane.read`, `pane.last_output` and `pane.send` on any other pane park the call for up to 60
 seconds and ask in trusted window chrome. `y` allows the batch once, `a` grants that caller,
-target and action for 30 minutes, and `n` or Esc denies it. Keys count only after the prompt has
-been shown for half a second. Related calls share a prompt, which takes a new id as each joins,
+target and action for 30 minutes, and `n` or Esc denies it. Allow keys count only once the prompt
+has been on screen in a focused window for half a second; denial always counts. Pane text is
+muted while a prompt is up, and at most 16 prompts wait: past that a new one is denied. Related calls share a prompt, which takes a new id as each joins,
 so a key pressed for the smaller batch approves nothing. The prompt shows every send text whole
 with its byte length; one too long for the window offers only denial. Without an open window the
 call is refused. Cross-pane reads are redacted. Reads return at most 1,000,000 bytes, keeping the

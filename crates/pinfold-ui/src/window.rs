@@ -591,7 +591,7 @@ impl App {
             if self.ended {
                 flash::ended(&mut self.composed);
             } else if !self.approvals.is_empty() {
-                self.approvals.draw(&mut self.composed);
+                self.approvals.draw(&mut self.composed, Instant::now());
             } else if let Some(prompt) = &self.prompt {
                 paste::banner(&mut self.composed, prompt);
             } else if let Some(bar) = &self.bar {
@@ -1242,7 +1242,10 @@ impl ApplicationHandler<Notice> for App {
                 self.redraw_soon();
             }
             Notice::Approval(approval) => {
-                self.approvals.add(approval, Instant::now());
+                if let Some(id) = self.approvals.add(approval) {
+                    let answer = proto::ApprovalAnswer::Deny;
+                    self.core(proto::Request::ApprovalAnswer { id, answer });
+                }
                 self.prefix.cancel();
                 self.menu = None;
                 self.redraw_soon();
@@ -1281,6 +1284,7 @@ impl ApplicationHandler<Notice> for App {
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::Focused(focused) => {
                 self.has_focus = focused;
+                self.approvals.focus(focused);
                 self.redraw_soon();
                 if !focused {
                     self.prefix.cancel();
@@ -1467,7 +1471,12 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
         wheel: 0.0,
         clipboard: None,
         prompt: None,
-        approvals: approval::Queue::new(Instant::now()),
+        approvals: {
+            // Matches `has_focus` below; `Focused` events keep them in step.
+            let mut queue = approval::Queue::default();
+            queue.focus(true);
+            queue
+        },
         menu: None,
         flash: Flash::default(),
         selecting: Selecting::default(),
