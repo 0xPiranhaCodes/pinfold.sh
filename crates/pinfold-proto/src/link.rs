@@ -37,7 +37,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 8;
+pub const VERSION: u16 = 9;
 
 /// Most rows or columns a screen can have, which the core clamps its panes to.
 pub const MAX_DIMENSION: u16 = 1024;
@@ -64,6 +64,10 @@ const FRAME_HEAD: usize = 43 + COUNT;
 /// 1024 rows of 1024 cells. Nothing else comes near it, as a selection stops at about 2 MB.
 pub const MAX_MESSAGE: usize =
     KIND + FRAME_HEAD + MAX_DIMENSION as usize * (ROW_NUMBER + MAX_DIMENSION as usize * CELL);
+
+/// Longest hyperlink target in a [`Notice::Linked`]. Browsers take more, but no link meant for
+/// a person is this long, and the core answers a longer one as no link.
+pub const MAX_URI: usize = 2048;
 
 /// Longest command in a [`Notice::WasRunning`], the cap a session snapshot keeps.
 pub const MAX_COMMAND: usize = 4096;
@@ -124,6 +128,7 @@ const MOVE_BORDER: u8 = 17;
 const ZOOM: u8 = 18;
 const APPROVAL_ANSWER: u8 = 19;
 const WAS_RUNNING_ANSWER: u8 = 20;
+const LINK: u8 = 21;
 
 const FRAME: u8 = 1;
 const CWD: u8 = 2;
@@ -136,6 +141,7 @@ const ACTIVITY: u8 = 8;
 const STATUS: u8 = 9;
 const APPROVAL: u8 = 10;
 const WAS_RUNNING: u8 = 11;
+const LINKED: u8 = 12;
 
 /// How many agent states there are. [`Notice::Status`] numbers them in the order of the
 /// contributor rule: needs you, running, done, error, idle.
@@ -445,6 +451,13 @@ pub enum Request<'a> {
         /// What to copy.
         selection: Selection,
     },
+    /// Asks for the OSC 8 hyperlink under a cell, as [`Notice::Linked`].
+    Link {
+        /// The pane.
+        pane: u32,
+        /// The cell.
+        at: Position,
+    },
     /// Asks for a full frame of a shown pane, when the window cannot apply a change to the one
     /// it holds. The core sends a pane's frames while [`Notice::Layout`] shows it, and no others.
     FullFrame {
@@ -545,6 +558,16 @@ pub enum Notice<'a> {
         pane: u32,
         /// The text.
         text: &'a str,
+    },
+    /// The target of a [`Request::Link`], as the program wrote it, or empty if the cell has no
+    /// link. Program output chose it, so it is untrusted.
+    Linked {
+        /// The pane.
+        pane: u32,
+        /// The cell asked about.
+        at: Position,
+        /// The URI.
+        uri: &'a str,
     },
     /// The session's tabs and what the active one shows. [`encode_layout`] writes this one. A
     /// pane that left it has closed or is hidden, and no tabs at all means the session ended.
@@ -851,6 +874,11 @@ impl Request<'_> {
                 put_selection(out, selection);
                 COPY
             }
+            Self::Link { pane, at } => {
+                put!(out; pane);
+                put_position(out, at);
+                LINK
+            }
             Self::FullFrame { pane } => put!(out, FULL_FRAME, pane),
             Self::Quit => QUIT,
             Self::NewTab => NEW_TAB,
@@ -933,6 +961,10 @@ impl Request<'_> {
                 pane: body.u32()?,
                 selection: body.selection()?,
             },
+            LINK => Request::Link {
+                pane: body.u32()?,
+                at: body.position()?,
+            },
             FULL_FRAME => Request::FullFrame { pane: body.u32()? },
             QUIT => Request::Quit,
             NEW_TAB => Request::NewTab,
@@ -1011,6 +1043,12 @@ impl Notice<'_> {
             }
             Self::Copied { pane, text } => {
                 put_tail(out, start, MAX_MESSAGE, COPIED, *pane, text.as_bytes())?
+            }
+            Self::Linked { pane, at, uri } => {
+                let mut head = Vec::with_capacity(10 + uri.len());
+                put_position(&mut head, *at);
+                head.extend_from_slice(uri.as_bytes());
+                put_tail(out, start, MAX_MESSAGE, LINKED, *pane, &head)?
             }
             Self::Layout(layout) => {
                 layout.write(out);
@@ -1103,6 +1141,11 @@ impl Notice<'_> {
             COPIED => Notice::Copied {
                 pane: body.u32()?,
                 text: body.text()?,
+            },
+            LINKED => Notice::Linked {
+                pane: body.u32()?,
+                at: body.position()?,
+                uri: body.text()?,
             },
             LAYOUT => Notice::Layout(read_layout(&mut body)?),
             RAISE => Notice::Raise,
@@ -1757,7 +1800,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 8, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 9, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -1910,11 +1953,11 @@ mod tests {
 
     #[test]
     fn another_version_is_an_error_that_stays() {
-        let wire = raw(HELLO, &9_u16.to_le_bytes());
+        let wire = raw(HELLO, &10_u16.to_le_bytes());
         let mut decoder = Decoder::default();
         let error = Error::Version {
             ours: VERSION,
-            theirs: 9,
+            theirs: 10,
         };
         assert_eq!(decoder.next_request(&mut wire.as_slice()), Err(error));
         let mut good: &[u8] = &HELLO_WIRE;
@@ -2401,6 +2444,7 @@ mod tests {
             (REVEAL, 12),
             (SEARCH, 15),
             (COPY, 24),
+            (LINK, 14),
             (SWITCH_TAB, 2),
             (STEP_TAB, 1),
             (SPLIT, 5),
@@ -2488,6 +2532,11 @@ mod tests {
             let wire = raw(kind, &[0, 0, 0, 0, 0xff]);
             assert_eq!(notice_error(&wire), Err(Error::BadText));
         }
+        let wire = raw(
+            LINKED,
+            &[0; 14].into_iter().chain([0xff]).collect::<Vec<_>>(),
+        );
+        assert_eq!(notice_error(&wire), Err(Error::BadText));
         let wire = raw(STATUS, &[0, 1, 0, 0, 0, 0, 0xff]);
         assert_eq!(notice_error(&wire), Err(Error::BadText));
     }
@@ -2843,6 +2892,21 @@ mod tests {
         #[test]
         fn copy_round_trips(pane in any::<u32>(), selection in selections(), chunk in chunks()) {
             prop_assert!(request_survives(Request::Copy { pane, selection }, chunk), "changed on the link");
+        }
+
+        #[test]
+        fn link_round_trips(pane in any::<u32>(), at in positions(), chunk in chunks()) {
+            prop_assert!(request_survives(Request::Link { pane, at }, chunk), "changed on the link");
+        }
+
+        #[test]
+        fn linked_round_trips(
+            pane in any::<u32>(),
+            at in positions(),
+            uri in any::<String>(),
+            chunk in chunks(),
+        ) {
+            prop_assert!(notice_survives(&Notice::Linked { pane, at, uri: &uri }, chunk), "changed on the link");
         }
 
         #[test]

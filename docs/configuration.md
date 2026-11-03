@@ -222,8 +222,20 @@ nothing.
 | Window  | Minimize `⌘M`, Next Tab `⇧⌘]`, Previous Tab `⇧⌘[`, Tab 1 to 9 `⌘1`–`⌘9`      |
 | Help    | PinFold Help `⌘?` (opens this page)                                         |
 
+Right-clicking the Dock icon offers New Tab, Split Right, Split Down and Detach, then each
+tab with its agent state as glyph and word, such as `● api  running`; choosing a tab goes to
+it.
+
 Bigger and Smaller last until the file is next saved. Elsewhere, Ctrl+Shift+C, V and F copy,
 paste and find.
+
+Right-click in a pane opens a menu of the same commands, or Shift+right-click when the
+program reports the mouse. On an OSC 8 hyperlink it also offers Open Link and Copy Link.
+Plain URLs that are not OSC 8 links get neither. Open Link opens an `http` or `https` link
+with a host in your browser, through `open` on macOS and `xdg-open` on Linux. Any other
+scheme, or a web link with characters outside ASCII, first shows the whole link under a
+`◆ needs you` border, with those characters escaped, and opens it on Enter. A link longer
+than 2,048 bytes, or one that is not a URI, gets neither item.
 
 Paste, copy, find and vi mode keys always work, and they cancel a pressed prefix. A key
 that composes text in an input method never counts as the prefix.
