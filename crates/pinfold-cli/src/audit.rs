@@ -207,6 +207,7 @@ mod tests {
         let open = Method::WorkspaceOpen(pinfold_api::workspace::Open {
             root: "/p".to_owned(),
             tabs: Vec::new(),
+            sha256: None,
         });
         let refused = Err("workspace.open needs a caller outside any pane".to_owned());
         let scope = |own| record(&open, true, own, &refused).scope;

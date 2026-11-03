@@ -41,6 +41,19 @@ pub enum State {
     Unknown,
 }
 
+/// The SHA-256 of a layout file's bytes, as the store keys it: 64 lowercase hexadecimal digits.
+///
+/// ```
+/// let empty = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+/// assert_eq!(pinfold_api::trust::sha256(b""), empty);
+/// ```
+#[must_use]
+pub fn sha256(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(bytes);
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// Looks `dir` and `sha256` up in the store at `path`. A missing or unreadable store trusts
 /// nothing.
 #[must_use]

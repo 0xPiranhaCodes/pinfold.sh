@@ -45,6 +45,21 @@ pub struct Snapshot {
     pub active: usize,
     /// Each pane, by its index in the layout.
     pub panes: Vec<Pane>,
+    /// The workspaces `pinfold up` opened, so a restore can run their `run` lines again.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspaces: Vec<Workspace>,
+}
+
+/// A workspace of a [`Snapshot`]. It names no command: `run` lines are read from the layout
+/// file again, and only if it still has this hash and is trusted with it (ADR-0034).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Workspace {
+    /// The canonical project directory.
+    pub root: String,
+    /// The layout file's SHA-256 when it opened.
+    pub sha256: String,
+    /// Each layout pane, in the file's order, by its index in the snapshot, or none once closed.
+    pub panes: Vec<Option<usize>>,
 }
 
 impl Default for Snapshot {
@@ -54,6 +69,7 @@ impl Default for Snapshot {
             tabs: Vec::new(),
             active: 0,
             panes: Vec::new(),
+            workspaces: Vec::new(),
         }
     }
 }
@@ -231,7 +247,13 @@ pub fn load(state: &Path, session: &str) -> io::Result<Option<Snapshot>> {
 /// this user or root and writable by no one else. The saved directory comes from OSC 7, which
 /// any program in a pane can print, and a shell started in a planted directory can run its code
 /// (a direnv `.envrc`, git hooks or fsmonitor in a prompt). A sticky `/tmp` is refused too.
-fn is_private(path: &Path) -> bool {
+/// A restore starts a pane in `$HOME` instead.
+///
+/// ```
+/// assert!(!pinfold_core::snapshot::is_private(std::path::Path::new("relative")));
+/// ```
+#[must_use]
+pub fn is_private(path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     use std::path::Component;
 
@@ -414,6 +436,7 @@ impl Reactor {
             tabs: tabs.collect(),
             active: tree.active,
             panes: panes.collect(),
+            workspaces: Vec::new(),
         }
     }
 }
@@ -512,6 +535,11 @@ mod tests {
                 ),
                 Pane::new(None, &"é".repeat(MAX_SEND)),
             ],
+            workspaces: vec![Workspace {
+                root: "/p".to_owned(),
+                sha256: "0".repeat(64),
+                panes: vec![Some(1), None],
+            }],
         }
     }
 
