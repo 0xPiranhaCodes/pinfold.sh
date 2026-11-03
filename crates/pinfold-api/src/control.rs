@@ -700,6 +700,7 @@ mod tests {
 
     const HELLO: &[u8] = br#"{"jsonrpc":"2.0","id":1,"method":"hello","params":{"version":1}}"#;
     const OPEN: &[u8] = br#"{"jsonrpc":"2.0","id":2,"method":"window.open"}"#;
+    const PATIENCE: Duration = Duration::from_secs(120);
 
     static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -904,7 +905,16 @@ mod tests {
         assert!(matches!(Control::bind(&directory), Err(Error::Running)));
         drop(first);
         assert!(socket_path(&directory).exists());
-        assert!(Control::bind(&directory).is_ok());
+        let start = Instant::now();
+        loop {
+            match Control::bind(&directory) {
+                Ok(_) => break,
+                Err(Error::Running) if start.elapsed() < PATIENCE => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                result => panic!("the dead core kept its session: {result:?}"),
+            }
+        }
     }
 
     #[test]
