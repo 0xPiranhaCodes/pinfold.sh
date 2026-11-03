@@ -1,8 +1,10 @@
-//! The control socket: how a launcher finds the core and asks it for a window.
+//! The control socket: how a launcher finds the core and asks it for a window, and how
+//! `pinfold ctl` lists panes.
 //!
-//! Until M3 it takes only `hello` and `window.open`, as newline-delimited JSON-RPC 2.0
-//! (ADR-0009, ADR-0028). `window.open` takes no arguments, so a caller cannot name a program,
-//! and nothing here reaches a pane. Same-user controls are guardrails (threat model).
+//! It takes `hello`, `window.open` and, after `hello` version 2, `pane.list`, as
+//! newline-delimited JSON-RPC 2.0 (ADR-0009, ADR-0028, ADR-0032). `window.open` takes no
+//! arguments, so a caller cannot name a program. The reactor answers every [`Request`], so
+//! nothing here reaches a pane. Same-user controls are guardrails (threat model).
 //!
 //! ```no_run
 //! use std::io::{BufRead, BufReader, Write};
@@ -12,7 +14,7 @@
 //!
 //! let directory = control::runtime_dir();
 //! let core = Control::bind(&directory)?;
-//! std::thread::spawn(move || core.serve(|opening| opening.answer(Ok(()))));
+//! std::thread::spawn(move || core.serve(|request| request.answer(Ok(serde_json::json!({})))));
 //!
 //! let mut launcher = UnixStream::connect(control::socket_path(&directory))?;
 //! launcher.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"hello\",\"params\":{\"version\":1}}\n")?;
@@ -37,8 +39,11 @@ use mio::{Events, Interest, Poll, Token, Waker};
 use pinfold_sys::Terminal;
 use serde_json::{Value, json};
 
-/// The version `hello` must name.
-pub const VERSION: u64 = 1;
+/// The newest version `hello` may name. It adds `pane.list` and says who the caller is.
+pub const VERSION: u64 = 2;
+/// The oldest version `hello` may name, which allows only `window.open`. Launchers send it, so
+/// a new `pinfold` still opens a window on an older core (ADR-0032 point 6).
+pub const OLDEST: u64 = 1;
 /// Stack for the thread that calls [`Control::serve`], which holds `serde_json`'s deepest parse.
 pub const STACK: usize = 256 * 1024;
 
@@ -52,7 +57,7 @@ const LISTENER: Token = Token(usize::MAX);
 const WAKE: Token = Token(usize::MAX - 1);
 /// Longest request, far above what `hello` and `window.open` need.
 const MAX_LINE: usize = 4096;
-/// Most bytes one connection may send: both requests, so it cannot stay and keep talking.
+/// Most bytes one connection may send: two requests, so it cannot stay and keep talking.
 const MAX_CONNECTION: u64 = 2 * MAX_LINE as u64;
 /// Longest a peer may spend sending, however it spaces its bytes, so it cannot hold a slot.
 const TIMEOUT: Duration = Duration::from_secs(2);
@@ -62,6 +67,8 @@ pub const OPEN_WAIT: Duration = Duration::from_secs(2);
 /// [`OPEN_WAIT`] for the first window of a core, which starts with nothing warm, so that a slow
 /// Mac does not report failure for a window that opens (`docs/spikes/m2-cold-start`).
 pub const FIRST_OPEN_WAIT: Duration = Duration::from_secs(10);
+/// Longest reply a client reads, the threat model's request limit.
+const MAX_REPLY: u64 = 1_000_000;
 /// Longest a launcher waits for each answer. It can queue behind one peer's first window, then
 /// have its own.
 const REPLY_WAIT: Duration = Duration::from_secs(FIRST_OPEN_WAIT.as_secs() + OPEN_WAIT.as_secs());
@@ -72,6 +79,18 @@ const NO_METHOD: i64 = -32601;
 const BAD_VERSION: i64 = -32001;
 const NO_HELLO: i64 = -32002;
 const NO_WINDOW: i64 = -32003;
+const REFUSED: i64 = -32004;
+
+/// What a caller asks the reactor for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Method {
+    /// `hello` version 2, which needs the caller's pane.
+    Hello,
+    /// `window.open`.
+    WindowOpen,
+    /// `pane.list`.
+    PaneList,
+}
 
 /// Why the core cannot take the control socket.
 #[derive(Debug, thiserror::Error)]
@@ -96,6 +115,9 @@ pub enum Error {
     /// The core answered with an error, or with nothing a launcher can read.
     #[error("the core refused: {0}")]
     Refused(String),
+    /// The core refuses this client's `hello` version, as a core older than `pinfold ctl` does.
+    #[error("the running PinFold does not speak this version: quit PinFold so a new core starts")]
+    Old,
     /// The system refused.
     #[error(transparent)]
     Io(#[from] io::Error),
@@ -232,14 +254,13 @@ impl Control {
     }
 
     /// Answers up to [`MAX_PEERS`] peers at once on this thread, for as long as the process
-    /// lives (ADR-0032). `open` is handed each request for a window and must not block: the
-    /// thread that can open one answers the [`Opening`] later. A peer that fails costs only its
-    /// own connection.
+    /// lives (ADR-0032). `ask` is handed each request for the reactor and must not block: the
+    /// reactor answers the [`Request`] later. A peer that fails costs only its own connection.
     ///
     /// # Errors
     ///
     /// Only if the system refuses to set up the poll; after that it never returns.
-    pub fn serve(&self, mut open: impl FnMut(Opening)) -> io::Result<()> {
+    pub fn serve(&self, mut ask: impl FnMut(Request)) -> io::Result<()> {
         let mut poll = Poll::new()?;
         let waker = Arc::new(Waker::new(poll.registry(), WAKE)?);
         let (answers, answered) = mpsc::channel();
@@ -276,7 +297,7 @@ impl Control {
             while let Ok(((slot, generation), result)) = answered.try_recv() {
                 let peer = peers.get_mut(slot).and_then(Option::as_mut);
                 if let Some(peer) = peer.filter(|peer: &&mut Peer| peer.generation == generation) {
-                    peer.opened(result);
+                    peer.answered(result);
                 }
             }
             let now = Instant::now();
@@ -284,14 +305,18 @@ impl Control {
                 let Some(peer) = entry else { continue };
                 peer.expire(now);
                 let (generation, caller) = (peer.generation, peer.caller);
-                peer.step(now, &mut || {
-                    open(Opening {
+                peer.step(now, &mut |method| {
+                    ask(Request {
                         peer: (slot, generation),
                         caller,
+                        method,
                         answers: answers.clone(),
                         waker: Arc::clone(&waker),
                     });
-                    mem::replace(&mut wait, OPEN_WAIT)
+                    match method {
+                        Method::WindowOpen => mem::replace(&mut wait, OPEN_WAIT),
+                        Method::Hello | Method::PaneList => OPEN_WAIT,
+                    }
                 });
                 peer.flush();
                 if peer.done(now) {
@@ -335,18 +360,19 @@ impl Control {
     }
 }
 
-/// A request for a window, handed to the thread that can open one. The caller hears
-/// [`Opening::answer`], or that the window is not ready once [`OPEN_WAIT`] has passed.
+/// A request for the reactor, which alone opens windows and knows panes. The caller hears
+/// [`Request::answer`], or that it waited too long once [`OPEN_WAIT`] has passed.
 #[derive(Debug)]
-pub struct Opening {
+pub struct Request {
     /// The peer's slot and generation, so an answer never reaches a later peer in that slot.
     peer: (usize, u64),
     caller: Option<Terminal>,
+    method: Method,
     answers: Sender<Answer>,
     waker: Arc<Waker>,
 }
 
-impl Opening {
+impl Request {
     /// The terminal and session the caller held when it connected, or nothing if it had no
     /// terminal. Map it to a pane on the reactor's thread for each request, so a pane that has
     /// closed since stops matching.
@@ -355,9 +381,15 @@ impl Opening {
         self.caller
     }
 
-    /// Answers the caller: `Ok` once a window is ready, or a short reason, which must carry no
+    /// What the caller asks for.
+    #[must_use]
+    pub fn method(&self) -> Method {
+        self.method
+    }
+
+    /// Answers the caller with the method's result, or a short reason, which must carry no
     /// pane contents, tokens or environment. A caller that has gone hears nothing.
-    pub fn answer(self, result: Result<(), String>) {
+    pub fn answer(self, result: Result<Value, String>) {
         if self.answers.send((self.peer, result)).is_ok() {
             let _ = self.waker.wake();
         }
@@ -365,7 +397,7 @@ impl Opening {
 }
 
 /// An answer for the peer in a slot, of a generation.
-type Answer = ((usize, u64), Result<(), String>);
+type Answer = ((usize, u64), Result<Value, String>);
 
 /// Refuses a socket whose other end is not `user`.
 fn check_peer(socket: BorrowedFd<'_>, user: u32) -> Result<(), Error> {
@@ -381,11 +413,12 @@ fn call(stream: &UnixStream, request: &Value) -> Result<Value, Error> {
     bytes.push(b'\n');
     (&mut &*stream).write_all(&bytes)?;
     let mut line = Vec::new();
-    BufReader::new(stream.take(MAX_LINE as u64)).read_until(b'\n', &mut line)?;
+    BufReader::new(stream.take(MAX_REPLY)).read_until(b'\n', &mut line)?;
     let reply: Value = serde_json::from_slice(&line)
         .map_err(|_| Error::Refused("the reply is not JSON-RPC".to_owned()))?;
     match reply.get("result") {
         Some(result) => Ok(result.clone()),
+        None if reply.pointer("/error/code") == Some(&json!(BAD_VERSION)) => Err(Error::Old),
         None => {
             let message = reply.pointer("/error/message").and_then(Value::as_str);
             Err(Error::Refused(message.unwrap_or("no result").to_owned()))
@@ -404,7 +437,7 @@ pub fn open_window(stream: &UnixStream) -> Result<(), Error> {
     check_peer(stream.as_fd(), pinfold_sys::effective_uid())?;
     stream.set_read_timeout(Some(REPLY_WAIT))?;
     stream.set_write_timeout(Some(REPLY_WAIT))?;
-    let hello = json!({"version": VERSION});
+    let hello = json!({"version": OLDEST});
     let hello = json!({"jsonrpc": "2.0", "id": 1, "method": "hello", "params": hello});
     call(stream, &hello)?;
     call(
@@ -412,6 +445,24 @@ pub fn open_window(stream: &UnixStream) -> Result<(), Error> {
         &json!({"jsonrpc": "2.0", "id": 2, "method": "window.open"}),
     )?;
     Ok(())
+}
+
+/// Asks the core on `stream` for its panes and returns the `hello` and `pane.list` results:
+/// `pinfold ctl list`'s whole conversation. Refuses another user's socket, as [`open_window`]
+/// does.
+///
+/// # Errors
+///
+/// [`Error::Old`] for a core that refuses `hello` version 2, and as [`open_window`] otherwise.
+pub fn list_panes(stream: &UnixStream) -> Result<(Value, Value), Error> {
+    check_peer(stream.as_fd(), pinfold_sys::effective_uid())?;
+    stream.set_read_timeout(Some(REPLY_WAIT))?;
+    stream.set_write_timeout(Some(REPLY_WAIT))?;
+    let hello = json!({"version": VERSION});
+    let hello = json!({"jsonrpc": "2.0", "id": 1, "method": "hello", "params": hello});
+    let hello = call(stream, &hello)?;
+    let list = json!({"jsonrpc": "2.0", "id": 2, "method": "pane.list"});
+    Ok((hello, call(stream, &list)?))
 }
 
 /// One connection on the API thread.
@@ -426,14 +477,15 @@ struct Peer {
     taken: u64,
     /// The peer sent all it may: it ended, failed, or reached the limit.
     ended: bool,
-    greeted: bool,
+    /// The `hello` version, or 0 before it.
+    greeted: u64,
     output: Vec<u8>,
     /// The connection ends once its output is written.
     closing: bool,
     /// When reading stops, however the peer spaces its bytes.
     until: Instant,
-    /// The id of the request waiting for a window, and when it stops waiting.
-    opening: Option<(Value, Instant)>,
+    /// The request waiting for the reactor, and when it stops waiting.
+    asked: Option<(Value, Method, Instant)>,
 }
 
 impl Peer {
@@ -445,17 +497,17 @@ impl Peer {
             input: Vec::new(),
             taken: 0,
             ended: false,
-            greeted: false,
+            greeted: 0,
             output: Vec::new(),
             closing: false,
             until: Instant::now() + TIMEOUT,
-            opening: None,
+            asked: None,
         }
     }
 
     /// When the poll must wake for this peer.
     fn deadline(&self) -> Instant {
-        self.opening.as_ref().map_or(self.until, |(_, at)| *at)
+        self.asked.as_ref().map_or(self.until, |(_, _, at)| *at)
     }
 
     /// Reads all the peer has sent, up to its limit.
@@ -481,10 +533,10 @@ impl Peer {
         }
     }
 
-    /// Answers each whole line, in order, until one waits for a window. `open` asks for a window
-    /// and returns how long the caller waits for it.
-    fn step(&mut self, now: Instant, open: &mut impl FnMut() -> Duration) {
-        while self.opening.is_none() && !self.closing {
+    /// Answers each whole line, in order, until one waits for the reactor. `ask` hands it the
+    /// method and returns how long the caller waits.
+    fn step(&mut self, now: Instant, ask: &mut impl FnMut(Method) -> Duration) {
+        while self.asked.is_none() && !self.closing {
             let line = self
                 .input
                 .iter()
@@ -501,28 +553,38 @@ impl Peer {
                     self.queue(&reply);
                     self.closing = !go_on;
                 }
-                Step::Open(id) => self.opening = Some((id, now + open())),
+                Step::Ask(id, method) => self.asked = Some((id, method, now + ask(method))),
             }
         }
     }
 
     /// Hands the waiting request its answer.
-    fn opened(&mut self, result: Result<(), String>) {
-        let Some((id, _)) = self.opening.take() else {
+    fn answered(&mut self, result: Result<Value, String>) {
+        let Some((id, method, _)) = self.asked.take() else {
             return;
         };
-        let (reply, go_on) = match result {
-            Ok(()) => (done(&id, &json!({})), true),
-            Err(reason) => refuse(&id, NO_WINDOW, &format!("no window can open: {reason}")),
+        let (reply, go_on) = match (result, method) {
+            (Ok(result), _) => (done(&id, &result), true),
+            (Err(reason), Method::WindowOpen) => {
+                refuse(&id, NO_WINDOW, &format!("no window can open: {reason}"))
+            }
+            (Err(reason), Method::Hello | Method::PaneList) => refuse(&id, REFUSED, &reason),
         };
         self.queue(&reply);
         self.closing = !go_on;
     }
 
-    /// Tells a request that waited too long that its window is not ready.
+    /// Tells a request that waited too long that the core did not answer in time.
     fn expire(&mut self, now: Instant) {
-        if self.opening.as_ref().is_some_and(|(_, at)| now >= *at) {
-            self.opened(Err("the window is not ready and may still open".to_owned()));
+        let Some((_, method, at)) = &self.asked else {
+            return;
+        };
+        if now >= *at {
+            let reason = match method {
+                Method::WindowOpen => "the window is not ready and may still open",
+                Method::Hello | Method::PaneList => "the core is busy",
+            };
+            self.answered(Err(reason.to_owned()));
         }
     }
 
@@ -551,7 +613,7 @@ impl Peer {
     /// Whether the connection is over: it said its last, or its time is up while it waits for
     /// nothing.
     fn done(&self, now: Instant) -> bool {
-        self.opening.is_none() && ((self.closing && self.output.is_empty()) || now >= self.until)
+        self.asked.is_none() && ((self.closing && self.output.is_empty()) || now >= self.until)
     }
 }
 
@@ -560,8 +622,8 @@ impl Peer {
 enum Step {
     /// This reply, null for none, and whether the connection goes on.
     Reply(Value, bool),
-    /// A window is wanted for the request with this id.
-    Open(Value),
+    /// The reactor answers the request with this id.
+    Ask(Value, Method),
 }
 
 fn done(id: &Value, result: &Value) -> Value {
@@ -575,7 +637,7 @@ fn refuse(id: &Value, code: i64, message: &str) -> (Value, bool) {
 
 /// Returns what one request leads to. A null reply means a notification: JSON-RPC gives it no
 /// answer, and no method here is one, so it does nothing.
-fn answer(line: &[u8], greeted: &mut bool) -> Step {
+fn answer(line: &[u8], greeted: &mut u64) -> Step {
     let refuse = |id: Option<&Value>, code, message: &str| {
         let (reply, go_on) = refuse(id.unwrap_or(&Value::Null), code, message);
         Step::Reply(reply, go_on)
@@ -596,18 +658,26 @@ fn answer(line: &[u8], greeted: &mut bool) -> Step {
         return Step::Reply(Value::Null, false);
     };
     match request.get("method").and_then(Value::as_str) {
-        Some("hello") if *greeted => refuse(Some(id), NO_METHOD, "hello comes once"),
-        Some("hello") => {
-            let version = request.pointer("/params/version").and_then(Value::as_u64);
-            if version != Some(VERSION) {
-                return refuse(Some(id), BAD_VERSION, "unknown version");
+        Some("hello") if *greeted > 0 => refuse(Some(id), NO_METHOD, "hello comes once"),
+        Some("hello") => match request.pointer("/params/version").and_then(Value::as_u64) {
+            Some(OLDEST) => {
+                *greeted = OLDEST;
+                let result = json!({"version": OLDEST, "capabilities": ["window.open"]});
+                Step::Reply(done(id, &result), true)
             }
-            *greeted = true;
-            let result = json!({"version": VERSION, "capabilities": ["window.open"]});
-            Step::Reply(done(id, &result), true)
+            // The reactor knows the caller's pane, so it answers.
+            Some(VERSION) => {
+                *greeted = VERSION;
+                Step::Ask(id.clone(), Method::Hello)
+            }
+            _ => refuse(Some(id), BAD_VERSION, "unknown version"),
+        },
+        _ if *greeted == 0 => refuse(Some(id), NO_HELLO, "hello comes first"),
+        Some("window.open") => Step::Ask(id.clone(), Method::WindowOpen),
+        Some("pane.list") if *greeted < VERSION => {
+            refuse(Some(id), NO_METHOD, "pane.list needs hello version 2")
         }
-        _ if !*greeted => refuse(Some(id), NO_HELLO, "hello comes first"),
-        Some("window.open") => Step::Open(id.clone()),
+        Some("pane.list") => Step::Ask(id.clone(), Method::PaneList),
         _ => refuse(Some(id), NO_METHOD, "unknown method"),
     }
 }
@@ -616,7 +686,7 @@ fn answer(line: &[u8], greeted: &mut bool) -> Step {
 #[doc(hidden)]
 pub fn fuzz_request_line(line: &[u8]) {
     let line = &line[..line.len().min(MAX_LINE)];
-    for mut greeted in [false, true] {
+    for mut greeted in [0, OLDEST, VERSION] {
         let _ = answer(line, &mut greeted);
     }
 }
@@ -650,25 +720,25 @@ mod tests {
     }
 
     /// The reply to a request that wants no window.
-    fn replied(line: &[u8], greeted: &mut bool) -> (Value, bool) {
+    fn replied(line: &[u8], greeted: &mut u64) -> (Value, bool) {
         match answer(line, greeted) {
             Step::Reply(reply, go_on) => (reply, go_on),
-            Step::Open(id) => panic!("{id} asked for a window"),
+            Step::Ask(id, method) => panic!("{id} asked the reactor for {method:?}"),
         }
     }
 
     /// Answers every window request at once with `result`.
-    fn serving(result: Result<(), String>) -> impl FnMut(Opening) {
-        move |opening| opening.answer(result.clone())
+    fn serving(result: Result<Value, String>) -> impl FnMut(Request) {
+        move |request| request.answer(result.clone())
     }
 
     #[test]
     fn hello_comes_first_and_once() {
-        let mut greeted = false;
+        let mut greeted = 0;
         let (reply, go_on) = replied(OPEN, &mut greeted);
         assert_eq!((code(&reply), go_on), (Some(NO_HELLO), false));
         let (reply, go_on) = replied(HELLO, &mut greeted);
-        assert_eq!(reply["result"]["version"], json!(VERSION));
+        assert_eq!(reply["result"]["version"], json!(OLDEST));
         assert_eq!(reply["result"]["capabilities"], json!(["window.open"]));
         assert_eq!(reply["id"], json!(1));
         assert!(go_on);
@@ -678,20 +748,68 @@ mod tests {
 
     #[test]
     fn a_wrong_version_is_refused() {
-        let line = br#"{"jsonrpc":"2.0","id":1,"method":"hello","params":{"version":2}}"#;
-        let mut greeted = false;
+        let line = br#"{"jsonrpc":"2.0","id":1,"method":"hello","params":{"version":3}}"#;
+        let mut greeted = 0;
         let (reply, go_on) = replied(line, &mut greeted);
         assert_eq!(
             (code(&reply), go_on, greeted),
-            (Some(BAD_VERSION), false, false)
+            (Some(BAD_VERSION), false, 0)
         );
+    }
+
+    #[test]
+    fn version_1_cannot_list_panes_and_version_2_asks_the_reactor() {
+        let list = br#"{"jsonrpc":"2.0","id":2,"method":"pane.list"}"#;
+        let (reply, go_on) = replied(list, &mut OLDEST.clone());
+        assert_eq!((code(&reply), go_on), (Some(NO_METHOD), false));
+        assert!(
+            reply.to_string().contains("needs hello version 2"),
+            "{reply}"
+        );
+
+        let hello = br#"{"jsonrpc":"2.0","id":1,"method":"hello","params":{"version":2}}"#;
+        let mut greeted = 0;
+        assert_eq!(
+            answer(hello, &mut greeted),
+            Step::Ask(json!(1), Method::Hello)
+        );
+        assert_eq!(
+            answer(list, &mut greeted),
+            Step::Ask(json!(2), Method::PaneList)
+        );
+    }
+
+    #[test]
+    fn ctl_hears_the_reactors_answers_and_is_told_to_restart_an_old_core() {
+        let directory = fresh();
+        let control = Control::bind(&directory).unwrap();
+        thread::spawn(move || {
+            control.serve(|request| match request.method() {
+                Method::Hello => request.answer(Ok(json!({"pane": null}))),
+                _ => request.answer(Ok(json!({"panes": []}))),
+            })
+        });
+        let stream = UnixStream::connect(socket_path(&directory)).unwrap();
+        let (hello, list) = list_panes(&stream).unwrap();
+        assert_eq!((hello, list), (json!({"pane": null}), json!({"panes": []})));
+
+        let (old, core) = UnixStream::pair().unwrap();
+        thread::spawn(move || {
+            let mut line = String::new();
+            BufReader::new(&core).read_line(&mut line).unwrap();
+            let refusal = json!({"jsonrpc": "2.0", "id": 1, "error": {"code": BAD_VERSION}});
+            (&core)
+                .write_all(format!("{refusal}\n").as_bytes())
+                .unwrap();
+        });
+        assert!(matches!(list_panes(&old), Err(Error::Old)));
     }
 
     #[test]
     fn only_hello_and_window_open_exist() {
         for method in ["pane.read", "pane.write", "window.close", "", "HELLO"] {
             let line = json!({"jsonrpc": "2.0", "id": 1, "method": method}).to_string();
-            let mut greeted = true;
+            let mut greeted = OLDEST;
             let (reply, go_on) = replied(line.as_bytes(), &mut greeted);
             assert_eq!((code(&reply), go_on), (Some(NO_METHOD), false), "{method}");
         }
@@ -701,7 +819,10 @@ mod tests {
     fn window_open_asks_for_a_window_and_ignores_arguments() {
         let line =
             br#"{"jsonrpc":"2.0","id":2,"method":"window.open","params":{"path":"/bin/sh"}}"#;
-        assert_eq!(answer(line, &mut true), Step::Open(json!(2)));
+        assert_eq!(
+            answer(line, &mut OLDEST.clone()),
+            Step::Ask(json!(2), Method::WindowOpen)
+        );
     }
 
     #[test]
@@ -713,7 +834,7 @@ mod tests {
             json!(null),
         ] {
             let line = line.to_string();
-            let (reply, go_on) = replied(line.as_bytes(), &mut true);
+            let (reply, go_on) = replied(line.as_bytes(), &mut OLDEST.clone());
             assert_eq!(
                 (code(&reply), go_on),
                 (Some(NOT_A_REQUEST), false),
@@ -725,7 +846,10 @@ mod tests {
     #[test]
     fn a_notification_gets_no_reply_and_does_nothing() {
         let line = br#"{"jsonrpc":"2.0","method":"window.open"}"#;
-        assert_eq!(answer(line, &mut true), Step::Reply(Value::Null, false));
+        assert_eq!(
+            answer(line, &mut OLDEST.clone()),
+            Step::Reply(Value::Null, false)
+        );
     }
 
     #[test]
@@ -741,7 +865,7 @@ mod tests {
         ];
         let worker = thread::Builder::new().stack_size(STACK).spawn(move || {
             for line in lines.into_iter().chain([nested.as_slice()]) {
-                let (reply, go_on) = replied(line, &mut false);
+                let (reply, go_on) = replied(line, &mut 0);
                 assert!(code(&reply).is_some() && !go_on);
             }
         });
@@ -800,7 +924,7 @@ mod tests {
     fn a_slow_peer_cannot_hold_the_socket() {
         let directory = fresh();
         let control = Control::bind(&directory).unwrap();
-        thread::spawn(move || control.serve(serving(Ok(()))));
+        thread::spawn(move || control.serve(serving(Ok(json!({})))));
 
         let path = socket_path(&directory);
         let mut slow = UnixStream::connect(&path).unwrap();
@@ -828,7 +952,7 @@ mod tests {
         for (window, opened) in [(true, true), (false, false)] {
             let directory = fresh();
             let control = Control::bind(&directory).unwrap();
-            let open = serving(window.then_some(()).ok_or_else(|| "why".to_owned()));
+            let open = serving(window.then(|| json!({})).ok_or_else(|| "why".to_owned()));
             thread::spawn(move || control.serve(open));
             let stream = UnixStream::connect(socket_path(&directory)).unwrap();
             match open_window(&stream) {
@@ -858,7 +982,7 @@ mod tests {
     fn a_connection_gets_answers_and_cannot_stay_for_ever() {
         let directory = fresh();
         let control = Control::bind(&directory).unwrap();
-        thread::spawn(move || control.serve(serving(Ok(()))));
+        thread::spawn(move || control.serve(serving(Ok(json!({})))));
 
         let mut stream = UnixStream::connect(socket_path(&directory)).unwrap();
         stream.write_all(HELLO).unwrap();
@@ -871,7 +995,7 @@ mod tests {
         let hello: Value = serde_json::from_str(&reply).unwrap();
         assert_eq!(hello["jsonrpc"], "2.0");
         assert_eq!(hello["id"], json!(1));
-        assert_eq!(hello["result"]["version"], json!(VERSION));
+        assert_eq!(hello["result"]["version"], json!(OLDEST));
         reply.clear();
         reader.read_line(&mut reply).unwrap();
         let opened: Value = serde_json::from_str(&reply).unwrap();
@@ -894,7 +1018,7 @@ mod tests {
         let control = Control::bind(&directory).unwrap();
         // Never answered, as by a core whose window hangs.
         let mut held = Vec::new();
-        thread::spawn(move || control.serve(move |opening| held.push(opening)));
+        thread::spawn(move || control.serve(move |request| held.push(request)));
 
         let path = socket_path(&directory);
         let mut waiting = UnixStream::connect(&path).unwrap();
@@ -921,7 +1045,7 @@ mod tests {
         let control = Control::bind(&directory).unwrap();
         // Each peer here is this process, so all share one identity, or are all unidentified.
         let (asked, callers) = mpsc::channel();
-        thread::spawn(move || control.serve(move |opening| asked.send(opening).unwrap()));
+        thread::spawn(move || control.serve(move |request| asked.send(request).unwrap()));
 
         let path = socket_path(&directory);
         let mut held: Vec<UnixStream> = (0..MAX_PER_CALLER)
@@ -931,11 +1055,11 @@ mod tests {
         held[0].write_all(b"\n").unwrap();
         held[0].write_all(OPEN).unwrap();
         held[0].write_all(b"\n").unwrap();
-        let opening = callers.recv_timeout(TIMEOUT).unwrap();
+        let request = callers.recv_timeout(TIMEOUT).unwrap();
         let probe = UnixListener::bind(fresh()).unwrap();
         let _us = UnixStream::connect(probe.local_addr().unwrap().as_pathname().unwrap());
         let expected = pinfold_sys::peer_terminal(probe.accept().unwrap().0.as_fd()).unwrap();
-        assert_eq!(opening.caller(), expected);
+        assert_eq!(request.caller(), expected);
         let mut over = UnixStream::connect(&path).unwrap();
         over.set_read_timeout(Some(TIMEOUT / 2)).unwrap();
         assert_eq!(over.read(&mut [0; 8]).unwrap(), 0);

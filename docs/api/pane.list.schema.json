@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "pane.list",
+  "description": "Lists the session's panes, with nothing from any screen. Needs hello version 2 and a caller with a controlling terminal, in a pane or not; a caller with none is refused.",
+  "type": "object",
+  "properties": {
+    "params": {
+      "description": "pane.list takes no arguments.",
+      "type": ["object", "array", "null"]
+    },
+    "result": {
+      "type": "object",
+      "required": ["panes"],
+      "additionalProperties": false,
+      "properties": {
+        "panes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id", "title", "cwd", "command", "status"],
+            "additionalProperties": false,
+            "properties": {
+              "id": { "type": "integer", "minimum": 0, "description": "The pane's number, never reused in a session." },
+              "title": { "type": ["string", "null"], "description": "The last name of cwd, as the pane's tab shows it." },
+              "cwd": { "type": ["string", "null"], "description": "The last directory the pane reported with OSC 7. Program output can fake it." },
+              "command": { "type": "string", "description": "The program the pane started, without its arguments." },
+              "status": {
+                "enum": ["running", "done", "error", "idle"],
+                "description": "From the shell's OSC 133 marks, which output can fake; done once the pane's program has ended."
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -38,6 +38,7 @@ Entries are generated from Conventional Commits with git-cliff
 - A spike measures what waiting for each Metal frame costs: a median 0.44 to 0.47 ms on a full 200x60 grid on an M1 Pro, so the wait stays rather than spending about 750 KB on more instance buffers.
 - The app is called PinFold: `PinFold.app`, the window's title and the Dock.
 - Tab pills stand a little taller than a cell, with their text centred, in any font. A chosen font without `⌘` takes it from the bundled font.
+- `hello` version 2 returns the version, the methods a caller may call and its pane id. `pane.list` lists the session's panes (id, title, cwd, command, status, and nothing from a screen) for any caller with a terminal, with a JSON Schema in [docs/api](docs/api/README.md). `pinfold ctl list` prints them, as JSON with `--json`. Version 1 still opens windows and cannot list panes (ADR-0032 step 3).
 - Pill tabs in the top bar, with hover, a mark on a hidden tab that printed, a quiet look for an
   unfocused window, and no title row in fullscreen.
 - Tabs and splits for real. The core owns the session, so a new window finds the same tabs and panes, and only the panes of the active tab are sent to the window, so a hidden tab costs no frame copies. A session holds at most 32 tabs and 64 panes, and past that a command is refused with a note under the pane. Panes are drawn in cells with cell-drawn borders, the focused pane's in the focus accent.

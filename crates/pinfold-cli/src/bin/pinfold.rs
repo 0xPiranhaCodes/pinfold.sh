@@ -1,7 +1,8 @@
 //! The `pinfold` launcher: starts the core if none answers, asks it for a window, and exits.
+//! `pinfold ctl` is a thin client of the core's API (ADR-0032).
 
 use std::error::Error;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Write};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
@@ -9,6 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use pinfold_api::control;
+use serde_json::Value;
 
 /// How long a core that was just started gets to answer.
 const START_WAIT: Duration = Duration::from_secs(5);
@@ -62,21 +64,108 @@ fn launch() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn main() -> ExitCode {
-    if std::env::args().len() > 1 {
-        eprintln!("usage: pinfold");
-        return ExitCode::FAILURE;
+/// `pinfold ctl list`: prints the session's panes, as JSON with `json`. It starts no core.
+fn list(json: bool) -> Result<(), Box<dyn Error>> {
+    let path = control::socket_path(&control::runtime_dir());
+    let stream = connect(&path)?.ok_or("PinFold is not running")?;
+    let (hello, list) = control::list_panes(&stream)?;
+    let text = if json {
+        format!("{list}\n")
+    } else {
+        table(&hello, &list)
+    };
+    std::io::stdout().write_all(text.as_bytes())?;
+    Ok(())
+}
+
+/// The panes as plain text, a line each, with `*` by the caller's own. A program chooses its own
+/// command and directory, so each field goes through [`printable`] before it reaches a terminal.
+fn table(hello: &Value, list: &Value) -> String {
+    let mut text = format!(
+        "{:<5} {:<8} {:<16} {:<24} CWD\n",
+        "ID", "STATUS", "TITLE", "COMMAND"
+    );
+    let panes = list["panes"].as_array().map_or(&[][..], Vec::as_slice);
+    for pane in panes {
+        let field = |name: &str| printable(pane[name].as_str().unwrap_or("-"));
+        let own = if pane["id"] == hello["pane"] { "*" } else { "" };
+        let id = format!("{}{own}", pane["id"]);
+        let (status, title) = (field("status"), field("title"));
+        let (command, cwd) = (field("command"), field("cwd"));
+        text += &format!("{id:<5} {status:<8} {title:<16} {command:<24} {cwd}\n");
     }
-    match launch() {
+    text
+}
+
+/// `text` with each control, bidi or zero-width character as `?`, so a pane's fields cannot
+/// move the cursor, recolour or reorder what the person reads (threat T6).
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|character| match character {
+            '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2069}'
+            | '\u{061c}'
+            | '\u{feff}' => '?',
+            _ if character.is_control() => '?',
+            _ => character,
+        })
+        .collect()
+}
+
+fn main() -> ExitCode {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let result = match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+        [] => launch(),
+        ["ctl", "list"] => list(false),
+        ["ctl", "list", "--json"] => list(true),
+        _ => {
+            eprintln!("usage: pinfold [ctl list [--json]]");
+            return ExitCode::FAILURE;
+        }
+    };
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("pinfold: {error}");
             // A core started from a terminal logs there, so this may be an older core's.
             let log = control::log_path(&control::runtime_dir());
-            if log.exists() {
+            if args.is_empty() && log.exists() {
                 eprintln!("pinfold: see {}", log.display());
             }
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_table_marks_the_callers_pane_and_dashes_what_is_unknown() {
+        let list = json!({"panes": [
+            {"id": 0, "title": "work", "cwd": "/tmp/work", "command": "/bin/zsh", "status": "running"},
+            {"id": 3, "title": null, "cwd": null, "command": "/bin/sh", "status": "idle"},
+        ]});
+        let expected = "\
+ID    STATUS   TITLE            COMMAND                  CWD
+0     running  work             /bin/zsh                 /tmp/work
+3*    idle     -                /bin/sh                  -
+";
+        assert_eq!(table(&json!({"pane": 3}), &list), expected);
+        // Outside a pane none is the caller's.
+        assert!(!table(&json!({"pane": null}), &list).contains('*'));
+    }
+
+    #[test]
+    fn a_table_prints_no_control_bidi_or_zero_width_characters() {
+        let list = json!({"panes": [{
+            "id": 1, "title": "a\u{202e}b", "cwd": "/x\u{1b}]0;y\u{7}", "command": "s\u{200b}h\r", "status": "idle"
+        }]});
+        let text = table(&json!({"pane": null}), &list);
+        assert!(text.contains("a?b") && text.contains("/x?]0;y?") && text.contains("s?h?"));
+        assert!(text.lines().count() == 2);
     }
 }

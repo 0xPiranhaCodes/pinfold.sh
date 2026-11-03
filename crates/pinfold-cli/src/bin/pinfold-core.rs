@@ -8,9 +8,10 @@ use std::sync::mpsc::{self, Receiver, TrySendError};
 use std::time::Duration;
 use std::{env, thread};
 
-use pinfold_api::control::{self, Control, Opening};
+use pinfold_api::control::{self, Control, Method, Request};
 use pinfold_core::io::{Reactor, Waker};
 use pinfold_core::shell;
+use serde_json::{Value, json};
 
 const ROWS: u16 = 24;
 const COLUMNS: u16 = 80;
@@ -25,18 +26,18 @@ fn window_binary() -> io::Result<PathBuf> {
 }
 
 /// Binds the control socket and answers it on the API thread (ADR-0007, ADR-0032). The
-/// reactor's thread makes every spawn (see `pinfold_sys::socket::pair`), so `window.open`
-/// crosses to it. The channel holds one request per peer the API thread serves.
-fn listen(waker: Arc<Waker>) -> io::Result<Receiver<Opening>> {
+/// reactor's thread makes every spawn (see `pinfold_sys::socket::pair`) and holds the panes, so
+/// every request crosses to it. The channel holds one request per peer the API thread serves.
+fn listen(waker: Arc<Waker>) -> io::Result<Receiver<Request>> {
     let control = Control::bind(&control::runtime_dir()).map_err(io::Error::other)?;
     let (ask, asked) = mpsc::sync_channel(control::MAX_PEERS);
-    let open = move |opening: Opening| match ask.try_send(opening) {
+    let open = move |request: Request| match ask.try_send(request) {
         Ok(()) => {
-            // A lost wake leaves the caller to hear that the window is not ready.
+            // A lost wake leaves the caller to hear that it waited too long.
             let _ = waker.wake();
         }
-        Err(TrySendError::Full(opening) | TrySendError::Disconnected(opening)) => {
-            opening.answer(Err("the core is busy".to_owned()));
+        Err(TrySendError::Full(request) | TrySendError::Disconnected(request)) => {
+            request.answer(Err("the core is busy".to_owned()));
         }
     };
     let serve = move || control.serve(open);
@@ -45,6 +46,34 @@ fn listen(waker: Arc<Waker>) -> io::Result<Receiver<Opening>> {
         .stack_size(control::STACK)
         .spawn(serve)?;
     Ok(asked)
+}
+
+/// Answers a request that opens no window. A caller with no terminal is unidentified and may
+/// not list panes (threat model, caller identity point 3). Any caller with a terminal may, in a
+/// pane or not, as a list shows no screen and little a same-user `ps` does not.
+fn answer(reactor: &Reactor, request: &Request) -> Result<Value, String> {
+    let identified = request.caller().is_some();
+    match request.method() {
+        Method::Hello => {
+            let pane = request.caller().and_then(|caller| reactor.pane_of(caller));
+            let methods: &[&str] = if identified {
+                &["window.open", "pane.list"]
+            } else {
+                &["window.open"]
+            };
+            Ok(json!({"version": control::VERSION, "methods": methods, "pane": pane}))
+        }
+        Method::PaneList if identified => {
+            let panes = reactor.list().map(|pane| {
+                json!({"id": pane.id, "title": pane.title, "cwd": pane.cwd,
+                       "command": pane.command, "status": pane.status})
+            });
+            Ok(json!({"panes": panes.collect::<Vec<_>>()}))
+        }
+        Method::PaneList => Err("pane.list needs a caller in a terminal".to_owned()),
+        // Never sent here: the loop opens windows.
+        Method::WindowOpen => Err("no window here".to_owned()),
+    }
 }
 
 /// Runs `panes` shells, a tab each, until every pane has gone and no window is left to tell, or
@@ -70,21 +99,26 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
     let mut waiting = Vec::new();
     loop {
         reactor.turn(Some(IDLE))?;
-        while let Ok(opening) = asked.try_recv() {
+        while let Ok(request) = asked.try_recv() {
+            if request.method() != Method::WindowOpen {
+                let answer = answer(&reactor, &request);
+                request.answer(answer);
+                continue;
+            }
             match reactor.spawn_window(&binary) {
-                Ok(_) => waiting.push(opening),
+                Ok(_) => waiting.push(request),
                 // The system's words alone, which name no pane, secret or variable.
-                Err(error) => opening.answer(Err(format!("cannot start pinfold-window: {error}"))),
+                Err(error) => request.answer(Err(format!("cannot start pinfold-window: {error}"))),
             }
         }
         let ended = !reactor.has_window();
         if ended || reactor.is_window_ready() {
-            for opening in waiting.drain(..) {
+            for request in waiting.drain(..) {
                 let reason = "the window ended before it was ready";
-                opening.answer(if ended {
+                request.answer(if ended {
                     Err(reason.to_owned())
                 } else {
-                    Ok(())
+                    Ok(json!({}))
                 });
             }
         }

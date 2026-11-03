@@ -17,6 +17,7 @@ use pinfold_sys::Terminal;
 use pinfold_sys::pty::Pty;
 
 use crate::link::{Host, LINK};
+use crate::marks::ShellPhase;
 use crate::search::{Direction, Position, Search, SearchStep, Selection};
 use crate::vt::{AlacrittyEngine, VtEngine};
 use crate::{paste, shell};
@@ -94,6 +95,8 @@ struct Pane {
     /// Never used twice, so a late message cannot reach a pane that took a closed one's place.
     number: usize,
     pty: Pty,
+    /// The program it started, for `pane.list`.
+    program: String,
     engine: Box<dyn VtEngine + Send>,
     replies: Vec<u8>,
     input: Vec<u8>,
@@ -113,6 +116,22 @@ impl Pane {
             self.input = Vec::new();
         }
     }
+}
+
+/// What `pane.list` tells of a pane. The title, directory and status come from output, which
+/// can fake them (T4).
+#[derive(Debug, PartialEq, Eq)]
+pub struct Listed<'a> {
+    /// The pane's number.
+    pub id: usize,
+    /// The last name of `cwd`, as its tab shows it.
+    pub title: Option<&'a str>,
+    /// The last OSC 7 directory, which is only a hint.
+    pub cwd: Option<&'a str>,
+    /// The program the pane started, without its arguments.
+    pub command: &'a str,
+    /// `running`, `done`, `error` or `idle`, from OSC 133 marks, and `done` once it closed.
+    pub status: &'static str,
 }
 
 /// Every PTY and its terminal state, driven from a single thread.
@@ -170,6 +189,8 @@ impl Reactor {
     /// Returns an error if the PTY cannot be created or polled, or the program cannot start.
     pub fn spawn(&mut self, mut command: Command, rows: u16, columns: u16) -> io::Result<usize> {
         command.env("TERM", "xterm-256color");
+        // The program alone: its arguments can hold secrets.
+        let program = command.get_program().to_string_lossy().into_owned();
         let pty = Pty::spawn(command, rows, columns)?;
         let pane = self.next_pane;
         let fd = pty.master().as_raw_fd();
@@ -181,6 +202,7 @@ impl Reactor {
         self.panes.push(Pane {
             number: pane,
             pty,
+            program,
             engine: Box::new(AlacrittyEngine::new(rows, columns)),
             replies: Vec::new(),
             input: Vec::new(),
@@ -386,6 +408,28 @@ impl Reactor {
         pane.filter(|pane| !pane.closed).map(|pane| pane.number)
     }
 
+    /// Describes every pane for `pane.list`, in order of number, with nothing from a screen.
+    pub fn list(&self) -> impl Iterator<Item = Listed<'_>> {
+        self.panes.iter().map(|pane| {
+            let marks = pane.engine.shell_marks();
+            let status = match (pane.closed, marks.phase) {
+                (true, _) => "done",
+                (_, ShellPhase::Running) => "running",
+                (_, ShellPhase::Finished) if marks.exit.is_some_and(|exit| exit != 0) => "error",
+                (_, ShellPhase::Finished) => "done",
+                _ => "idle",
+            };
+            let cwd = pane.engine.cwd().map(|cwd| cwd.path.as_str());
+            Listed {
+                id: pane.number,
+                title: cwd.and_then(|cwd| cwd.rsplit('/').next().filter(|name| !name.is_empty())),
+                cwd,
+                command: &pane.program,
+                status,
+            }
+        })
+    }
+
     fn pane(&self, number: usize) -> Option<&Pane> {
         let index = self.panes.binary_search_by_key(&number, |pane| pane.number);
         self.panes.get(index.ok()?)
@@ -525,6 +569,23 @@ mod tests {
         let (_stream, terminal) = accept(&mut reactor, &listener);
         assert_eq!(terminal, None);
         let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_list_tells_program_directory_and_status_and_no_screen() {
+        let mut reactor = Reactor::new().unwrap();
+        let marks = r"printf '\033]7;file:///tmp/work\007\033]133;C\007secret'; sleep 30";
+        let pane = reactor.spawn(shell(marks), 24, 80).unwrap();
+        let listed = |reactor: &Reactor| reactor.list().any(|pane| pane.status == "running");
+        assert!(turn_until(&mut reactor, listed));
+        let expected = Listed {
+            id: pane,
+            title: Some("work"),
+            cwd: Some("/tmp/work"),
+            command: "/bin/sh",
+            status: "running",
+        };
+        assert_eq!(reactor.list().collect::<Vec<_>>(), [expected]);
     }
 
     #[test]
