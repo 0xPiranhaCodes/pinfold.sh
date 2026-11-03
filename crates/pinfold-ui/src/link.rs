@@ -35,8 +35,8 @@ use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
 use pinfold_proto::Frame;
 use pinfold_proto::link::{
-    Decoder, Error, Layout, MAX_DIMENSION, MAX_REQUEST, Notice, Rect, Refusal, Request, Selection,
-    VERSION,
+    ApprovalAction, Decoder, Error, Layout, MAX_DIMENSION, MAX_REQUEST, Notice, Rect, Refusal,
+    Request, Selection, VERSION,
 };
 
 /// Most bytes read per turn, so a flooding core cannot hold the window's thread.
@@ -116,6 +116,29 @@ pub struct Tab {
     pub message: String,
 }
 
+/// An approval copied out of the decoder's borrowed message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Approval {
+    /// Stable prompt id.
+    pub id: u64,
+    /// Pane asking.
+    pub caller: u32,
+    /// Target pane.
+    pub target: u32,
+    /// Cross-pane action.
+    pub action: ApprovalAction,
+    /// Exact batched sends, empty for reads.
+    pub texts: Vec<String>,
+}
+
+impl Approval {
+    /// Whether `other` is this prompt, possibly grown by more requests.
+    #[must_use]
+    pub fn same_batch(&self, other: &Self) -> bool {
+        (self.caller, self.target, self.action) == (other.caller, other.target, other.action)
+    }
+}
+
 /// What the window knows of the session, and what it has to say.
 #[derive(Default)]
 struct State {
@@ -141,6 +164,7 @@ struct State {
     copying: u32,
     raised: bool,
     refused: Option<Refusal>,
+    approvals: Vec<Approval>,
 }
 
 impl State {
@@ -219,6 +243,28 @@ impl State {
                 }
             }
             Notice::Refused { reason } => self.refused = Some(reason),
+            Notice::Approval(approval) => {
+                let owned = Approval {
+                    id: approval.id,
+                    caller: approval.caller,
+                    target: approval.target,
+                    action: approval.action,
+                    texts: approval
+                        .texts
+                        .iter()
+                        .map(|text| (*text).to_owned())
+                        .collect(),
+                };
+                // A batch that grew comes under a new id; it replaces the one shown.
+                match self
+                    .approvals
+                    .iter_mut()
+                    .find(|known| known.same_batch(&owned))
+                {
+                    Some(known) => *known = owned,
+                    None => self.approvals.push(owned),
+                }
+            }
             Notice::Copied { .. } => {}
         }
         Ok(())
@@ -526,6 +572,11 @@ impl Link {
     /// Returns the last command the core refused, once.
     pub fn take_refused(&mut self) -> Option<Refusal> {
         self.state.refused.take()
+    }
+
+    /// Takes the oldest new or updated approval prompt.
+    pub fn take_approval(&mut self) -> Option<Approval> {
+        (!self.state.approvals.is_empty()).then(|| self.state.approvals.remove(0))
     }
 
     /// Returns the text of the last copy asked for, once.

@@ -5,7 +5,7 @@
 use pinfold_proto::link::MAX_PASTE;
 use pinfold_proto::{Cell, Frame};
 
-const GROUND: u32 = 0x0012_151a;
+pub(crate) const GROUND: u32 = 0x0012_151a;
 pub(crate) const TEXT: u32 = 0x00e2_e5ea;
 pub(crate) const AMBER: u32 = 0x00f5_b544;
 pub(crate) const RED: u32 = 0x00ff_8a8a;
