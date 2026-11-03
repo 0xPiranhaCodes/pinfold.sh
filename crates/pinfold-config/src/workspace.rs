@@ -151,11 +151,8 @@ pub fn parse(bytes: &[u8], project: &Path) -> Result<Layout, Error> {
     }
     let text = std::str::from_utf8(bytes).map_err(|_| Error::NotUtf8)?;
     let mut layout: Layout = toml::from_str(text).map_err(|error| {
-        // Controls, and bidi and zero-width format characters, which could reorder the message.
-        let clean = |c: char| {
-            (c.is_control() && c != '\n')
-                || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{feff}')
-        };
+        // Only printable ASCII: anything else could reorder or hide part of the message.
+        let clean = |c: char| !(c == '\n' || c == ' ' || c.is_ascii_graphic());
         Error::Invalid(error.to_string().replace(clean, "\u{fffd}"))
     })?;
     if layout.tabs.is_empty() || layout.tabs.iter().any(|tab| tab.panes.is_empty()) {
