@@ -1078,6 +1078,143 @@ fn a_pane_spawns_children_and_reaches_only_them() {
 }
 
 #[test]
+fn ctl_wait_prints_how_a_wait_ended_and_exits_0_1_or_2() {
+    let session = Session::new("cw", None).unwrap();
+    let ctl = format!("'{}' ctl wait", session.directory.join("pinfold").display());
+    // Each line notes what `ctl wait` printed and its exit status. The pane prints in the
+    // background over and over, so a wait parked late still sees a later line or mark.
+    let shell = format!(
+        r#"exec 3> "$PINFOLD_TEST_CLIENT/x$$"
+note() {{ "$@" >&3 2>/dev/null; echo "status $?" >&3; }}
+note {ctl} self --until output --timeout 1
+note {ctl} self --until idle --idle-ms 100 --timeout 20
+(while :; do echo ready-42; sleep 0.2; done) & loud=$!
+note {ctl} self --until match --pattern 'ready-\d+$' --timeout 20
+kill $loud
+(while :; do printf '\033]133;D;3\007'; sleep 0.2; done) & loud=$!
+note {ctl} self --until exit --timeout 20
+kill $loud
+note {ctl} self --until match --pattern '(' --timeout 1
+note {ctl} 9 --until exit --timeout 1
+note {ctl} self --until exit
+mv "$PINFOLD_TEST_CLIENT/x$$" "$PINFOLD_TEST_CLIENT/waited"
+exec sleep 30"#
+    );
+    let mut core = session.start_core(&["--idle", "1"], &shell).unwrap();
+    assert!(session.wait_for("waited"), "{}", session.read_log());
+    let expected = "timeout\nstatus 1\nidle\nstatus 0\nmatch ready-42\nstatus 0\nexit 3\n\
+                    status 0\nstatus 2\nstatus 2\nstatus 2\n";
+    assert_eq!(session.read("waited"), expected);
+    core.kill().unwrap();
+    core.wait().unwrap();
+}
+
+/// Names the directory of a run, in the pane that subscribes to output.
+const OUTPUT: &str = "PINFOLD_TEST_OUTPUT";
+
+/// Not a test: the first pane of [`output_events_and_match_waits_reach_only_the_callers_pane`].
+/// It subscribes to output, spawns a child, and notes what it hears from whom.
+#[test]
+fn output_process() {
+    let Some(directory) = env::var_os(OUTPUT) else {
+        return;
+    };
+    let subscribe = call(
+        2,
+        "events.subscribe",
+        serde_json::json!({"events": ["pane.output"]}),
+    );
+    let mut events = api(&[subscribe]).unwrap();
+    let own = next(&mut events, || Ok(())).unwrap()["result"]["pane"].clone();
+    next(&mut events, || Ok(())).unwrap();
+    let spawned = ask("pane.spawn", serde_json::json!({"where": "split-right"})).unwrap();
+    let child = spawned["result"]["pane"].clone();
+    let wait =
+        serde_json::json!({"pane": child, "until": "match", "pattern": "x", "timeout_ms": 1});
+    let refused = ask("pane.wait", wait).unwrap();
+    let text = "child password=hunter2\n";
+    let send = serde_json::json!({"pane": child, "text": text});
+    ask("pane.send", send).unwrap();
+    // The child has printed before the caller does, so its events would come first.
+    let start = Instant::now();
+    while start.elapsed() < PATIENCE {
+        let read = ask("pane.read", serde_json::json!({"pane": child})).unwrap();
+        if read["result"]["text"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("child")
+        {
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    let mut tty = fs::OpenOptions::new().write(true).open("/dev/tty").unwrap();
+    std::io::Write::write_all(&mut tty, b"own password=hunter2\n").unwrap();
+    let mut heard = format!("{own}\n{refused}\n");
+    while !heard.contains("own password=hunter2") {
+        let event = next(&mut events, || Ok(())).unwrap();
+        writeln!(heard, "{}", event["params"]).unwrap();
+    }
+    fs::write(Path::new(&directory).join("heard"), heard).unwrap();
+}
+
+/// Not a test: a terminal outside any pane in
+/// [`output_events_and_match_waits_reach_only_the_callers_pane`], which asks for output.
+#[test]
+fn outside_output_process() {
+    let Some(directory) = env::var_os(OUTPUT) else {
+        return;
+    };
+    let events = serde_json::json!({"events": ["pane.output"]});
+    let refused = ask("events.subscribe", events).unwrap();
+    fs::write(Path::new(&directory).join("outside"), refused.to_string()).unwrap();
+}
+
+#[test]
+fn output_events_and_match_waits_reach_only_the_callers_pane() {
+    let session = Session::new("o", None).unwrap();
+    let exe = env::current_exe().unwrap();
+    // The second pane is another of the person's, printing all along.
+    let shell = format!(
+        "if mkdir \"$PINFOLD_TEST_CLIENT/first\"; then {OUTPUT}=\"$PINFOLD_TEST_CLIENT\" exec '{}' \
+         --exact output_process; elif mkdir \"$PINFOLD_TEST_CLIENT/second\"; then \
+         while :; do echo other password=hunter2; sleep 0.1; done; fi; exec cat",
+        exe.display()
+    );
+    let mut core = session.start_core(&["--idle", "2"], &shell).unwrap();
+    assert!(session.wait_for("heard"), "{}", session.read_log());
+    let heard = session.read("heard");
+    let mut lines = heard.lines();
+    let own: u64 = lines.next().unwrap().parse().unwrap();
+    let refused = lines.next().unwrap();
+    assert!(
+        refused.contains("a match wait needs the caller's own pane"),
+        "{heard}"
+    );
+    for line in lines {
+        let event: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(event["event"], "pane.output", "{heard}");
+        assert_eq!(event["pane"], own, "another pane was heard: {heard}");
+    }
+
+    // A terminal that is no pane has no own pane to hear, so it is refused.
+    let mut outside = Command::new(&exe);
+    outside
+        .args(["--exact", "outside_output_process"])
+        .env("XDG_RUNTIME_DIR", session.directory.join("run"))
+        .env(OUTPUT, &session.directory);
+    let _terminal = pinfold_sys::pty::Pty::spawn(outside, 24, 80).unwrap();
+    assert!(session.wait_for("outside"), "{}", session.read_log());
+    let refused = session.read("outside");
+    assert!(
+        refused.contains("pane.output needs the caller's own pane"),
+        "{refused}"
+    );
+    core.kill().unwrap();
+    core.wait().unwrap();
+}
+
+#[test]
 fn mcp_lists_tools_calls_the_core_as_its_pane_and_reports_a_refusal_as_a_tool_error() {
     let session = Session::new("m", None).unwrap();
     let call = |id: u32, name: &str, arguments: serde_json::Value| {
