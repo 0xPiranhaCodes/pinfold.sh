@@ -9,6 +9,10 @@ Entries are generated from Conventional Commits with git-cliff
 
 ## [Unreleased]
 
+### Changed
+
+- Refined window chrome with graphite tab surfaces, teal active labels, readable unfocused tabs, quieter search hints, and more space around the terminal.
+
 ### Added
 
 - ADR-0031: a macOS beta comes before v0.1, which covers macOS and Linux.

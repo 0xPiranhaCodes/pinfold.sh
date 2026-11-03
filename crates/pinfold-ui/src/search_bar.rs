@@ -8,6 +8,7 @@ use winit::keyboard::{Key, ModifiersState, NamedKey};
 use crate::selection;
 
 const GROUND: u32 = 0x0012_151a;
+const HINT: u32 = 0x009a_a1ac;
 const TEXT: u32 = 0x00e2_e5ea;
 const RED: u32 = 0x00ff_8a8a;
 
@@ -114,7 +115,7 @@ impl Bar {
             start,
             column,
             "  Enter older, Shift+Enter newer, Esc closes",
-            TEXT,
+            HINT,
         );
         frame.cursor = Some((frame.rows, cursor as u16));
         frame.rows += 1;
