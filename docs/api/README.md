@@ -37,3 +37,20 @@ queue unread.
 programs print, which can fake them: read them as hints, not facts. `pinfold ctl send <pane>
 <text>` types into a pane. A core that refuses version 2 is older than the client, and
 `pinfold ctl` says to quit PinFold so that a new core starts.
+
+## MCP
+
+`pinfold mcp` is an MCP server over stdio (protocol version 2025-06-18) and a thin client of
+this API. Its stdout carries only newline-delimited JSON-RPC, and a line over 1,000,000 bytes is
+refused. Its tools are `pane_list`, `pane_read`, `pane_last_output`, `pane_send` and
+`pane_wait`, each taking its method's params and returning the method's result as JSON text.
+`pane_list` adds `caller_pane`, the caller's own pane. A refusal, or no running core, is a tool
+result with `isError`. Each call opens its own connection, so the core identifies the caller by
+the server's controlling terminal: start it from an agent running in a PinFold pane, as Claude
+Code does with this in `.mcp.json`, or any client with the same command:
+
+```json
+{ "mcpServers": { "pinfold": { "command": "pinfold", "args": ["mcp"] } } }
+```
+
+A reply is read up to 1,000,000 bytes, so read a long history with `lines`.

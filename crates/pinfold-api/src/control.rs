@@ -613,7 +613,12 @@ pub fn list_panes(stream: &UnixStream) -> Result<(Value, Value), Error> {
 /// As [`list_panes`].
 pub fn ask(stream: &UnixStream, method: &str, params: &Value) -> Result<(Value, Value), Error> {
     check_peer(stream.as_fd(), pinfold_sys::effective_uid())?;
-    stream.set_read_timeout(Some(REPLY_WAIT))?;
+    // `pane.wait` answers only when it ends, so its timeout comes on top.
+    let waits = params.get("timeout_ms").and_then(Value::as_u64);
+    let waits = waits
+        .map_or(Duration::ZERO, Duration::from_millis)
+        .min(MAX_WAIT);
+    stream.set_read_timeout(Some(REPLY_WAIT + waits))?;
     stream.set_write_timeout(Some(REPLY_WAIT))?;
     let hello = json!({"version": VERSION});
     let hello = json!({"jsonrpc": "2.0", "id": 1, "method": "hello", "params": hello});
