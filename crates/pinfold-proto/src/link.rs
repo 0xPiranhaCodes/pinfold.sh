@@ -932,6 +932,13 @@ impl Notice<'_> {
                 runnable,
                 command,
             } => {
+                // The decoder refuses a longer one, so it must not go out.
+                if command.len() > MAX_COMMAND {
+                    out.truncate(start);
+                    return Err(Error::TooLarge {
+                        size: command.len() as u64,
+                    });
+                }
                 put!(out; pane);
                 out.push(u8::from(*runnable));
                 out.extend_from_slice(command.as_bytes());
@@ -2182,6 +2189,17 @@ mod tests {
         let message = Notice::Copied {
             pane: 0,
             text: &text,
+        };
+        assert!(matches!(
+            message.encode(&mut out),
+            Err(Error::TooLarge { .. })
+        ));
+        // Under the message limit, but over what the decoder takes for a command.
+        let command = "x".repeat(MAX_COMMAND + 1);
+        let message = Notice::WasRunning {
+            pane: 0,
+            runnable: true,
+            command: &command,
         };
         assert!(matches!(
             message.encode(&mut out),

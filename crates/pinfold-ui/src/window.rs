@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use mio::Waker;
 use pinfold_config::{Config, MAX_FONT_SIZE, MIN_FONT_SIZE};
-use pinfold_proto::link::{self as proto, MAX_DIMENSION, MAX_PANES, Position, Rect, Selection};
+use pinfold_proto::link::{self as proto, MAX_DIMENSION, Position, Rect, Selection};
 use pinfold_proto::{Frame, MouseMode};
 use pinfold_render::cpu::{CpuRenderer, Renderer};
 use pinfold_render::font::{Font, FontError};
@@ -330,7 +330,7 @@ struct App {
     prompt: Option<Prompt>,
     /// What restored panes were running, until answered. The focused one's strip takes the next
     /// key.
-    was_running: Vec<(u32, bool, String)>,
+    was_running: was_running::Strips,
     /// The right-click menu, while open. Every key and press goes to it.
     menu: Option<Menu>,
     prefix: Prefix,
@@ -592,10 +592,9 @@ impl App {
                 flash::ended(&mut self.composed);
             } else if let Some(prompt) = &self.prompt {
                 paste::banner(&mut self.composed, prompt);
-            } else if let Some((_, runnable, command)) =
-                (self.was_running.iter()).find(|(pane, ..)| *pane == self.focused)
-            {
-                was_running::banner(&mut self.composed, *runnable, command);
+                self.was_running.hide();
+            } else if (self.was_running).draw(&mut self.composed, self.focused, Instant::now()) {
+                // The strip is drawn.
             } else if let Some(bar) = &self.bar {
                 bar.draw(&mut self.composed);
             } else if let Some(vi) = self.vi.filter(|_| self.flash.until().is_none()) {
@@ -830,20 +829,21 @@ impl App {
         }
     }
 
-    /// Answers the focused pane's strip with any key: Enter, if offered and not held, runs what
-    /// it was running, and anything else dismisses it. Returns whether the key was used up, as
-    /// Enter and Esc are; any other goes on to the pane.
+    /// Answers the focused pane's strip with any key: Enter, once armed and if offered, runs
+    /// what it was running, and anything else dismisses it. Returns whether the key was used up,
+    /// as Enter and Esc are; any other goes on to the pane.
     fn answer_strip(&mut self, event: &KeyEvent) -> bool {
-        let focused = self.focused;
-        let Some(index) = self.was_running.iter().position(|(at, ..)| *at == focused) else {
-            return false;
-        };
-        let (pane, runnable, command) = self.was_running.swap_remove(index);
-        let enter = event.logical_key == Key::Named(NamedKey::Enter) && !event.repeat;
-        let run = enter && was_running::offers_run(runnable, &command, self.area.1);
-        self.core(proto::Request::WasRunningAnswer { pane, run });
-        self.redraw_soon();
-        run || event.logical_key == Key::Named(NamedKey::Escape)
+        let key = &event.logical_key;
+        let now = Instant::now();
+        match (self.was_running).key(self.focused, key, event.repeat, now, self.area.1) {
+            None => false,
+            Some(was_running::Answer::Held) => true,
+            Some(was_running::Answer::Answered { pane, run, used }) => {
+                self.core(proto::Request::WasRunningAnswer { pane, run });
+                self.redraw_soon();
+                used
+            }
+        }
     }
 
     /// Turns vi mode on at the program's cursor, or off and back to the live screen. An input
@@ -1262,11 +1262,10 @@ impl ApplicationHandler<Notice> for App {
                 }
             }
             Notice::Config(config) => self.configure(config),
-            Notice::WasRunning(pane, runnable, command) if self.was_running.len() < MAX_PANES => {
-                self.was_running.push((pane, runnable, command));
+            Notice::WasRunning(pane, runnable, command) => {
+                self.was_running.add(pane, runnable, command);
                 self.redraw_soon();
             }
-            Notice::WasRunning(..) => {}
             // A prompt keeps every key until it is answered, menu keys too; only Quit, which
             // leaves the session running, gets past it.
             Notice::Command(command) if self.prompt.is_none() || command == Command::Detach => {
@@ -1288,6 +1287,7 @@ impl ApplicationHandler<Notice> for App {
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::Focused(focused) => {
                 self.has_focus = focused;
+                self.was_running.focus(focused);
                 self.redraw_soon();
                 if !focused {
                     self.prefix.cancel();
@@ -1469,7 +1469,7 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
         wheel: 0.0,
         clipboard: None,
         prompt: None,
-        was_running: Vec::new(),
+        was_running: was_running::Strips::default(),
         menu: None,
         flash: Flash::default(),
         selecting: Selecting::default(),
