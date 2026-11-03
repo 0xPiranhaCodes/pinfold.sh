@@ -1,7 +1,7 @@
 //! The `pinfold-core` binary.
 
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TrySendError};
@@ -21,7 +21,7 @@ use pinfold_core::family::{self, Family, SplitWay};
 use pinfold_core::grants::{Decision, Grants, Released};
 use pinfold_core::io::{Reactor, Waker};
 use pinfold_core::shell;
-use pinfold_core::snapshot::Saver;
+use pinfold_core::snapshot::{self, Saver};
 use pinfold_core::status::Status;
 use pinfold_core::wait::{Outcome, Waits};
 use pinfold_core::workspace::Workspaces;
@@ -492,15 +492,41 @@ fn save(saver: &mut Saver, reactor: &Reactor) {
     }
 }
 
-/// Runs `panes` shells, a tab each, until every pane has gone and no window is left to tell, or
+/// Restores the saved session (ADR-0034), and says whether it did. A failure is logged by its
+/// kind alone, which names no path or pane, and leaves the core to start fresh.
+fn restore_session(reactor: &mut Reactor, state: &Path) -> bool {
+    let restored = snapshot::load(state, control::SESSION).and_then(|snapshot| {
+        snapshot
+            .map(|snapshot| reactor.restore(&snapshot))
+            .transpose()
+    });
+    restored
+        .unwrap_or_else(|error| {
+            let _ = writeln!(
+                io::stderr(),
+                "pinfold-core: cannot restore the session: {}",
+                error.kind()
+            );
+            None
+        })
+        .is_some()
+}
+
+/// Runs the saved session if `restore` and there is one, else `panes` shells, a tab each, until every pane has gone and no window is left to tell, or
 /// until SIGTERM or SIGHUP, saving the session on the way out, when the window closes and a
 /// minute after a change (ADR-0034). With a size, it opens a window for `cargo xtask mem-gate` and prints its pid.
-fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
+fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result<()> {
     let binary = window_binary()?;
     let mut reactor = Reactor::new()?;
     reactor.watch_signals()?;
-    let mut saver = pinfold_config::state_dir().map(|state| Saver::new(state, control::SESSION));
+    let state = pinfold_config::state_dir();
+    let mut saver = state
+        .clone()
+        .map(|state| Saver::new(state, control::SESSION));
     let asked = listen(reactor.waker())?;
+    if restore && state.is_some_and(|state| restore_session(&mut reactor, &state)) {
+        panes = 0;
+    }
     for _ in 0..panes {
         reactor
             .open_tab(shell::command(), ROWS, COLUMNS)
@@ -653,7 +679,7 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
 /// Hardens, then runs the first pane, whose shell is the user's.
 fn serve() -> io::Result<()> {
     pinfold_sys::harden()?;
-    daemon(1, None)
+    daemon(1, None, true)
 }
 
 /// Plays `file` through a real pane, says so on stdout, then idles until killed.
@@ -676,9 +702,12 @@ fn run(args: &[&str]) -> io::Result<()> {
     match *args {
         [] => serve(),
         // The daemon without hardening, which also leaves a way to attach a debugger
-        // (ADR-0020). `cargo xtask mem-gate` measures these two, as /proc refuses a hardened one.
-        ["--idle", panes] => daemon(panes.parse().map_err(io::Error::other)?, None),
-        ["--window", panes, size] => daemon(panes.parse().map_err(io::Error::other)?, Some(size)),
+        // (ADR-0020). `cargo xtask mem-gate` measures these two, as /proc refuses a hardened one,
+        // so they restore nothing, which would change what it measures.
+        ["--idle", panes] => daemon(panes.parse().map_err(io::Error::other)?, None, false),
+        ["--window", panes, size] => {
+            daemon(panes.parse().map_err(io::Error::other)?, Some(size), false)
+        }
         ["--replay", file] => replay(file),
         _ => Err(io::Error::other(
             "usage: pinfold-core [--idle <panes> | --window <panes> <width>x<height> | --replay <file>]",

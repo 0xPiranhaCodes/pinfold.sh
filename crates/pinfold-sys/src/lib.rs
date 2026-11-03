@@ -269,6 +269,29 @@ pub fn open_log(path: &Path) -> io::Result<File> {
     Ok(file)
 }
 
+/// Opens the file at `path` for reading, refused if it is a symlink. The caller checks that it
+/// got a regular file: O_NONBLOCK, so that a FIFO put here cannot hang the open.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened or is a symlink.
+///
+/// # Examples
+///
+/// ```
+/// let path = std::env::temp_dir().join(format!("pinfold-read-{}", std::process::id()));
+/// std::fs::write(&path, "saved")?;
+/// assert!(pinfold_sys::open_no_follow(&path)?.metadata()?.is_file());
+/// std::fs::remove_file(&path)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn open_no_follow(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
+}
+
 /// A moment on the local clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LocalTime {
