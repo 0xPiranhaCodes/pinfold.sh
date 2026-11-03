@@ -884,7 +884,7 @@ fn a_pane_spawns_children_and_reaches_only_them() {
 }
 
 #[test]
-fn mcp_calls_the_core_as_its_pane_and_reports_a_refusal_as_a_tool_error() {
+fn mcp_lists_tools_calls_the_core_as_its_pane_and_reports_a_refusal_as_a_tool_error() {
     let session = Session::new("m", None).unwrap();
     let call = |id: u32, name: &str, arguments: serde_json::Value| {
         let params = serde_json::json!({"name": name, "arguments": arguments});
@@ -894,6 +894,7 @@ fn mcp_calls_the_core_as_its_pane_and_reports_a_refusal_as_a_tool_error() {
         serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
         call(2, "pane_list_v1", serde_json::json!({})),
         call(3, "pane_read_v1", serde_json::json!({"pane": 1})),
+        serde_json::json!({"jsonrpc": "2.0", "id": 4, "method": "tools/list"}),
     ];
     let input: String = requests
         .iter()
@@ -913,7 +914,7 @@ fn mcp_calls_the_core_as_its_pane_and_reports_a_refusal_as_a_tool_error() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(replies.len(), 3, "{out}");
+    assert_eq!(replies.len(), 4, "{out}");
     assert_eq!(replies[0]["result"]["serverInfo"]["name"], "pinfold");
     let listed = &replies[1]["result"];
     assert_eq!(listed["isError"], false, "{out}");
@@ -925,6 +926,24 @@ fn mcp_calls_the_core_as_its_pane_and_reports_a_refusal_as_a_tool_error() {
     assert_eq!(refused["isError"], true, "{out}");
     let message = refused["content"][0]["text"].as_str().unwrap();
     assert!(message.contains("own pane"), "{out}");
+    let names: Vec<_> = replies[3]["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "pane_list_v1",
+            "pane_read_v1",
+            "pane_last_output_v1",
+            "pane_send_v1",
+            "pane_spawn_v1",
+            "pane_close_v1",
+            "pane_wait_v1",
+        ]
+    );
     core.kill().unwrap();
     core.wait().unwrap();
 }
