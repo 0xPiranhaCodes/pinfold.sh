@@ -90,7 +90,8 @@ fn sends_are_audited_by_size_and_only_a_terminal_outside_a_pane_reads_the_log() 
     let text = fs::read_to_string(directory.join("text")).unwrap();
     for expected in [
         "pane 0 pane.send pane 0 ok: allowed, 13 bytes\n",
-        "pane 1 pane.send pane 0 refused: only the caller's own pane and the panes it spawned can be reached, 13 bytes\n",
+        // With no window to ask in, a cross-pane send fails closed.
+        "pane 1 pane.send pane 0 refused: approval needs an open PinFold window, 13 bytes\n",
         "audit.read - refused: audit.read needs a caller in a terminal outside any pane\n",
     ] {
         assert!(text.contains(expected), "{text}");
