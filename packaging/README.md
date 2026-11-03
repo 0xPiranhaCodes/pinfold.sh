@@ -1,7 +1,8 @@
 # Packaging
 
-The Homebrew formula, AppImage and .deb recipes, and the macOS signing and entitlements
-arrive in M5.
+The Homebrew formula, AppImage and .deb recipes, and the macOS Developer ID signing and
+entitlements arrive in M5. The core and window are ad-hoc signed with the hardened runtime
+until then, which a same-user process needs to be refused a task port (ADR-0020).
 
 `macos/bundle.sh` builds `PinFold.app` from built binaries. `macos/AppIcon.icns` holds the
 PinFold logo, which [TRADEMARK.md](../TRADEMARK.md) covers.

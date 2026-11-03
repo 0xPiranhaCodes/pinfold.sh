@@ -43,18 +43,47 @@ pub fn effective_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
-/// Stops a same-user process from copying a PTY master out of this one (ADR-0020). Call this
-/// before opening any PTY. It lasts for the process and ends at `exec`.
+/// Stops a same-user process from debugging this one, which on Linux stops it copying a PTY
+/// master out too (ADR-0020). Call this before opening any PTY. It lasts for the process, holds
+/// when called again and ends at `exec`, so a pane's programs can still be debugged.
 ///
-/// On macOS a process with a debugger attached dies here, and on Linux this also stops other
-/// processes reading its `/proc` entries, which is why `cargo xtask mem-gate` measures a core
-/// that has not called it.
+/// On macOS this stops `ptrace` alone, and a process that tries gets `SIGSEGV`, which is what
+/// ends a debugger's server when `lldb -p` tries. A task port is
+/// not stopped: only a hardened runtime signature does that. Under a debugger a process exits
+/// here with status 45, and `pinfold-core --idle 1` is the way to debug a core. On Linux this
+/// also stops other processes reading its `/proc` entries, which is why `cargo xtask mem-gate`
+/// measures a core that has not called it, and a tracer already attached stays attached.
 ///
 /// # Errors
 ///
 /// Returns an error if the system refuses. A core must not go on without this.
 pub fn harden() -> io::Result<()> {
     platform::harden()
+}
+
+/// Tries to attach to `pid` as a debugger and detaches again, to prove [`harden`] held.
+///
+/// The caller is left alone: macOS answers an attach to a hardened process with `SIGSEGV` as well
+/// as an error, so this ignores that signal for the call, and is not for a process that can fault.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::ResourceBusy`] for a hardened process. Any other refusal is one
+/// that any process gets without the debugger entitlement, hardened or not.
+///
+/// # Examples
+///
+/// ```
+/// let mut child = std::process::Command::new("/bin/sleep").arg("30").spawn()?;
+/// let refused = pinfold_sys::probe_attach(child.id()).unwrap_err();
+/// assert_ne!(refused.kind(), std::io::ErrorKind::ResourceBusy);
+/// child.kill()?;
+/// child.wait()?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+#[cfg(target_os = "macos")]
+pub fn probe_attach(pid: u32) -> io::Result<()> {
+    platform::probe_attach(pid)
 }
 
 /// Returns the user at the other end of a connected Unix socket.
@@ -243,6 +272,28 @@ mod platform {
     pub fn harden() -> io::Result<()> {
         // SAFETY: PT_DENY_ATTACH takes no address or data and touches no memory.
         match unsafe { libc::ptrace(libc::PT_DENY_ATTACH, 0, ptr::null_mut(), 0) } {
+            0 => Ok(()),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
+    pub fn probe_attach(pid: u32) -> io::Result<()> {
+        let pid = libc::pid_t::try_from(pid).map_err(io::Error::other)?;
+        // SAFETY: SIG_IGN is a valid disposition, and the old one goes straight back below.
+        let previous = unsafe { libc::signal(libc::SIGSEGV, libc::SIG_IGN) };
+        // SAFETY: PT_ATTACH takes no address or data and touches no memory.
+        let attached = unsafe { libc::ptrace(libc::PT_ATTACH, pid, ptr::null_mut(), 0) };
+        let error = io::Error::last_os_error();
+        // SAFETY: `previous` came from signal for this signal.
+        unsafe { libc::signal(libc::SIGSEGV, previous) };
+        if attached != 0 {
+            return Err(error);
+        }
+        let mut status = 0;
+        // SAFETY: `status` is valid for writes for the call.
+        unsafe { libc::waitpid(pid, &raw mut status, libc::WUNTRACED) };
+        // SAFETY: the kernel reads PT_DETACH's address as a value: 1 means carry on from here.
+        match unsafe { libc::ptrace(libc::PT_DETACH, pid, ptr::without_provenance_mut(1), 0) } {
             0 => Ok(()),
             _ => Err(io::Error::last_os_error()),
         }

@@ -31,3 +31,18 @@ option that keeps it attachable. Point 2's fallback leaves older Linux kernels w
 pid-reuse race. Which kernels and whether macOS needs `LOCAL_PEERTOKEN` are still to
 settle. Point 5 needs testing with real bubblewrap and `sandbox-exec`, because the spike
 only used `unshare`. `PT_DENY_ATTACH` was proposed from the spike but not tested in it.
+
+`tests/hardening/audit.sh` has since tested point 1 on macOS 27.0.1 (arm64, SIP on, Developer
+Mode off) and Linux 7.2 (arm64, `ptrace_scope` 0), and the threat model holds the results.
+
+- On Linux `PR_SET_DUMPABLE(0)` does what point 1 wants: `ptrace` and `pidfd_getfd` were
+  refused, where an unhardened core gave up 8 descriptors.
+- On macOS `PT_DENY_ATTACH` stops `ptrace` only, and the attacker gets `SIGSEGV`. It does not
+  stop `task_for_pid`: an ad-hoc signed process with the debugger entitlement read a hardened
+  core's memory. Point 1 alone does not meet its aim on macOS. The hardened runtime refused
+  that process, so `PinFold.app` now has it. Builds from `cargo` do not.
+- Neither state reaches a pane, on either system, and calling `harden` twice is harmless.
+- Under a debugger a macOS core or window exits with status 45 at `harden`, not with a signal.
+  The startup option this ADR calls for is `pinfold-core --idle <panes>`. It ran under a tracer,
+  and a debugger with the entitlement attached to it, in a `cargo` build. A bundle's core cannot
+  be attached to, as the hardened runtime refuses that too.
