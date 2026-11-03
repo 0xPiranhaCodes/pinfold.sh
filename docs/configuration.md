@@ -131,7 +131,9 @@ working directory is the pane's, as its shell reports it, and the agent does not
 that directory is yours, writable by no other user or group, under directories only you or root
 can change, not `/`, your home directory or above it, not a dot-directory of your home such as
 `~/.config` or `~/.local/bin` or inside one, not in `~/Library` on macOS, not inside a `.git`
-directory, and does not hold or sit inside a hidden directory.
+directory, not a directory on your `PATH` or above one, and does not hold or sit inside a hidden
+directory. A relative `PATH` entry, such as `.` or an empty one, counts from the working
+directory, so it refuses every launch, and so does a `PATH` entry that is a dangling symlink.
 
 Git runs what a repository's hooks and config name outside the sandbox, so the agent cannot
 change them. On Linux the working directory's whole `.git` is read-only: a sandboxed agent
@@ -155,8 +157,15 @@ The agent gets no `SSH_AUTH_SOCK`, `GPG_AGENT_INFO` or `DBUS_SESSION_BUS_ADDRESS
 Unix socket but PinFold's API socket, so it cannot sign with your ssh-agent without reading
 `~/.ssh`. On macOS the system's name lookup socket also stays reachable. On Linux the agent's
 `$XDG_RUNTIME_DIR` and `/tmp` are empty but for the API socket's directory, which is read-only.
-Abstract sockets stay reachable there, as the agent keeps the network. The agent also gets its
-own IPC, host name and cgroup namespaces, and ends when the core does.
+The agent keeps the network, so abstract sockets, such as X11's `@/tmp/.X11-unix/X0` or a
+session bus on `unix:abstract=`, are not hidden by a mount. On Linux 6.12 and later, with
+Landlock ABI 6, the agent cannot connect to one bound outside its sandbox
+([ADR-0038](adr/0038-landlock-scopes-abstract-sockets.md)). On older kernels, or with Landlock
+turned off, they stay reachable, and the core's log says so once. If the kernel has Landlock but
+it fails, the agent does not start. Landlock needs `no_new_privs` before `bwrap` runs, so a
+setuid `bwrap` runs without its setuid rights and needs unprivileged user namespaces like any
+other. The agent also gets its own IPC, host name and cgroup namespaces, and ends when the core
+does.
 
 ## Keys
 
