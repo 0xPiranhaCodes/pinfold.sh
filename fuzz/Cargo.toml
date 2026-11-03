@@ -28,8 +28,23 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "api_request"
+path = "fuzz_targets/api_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "api_params"
+path = "fuzz_targets/api_params.rs"
+test = false
+doc = false
+bench = false
+
 [dependencies]
 libfuzzer-sys = "0.4"
+pinfold-api = { path = "../crates/pinfold-api" }
 pinfold-core = { path = "../crates/pinfold-core" }
 pinfold-proto = { path = "../crates/pinfold-proto" }
 

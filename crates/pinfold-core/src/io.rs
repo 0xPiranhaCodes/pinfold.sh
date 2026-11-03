@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token};
 use pinfold_mux::{Session, Size};
+use pinfold_sys::Terminal;
 use pinfold_sys::pty::Pty;
 
 use crate::link::{Host, LINK};
@@ -373,6 +374,18 @@ impl Reactor {
         self.pane(pane).is_none_or(|pane| pane.closed)
     }
 
+    /// Returns the pane whose terminal and session a caller holds, which is who an API caller is
+    /// (ADR-0032). Asked on each request, so a pane that closes, or whose program has ended,
+    /// stops matching.
+    #[must_use]
+    pub fn pane_of(&self, caller: Terminal) -> Option<usize> {
+        // The session id is the pane's child's pid. That pid cannot be reused while the pane is
+        // here, because the child is only reaped when its `Pty` drops, so an exited child stays
+        // a zombie holding it. Reaping earlier would need this to check the child too.
+        let pane = self.panes.iter().find(|pane| pane.pty.terminal() == caller);
+        pane.filter(|pane| !pane.closed).map(|pane| pane.number)
+    }
+
     fn pane(&self, number: usize) -> Option<&Pane> {
         let index = self.panes.binary_search_by_key(&number, |pane| pane.number);
         self.panes.get(index.ok()?)
@@ -429,6 +442,89 @@ mod tests {
     fn on_screen(reactor: &Reactor, pane: usize, text: &str) -> bool {
         let engine = reactor.engine(pane).unwrap();
         (0..24).any(|line| engine.line_text(line).contains(text))
+    }
+
+    const CALLER_SOCKET: &str = "PINFOLD_TEST_CALLER_SOCKET";
+    const CALLER_DETACHES: &str = "PINFOLD_TEST_CALLER_DETACHES";
+
+    /// This test binary, run as [`identity_caller`] on the socket at `path`.
+    fn caller(path: &std::path::Path) -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args(["--exact", "io::tests::identity_caller", "--ignored"])
+            .env(CALLER_SOCKET, path);
+        command
+    }
+
+    /// Turns the reactor until a caller connects, and returns it with what it holds.
+    fn accept(
+        reactor: &mut Reactor,
+        listener: &std::os::unix::net::UnixListener,
+    ) -> (std::os::unix::net::UnixStream, Option<Terminal>) {
+        let start = Instant::now();
+        loop {
+            if let Ok((stream, _)) = listener.accept() {
+                let terminal = pinfold_sys::peer_terminal(std::os::fd::AsFd::as_fd(&stream));
+                return (stream, terminal.unwrap());
+            }
+            assert!(start.elapsed() < Duration::from_secs(10), "no caller came");
+            reactor.turn(Some(Duration::from_millis(20))).unwrap();
+        }
+    }
+
+    /// Not a test of its own: the caller that the identity test starts in a pane. It connects,
+    /// or first leaves its session, and holds on until the test hangs up.
+    #[test]
+    #[ignore = "run by a_caller_is_the_pane_whose_terminal_and_session_it_holds"]
+    fn identity_caller() {
+        let Some(path) = std::env::var_os(CALLER_SOCKET) else {
+            return;
+        };
+        if std::env::var_os(CALLER_DETACHES).is_some() {
+            let mut command = caller(path.as_ref());
+            command.env_remove(CALLER_DETACHES);
+            let stderr = std::process::Stdio::null();
+            pinfold_sys::spawn_detached(command, stderr)
+                .unwrap()
+                .wait()
+                .unwrap();
+            return;
+        }
+        let mut stream = std::os::unix::net::UnixStream::connect(path).unwrap();
+        let _ = stream.read(&mut [0; 1]);
+    }
+
+    #[test]
+    fn a_caller_is_the_pane_whose_terminal_and_session_it_holds() {
+        let directory = std::env::temp_dir().join(format!("pinfold-id-{}", std::process::id()));
+        let _ = std::fs::create_dir(&directory);
+        let path = directory.join("api.sock");
+        let _ = std::fs::remove_file(&path);
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut reactor = Reactor::new().unwrap();
+        let b = reactor.spawn(shell("sleep 30"), 24, 80).unwrap();
+
+        // Pane A's caller claims to be pane B, which changes nothing.
+        let mut spoofed = caller(&path);
+        spoofed.env("PINFOLD_PANE_ID", b.to_string());
+        let a = reactor.spawn(spoofed, 24, 80).unwrap();
+        let (stream, terminal) = accept(&mut reactor, &listener);
+        let terminal = terminal.unwrap();
+        assert_eq!(reactor.pane_of(terminal), Some(a));
+
+        // Pane A closes when its caller exits, and stops matching.
+        drop(stream);
+        assert!(turn_until(&mut reactor, |reactor| reactor.is_closed(a)));
+        assert_eq!(reactor.pane_of(terminal), None);
+
+        // A caller that leaves its pane's session has no terminal, so it is no pane.
+        let mut detaches = caller(&path);
+        detaches.env(CALLER_DETACHES, "1");
+        reactor.spawn(detaches, 24, 80).unwrap();
+        let (_stream, terminal) = accept(&mut reactor, &listener);
+        assert_eq!(terminal, None);
+        let _ = std::fs::remove_dir_all(&directory);
     }
 
     #[test]

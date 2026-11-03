@@ -34,6 +34,7 @@ use std::time::{Duration, Instant};
 
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
+use pinfold_sys::Terminal;
 use serde_json::{Value, json};
 
 /// The version `hello` must name.
@@ -45,6 +46,8 @@ pub const STACK: usize = 256 * 1024;
 const SESSION: &str = "default";
 /// Most peers served at once (ADR-0032). Past it a new peer is closed unread.
 pub const MAX_PEERS: usize = 16;
+/// Most peers of one caller identity, where all unidentified peers count as one (ADR-0032).
+pub const MAX_PER_CALLER: usize = 4;
 const LISTENER: Token = Token(usize::MAX);
 const WAKE: Token = Token(usize::MAX - 1);
 /// Longest request, far above what `hello` and `window.open` need.
@@ -280,10 +283,11 @@ impl Control {
             for (slot, entry) in peers.iter_mut().enumerate() {
                 let Some(peer) = entry else { continue };
                 peer.expire(now);
-                let generation = peer.generation;
+                let (generation, caller) = (peer.generation, peer.caller);
                 peer.step(now, &mut || {
                     open(Opening {
                         peer: (slot, generation),
+                        caller,
                         answers: answers.clone(),
                         waker: Arc::clone(&waker),
                     });
@@ -299,7 +303,8 @@ impl Control {
         }
     }
 
-    /// Takes every waiting peer of this user while a slot is free, and closes the rest unread.
+    /// Takes every waiting peer of this user while a slot is free and its identity is under its
+    /// cap, and closes the rest unread. A peer's identity is read once, here.
     fn accept(&self, poll: &Poll, peers: &mut [Option<Peer>], generation: &mut u64) {
         while let Ok((stream, _)) = self.listener.accept() {
             let Some(slot) = peers.iter().position(Option::is_none) else {
@@ -307,7 +312,13 @@ impl Control {
             };
             let ours = pinfold_sys::peer_uid(stream.as_fd())
                 .is_ok_and(|uid| uid == pinfold_sys::effective_uid());
-            if !ours || stream.set_nonblocking(true).is_err() {
+            if !ours {
+                continue;
+            }
+            // Unreadable is unidentified.
+            let caller = pinfold_sys::peer_terminal(stream.as_fd()).ok().flatten();
+            let same = peers.iter().flatten().filter(|peer| peer.caller == caller);
+            if same.count() >= MAX_PER_CALLER || stream.set_nonblocking(true).is_err() {
                 continue;
             }
             let interest = Interest::READABLE | Interest::WRITABLE;
@@ -318,7 +329,7 @@ impl Control {
                 .is_ok()
             {
                 *generation += 1;
-                peers[slot] = Some(Peer::new(stream, *generation));
+                peers[slot] = Some(Peer::new(stream, *generation, caller));
             }
         }
     }
@@ -330,11 +341,20 @@ impl Control {
 pub struct Opening {
     /// The peer's slot and generation, so an answer never reaches a later peer in that slot.
     peer: (usize, u64),
+    caller: Option<Terminal>,
     answers: Sender<Answer>,
     waker: Arc<Waker>,
 }
 
 impl Opening {
+    /// The terminal and session the caller held when it connected, or nothing if it had no
+    /// terminal. Map it to a pane on the reactor's thread for each request, so a pane that has
+    /// closed since stops matching.
+    #[must_use]
+    pub fn caller(&self) -> Option<Terminal> {
+        self.caller
+    }
+
     /// Answers the caller: `Ok` once a window is ready, or a short reason, which must carry no
     /// pane contents, tokens or environment. A caller that has gone hears nothing.
     pub fn answer(self, result: Result<(), String>) {
@@ -398,6 +418,8 @@ pub fn open_window(stream: &UnixStream) -> Result<(), Error> {
 struct Peer {
     stream: UnixStream,
     generation: u64,
+    /// The peer's terminal and session at accept, fixed for the connection.
+    caller: Option<Terminal>,
     /// Bytes read and not yet taken as lines.
     input: Vec<u8>,
     /// Bytes read in all, at most [`MAX_CONNECTION`].
@@ -415,10 +437,11 @@ struct Peer {
 }
 
 impl Peer {
-    fn new(stream: UnixStream, generation: u64) -> Self {
+    fn new(stream: UnixStream, generation: u64, caller: Option<Terminal>) -> Self {
         Self {
             stream,
             generation,
+            caller,
             input: Vec::new(),
             taken: 0,
             ended: false,
@@ -586,6 +609,15 @@ fn answer(line: &[u8], greeted: &mut bool) -> Step {
         _ if !*greeted => refuse(Some(id), NO_HELLO, "hello comes first"),
         Some("window.open") => Step::Open(id.clone()),
         _ => refuse(Some(id), NO_METHOD, "unknown method"),
+    }
+}
+
+/// Feeds one bounded request line through every parser state used by a control-socket peer.
+#[doc(hidden)]
+pub fn fuzz_request_line(line: &[u8]) {
+    let line = &line[..line.len().min(MAX_LINE)];
+    for mut greeted in [false, true] {
+        let _ = answer(line, &mut greeted);
     }
 }
 
@@ -884,15 +916,26 @@ mod tests {
     }
 
     #[test]
-    fn past_the_cap_a_peer_is_closed_unread() {
+    fn past_its_identitys_cap_a_peer_is_closed_unread() {
         let directory = fresh();
         let control = Control::bind(&directory).unwrap();
-        thread::spawn(move || control.serve(serving(Ok(()))));
+        // Each peer here is this process, so all share one identity, or are all unidentified.
+        let (asked, callers) = mpsc::channel();
+        thread::spawn(move || control.serve(move |opening| asked.send(opening).unwrap()));
 
         let path = socket_path(&directory);
-        let held: Vec<UnixStream> = (0..MAX_PEERS)
+        let mut held: Vec<UnixStream> = (0..MAX_PER_CALLER)
             .map(|_| UnixStream::connect(&path).unwrap())
             .collect();
+        held[0].write_all(HELLO).unwrap();
+        held[0].write_all(b"\n").unwrap();
+        held[0].write_all(OPEN).unwrap();
+        held[0].write_all(b"\n").unwrap();
+        let opening = callers.recv_timeout(TIMEOUT).unwrap();
+        let probe = UnixListener::bind(fresh()).unwrap();
+        let _us = UnixStream::connect(probe.local_addr().unwrap().as_pathname().unwrap());
+        let expected = pinfold_sys::peer_terminal(probe.accept().unwrap().0.as_fd()).unwrap();
+        assert_eq!(opening.caller(), expected);
         let mut over = UnixStream::connect(&path).unwrap();
         over.set_read_timeout(Some(TIMEOUT / 2)).unwrap();
         assert_eq!(over.read(&mut [0; 8]).unwrap(), 0);
