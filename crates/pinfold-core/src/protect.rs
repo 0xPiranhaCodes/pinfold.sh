@@ -1,15 +1,15 @@
 //! Protected panes, which refuse API writes even with a grant, and sends split at newlines
 //! (threat model, Authorization).
 //!
-//! A pane is protected while its foreground process is `ssh`, `mosh`, `sudo`, `su` or `doas`
-//! by name, runs as root, reads a password (echo off), matches a command-line pattern, or
-//! while it is marked. A send to another pane goes a line at a time, with the check made again
+//! A pane is protected while any process of its foreground group is `ssh`, `mosh`, `sudo`, `su`
+//! or `doas` by name, runs as root, cannot be read or matches a command-line pattern, while
+//! the terminal reads a password (echo off), or while it is marked. A send to another pane goes a line at a time, with the check made again
 //! [`LINE_GAP`] after each line, so `ssh prod\nrm -rf ~\n` cannot land its second line in ssh.
 
 use std::os::fd::AsFd;
 use std::time::{Duration, Instant};
 
-use pinfold_sys::foreground::{self, Foreground};
+use pinfold_sys::foreground::{self, Process};
 
 use crate::io::Reactor;
 
@@ -54,33 +54,43 @@ impl Reason {
     }
 }
 
-/// Why `found` protects its pane, if it does. A command line that cannot be read protects it.
+/// Why `process` protects its pane, if it does. A command line that cannot be read protects it.
 ///
 /// # Examples
 ///
 /// ```
 /// use pinfold_core::protect::{Reason, classify};
-/// use pinfold_sys::foreground::Foreground;
+/// use pinfold_sys::foreground::Process;
 ///
-/// let found = Foreground { name: "ssh".into(), argv: None, euid: 501, echo_off: false };
+/// let found = Process { name: "ssh".into(), argv: None, euid: 501 };
 /// assert_eq!(classify(&found, &[]), Some(Reason::Ssh));
 /// ```
 #[must_use]
-pub fn classify(found: &Foreground, patterns: &[String]) -> Option<Reason> {
-    match found.name.as_str() {
+pub fn classify(process: &Process, patterns: &[String]) -> Option<Reason> {
+    match process.name.as_str() {
         "ssh" | "mosh" | "mosh-client" => return Some(Reason::Ssh),
         "sudo" | "su" | "doas" => return Some(Reason::Sudo),
         _ => {}
     }
-    if found.euid == 0 {
+    if process.euid == 0 {
         return Some(Reason::Root);
     }
-    if found.echo_off {
-        return Some(Reason::EchoOff);
-    }
-    let line = found.argv.as_ref().map(|argv| argv.join(" "));
-    let matched = line.is_none_or(|line| patterns.iter().any(|p| line.contains(p.as_str())));
+    let matched = process
+        .argv
+        .as_ref()
+        .is_none_or(|argv| patterns.iter().any(|pattern| matches(pattern, argv)));
     matched.then_some(Reason::Rule)
+}
+
+/// Whether a pattern's first word is the program's file name and each next word is a later
+/// argument, in order.
+fn matches(pattern: &str, argv: &[String]) -> bool {
+    let mut words = pattern.split_whitespace();
+    let (Some(program), Some((first, rest))) = (words.next(), argv.split_first()) else {
+        return false;
+    };
+    let mut rest = rest.iter();
+    first.rsplit('/').next() == Some(program) && words.all(|word| rest.any(|arg| arg == word))
 }
 
 /// The reactor's protection state.
@@ -123,11 +133,17 @@ impl Reactor {
         if self.protect.marked.contains(&pane) {
             return Some(Reason::Marked);
         }
-        match foreground::foreground(self.master(pane)?.as_fd()) {
-            Ok(found) => classify(&found?, &self.protect.patterns),
-            // The process went or cannot be read, so it is not known to be safe.
-            Err(_) => Some(Reason::Rule),
+        // A terminal or process that cannot be read, or a group with no live process, is not
+        // known to be safe.
+        let Ok(found) = foreground::foreground(self.master(pane)?.as_fd()) else {
+            return Some(Reason::Rule);
+        };
+        if found.members.is_empty() {
+            return Some(Reason::Rule);
         }
+        let patterns = &self.protect.patterns;
+        let reason = found.members.iter().find_map(|m| classify(m, patterns));
+        reason.or(found.echo_off.then_some(Reason::EchoOff))
     }
 
     /// Marks a pane protected, or clears the mark.
@@ -138,8 +154,9 @@ impl Reactor {
         }
     }
 
-    /// Replaces the command-line patterns, which match anywhere in the arguments joined by
-    /// spaces. [`DEFAULT_PATTERNS`] apply until this is called.
+    /// Replaces the command-line patterns. A pattern's first word must be the file name of the
+    /// program, and each next word a later argument, in order. [`DEFAULT_PATTERNS`] apply until
+    /// this is called.
     pub fn set_patterns(&mut self, patterns: Vec<String>) {
         self.protect.patterns = patterns;
     }
@@ -202,46 +219,55 @@ mod tests {
     use super::*;
     use std::process::Command;
 
-    fn found(name: &str, argv: &[&str], euid: u32, echo_off: bool) -> Foreground {
+    fn process(name: &str, argv: &[&str], euid: u32) -> Process {
         let argv = Some(argv.iter().map(|arg| (*arg).to_owned()).collect());
-        Foreground {
+        Process {
             name: name.to_owned(),
             argv,
             euid,
-            echo_off,
         }
     }
 
     #[test]
     fn each_rule_has_its_word() {
         let patterns = vec!["kubectl exec".to_owned()];
-        let check = |found: Foreground| classify(&found, &patterns);
+        let check = |found: Process| classify(&found, &patterns);
         assert_eq!(
-            check(found("ssh", &["ssh", "prod"], 501, false)),
+            check(process("ssh", &["ssh", "prod"], 501)),
             Some(Reason::Ssh)
         );
-        assert_eq!(
-            check(found("mosh-client", &[], 501, false)),
-            Some(Reason::Ssh)
-        );
-        assert_eq!(check(found("doas", &[], 0, false)), Some(Reason::Sudo));
-        assert_eq!(
-            check(found("bash", &["bash"], 0, false)),
-            Some(Reason::Root)
-        );
-        assert_eq!(
-            check(found("bash", &["bash"], 501, true)),
-            Some(Reason::EchoOff)
-        );
-        let kubectl = found("kubectl", &["kubectl", "exec", "-it", "db"], 501, false);
+        assert_eq!(check(process("mosh-client", &[], 501)), Some(Reason::Ssh));
+        assert_eq!(check(process("doas", &[], 0)), Some(Reason::Sudo));
+        assert_eq!(check(process("bash", &["bash"], 0)), Some(Reason::Root));
+        let kubectl = process("kubectl", &["kubectl", "exec", "-it", "db"], 501);
         assert_eq!(check(kubectl), Some(Reason::Rule));
-        let unread = Foreground {
+        let unread = Process {
             argv: None,
-            ..found("bash", &[], 501, false)
+            ..process("bash", &[], 501)
         };
         assert_eq!(check(unread), Some(Reason::Rule));
-        assert_eq!(check(found("bash", &["bash", "-l"], 501, false)), None);
+        assert_eq!(check(process("bash", &["bash", "-l"], 501)), None);
         assert_eq!(Reason::EchoOff.refusal(), "the pane is protected: echo-off");
+    }
+
+    #[test]
+    fn patterns_match_words_not_text() {
+        let argv = |line: &str| line.split(' ').map(str::to_owned).collect::<Vec<_>>();
+        let kubectl = |line: &str| matches("kubectl exec", &argv(line));
+        assert!(kubectl("kubectl -n x exec pod"));
+        assert!(kubectl("/usr/local/bin/kubectl exec pod"));
+        assert!(!kubectl("kubectl get exec-logs"));
+        assert!(!kubectl("/tmp/notkubectl exec"));
+        assert!(!kubectl("kubectl"));
+        assert!(matches(
+            "aws ssm start-session",
+            &argv("aws --x ssm start-session")
+        ));
+        assert!(!matches(
+            "aws ssm start-session",
+            &argv("aws start-session ssm")
+        ));
+        assert!(!matches("", &argv("anything")));
     }
 
     fn turn_until(reactor: &mut Reactor, done: impl Fn(&mut Reactor) -> bool) -> bool {
@@ -280,6 +306,17 @@ mod tests {
         assert_eq!(refused, Err("the pane is protected: marked"));
         reactor.set_marked(sleeping, false);
         assert_eq!(reactor.send(sleeping, "x", Instant::now()), Ok(()));
+    }
+
+    #[test]
+    fn a_process_anywhere_in_the_group_protects_the_pane() {
+        let mut reactor = Reactor::new().unwrap();
+        // Without job control, the background job shares the shell's group.
+        let pane = spawn(&mut reactor, "sleep 33 & wait");
+        reactor.set_patterns(vec!["sleep 33".to_owned()]);
+        let matched = |reactor: &mut Reactor| reactor.protection(pane).is_some();
+        assert!(turn_until(&mut reactor, matched));
+        assert_eq!(reactor.protection(pane), Some(Reason::Rule));
     }
 
     #[test]

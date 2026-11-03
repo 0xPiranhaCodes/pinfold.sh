@@ -63,15 +63,21 @@ checks apply to its target.
 
 ## Protected panes
 
-A pane refuses `pane.send` from the API, even with a grant, while its foreground process is
-`ssh`, `mosh`, `mosh-client`, `sudo`, `su` or `doas`, runs as root, reads a password (echo off
-with input in lines), or has one of the `api.protect` texts in its command line, the
-arguments joined by spaces. The default list is `["kubectl exec", "docker exec", "psql",
-"aws ssm"]`, and a list you set replaces it. An empty text is refused as a bad value.
+A pane refuses `pane.send` from the API, even with a grant, while any process in its
+foreground process group is `ssh`, `mosh`, `mosh-client`, `sudo`, `su` or `doas`, runs as
+root, cannot be read, or matches an `api.protect` pattern, or while the terminal reads a
+password (echo off with input in lines).
+
+A pattern is words separated by spaces. The first must be the program's file name, the last
+part of its path, and each next word must be one of the program's later arguments, in order,
+with others allowed between. So `"kubectl exec"` matches `kubectl -n x exec pod` and
+`/usr/local/bin/kubectl exec pod`, but not `kubectl get exec-logs` or `/tmp/notkubectl exec`.
+The default list is `["kubectl exec", "docker exec", "psql", "aws ssm"]`, and a list you set
+replaces it. An empty pattern is refused as a bad value.
 
 ```toml
 [api]
-protect = ["kubectl exec", "docker exec", "psql", "aws ssm", "mysql -h prod"]
+protect = ["kubectl exec", "docker exec", "psql", "aws ssm", "mysql -h prod-db"]
 ```
 
 The window checks `api.protect` now, but the core does not read this file yet, so until it
