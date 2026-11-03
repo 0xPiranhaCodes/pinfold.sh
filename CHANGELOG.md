@@ -17,6 +17,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Changed
 
+- The release dry run can no longer be started by hand. It runs on version tags and on pull requests that change packaging or `release.yml`.
 - Refined window chrome with graphite tab surfaces, teal active labels, readable unfocused tabs, quieter search hints, and more space around the terminal.
 
 ### Added
