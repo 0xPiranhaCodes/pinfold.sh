@@ -12,6 +12,8 @@ variable is unset. Saving the file applies it to the running window within about
 | `background_opacity`  | number | `1`     | Default background opacity, from 0 to 1. macOS only      |
 | `background_blur`     | bool   | `false` | Blur what shows through the background. macOS only       |
 | `keys.prefix`         | string | `"C-a"` | Prefix, `C-` and a lowercase letter                      |
+| `api.audit_log`       | bool   | `false` | Also write the API audit log to disk                     |
+| `api.protect`         | list   | below   | Command-line text that protects a pane from API sends    |
 
 ```toml
 font_size = 14
@@ -23,6 +25,13 @@ background_blur = true
 [keys]
 prefix = "C-b"
 ```
+
+The core reads `api.audit_log` when it starts. Without it the [audit log](api/README.md) is
+kept only in memory. With it the log is also written, mode 0600, to `audit.log` in
+`~/Library/Application Support/PinFold` on macOS, and elsewhere in `$XDG_STATE_HOME/pinfold`,
+or `~/.local/state/pinfold` when that variable is unset. At 5 MiB it moves to `audit.log.1`,
+replacing the older one. If the file cannot be opened, the core says why in its log and keeps
+the log in memory. `pinfold ctl log --verify <file>` checks it.
 
 `font_path` takes a TrueType or OpenType file, or the first font in a collection. PinFold
 draws bold and italic by thickening and slanting that one font, not from separate files, and
@@ -59,6 +68,28 @@ its [log](#where-problems-are-reported) and uses the defaults for every key. Tha
 file's place, a file it cannot read, and a file that another user owns or that group or
 others can write (the rule from the threat model). A symlink is followed, and those
 checks apply to its target.
+
+## Protected panes
+
+A pane refuses `pane.send` from the API, even with a grant, while any process in its
+foreground process group is `ssh`, `mosh`, `mosh-client`, `sudo`, `su` or `doas`, runs as
+root, cannot be read, or matches an `api.protect` pattern, or while the terminal reads a
+password (echo off with input in lines).
+
+A pattern is words separated by spaces. The first must be the program's file name, the last
+part of its path, and each next word must be one of the program's later arguments, in order,
+with others allowed between. So `"kubectl exec"` matches `kubectl -n x exec pod` and
+`/usr/local/bin/kubectl exec pod`, but not `kubectl get exec-logs` or `/tmp/notkubectl exec`.
+The default list is `["kubectl exec", "docker exec", "psql", "aws ssm"]`, and a list you set
+replaces it. An empty pattern is refused as a bad value.
+
+```toml
+[api]
+protect = ["kubectl exec", "docker exec", "psql", "aws ssm", "mysql -h prod-db"]
+```
+
+The window checks `api.protect` now, but the core does not read this file yet, so until it
+does the default list applies.
 
 ## Keys
 
@@ -112,6 +143,33 @@ Deleting the file changes nothing until the next start.
 
 PinFold checks the file with one `stat` a second on a thread of its own, so an idle window
 wakes once a second for this. Changes to the font file itself are not noticed.
+
+## Workspace layouts
+
+A project may describe tabs and panes in `.pinfold/layout.toml`. PinFold validates this format
+now; `pinfold up` and the trust prompt arrive separately, so it does not open the layout yet.
+
+```toml
+[[tabs]]
+[[tabs.panes]]
+cwd = "."
+run = "cargo test"
+
+[[tabs.panes]]
+split = "right"
+cwd = "crates/pinfold-core"
+run = "cargo test -p pinfold-core"
+```
+
+The root contains only `tabs`; each tab contains only `panes`; and a pane may contain only
+`split`, `cwd`, and `run`. `split` is `right` or `down` and is omitted for the first pane. A
+relative `cwd` starts at the project directory. Every supplied `cwd` must already exist as a
+directory and resolve inside the project, including after following directory symlinks.
+
+A layout must have at least one tab and one pane in each tab. It may hold at most 32 tabs and 64
+panes in total, and the file may be at most 64 KiB. Unknown keys, invalid values, non-UTF-8,
+special files, and a symlink in place of `layout.toml` are refused. `run` is only data at this
+stage; a later trust prompt will show it before anything can run.
 
 ## Vi mode
 

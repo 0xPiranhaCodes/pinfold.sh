@@ -11,7 +11,9 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Fixed
 
+- `past_its_identitys_cap_a_peer_is_closed_unread` no longer fails on macOS when the core closes the extra peer before the test sets its read timeout.
 - The link test that fills every tab and pane uses 128 by 128 panes instead of 1024 by 1024, so it no longer runs past its 20 second limit on CI's Intel Mac.
+- Session and control tests wait for observable events instead of idle-machine timing under load.
 - Missing file and status icons now use installed fallback fonts while preserving the selected text font and terminal cell size.
 - macOS title text and the grid's left edge align with the actual native window buttons, accounting for font size and display scale.
 
@@ -28,28 +30,36 @@ Entries are generated from Conventional Commits with git-cliff
 - Right-click in a pane opens a menu drawn in cells: Copy, Paste, Select All, Find, Split Right, Split Down, New Tab, Zoom and Close Pane. Arrows, Enter and Esc work it as well as the mouse. When a program has turned on mouse reporting, the click goes to it, and `Shift`+right-click opens the menu (ADR-0033).
 - A 256 KiB hash-chained API audit log with optional private, rotating persistence. The file must be a regular file, not a symlink or FIFO, and after a failed write the log stops mirroring to disk and keeps only memory.
 - A native menu bar on macOS: PinFold, Shell, Edit, View, Window and Help, holding every Command shortcut, with new Select All, Bigger, Smaller, Actual Size, Settings and Help commands, and items greyed out when they cannot apply (ADR-0033).
+- A control-socket connection takes many requests, one at a time: it must say `hello` within 2 s and end each line within 2 s of its first byte, and is closed after 60 s idle. Answers and events reach the API thread over bounded channels, and a subscriber that misses an event is closed (ADR-0032).
 - ADR-0033: a native menu bar and Dock menu on macOS, and a right-click menu drawn in cells, all running the same commands as the keys.
 - `pane.read`, `pane.last_output` and `pane.send` for a caller's own pane (the `self` scope; other panes are refused): reads are plain text, newest last, at most 2,000,000 bytes, and `last_output` follows OSC 133 marks. A send carries at most 4096 bytes, a pane takes 20 a second, and a full input queue refuses it. `pinfold ctl send` types into a pane. JSON Schemas in [docs/api](docs/api/README.md) (ADR-0032 step 4).
 - Secret redaction for cross-pane text, covering private keys, provider tokens, JWTs, password pairs, the password in a URI and high-entropy strings.
 - The core serves up to 16 callers of its control socket at once on one `mio` thread, so a caller waiting for a window holds up no one (ADR-0032).
 - ADR-0032: the agent API gets one `mio` thread of its own, and M3 lands in eight steps. M1 and M2 are done.
+- `pane.wait` waits on the caller's own pane for a command's exit code, the next prompt, any output or a timeout, with at most 64 parked, and `events.subscribe` sends pane opened, closed and status events; a connection that lets 2 MiB queue unread is closed (ADR-0032 step 6).
 - Fuzz targets `api_request` and `api_params` feed arbitrary control-socket request lines and `hello` parameters to the API parser, in the fuzz smoke run on each PR and nightly.
 - Tests that fail if the core stops refusing a debugger, or a pane's shell starts refusing one, and `tests/hardening/audit.sh`, which attacks real binaries by hand and is where the threat model's table comes from.
 - ADR-0031: a macOS beta comes before v0.1, which covers macOS and Linux.
 - A spike measures what waiting for each Metal frame costs: a median 0.44 to 0.47 ms on a full 200x60 grid on an M1 Pro, so the wait stays rather than spending about 750 KB on more instance buffers.
 - The app is called PinFold: `PinFold.app`, the window's title and the Dock.
+- API `pane.spawn` opens a split or tab running the user's shell without taking focus, and `pane.close` closes it: a caller reads, sends to, waits on and closes the panes it spawned and theirs, the `children` scope.
 - Tab pills stand a little taller than a cell, with their text centred, in any font. A chosen font without `⌘` takes it from the bundled font.
 - `hello` version 2 returns the version, the methods a caller may call and its pane id. `pane.list` lists the session's panes (id, title, cwd, command, status, and nothing from a screen) for any caller with a terminal, with a JSON Schema in [docs/api](docs/api/README.md). `pinfold ctl list` prints them, as JSON with `--json`. Version 1 still opens windows and cannot list panes (ADR-0032 step 3).
 - Pill tabs in the top bar, with hover, a mark on a hidden tab that printed, a quiet look for an
   unfocused window, and no title row in fullscreen.
+- Protected panes: `pane.send` is refused while any process in the pane's foreground group is ssh, mosh, sudo, su or doas, runs as root, cannot be read or matches an `api.protect` pattern, at a password prompt, or when marked. Sends to other panes refuse control characters and go a line at a time, each line at least 150 ms after the last, once the pane's shell holds the foreground again, checked just before it is written.
 - Tabs and splits for real. The core owns the session, so a new window finds the same tabs and panes, and only the panes of the active tab are sent to the window, so a hidden tab costs no frame copies. A session holds at most 32 tabs and 64 panes, and past that a command is refused with a note under the pane. Panes are drawn in cells with cell-drawn borders, the focused pane's in the focus accent.
+- `pinfold mcp` serves the API's pane tools over MCP on stdio, so an agent in a pane can list, read, wait on and type into its own pane.
+- `pinfold mcp` can spawn and close child panes through versioned MCP tools.
 - Prefix keys work: `Ctrl+a`, or `keys.prefix`, then `c`, `n`, `p`, `0` to `9`, `|`, `-`, the arrows, `z`, `d` and `x`. `x` asks first, and says so in red when it would end the session. On macOS Command+T opens a tab and Command+1 to Command+9 go to one. A click focuses a pane or picks a tab, and the `+` button opens one. Bindings are in [docs/configuration.md](docs/configuration.md).
 - `pinfold-core` runs as a hardened daemon with a private control socket that takes `hello` and `window.open`.
 - `pinfold ctl session save`, from a terminal outside any pane, writes the session's layout and each pane's directory and redacted command to `sessions/default.json` in the state directory, 0600 and atomically, with no scrollback or environment.
+- The core records each API request that reaches it in a hash-chained audit log, never pane contents or sent text; `audit.read`, `pinfold ctl log` and `pinfold ctl log --verify` read and check it, and `api.audit_log = true` also writes it to disk.
 - `pinfold` is now a launcher: it starts the core if none answers, checks that the socket's owner is you, asks for a window and exits. The window is its own `pinfold-window` process on the link (ADR-0028), so a window that crashes or closes leaves every pane running and `pinfold` reattaches. A second `pinfold` brings the window to the front, and a window whose core dies says the session ended. `pinfold --size` is gone.
 - `cargo xtask mem-gate` measures the window and the core as separate processes, and the core beside a window.
 - `pinfold-mux` exports a session's layout as a plain tree that names panes by index, and rebuilds a session from one, refusing a bad tree with an error.
 - A TOML config file with `font_size` and `macos_option_as_alt`. A bad file means the defaults.
+- Workspace layout parsing for `.pinfold/layout.toml`, bounded to 32 tabs, 64 panes and 64 KiB, with unknown keys, symlinks and project-escaping working directories refused.
 - Padding around the grid, and on macOS a full-height window under the native traffic lights, with `background_opacity` and `background_blur`.
 - Config hot reload: saving the file applies it to the running window, and a bad save keeps the current settings.
 - CJK text from a system font, opened only when the bundled font lacks a character.

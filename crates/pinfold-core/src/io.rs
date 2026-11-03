@@ -17,10 +17,9 @@ use pinfold_sys::Terminal;
 use pinfold_sys::pty::Pty;
 
 use crate::link::{Host, LINK};
-use crate::marks::ShellPhase;
-use crate::search::{
-    CopyStep, Copying, Direction, MAX_SELECTION, Position, Search, SearchStep, Selection,
-};
+use crate::marks::{ShellMarks, ShellPhase};
+use crate::protect::Protect;
+use crate::search::{CopyStep, Copying, Direction, Position, Search, SearchStep, Selection};
 use crate::vt::{AlacrittyEngine, VtEngine};
 use crate::{paste, shell};
 
@@ -33,8 +32,9 @@ pub const MAX_REPLIES: usize = 4 * 1024;
 /// Most input waiting for a program that is not reading it. Input past this is refused
 /// whole, since a paste cut short would lose its closing bracket.
 pub const MAX_INPUT: usize = pinfold_proto::link::MAX_INPUT;
-/// Most text one `pane.read` or `pane.last_output` returns (threat model, Limits).
-pub const MAX_READ: usize = MAX_SELECTION;
+/// Most text one `pane.read` or `pane.last_output` returns. Half the API's 2 MiB output cap, so
+/// the reply fits even when JSON escapes every byte (`"` and `\` become two).
+pub const MAX_READ: usize = 1_000_000;
 /// Most `pane.send` calls a second to one pane (threat model, Limits).
 pub const SENDS_PER_SECOND: u32 = 20;
 /// Queue capacity an empty pane keeps, so one large paste does not cost memory for good.
@@ -109,6 +109,8 @@ struct Pane {
     readable: bool,
     closed: bool,
     dirty: bool,
+    /// Counts reads that found output, wrapping, for `pane.wait`.
+    output: u64,
     /// The running search, which gets one step per pass, so PTYs are served between steps.
     search: Option<Search>,
     found: Option<Selection>,
@@ -142,6 +144,15 @@ pub struct Listed<'a> {
     pub status: &'static str,
 }
 
+/// What `pane.wait` watches in a pane, with nothing from its screen.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Progress {
+    /// Counts reads that found output, wrapping.
+    pub output: u64,
+    /// The shell's OSC 133 marks, which output can fake (T4).
+    pub marks: ShellMarks,
+}
+
 /// Every PTY and its terminal state, driven from a single thread.
 pub struct Reactor {
     pub(crate) poll: Poll,
@@ -161,6 +172,7 @@ pub struct Reactor {
     pub(crate) shell: fn() -> Command,
     buffer: Vec<u8>,
     pub(crate) host: Host,
+    pub(crate) protect: Protect,
 }
 
 impl Reactor {
@@ -184,13 +196,14 @@ impl Reactor {
             shell: shell::command,
             buffer: vec![0; READ_BUDGET],
             host: Host::default(),
+            protect: Protect::default(),
         })
     }
 
     /// Starts `command` on a new PTY and returns its pane number. The pane is in no tab, so it
     /// stays when its program exits, for reading. [`Reactor::open_tab`] adds one to the session.
     ///
-    /// The reactor's thread makes every spawn, which [`Pty::spawn`] requires.
+    /// The reactor's thread makes every spawn, which `pinfold_sys::socket::pair` requires.
     ///
     /// # Errors
     ///
@@ -217,6 +230,7 @@ impl Reactor {
             readable: true,
             closed: false,
             dirty: true,
+            output: 0,
             search: None,
             found: None,
             sends: (Instant::now(), 0),
@@ -242,6 +256,7 @@ impl Reactor {
             .panes
             .iter()
             .filter_map(|pane| pane.engine.sync_deadline())
+            .chain(self.protect.deadline())
             .min()
             .map(|deadline| deadline.saturating_duration_since(now));
         let timeout = if unfinished {
@@ -261,16 +276,20 @@ impl Reactor {
                 pane.readable |= !pane.closed && (event.is_readable() || event.is_read_closed());
             }
         }
+        self.send_due(Instant::now());
         for pane in &mut self.panes {
             if pane.readable {
                 let mut master = pane.pty.master();
+                let mut fed = false;
                 let pumped = pump(
                     &mut master,
                     pane.engine.as_mut(),
                     &mut pane.replies,
                     &mut self.buffer,
-                    &mut pane.dirty,
+                    &mut fed,
                 );
+                pane.dirty |= fed;
+                pane.output = pane.output.wrapping_add(u64::from(fed));
                 pane.readable = pumped == Pumped::Budget;
                 pane.closed |= pumped == Pumped::Closed;
             }
@@ -333,7 +352,8 @@ impl Reactor {
 
     /// Types `text` into a pane's program as it is, through the queue [`Reactor::write`] fills.
     /// Refused with a reason past [`SENDS_PER_SECOND`] calls in a second, which count refusals
-    /// too, or if the queue has no room for all of it.
+    /// too, while the pane is protected or still taking a split send, or if the queue has no
+    /// room for all of it.
     // shortcut: the second is per pane, which is per caller while the API has only the `self`
     // scope. Key it by caller when a caller can send to other panes.
     pub fn send(&mut self, pane: usize, text: &str, now: Instant) -> Result<(), &'static str> {
@@ -348,6 +368,12 @@ impl Reactor {
             return Err("rate limited: at most 20 sends a second");
         }
         *count += 1;
+        if let Some(reason) = self.protection(pane) {
+            return Err(reason.refusal());
+        }
+        if self.protect.is_sending(pane) {
+            return Err("the pane is still taking an earlier send");
+        }
         if self.write(pane, text.as_bytes()) {
             Ok(())
         } else {
@@ -499,6 +525,22 @@ impl Reactor {
                 status,
             }
         })
+    }
+
+    /// Returns what `pane.wait` watches in a pane, or nothing once it has closed.
+    #[must_use]
+    pub fn progress(&self, pane: usize) -> Option<Progress> {
+        let pane = self.pane(pane).filter(|pane| !pane.closed)?;
+        let marks = pane.engine.shell_marks();
+        Some(Progress {
+            output: pane.output,
+            marks,
+        })
+    }
+
+    /// A pane's PTY, for [`Reactor::protection`].
+    pub(crate) fn pty(&self, pane: usize) -> Option<&Pty> {
+        Some(&self.pane(pane)?.pty)
     }
 
     fn pane(&self, number: usize) -> Option<&Pane> {

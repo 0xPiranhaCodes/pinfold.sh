@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, de};
 
+pub mod workspace;
+
 /// The largest file read. A file written by hand is a few KiB, and this bounds startup.
 pub const MAX_BYTES: u64 = 64 * 1024;
 
@@ -40,6 +42,21 @@ pub struct Config {
     pub background_blur: bool,
     /// The `[keys]` table.
     pub keys: Keys,
+    /// The `[api]` table.
+    pub api: Api,
+}
+
+/// The `[api]` table.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Api {
+    /// Whether the audit log is also written to `audit.log` in [`state_dir`], not only kept in
+    /// memory.
+    pub audit_log: bool,
+    /// Text that protects a pane when it appears in its foreground command line, with the
+    /// arguments joined by spaces. Nothing means the core's defaults.
+    #[serde(deserialize_with = "protect")]
+    pub protect: Option<Vec<String>>,
 }
 
 /// The `[keys]` table.
@@ -67,6 +84,7 @@ impl Default for Config {
             background_opacity: 1.0,
             background_blur: false,
             keys: Keys::default(),
+            api: Api::default(),
         }
     }
 }
@@ -114,6 +132,16 @@ fn prefix<'de, D: Deserializer<'de>>(deserializer: D) -> Result<char, D::Error> 
         _ => Err(de::Error::custom(format!(
             "prefix must be C- and a lowercase letter, such as \"C-a\", not {text:?}"
         ))),
+    }
+}
+
+fn protect<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Vec<String>>, D::Error> {
+    let patterns = Vec::<String>::deserialize(deserializer)?;
+    // An empty pattern would protect every pane, which is surely a mistake.
+    if patterns.iter().all(|pattern| !pattern.trim().is_empty()) {
+        Ok(Some(patterns))
+    } else {
+        Err(de::Error::custom("protect patterns must not be empty"))
     }
 }
 
@@ -418,6 +446,18 @@ mod tests {
     }
 
     #[test]
+    fn protect_patterns_are_read() {
+        assert_eq!(parse(b"").unwrap().api.protect, None);
+        let config = parse(b"[api]\nprotect = [\"kubectl exec\"]\n").unwrap();
+        assert_eq!(config.api.protect, Some(vec!["kubectl exec".to_owned()]));
+        let text = message(b"[api]\nprotect = [\"psql\", \" \"]\n");
+        assert!(
+            text.contains("line 2") && text.contains("must not be empty"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn wrong_types_are_errors() {
         assert!(message(b"macos_option_as_alt = 1").contains("line 1"));
         assert!(message(b"background_blur = 30").contains("line 1"));
@@ -459,6 +499,21 @@ mod tests {
         }
         assert_eq!(path_from(None, None), None);
         assert_eq!(path_from(None, some("")), None);
+    }
+
+    #[test]
+    fn the_state_dir_is_application_support_on_macos_and_xdg_elsewhere() {
+        let some = |dir: &str| Some(OsString::from(dir));
+        let found = state_dir_from(some("/xdg"), some("/home/me"));
+        let expected = if cfg!(target_os = "macos") {
+            "/home/me/Library/Application Support/PinFold"
+        } else {
+            "/xdg/pinfold"
+        };
+        assert_eq!(found, Some(PathBuf::from(expected)));
+        assert_eq!(state_dir_from(None, some("relative")), None);
+        let config = parse(b"[api]\naudit_log = true").unwrap();
+        assert!(config.api.audit_log && !Config::default().api.audit_log);
     }
 
     #[test]

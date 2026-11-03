@@ -42,10 +42,18 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "workspace_layout"
+path = "fuzz_targets/workspace_layout.rs"
+test = false
+doc = false
+bench = false
+
 [dependencies]
 libfuzzer-sys = "0.4"
 pinfold-api = { path = "../crates/pinfold-api" }
 pinfold-core = { path = "../crates/pinfold-core" }
+pinfold-config = { path = "../crates/pinfold-config" }
 pinfold-proto = { path = "../crates/pinfold-proto" }
 
 # Keeps this out of the workspace, so the C++ in libfuzzer-sys stays out of its builds.

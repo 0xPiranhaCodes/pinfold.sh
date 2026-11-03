@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "events.subscribe",
+  "description": "Subscribes the connection to events for every pane in the session, as pane.list sees them. Needs hello version 2 and a caller with a controlling terminal. One subscription per connection; a second is refused. After the result the core sends notifications, {\"jsonrpc\": \"2.0\", \"method\": \"event\", \"params\": <event>}, with no id. A subscriber that lets 2 MiB of them queue unread is closed.",
+  "type": "object",
+  "properties": {
+    "params": {
+      "type": "object",
+      "required": ["events"],
+      "properties": {
+        "events": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "enum": ["pane.opened", "pane.closed", "pane.status"] }
+        }
+      }
+    },
+    "result": { "type": "object", "additionalProperties": false },
+    "event": {
+      "description": "The params of a notification: pane numbers, status and exit status only, never screen contents or titles.",
+      "type": "object",
+      "required": ["event", "pane"],
+      "additionalProperties": false,
+      "properties": {
+        "event": { "enum": ["pane.opened", "pane.closed", "pane.status"] },
+        "pane": { "type": "integer", "minimum": 0 },
+        "status": {
+          "enum": ["running", "done", "error", "idle"],
+          "description": "Not with pane.closed. As pane.list reports it, from OSC 133 marks that output can fake."
+        },
+        "exit": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 255,
+          "description": "Not with pane.closed. The last exit status the shell gave, or null."
+        }
+      }
+    }
+  }
+}
