@@ -37,7 +37,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 5;
+pub const VERSION: u16 = 8;
 
 /// Most rows or columns a screen can have, which the core clamps its panes to.
 pub const MAX_DIMENSION: u16 = 1024;
@@ -122,7 +122,7 @@ const FOCUS: u8 = 15;
 const MOVE_FOCUS: u8 = 16;
 const MOVE_BORDER: u8 = 17;
 const ZOOM: u8 = 18;
-// 19 and 9 are left to the approval messages of #149.
+const APPROVAL_ANSWER: u8 = 19;
 const WAS_RUNNING_ANSWER: u8 = 20;
 
 const FRAME: u8 = 1;
@@ -133,7 +133,13 @@ const LAYOUT: u8 = 5;
 const RAISE: u8 = 6;
 const REFUSED: u8 = 7;
 const ACTIVITY: u8 = 8;
-const WAS_RUNNING: u8 = 10;
+const STATUS: u8 = 9;
+const APPROVAL: u8 = 10;
+const WAS_RUNNING: u8 = 11;
+
+/// How many agent states there are. [`Notice::Status`] numbers them in the order of the
+/// contributor rule: needs you, running, done, error, idle.
+pub const STATES: u8 = 5;
 
 const FLAG_FULL: u8 = 1;
 const FLAG_CURSOR: u8 = 1 << 1;
@@ -283,6 +289,59 @@ pub enum Side {
     Up,
     /// Away from row 0.
     Down,
+}
+
+/// A cross-pane operation that needs a person's approval.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ApprovalAction {
+    /// Read screen text or the last marked output.
+    Read,
+    /// Type exact text into another pane.
+    Send,
+    /// Trust a workspace's layout file. The first text is the canonical directory and the rest
+    /// are every `run` line; `caller` is 0 and `target` is 1 when the directory was trusted with
+    /// another layout. Only allowing once answers it.
+    Trust,
+}
+
+impl ApprovalAction {
+    /// Stable API spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Read => "read",
+            Self::Send => "send",
+            Self::Trust => "trust",
+        }
+    }
+}
+
+/// A real key's answer to an approval prompt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ApprovalAnswer {
+    /// Allow the requests already in this batch once.
+    AllowOnce,
+    /// Allow this caller, target and action for thirty minutes.
+    AllowForThirtyMinutes,
+    /// Refuse the batch.
+    Deny,
+}
+
+/// One cross-pane prompt. Every send in a batch remains distinct and exact.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Approval<'a> {
+    /// Stable id returned in the answer.
+    pub id: u64,
+    /// Pane asking.
+    pub caller: u32,
+    /// Pane being acted on.
+    pub target: u32,
+    /// Requested action.
+    pub action: ApprovalAction,
+    /// Exact text of each batched send, empty for reads.
+    pub texts: Vec<&'a str>,
 }
 
 /// Why the core did not carry out a command. The link stays up.
@@ -447,6 +506,13 @@ pub enum Request<'a> {
         /// Whether the person pressed Enter.
         run: bool,
     },
+    /// Answers a prompt. Only the inherited window link can carry this message.
+    ApprovalAnswer {
+        /// Prompt id.
+        id: u64,
+        /// The key's meaning.
+        answer: ApprovalAnswer,
+    },
 }
 
 /// A message from the core to a window. Text borrows from the decoder's buffer.
@@ -490,6 +556,9 @@ pub enum Notice<'a> {
         /// One bit per tab, lowest first, by the order of the last [`Notice::Layout`]. Thirty-two
         /// bits hold [`MAX_TABS`].
         tabs: u32,
+        /// The tabs, in the same bits, with a pane that raised a "needs you" alert while hidden
+        /// and needs you still.
+        alerts: u32,
     },
     /// A command was not carried out.
     Refused {
@@ -506,6 +575,19 @@ pub enum Notice<'a> {
         /// The redacted command, which is only a hint. At most [`MAX_COMMAND`] bytes.
         command: &'a str,
     },
+    /// The state of a pane that names its tab.
+    Status {
+        /// The pane.
+        pane: u32,
+        /// Below [`STATES`].
+        state: u8,
+        /// Whether the pane's agent reported it, rather than output's marks, which can fake it.
+        reported: bool,
+        /// The reported message, which the core has cleaned of control and bidi characters.
+        message: &'a str,
+    },
+    /// A cross-pane action waiting for a real window key.
+    Approval(Approval<'a>),
 }
 
 /// The session as the window draws it.
@@ -798,6 +880,11 @@ impl Request<'_> {
                 out.push(u8::from(run));
                 WAS_RUNNING_ANSWER
             }
+            Self::ApprovalAnswer { id, answer } => {
+                put!(out; id);
+                out.push(answer as u8);
+                APPROVAL_ANSWER
+            }
         };
         finish(out, start, MAX_REQUEST, kind)
     }
@@ -874,6 +961,17 @@ impl Request<'_> {
                 pane: body.u32()?,
                 run: body.tag("run", &[false, true])?,
             },
+            APPROVAL_ANSWER => Request::ApprovalAnswer {
+                id: body.array().map(u64::from_le_bytes)?,
+                answer: body.tag(
+                    "approval answer",
+                    &[
+                        ApprovalAnswer::AllowOnce,
+                        ApprovalAnswer::AllowForThirtyMinutes,
+                        ApprovalAnswer::Deny,
+                    ],
+                )?,
+            },
             kind => return Err(Error::UnknownKind { kind }),
         };
         body.end()?;
@@ -919,10 +1017,7 @@ impl Notice<'_> {
                 LAYOUT
             }
             Self::Raise => RAISE,
-            Self::Activity { tabs } => {
-                out.extend_from_slice(&tabs.to_le_bytes());
-                ACTIVITY
-            }
+            Self::Activity { tabs, alerts } => put!(out, ACTIVITY, tabs, alerts),
             Self::Refused { reason } => {
                 out.push(*reason as u8);
                 REFUSED
@@ -943,6 +1038,44 @@ impl Notice<'_> {
                 out.push(u8::from(*runnable));
                 out.extend_from_slice(command.as_bytes());
                 WAS_RUNNING
+            }
+            Self::Status {
+                pane,
+                state,
+                reported,
+                message,
+            } => {
+                if *state >= STATES {
+                    out.truncate(start);
+                    return Err(Error::BadTag {
+                        field: "state",
+                        tag: *state,
+                    });
+                }
+                out.extend_from_slice(&[*state, u8::from(*reported)]);
+                put_tail(out, start, MAX_MESSAGE, STATUS, *pane, message.as_bytes())?
+            }
+            Self::Approval(approval) => {
+                put!(out; approval.id, approval.caller, approval.target);
+                out.push(approval.action as u8);
+                let Ok(count) = u16::try_from(approval.texts.len()) else {
+                    out.truncate(start);
+                    return Err(Error::TooLarge {
+                        size: approval.texts.len() as u64,
+                    });
+                };
+                put!(out; count);
+                for text in &approval.texts {
+                    let Ok(length) = u32::try_from(text.len()) else {
+                        out.truncate(start);
+                        return Err(Error::TooLarge {
+                            size: text.len() as u64,
+                        });
+                    };
+                    put!(out; length);
+                    out.extend_from_slice(text.as_bytes());
+                }
+                APPROVAL
             }
         };
         finish(out, start, MAX_MESSAGE, kind)
@@ -973,7 +1106,26 @@ impl Notice<'_> {
             },
             LAYOUT => Notice::Layout(read_layout(&mut body)?),
             RAISE => Notice::Raise,
-            ACTIVITY => Notice::Activity { tabs: body.u32()? },
+            ACTIVITY => Notice::Activity {
+                tabs: body.u32()?,
+                alerts: body.u32()?,
+            },
+            // The state and its source go ahead of the pane, as the message runs to the end.
+            STATUS => {
+                let state = body.u8()?;
+                if state >= STATES {
+                    return Err(Error::BadTag {
+                        field: "state",
+                        tag: state,
+                    });
+                }
+                Notice::Status {
+                    state,
+                    reported: body.tag("reported", &[false, true])?,
+                    pane: body.u32()?,
+                    message: body.text()?,
+                }
+            }
             REFUSED => Notice::Refused {
                 reason: body.tag(
                     "refusal",
@@ -999,6 +1151,31 @@ impl Notice<'_> {
                     runnable,
                     command,
                 }
+            }
+            APPROVAL => {
+                let id = body.array().map(u64::from_le_bytes)?;
+                let caller = body.u32()?;
+                let target = body.u32()?;
+                let action = body.tag(
+                    "approval action",
+                    &[
+                        ApprovalAction::Read,
+                        ApprovalAction::Send,
+                        ApprovalAction::Trust,
+                    ],
+                )?;
+                let count = body.u16()?;
+                let mut texts = Vec::with_capacity(usize::from(count));
+                for _ in 0..count {
+                    texts.push(body.sized_text()?);
+                }
+                Notice::Approval(Approval {
+                    id,
+                    caller,
+                    target,
+                    action,
+                    texts,
+                })
             }
             kind => return Err(Error::UnknownKind { kind }),
         };
@@ -1556,6 +1733,14 @@ impl<'a> Reader<'a> {
         std::str::from_utf8(self.rest()).map_err(|_| Error::BadText)
     }
 
+    fn sized_text(&mut self) -> Result<&'a str, Error> {
+        let count = usize::try_from(self.u32()?).map_err(|_| Error::OutOfBounds {
+            field: "text length",
+            value: u64::MAX,
+        })?;
+        std::str::from_utf8(self.take(count)?).map_err(|_| Error::BadText)
+    }
+
     fn end(&self) -> Result<(), Error> {
         match self.0.len() {
             0 => Ok(()),
@@ -1572,7 +1757,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 5, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 8, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -2303,6 +2488,37 @@ mod tests {
             let wire = raw(kind, &[0, 0, 0, 0, 0xff]);
             assert_eq!(notice_error(&wire), Err(Error::BadText));
         }
+        let wire = raw(STATUS, &[0, 1, 0, 0, 0, 0, 0xff]);
+        assert_eq!(notice_error(&wire), Err(Error::BadText));
+    }
+
+    #[test]
+    fn a_status_holds_a_known_state_either_way() {
+        let state = Error::BadTag {
+            field: "state",
+            tag: STATES,
+        };
+        assert_eq!(
+            notice_error(&raw(STATUS, &[STATES, 0, 0, 0, 0, 0])),
+            Err(state)
+        );
+        let reported = Error::BadTag {
+            field: "reported",
+            tag: 2,
+        };
+        assert_eq!(
+            notice_error(&raw(STATUS, &[0, 2, 0, 0, 0, 0])),
+            Err(reported)
+        );
+        let notice = Notice::Status {
+            pane: 0,
+            state: STATES,
+            reported: false,
+            message: "",
+        };
+        let mut out = vec![7];
+        assert_eq!(notice.encode(&mut out), Err(state));
+        assert_eq!(out, [7]);
     }
 
     #[test]
@@ -2635,6 +2851,22 @@ mod tests {
         }
 
         #[test]
+        fn approval_answers_round_trip(
+            id in any::<u64>(),
+            answer in prop::sample::select(&[
+                ApprovalAnswer::AllowOnce,
+                ApprovalAnswer::AllowForThirtyMinutes,
+                ApprovalAnswer::Deny,
+            ][..]),
+            chunk in chunks(),
+        ) {
+            prop_assert!(
+                request_survives(Request::ApprovalAnswer { id, answer }, chunk),
+                "changed on the link"
+            );
+        }
+
+        #[test]
         fn quit_round_trips(chunk in chunks()) {
             prop_assert!(request_survives(Request::Quit, chunk), "changed on the link");
         }
@@ -2661,6 +2893,23 @@ mod tests {
         }
 
         #[test]
+        fn status_round_trips(
+            pane in any::<u32>(),
+            state in 0..STATES,
+            reported in any::<bool>(),
+            message in any::<String>(),
+            chunk in chunks(),
+        ) {
+            let notice = Notice::Status { pane, state, reported, message: &message };
+            prop_assert!(notice_survives(&notice, chunk), "changed on the link");
+        }
+
+        #[test]
+        fn activity_round_trips(tabs in any::<u32>(), alerts in any::<u32>(), chunk in chunks()) {
+            prop_assert!(notice_survives(&Notice::Activity { tabs, alerts }, chunk), "changed on the link");
+        }
+
+        #[test]
         fn searched_round_trips(
             pane in any::<u32>(),
             found in proptest::option::of(selections()),
@@ -2672,6 +2921,22 @@ mod tests {
         #[test]
         fn copied_round_trips(pane in any::<u32>(), text in any::<String>(), chunk in chunks()) {
             prop_assert!(notice_survives(&Notice::Copied { pane, text: &text }, chunk), "changed on the link");
+        }
+
+        #[test]
+        fn approvals_round_trip(
+            id in any::<u64>(),
+            caller in any::<u32>(),
+            target in any::<u32>(),
+            action in prop::sample::select(
+                &[ApprovalAction::Read, ApprovalAction::Send, ApprovalAction::Trust][..]
+            ),
+            owned in vec(".{0,32}", 0..4),
+            chunk in chunks(),
+        ) {
+            let texts = owned.iter().map(String::as_str).collect();
+            let notice = Notice::Approval(Approval { id, caller, target, action, texts });
+            prop_assert!(notice_survives(&notice, chunk), "changed on the link");
         }
 
         #[test]

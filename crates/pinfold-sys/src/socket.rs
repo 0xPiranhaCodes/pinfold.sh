@@ -26,7 +26,7 @@ fn check(result: libc::c_int) -> io::Result<libc::c_int> {
 }
 
 /// Returns a close-on-exec copy of `fd` numbered `lowest` or above.
-fn duplicate(fd: RawFd, lowest: RawFd) -> io::Result<OwnedFd> {
+pub(crate) fn duplicate(fd: RawFd, lowest: RawFd) -> io::Result<OwnedFd> {
     // SAFETY: F_DUPFD_CLOEXEC takes an integer and touches no memory.
     let copy = check(unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, lowest) })?;
     // SAFETY: the call succeeded, so `copy` is open and owned only by this function.
@@ -36,7 +36,7 @@ fn duplicate(fd: RawFd, lowest: RawFd) -> io::Result<OwnedFd> {
 /// Returns a connected pair of Unix sockets, both close-on-exec.
 ///
 /// On macOS they are briefly inheritable while they are being made, so one thread must make
-/// every call that creates a child, as [`crate::pty::Pty::spawn`] also requires.
+/// every call that creates a child.
 ///
 /// # Errors
 ///

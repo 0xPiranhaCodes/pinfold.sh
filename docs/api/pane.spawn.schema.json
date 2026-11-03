@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "pane.spawn",
+  "description": "Opens a split or a tab running the user's shell and returns its number at once. It takes neither focus nor the active tab, so the person's keystrokes stay where they were. There is no command or argv: the caller cannot name a program. The caller then reads, sends to, waits on and closes the pane, and any pane that pane spawns (the children scope). A program running in the new pane is that pane, not the caller. Needs hello version 2 and a caller in a pane. The session's caps of 32 tabs and 64 panes refuse one more.",
+  "type": "object",
+  "properties": {
+    "params": {
+      "type": "object",
+      "required": ["where"],
+      "additionalProperties": false,
+      "properties": {
+        "where": { "enum": ["split-right", "split-down", "tab"], "description": "A split of the pane `of`, or a new tab after the others." },
+        "of": { "type": ["integer", "null"], "minimum": 0, "description": "The pane to split: the caller's own, the default, or one it spawned. A tab ignores it." },
+        "cwd": { "type": ["string", "null"], "pattern": "^/", "description": "An absolute path to an existing directory the shell starts in. Anything else is refused." }
+      }
+    },
+    "result": {
+      "type": "object",
+      "required": ["pane"],
+      "additionalProperties": false,
+      "properties": {
+        "pane": { "type": "integer", "minimum": 0, "description": "The new pane's number." }
+      }
+    }
+  }
+}

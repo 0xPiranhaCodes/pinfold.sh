@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "pane.status",
+  "description": "An agent reports the state of the pane it runs in. The report outranks the pane's OSC 133 marks from then on, as output can fake marks and cannot fake the caller (threat model T4), and pane.list and pane.status events say source \"reported\". A report of needs-you marks the pane's tab while it is hidden, at most once every 10 seconds. The window draws the state as glyph, colour and word, and the message only in Pinfold's own chrome, never in pane text. Needs hello version 2, and the pane must be the caller's own (the self scope).",
+  "type": "object",
+  "properties": {
+    "params": {
+      "type": "object",
+      "required": ["pane", "state"],
+      "properties": {
+        "pane": { "type": "integer", "minimum": 0, "description": "The pane's number, which must be the caller's own." },
+        "state": {
+          "enum": ["needs-you", "running", "done", "error", "idle"],
+          "description": "◆ needs you, ● running, ✓ done, ✕ error or ○ idle."
+        },
+        "message": {
+          "type": ["string", "null"],
+          "maxLength": 200,
+          "description": "At most 200 characters; longer is refused, not cut. Control, bidi and zero-width characters and state glyphs are dropped. A report without one clears the last."
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false
+    }
+  }
+}

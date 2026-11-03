@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "audit.read",
+  "description": "Returns the newest entries of the core's audit log, oldest first, and whether its hash chain in memory verifies. Each entry records one answered request: who called, the method, the target pane and the outcome, never pane contents or sent text. Needs hello version 2 and a caller in a terminal outside any pane: a caller in a pane or with no terminal is refused.",
+  "type": "object",
+  "properties": {
+    "params": {
+      "type": ["object", "null"],
+      "properties": {
+        "count": { "type": "integer", "minimum": 0, "maximum": 1000, "default": 100, "description": "How many of the newest entries." },
+        "pane": { "type": "integer", "minimum": 0, "description": "Only calls made by or to this pane." }
+      }
+    },
+    "result": {
+      "type": "object",
+      "required": ["entries", "verified", "broken_at"],
+      "additionalProperties": false,
+      "properties": {
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["hash", "prev", "seq", "at_ms", "caller", "terminal", "method", "target", "scope", "outcome", "reason"],
+            "additionalProperties": false,
+            "properties": {
+              "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256 of prev and the entry." },
+              "prev": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "The preceding entry's hash, or zeroes for the first." },
+              "seq": { "type": "integer", "minimum": 0 },
+              "at_ms": { "type": "integer", "minimum": 0, "description": "Unix time in milliseconds." },
+              "caller": { "type": ["integer", "null"], "minimum": 0, "description": "The calling pane, or null outside a pane or when unidentified." },
+              "terminal": { "type": "boolean", "description": "Whether the caller had a controlling terminal; with a null caller, false means unidentified." },
+              "method": { "type": "string" },
+              "target": { "type": ["integer", "null"], "minimum": 0, "description": "The pane the call named, if any." },
+              "scope": { "enum": ["any", "terminal", "self", "other", "outside"], "description": "What the call needed: any caller, a terminal, the caller's own pane, another pane, or a terminal outside any pane." },
+              "outcome": { "enum": ["ok", "refused", "error"] },
+              "reason": { "type": "string", "description": "Short. For pane.send it ends with the text's size in bytes, never the text." }
+            }
+          }
+        },
+        "verified": { "type": "boolean" },
+        "broken_at": { "type": ["integer", "null"], "description": "The first sequence whose hash or link is wrong, or null." }
+      }
+    }
+  }
+}
