@@ -28,10 +28,16 @@ For now a caller reads and sends only to the pane it runs in, the `self` scope, 
 pane is refused. Reads return at most 2,000,000 bytes, keeping the newest. A send carries at
 most 4096 bytes, and a pane takes at most 20 sends a second.
 
+A connection takes many requests, answered one at a time in order, each line at most 32 KiB.
+It must send `hello` within 2 seconds of connecting and end each line within 2 seconds of its
+first byte. It is closed after 60 seconds with no request in flight, wait or subscription, and
+the time starts again after each answer. A malformed request closes it, and so does a request
+the core took too long to answer; a refusal, such as "the core is busy", does not.
+
 `pane.wait` waits on the caller's own pane for at most 10 minutes, and the core parks at most 64
-waits. `events.subscribe` sends `event` notifications on its connection. A connection with a
-wait or a subscription stays open past the usual limit, and is closed if 2 MiB of replies
-queue unread.
+waits. `events.subscribe` sends `event` notifications on its connection. A connection is closed
+if 2 MiB of replies queue unread, or if the core has more events for it than it can queue, so a
+subscriber that was closed may have missed events.
 
 `pane.status` lets an agent say what state its own pane is in: `needs-you`, `running`, `done`,
 `error` or `idle`, with a message of at most 200 characters. A report outranks the pane's OSC 133
