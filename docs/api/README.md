@@ -25,7 +25,7 @@ Every connection starts with `hello`:
 | `pane.status`      | Version 2 and its own pane  | [`pane.status.schema.json`](pane.status.schema.json)         |
 
 For now a caller reads and sends only to the pane it runs in, the `self` scope, and any other
-pane is refused. Reads return at most 2,000,000 bytes, keeping the newest. A send carries at
+pane is refused. Reads return at most 1,000,000 bytes, keeping the newest. A send carries at
 most 4096 bytes, and a pane takes at most 20 sends a second.
 
 A connection takes many requests, answered one at a time in order, each line at most 32 KiB.
@@ -50,3 +50,20 @@ own chrome.
 programs print, which can fake them: read them as hints, not facts. `pinfold ctl send <pane>
 <text>` types into a pane. A core that refuses version 2 is older than the client, and
 `pinfold ctl` says to quit PinFold so that a new core starts.
+
+## MCP
+
+`pinfold mcp` is an MCP server over stdio (protocol version 2025-06-18) and a thin client of
+this API. Its stdout carries only newline-delimited JSON-RPC, and a line over 1,000,000 bytes is
+refused. Its tools are `pane_list_v1`, `pane_read_v1`, `pane_last_output_v1`, `pane_send_v1` and
+`pane_wait_v1`, named with their version as ADR-0009 asks, each taking its method's params and returning the method's result as JSON text.
+`pane_list_v1` adds `caller_pane`, the caller's own pane. A refusal, or no running core, is a tool
+result with `isError`. Each call opens its own connection, so the core identifies the caller by
+the server's controlling terminal: start it from an agent running in a PinFold pane, as Claude
+Code does with this in `.mcp.json`, or any client with the same command:
+
+```json
+{ "mcpServers": { "pinfold": { "command": "pinfold", "args": ["mcp"] } } }
+```
+
+A read returns at most 1,000,000 bytes of text, so read a long history with `lines`.

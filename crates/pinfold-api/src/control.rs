@@ -91,8 +91,8 @@ pub const OPEN_WAIT: Duration = Duration::from_secs(2);
 /// [`OPEN_WAIT`] for the first window of a core, which starts with nothing warm, so that a slow
 /// Mac does not report failure for a window that opens (`docs/spikes/m2-cold-start`).
 pub const FIRST_OPEN_WAIT: Duration = Duration::from_secs(10);
-/// Longest reply a client reads, the threat model's request limit.
-const MAX_REPLY: u64 = 1_000_000;
+/// Longest reply a client reads: the core closes a peer whose queue reaches [`MAX_OUTPUT`].
+const MAX_REPLY: u64 = MAX_OUTPUT as u64;
 /// Longest a launcher waits for each answer. It can queue behind one peer's first window, then
 /// have its own.
 const REPLY_WAIT: Duration = Duration::from_secs(FIRST_OPEN_WAIT.as_secs() + OPEN_WAIT.as_secs());
@@ -698,7 +698,12 @@ pub fn list_panes(stream: &UnixStream) -> Result<(Value, Value), Error> {
 /// As [`list_panes`].
 pub fn ask(stream: &UnixStream, method: &str, params: &Value) -> Result<(Value, Value), Error> {
     check_peer(stream.as_fd(), pinfold_sys::effective_uid())?;
-    stream.set_read_timeout(Some(REPLY_WAIT))?;
+    // `pane.wait` answers only when it ends, so its timeout comes on top.
+    let waits = params.get("timeout_ms").and_then(Value::as_u64);
+    let waits = waits
+        .map_or(Duration::ZERO, Duration::from_millis)
+        .min(MAX_WAIT);
+    stream.set_read_timeout(Some(REPLY_WAIT + waits))?;
     stream.set_write_timeout(Some(REPLY_WAIT))?;
     let hello = json!({"version": VERSION});
     let hello = json!({"jsonrpc": "2.0", "id": 1, "method": "hello", "params": hello});
@@ -1138,6 +1143,7 @@ mod tests {
 
     const HELLO: &[u8] = br#"{"jsonrpc":"2.0","id":1,"method":"hello","params":{"version":1}}"#;
     const OPEN: &[u8] = br#"{"jsonrpc":"2.0","id":2,"method":"window.open"}"#;
+    const PATIENCE: Duration = Duration::from_secs(120);
 
     static NEXT: AtomicUsize = AtomicUsize::new(0);
 
@@ -1577,7 +1583,16 @@ mod tests {
         assert!(matches!(Control::bind(&directory), Err(Error::Running)));
         drop(first);
         assert!(socket_path(&directory).exists());
-        assert!(Control::bind(&directory).is_ok());
+        let start = Instant::now();
+        loop {
+            match Control::bind(&directory) {
+                Ok(_) => break,
+                Err(Error::Running) if start.elapsed() < PATIENCE => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                result => panic!("the dead core kept its session: {result:?}"),
+            }
+        }
     }
 
     #[test]

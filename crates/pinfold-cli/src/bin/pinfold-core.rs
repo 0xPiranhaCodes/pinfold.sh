@@ -17,6 +17,8 @@ use serde_json::{Value, json};
 
 const ROWS: u16 = 24;
 const COLUMNS: u16 = 80;
+// A read with every byte escaped by JSON still fits in a peer's output queue.
+const _: () = assert!(2 * pinfold_core::io::MAX_READ + 4096 < control::MAX_OUTPUT);
 const IDLE: Duration = Duration::from_secs(3600);
 
 /// Returns the window binary beside this one. It is resolved once, so nothing later can name
