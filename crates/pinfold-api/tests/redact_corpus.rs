@@ -99,11 +99,6 @@ const POSITIVES: &[(Kind, &str, &str)] = &[
         "token=\"«redacted:password»\" next",
     ),
     (
-        Kind::PrivateKey,
-        "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBGZm\n-----END PGP PRIVATE KEY BLOCK-----",
-        "«redacted:private-key»",
-    ),
-    (
         Kind::HighEntropy,
         "Zm9vYmFyYmF6cXV4MTIzNDU2/aGVsbG8gd29ybGQ0MjQyNTI2Nzg/c2Vj",
         "«redacted:high-entropy»",
@@ -175,6 +170,36 @@ fn key_value_pairs_keep_the_key_and_separator() {
     let input = "PASSWORD=one passwd:two secret = three token:\"four\" api_key='five'";
     let expected = "PASSWORD=«redacted:password» passwd:«redacted:password» secret = «redacted:password» token:\"«redacted:password»\" api_key='«redacted:password»'";
     assert_eq!(redact(input), expected);
+}
+
+#[test]
+fn uri_passwords_keep_the_user_and_host() {
+    assert_eq!(
+        redact("postgres://alice:pw@db/app"),
+        "postgres://alice:«redacted:password»@db/app"
+    );
+    assert_eq!(
+        redact("custom+scheme://user:x@host.example/path"),
+        "custom+scheme://user:«redacted:password»@host.example/path"
+    );
+}
+
+#[test]
+fn at_signs_outside_uri_user_info_are_not_passwords() {
+    for input in [
+        "postgres://alice@db/app",
+        "https://example.test/users/alice:pw@db",
+        "alice:pw@example.test",
+    ] {
+        assert!(matches!(redact(input), Cow::Borrowed(_)), "changed {input}");
+    }
+}
+
+#[test]
+fn dummy_pgp_private_key_block_is_redacted() {
+    let label = ["PGP", "PRIVATE", "KEY", "BLOCK"].join(" ");
+    let input = format!("-----BEGIN {label}-----\nnot-a-real-key\n-----END {label}-----");
+    assert_eq!(redact(&input), "«redacted:private-key»");
 }
 
 #[test]

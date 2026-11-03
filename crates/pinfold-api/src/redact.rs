@@ -97,10 +97,46 @@ pub fn redact(text: &str) -> Cow<'_, str> {
 fn match_at(bytes: &[u8], index: usize) -> Option<(usize, usize, Kind)> {
     private_key_at(bytes, index)
         .map(|end| (index, end, Kind::PrivateKey))
+        .or_else(|| uri_password_at(bytes, index).map(|(start, end)| (start, end, Kind::Password)))
         .or_else(|| pair_value_at(bytes, index).map(|(start, end)| (start, end, Kind::Password)))
         .or_else(|| prefixed_token_at(bytes, index))
         .or_else(|| jwt_at(bytes, index).map(|end| (index, end, Kind::Jwt)))
         .or_else(|| entropy_at(bytes, index).map(|end| (index, end, Kind::HighEntropy)))
+}
+
+fn uri_password_at(bytes: &[u8], index: usize) -> Option<(usize, usize)> {
+    if !bytes.get(index)?.is_ascii_alphabetic() || (index > 0 && is_uri_scheme(bytes[index - 1])) {
+        return None;
+    }
+    let mut cursor: usize = index + 1;
+    while bytes.get(cursor).is_some_and(|byte| is_uri_scheme(*byte)) {
+        cursor += 1;
+    }
+    if !bytes.get(cursor..)?.starts_with(b"://") {
+        return None;
+    }
+    let authority_start: usize = cursor + 3;
+    let authority_end: usize = bytes[authority_start..]
+        .iter()
+        .position(|byte| byte.is_ascii_whitespace() || matches!(byte, b'/' | b'?' | b'#'))
+        .map_or(bytes.len(), |offset| authority_start + offset);
+    let at: usize = bytes[authority_start..authority_end]
+        .iter()
+        .rposition(|byte| *byte == b'@')
+        .map(|offset| authority_start + offset)?;
+    if at + 1 >= authority_end {
+        return None;
+    }
+    let colon: usize = bytes[authority_start..at]
+        .iter()
+        .position(|byte| *byte == b':')
+        .map(|offset| authority_start + offset)?;
+    let password_start: usize = colon + 1;
+    (colon > authority_start && password_start < at).then_some((password_start, at))
+}
+
+fn is_uri_scheme(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.')
 }
 
 fn private_key_at(bytes: &[u8], index: usize) -> Option<usize> {

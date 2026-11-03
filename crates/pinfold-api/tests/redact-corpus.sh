@@ -7,5 +7,4 @@ git log --format='%H %an %s' -n 2000
 cat Cargo.lock
 cargo tree --workspace
 ls -la / /usr/bin
-env | grep -v -i -E 'key|token|secret|pass|auth|cred' || true
 cargo build --workspace -v 2>&1 | tail -n 200
