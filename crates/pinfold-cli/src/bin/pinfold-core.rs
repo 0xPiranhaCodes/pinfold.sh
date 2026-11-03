@@ -92,7 +92,13 @@ fn answer(reactor: &mut Reactor, family: &mut Family, request: &Request) -> Resu
             }
         }
         Method::PaneSend { pane, text } => {
-            let sent = reactor.send(family.reach(reactor, own, *pane)?, text, Instant::now());
+            let target = family.reach(reactor, own, *pane)?;
+            // Another pane takes a line at a time, each checked for protection before it goes.
+            let sent = if own == Some(target) {
+                reactor.send(target, text, Instant::now())
+            } else {
+                reactor.send_lines(target, text, Instant::now()).map(drop)
+            };
             sent.map(|()| json!({})).map_err(str::to_owned)
         }
         Method::PaneSpawn(spawn) => {

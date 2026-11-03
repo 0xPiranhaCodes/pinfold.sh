@@ -40,6 +40,18 @@ pub struct Config {
     pub background_blur: bool,
     /// The `[keys]` table.
     pub keys: Keys,
+    /// The `[api]` table.
+    pub api: Api,
+}
+
+/// The `[api]` table.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Api {
+    /// Text that protects a pane when it appears in its foreground command line, with the
+    /// arguments joined by spaces. Nothing means the core's defaults.
+    #[serde(deserialize_with = "protect")]
+    pub protect: Option<Vec<String>>,
 }
 
 /// The `[keys]` table.
@@ -67,6 +79,7 @@ impl Default for Config {
             background_opacity: 1.0,
             background_blur: false,
             keys: Keys::default(),
+            api: Api::default(),
         }
     }
 }
@@ -114,6 +127,16 @@ fn prefix<'de, D: Deserializer<'de>>(deserializer: D) -> Result<char, D::Error> 
         _ => Err(de::Error::custom(format!(
             "prefix must be C- and a lowercase letter, such as \"C-a\", not {text:?}"
         ))),
+    }
+}
+
+fn protect<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Vec<String>>, D::Error> {
+    let patterns = Vec::<String>::deserialize(deserializer)?;
+    // An empty pattern would protect every pane, which is surely a mistake.
+    if patterns.iter().all(|pattern| !pattern.trim().is_empty()) {
+        Ok(Some(patterns))
+    } else {
+        Err(de::Error::custom("protect patterns must not be empty"))
     }
 }
 
@@ -393,6 +416,18 @@ mod tests {
             assert!(text.contains("from 0 to 1"), "{value}: {text}");
         }
         assert!(message(b"background_opacity = \"glass\"").contains("background_opacity"));
+    }
+
+    #[test]
+    fn protect_patterns_are_read() {
+        assert_eq!(parse(b"").unwrap().api.protect, None);
+        let config = parse(b"[api]\nprotect = [\"kubectl exec\"]\n").unwrap();
+        assert_eq!(config.api.protect, Some(vec!["kubectl exec".to_owned()]));
+        let text = message(b"[api]\nprotect = [\"psql\", \" \"]\n");
+        assert!(
+            text.contains("line 2") && text.contains("must not be empty"),
+            "{text}"
+        );
     }
 
     #[test]
