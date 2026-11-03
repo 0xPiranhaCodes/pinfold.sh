@@ -14,8 +14,10 @@ use serde::{Deserialize, Deserializer, de};
 /// The largest file read. A file written by hand is a few KiB, and this bounds startup.
 pub const MAX_BYTES: u64 = 64 * 1024;
 
-const MIN_FONT_SIZE: f32 = 6.0;
-const MAX_FONT_SIZE: f32 = 72.0;
+/// The smallest font size, in points.
+pub const MIN_FONT_SIZE: f32 = 6.0;
+/// The largest font size, in points.
+pub const MAX_FONT_SIZE: f32 = 72.0;
 
 /// Settings read at startup and on each save. Every key is optional.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
