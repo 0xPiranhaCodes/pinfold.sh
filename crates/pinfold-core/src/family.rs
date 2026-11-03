@@ -3,7 +3,8 @@
 //! A caller fully controls the panes it spawned and theirs in turn, and nothing else without a
 //! grant (threat model, Authorization). A spawned pane runs the user's shell, never a program
 //! the caller names, and goes through the same session code as the window's keys, so a window
-//! shows it like any other.
+//! shows it like any other. It takes neither focus nor the active tab, so the keyboard stays
+//! where the person left it.
 
 use std::path::Path;
 
@@ -85,9 +86,10 @@ impl Family {
             command.current_dir(cwd);
         }
         let size = reactor.area.unwrap_or(FIRST_SIZE);
+        // Focus and the active tab stay, so a caller cannot take the person's keystrokes.
         let pane = match way {
-            Some(way) => reactor.split(of, command, way),
-            None => reactor.open_tab(command, size.rows, size.cols),
+            Some(way) => reactor.split_with(of, command, way, false),
+            None => reactor.open_tab_with(command, size.rows, size.cols, false),
         };
         let pane = pane.map_err(|refusal| refusal.to_string())?;
         self.parents.push((pane, caller));
@@ -142,7 +144,8 @@ mod tests {
     use std::process::Command;
     use std::time::{Duration, Instant};
 
-    use pinfold_proto::link::MAX_TABS;
+    use pinfold_mux::PaneId;
+    use pinfold_proto::link::{MAX_PANES, MAX_TABS};
 
     use super::*;
 
@@ -179,6 +182,12 @@ mod tests {
         let (mut reactor, own) = reactor();
         let other = reactor.open_tab(waiting(), 24, 80).unwrap();
         let mut family = Family::default();
+        // The person's tab is active, and the caller's tab is behind it.
+        let focus = |reactor: &Reactor| {
+            let tabs = reactor.session.tabs().iter().map(pinfold_mux::Tab::focused);
+            (reactor.session.active(), tabs.take(2).collect::<Vec<_>>())
+        };
+        let before = focus(&reactor);
         let right = Some(SplitWay::Right);
         let child = family.spawn(&mut reactor, own, own, right, None).unwrap();
         let tab = family
@@ -190,6 +199,7 @@ mod tests {
             .spawn(&mut reactor, child, child, down, None)
             .unwrap();
         assert_eq!(reactor.session.tabs().len(), 3);
+        assert_eq!(focus(&reactor), before);
         assert!(shows(&mut reactor, tab, "[/]"));
 
         for pane in [own, child, tab, grandchild] {
@@ -230,6 +240,9 @@ mod tests {
             );
         }
         assert_eq!(reactor.pane_count(), 1);
+        // Focus and the active tab stay with the person.
+        let right = Some(SplitWay::Right);
+        family.spawn(&mut reactor, own, own, right, None).unwrap();
         for _ in 1..MAX_TABS {
             family.spawn(&mut reactor, own, own, None, None).unwrap();
         }
@@ -238,6 +251,23 @@ mod tests {
             tabs,
             Err("This session has as many tabs as it can hold".to_owned())
         );
-        assert_eq!(family.parents.len(), MAX_TABS - 1);
+        let focused =
+            |reactor: &Reactor| reactor.session.active_tab().map(pinfold_mux::Tab::focused);
+        assert_eq!(
+            (reactor.session.active(), focused(&reactor)),
+            (0, Some(own as PaneId))
+        );
+        // Each other tab's pane splits once, which fills the session.
+        let tabs = reactor.session.tabs().get(1..).unwrap_or_default();
+        let firsts: Vec<_> = tabs.iter().map(|tab| tab.focused() as usize).collect();
+        for pane in firsts {
+            family.spawn(&mut reactor, own, pane, right, None).unwrap();
+        }
+        let panes = family.spawn(&mut reactor, own, own, right, None);
+        assert_eq!(
+            panes,
+            Err("This session has as many panes as it can hold".to_owned())
+        );
+        assert_eq!(family.parents.len(), MAX_PANES - 1);
     }
 }

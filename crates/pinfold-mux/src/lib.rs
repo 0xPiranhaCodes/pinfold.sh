@@ -589,6 +589,32 @@ impl Session {
         Ok(())
     }
 
+    /// Focuses `pane` in whichever tab holds it, and leaves the active tab as it is.
+    ///
+    /// ```
+    /// use pinfold_mux::{Session, SplitDirection};
+    ///
+    /// let mut session = Session::default();
+    /// session.new_tab(1)?;
+    /// session.split(1, 2, SplitDirection::Right)?;
+    /// session.new_tab(3)?;
+    /// session.focus_in_tab(1)?;
+    /// assert_eq!((session.active(), session.tabs()[0].focused()), (1, 1));
+    /// # Ok::<(), pinfold_mux::LayoutError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// [`LayoutError::UnknownPane`] if no tab holds it.
+    pub fn focus_in_tab(&mut self, pane: PaneId) -> Result<(), LayoutError> {
+        let tab = self
+            .tabs
+            .iter_mut()
+            .find(|tab| tab.index_of(pane).is_some());
+        tab.ok_or(LayoutError::UnknownPane(pane))?.focus = pane;
+        Ok(())
+    }
+
     /// Splits `pane` in half and focuses `new` in the second half, in whichever tab holds
     /// `pane`. That tab stops zooming, so the new pane is seen in place.
     ///
