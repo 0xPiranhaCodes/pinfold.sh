@@ -40,6 +40,17 @@ pub struct Config {
     pub background_blur: bool,
     /// The `[keys]` table.
     pub keys: Keys,
+    /// The `[api]` table.
+    pub api: Api,
+}
+
+/// The `[api]` table.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Api {
+    /// Whether the audit log is also written to `audit.log` in [`state_dir`], not only kept in
+    /// memory.
+    pub audit_log: bool,
 }
 
 /// The `[keys]` table.
@@ -67,6 +78,7 @@ impl Default for Config {
             background_opacity: 1.0,
             background_blur: false,
             keys: Keys::default(),
+            api: Api::default(),
         }
     }
 }
@@ -158,6 +170,28 @@ fn path_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
     let absolute = |dir: Option<OsString>| dir.map(PathBuf::from).filter(|dir| dir.is_absolute());
     let base = absolute(xdg).or_else(|| Some(absolute(home)?.join(".config")))?;
     Some(base.join("pinfold/pinfold.toml"))
+}
+
+/// Returns the directory for state PinFold keeps between runs, or nothing if no base directory
+/// is set: `~/Library/Application Support/PinFold` on macOS, and elsewhere
+/// `$XDG_STATE_HOME/pinfold`, or `~/.local/state/pinfold` when that variable is unset.
+///
+/// ```
+/// if let Some(dir) = pinfold_config::state_dir() {
+///     assert!(dir.is_absolute());
+/// }
+/// ```
+pub fn state_dir() -> Option<PathBuf> {
+    state_dir_from(env::var_os("XDG_STATE_HOME"), env::var_os("HOME"))
+}
+
+fn state_dir_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    let absolute = |dir: Option<OsString>| dir.map(PathBuf::from).filter(|dir| dir.is_absolute());
+    if cfg!(target_os = "macos") {
+        return Some(absolute(home)?.join("Library/Application Support/PinFold"));
+    }
+    let base = absolute(xdg).or_else(|| Some(absolute(home)?.join(".local/state")))?;
+    Some(base.join("pinfold"))
 }
 
 /// Reads the config file, following a symlink, or returns the defaults if there is none.
@@ -437,6 +471,21 @@ mod tests {
         }
         assert_eq!(path_from(None, None), None);
         assert_eq!(path_from(None, some("")), None);
+    }
+
+    #[test]
+    fn the_state_dir_is_application_support_on_macos_and_xdg_elsewhere() {
+        let some = |dir: &str| Some(OsString::from(dir));
+        let found = state_dir_from(some("/xdg"), some("/home/me"));
+        let expected = if cfg!(target_os = "macos") {
+            "/home/me/Library/Application Support/PinFold"
+        } else {
+            "/xdg/pinfold"
+        };
+        assert_eq!(found, Some(PathBuf::from(expected)));
+        assert_eq!(state_dir_from(None, some("relative")), None);
+        let config = parse(b"[api]\naudit_log = true").unwrap();
+        assert!(config.api.audit_log && !Config::default().api.audit_log);
     }
 
     #[test]

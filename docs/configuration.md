@@ -12,6 +12,7 @@ variable is unset. Saving the file applies it to the running window within about
 | `background_opacity`  | number | `1`     | Default background opacity, from 0 to 1. macOS only      |
 | `background_blur`     | bool   | `false` | Blur what shows through the background. macOS only       |
 | `keys.prefix`         | string | `"C-a"` | Prefix, `C-` and a lowercase letter                      |
+| `api.audit_log`       | bool   | `false` | Also write the API audit log to disk                     |
 
 ```toml
 font_size = 14
@@ -23,6 +24,13 @@ background_blur = true
 [keys]
 prefix = "C-b"
 ```
+
+The core reads `api.audit_log` when it starts. Without it the [audit log](api/README.md) is
+kept only in memory. With it the log is also written, mode 0600, to `audit.log` in
+`~/Library/Application Support/PinFold` on macOS, and elsewhere in `$XDG_STATE_HOME/pinfold`,
+or `~/.local/state/pinfold` when that variable is unset. At 5 MiB it moves to `audit.log.1`,
+replacing the older one. If the file cannot be opened, the core says why in its log and keeps
+the log in memory. `pinfold ctl log --verify <file>` checks it.
 
 `font_path` takes a TrueType or OpenType file, or the first font in a collection. PinFold
 draws bold and italic by thickening and slanting that one font, not from separate files, and

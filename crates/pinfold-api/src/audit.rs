@@ -1,7 +1,7 @@
 //! Tamper-evident records of API calls.
 //!
 //! The canonical hash input is the previous hash followed by the record fields in declaration
-//! order. Integers are big-endian; optional integers have a one-byte presence tag; strings have
+//! order. Integers are big-endian; booleans and optional integers' presence tags are one byte; strings have
 //! an eight-byte big-endian byte length followed by UTF-8 bytes; and outcomes have a one-byte
 //! variant tag followed by their reason as a string. Thus no two field sequences are ambiguous.
 //!
@@ -17,7 +17,7 @@
 //!
 //! let mut log = Log::new();
 //! log.append(Record {
-//!     seq: 0, at_ms: 42, caller: Some(1), method: "pane.read".into(),
+//!     seq: 0, at_ms: 42, caller: Some(1), terminal: true, method: "pane.read".into(),
 //!     target: Some(2), scope: "pane.read:other".into(), outcome: Outcome::Ok("allowed".into()),
 //! })?;
 //! assert_eq!(log.for_pane(2).count(), 1);
@@ -64,7 +64,7 @@ pub enum Outcome {
 ///
 /// ```
 /// use pinfold_api::{Outcome, Record};
-/// let record = Record { seq: 7, at_ms: 100, caller: None, method: "hello".into(),
+/// let record = Record { seq: 7, at_ms: 100, caller: None, terminal: false, method: "hello".into(),
 ///     target: None, scope: "none".into(), outcome: Outcome::Ok("version matched".into()) };
 /// assert_eq!(record.seq, 7);
 /// ```
@@ -76,6 +76,9 @@ pub struct Record {
     pub at_ms: u64,
     /// Calling pane, or `None` when the caller is not identified as a pane.
     pub caller: Option<u64>,
+    /// Whether the caller had a controlling terminal. With no `caller` that means a terminal
+    /// outside any pane, and without one the caller is unidentified.
+    pub terminal: bool,
     /// API method name.
     pub method: String,
     /// Target pane, when the call has one.
@@ -91,7 +94,7 @@ pub struct Record {
 /// ```
 /// # use pinfold_api::{Log, Outcome, Record};
 /// # let mut log = Log::new();
-/// # log.append(Record { seq: 0, at_ms: 0, caller: None, method: "hello".into(),
+/// # log.append(Record { seq: 0, at_ms: 0, caller: None, terminal: false, method: "hello".into(),
 /// # target: None, scope: "none".into(), outcome: Outcome::Ok("ok".into()) })?;
 /// let entry = log.iter().next().ok_or("missing entry")?;
 /// assert_ne!(entry.hash, [0; 32]);
@@ -106,6 +109,35 @@ pub struct Entry {
     /// SHA-256 of `prev` and the canonical record bytes.
     pub hash: [u8; HASH_BYTES],
     cost: usize,
+}
+
+impl Entry {
+    /// The entry as one JSON object, as a line of the file and `audit.read` give it.
+    ///
+    /// ```
+    /// # use pinfold_api::{Log, Outcome, Record};
+    /// # let mut log = Log::new();
+    /// # log.append(Record { seq: 0, at_ms: 0, caller: Some(2), terminal: true, method: "pane.send".into(),
+    /// # target: Some(2), scope: "self".into(), outcome: Outcome::Ok("allowed, 3 bytes".into()) })?;
+    /// let entry = log.iter().next().ok_or("missing entry")?.to_json();
+    /// assert_eq!((entry["caller"].as_u64(), entry["outcome"].as_str()), (Some(2), Some("ok")));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn to_json(&self) -> Value {
+        let (outcome, reason) = match &self.record.outcome {
+            Outcome::Ok(reason) => ("ok", reason),
+            Outcome::Refused(reason) => ("refused", reason),
+            Outcome::Error(reason) => ("error", reason),
+        };
+        json!({
+            "hash": hex(&self.hash), "prev": hex(&self.prev),
+            "seq": self.record.seq, "at_ms": self.record.at_ms,
+            "caller": self.record.caller, "terminal": self.record.terminal,
+            "method": self.record.method, "target": self.record.target,
+            "scope": self.record.scope, "outcome": outcome, "reason": reason,
+        })
+    }
 }
 
 /// Location of a broken link or invalid record hash.
@@ -360,6 +392,7 @@ fn encode_record(record: &Record) -> Vec<u8> {
     bytes.extend_from_slice(&record.seq.to_be_bytes());
     bytes.extend_from_slice(&record.at_ms.to_be_bytes());
     encode_option(&mut bytes, record.caller);
+    bytes.push(u8::from(record.terminal));
     encode_string(&mut bytes, &record.method);
     encode_option(&mut bytes, record.target);
     encode_string(&mut bytes, &record.scope);
@@ -474,20 +507,7 @@ fn rotated_path(path: &Path) -> PathBuf {
 }
 
 fn format_line(entry: &Entry) -> String {
-    let (outcome, reason) = match &entry.record.outcome {
-        Outcome::Ok(reason) => ("ok", reason),
-        Outcome::Refused(reason) => ("refused", reason),
-        Outcome::Error(reason) => ("error", reason),
-    };
-    json!({
-        "hash": hex(&entry.hash), "prev": hex(&entry.prev),
-        "seq": entry.record.seq, "at_ms": entry.record.at_ms,
-        "caller": entry.record.caller, "method": entry.record.method,
-        "target": entry.record.target, "scope": entry.record.scope,
-        "outcome": outcome, "reason": reason,
-    })
-    .to_string()
-        + "\n"
+    entry.to_json().to_string() + "\n"
 }
 
 fn parse_line(line: &str, line_no: u64) -> Result<Entry, Error> {
@@ -525,6 +545,9 @@ fn parse_line(line: &str, line_no: u64) -> Result<Entry, Error> {
         seq: number("seq")?,
         at_ms: number("at_ms")?,
         caller: optional("caller")?,
+        terminal: field("terminal")?
+            .as_bool()
+            .ok_or(Error::Malformed { line: line_no })?,
         method: text("method")?,
         target: optional("target")?,
         scope: text("scope")?,
@@ -583,6 +606,7 @@ mod tests {
             seq,
             at_ms: 1_700_000_000_000 + seq,
             caller: Some(seq % 3),
+            terminal: true,
             method: "pane.send".into(),
             target: Some((seq + 1) % 3),
             scope: "children".into(),

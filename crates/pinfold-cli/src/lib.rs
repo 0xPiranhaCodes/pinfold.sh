@@ -2,6 +2,30 @@
 
 use std::io::{self, Write};
 
+pub mod audit;
+
+/// Reads the config file once, as the window does. A bad file means the defaults, which the
+/// log hears about.
+///
+/// ```no_run
+/// let config = pinfold_cli::config();
+/// assert!(config.font_size > 0.0);
+/// ```
+#[must_use]
+pub fn config() -> pinfold_config::Config {
+    let Some(path) = pinfold_config::path() else {
+        return pinfold_config::Config::default();
+    };
+    pinfold_config::load(&path).unwrap_or_else(|error| {
+        let _ = writeln!(
+            io::stderr(),
+            "pinfold-core: using the defaults, not {}: {error}",
+            path.display()
+        );
+        pinfold_config::Config::default()
+    })
+}
+
 /// Makes a panic print only its place. Stderr may be the session's log, and a panic's text can
 /// quote pane contents, as a bad `str` slice quotes the string.
 ///
