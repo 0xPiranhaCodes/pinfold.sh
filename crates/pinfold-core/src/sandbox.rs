@@ -2,9 +2,8 @@
 //!
 //! The sandbox wraps the pane's whole program: `sandbox-exec` on macOS and bubblewrap on Linux.
 //! Neither starts a session, so the agent keeps the pane's controlling terminal and session, by
-//! which the API knows it. On macOS the rules deny TIOCSTI. On Linux nothing blocks it yet, but
-//! nothing outside the sandbox reads that terminal, so TIOCSTI, which only reaches the caller's
-//! own terminal, can type into sandboxed programs alone.
+//! which the API knows it. TIOCSTI, which would type into that terminal, is denied: by the rules
+//! on macOS and by a seccomp filter on Linux.
 //!
 //! The agent writes only to its [`WorkingDirectory`] and temporary directories: a fresh `/tmp` on
 //! Linux, and `/private/tmp` and the user's temporary directory on macOS. Git runs what its
@@ -17,6 +16,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io;
+use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
@@ -184,7 +184,8 @@ fn resolve(path: &Path) -> PathBuf {
 /// # Errors
 ///
 /// Returns an error if `program` is empty or starts with `-`, the system has no sandbox, or on
-/// Linux no `bwrap` in `/usr/bin`, `/usr/local/bin` or `/bin` is root's alone.
+/// Linux no `bwrap` in `/usr/bin`, `/usr/local/bin` or `/bin` is root's alone, or the filter has
+/// no rules for this architecture.
 ///
 /// # Examples
 ///
@@ -224,9 +225,13 @@ pub fn command(
         ));
     }
     let git = git_controls(work.path())?;
-    let (tool, args) = if cfg!(target_os = "macos") {
+    let (tool, args, filter) = if cfg!(target_os = "macos") {
         let tool = PathBuf::from("/usr/bin/sandbox-exec");
-        (tool, macos_args(hidden, program, work.path(), api, &git))
+        (
+            tool,
+            macos_args(hidden, program, work.path(), api, &git),
+            None,
+        )
     } else if cfg!(target_os = "linux") {
         let tool = bwrap().ok_or_else(|| {
             io::Error::new(
@@ -237,13 +242,18 @@ pub fn command(
         })?;
         let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
         let runtime = runtime.as_deref();
-        let args = linux_args(hidden, program, work.path(), api, runtime, &git.modules);
-        (tool, args)
+        let filter = pinfold_sys::seccomp::filter()?;
+        let fd = filter.as_raw_fd();
+        let args = linux_args(hidden, program, work.path(), api, runtime, &git.modules, fd);
+        (tool, args, Some(filter))
     } else {
         return Err(io::ErrorKind::Unsupported.into());
     };
     let mut command = Command::new(tool);
     command.args(args);
+    if let Some(filter) = filter {
+        pinfold_sys::inherit(&mut command, filter);
+    }
     for name in SOCKET_VARS {
         command.env_remove(name);
     }
@@ -300,9 +310,9 @@ fn macos_args(
 
 /// `bwrap`'s arguments: the real root read-only, private `/dev`, `/proc`, `/tmp` and IPC, an
 /// empty `runtime` directory but for the API socket's, `work` writable but its `.git` and its
-/// submodules' `modules`, and an empty directory over each hidden one. A missing directory is skipped, as bwrap
-/// would make it outside the sandbox, and so is one inside another hidden directory, which that
-/// one's mount already covers.
+/// submodules' `modules`, the seccomp filter on fd `filter`, and an empty directory over each
+/// hidden one. A missing directory is skipped, as bwrap would make it outside the sandbox, and so
+/// is one inside another hidden directory, which that one's mount already covers.
 fn linux_args(
     hidden: &[PathBuf],
     program: &[String],
@@ -310,6 +320,7 @@ fn linux_args(
     api: &Path,
     runtime: Option<&Path>,
     modules: &[PathBuf],
+    filter: i32,
 ) -> Vec<OsString> {
     let fixed = [
         "--ro-bind",
@@ -346,6 +357,7 @@ fn linux_args(
             mount("--ro-bind", git);
         }
     }
+    args.extend(["--seccomp".into(), filter.to_string().into()]);
     let mounted: Vec<&PathBuf> = hidden.iter().filter(|path| path.is_dir()).collect();
     for path in &mounted {
         if mounted
@@ -582,6 +594,7 @@ mod tests {
             api,
             runtime,
             &modules,
+            7,
         );
         fs::remove_dir(&inner).unwrap();
         fs::remove_dir_all(&work).unwrap();
@@ -595,6 +608,7 @@ mod tests {
         assert!(!args.contains(&"--unshare-net"));
         assert_eq!(args[..3], ["--ro-bind", "/", "/"]);
         let has = |want: &[&str]| args.windows(want.len()).any(|got| got == want);
+        assert!(has(&["--seccomp", "7"]));
         let (work, git) = (work.to_str().unwrap(), work.join(".git"));
         let (git, module) = (git.to_str().unwrap(), module.to_str().unwrap());
         assert!(has(&["--ro-bind", module, module]));

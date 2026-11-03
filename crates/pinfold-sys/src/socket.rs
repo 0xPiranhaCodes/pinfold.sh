@@ -26,7 +26,7 @@ fn check(result: libc::c_int) -> io::Result<libc::c_int> {
 }
 
 /// Returns a close-on-exec copy of `fd` numbered `lowest` or above.
-fn duplicate(fd: RawFd, lowest: RawFd) -> io::Result<OwnedFd> {
+pub(crate) fn duplicate(fd: RawFd, lowest: RawFd) -> io::Result<OwnedFd> {
     // SAFETY: F_DUPFD_CLOEXEC takes an integer and touches no memory.
     let copy = check(unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, lowest) })?;
     // SAFETY: the call succeeded, so `copy` is open and owned only by this function.

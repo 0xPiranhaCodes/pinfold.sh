@@ -116,10 +116,8 @@ directory that does not exist when the agent starts is not hidden on Linux.
 
 The agent stays in its pane's session with the pane as its controlling terminal, so the API
 still knows it as that pane, and its socket stays reachable. On macOS the sandbox denies typing
-into that terminal with `TIOCSTI`. On Linux it does not yet, but only the agent reads that
-terminal, so such input reaches nothing outside the sandbox. Linux 6.2 and later refuse
-`TIOCSTI` to unprivileged programs when `sysctl dev.tty.legacy_tiocsti` prints `0`, the default
-on kernels built without `CONFIG_LEGACY_TIOCSTI`; check it there.
+into that terminal with `TIOCSTI`. On Linux a seccomp filter does, on x86_64 and aarch64; on
+other architectures the agent does not start.
 
 A sandboxed agent writes only to its working directory and temporary directories: a fresh,
 empty `/tmp` on Linux, and `/private/tmp` and your temporary directory on macOS. Everything else

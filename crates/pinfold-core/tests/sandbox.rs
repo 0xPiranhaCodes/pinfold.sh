@@ -1,7 +1,7 @@
 //! A sandboxed agent, run with the real `sandbox-exec` or bubblewrap, cannot read hidden
-//! directories or another pane's terminal, writes only to its working directory but not its git
-//! hooks, reaches no Unix socket but the API's, and keeps the caller identity the API gives its
-//! pane.
+//! directories or another pane's terminal or type into its own, writes only to its working
+//! directory but not its git hooks, reaches no Unix socket but the API's, and keeps the caller
+//! identity the API gives its pane.
 
 use std::fs;
 use std::io::{ErrorKind, Read};
@@ -178,10 +178,7 @@ fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
     assert!(output.contains("id_test"), "{output}");
     assert!(!output.contains("SECRET-STATE"), "{output}");
     assert!(output.contains("peer=closed"), "{output}");
-    // Linux has no TIOCSTI filter yet; the sandbox wraps the whole pane instead.
-    if cfg!(target_os = "macos") {
-        assert!(output.contains("sti=denied"), "{output}");
-    }
+    assert!(output.contains("sti=denied"), "{output}");
     assert!(output.contains("VISIBLE"), "{output}");
     let uid = format!("uid={}", pinfold_sys::effective_uid());
     assert!(output.contains(&uid), "{output}");
