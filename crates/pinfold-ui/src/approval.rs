@@ -353,14 +353,15 @@ mod tests {
             caller: 0,
             target: 1,
             action: ApprovalAction::Send,
-            texts: vec![send],
+            texts: vec![send.clone()],
         };
         assert!(fits(&prompt, 1, 22, 80));
         let mut frame = frame(22, 80);
         banner(&mut frame, &prompt, 1);
         let text = text(&frame);
+        // Rows are full-width chunks, so a whole send reads back as one run of cells.
         assert!(
-            text.contains("TAIL") && text.contains("(304 bytes)"),
+            text.contains(&format!("text 1 (304 bytes): {send}")),
             "{text}"
         );
         assert!(text.contains("y allow once"), "{text}");
