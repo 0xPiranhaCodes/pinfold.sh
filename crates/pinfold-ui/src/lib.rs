@@ -5,6 +5,7 @@ mod context_menu;
 #[cfg(target_os = "macos")]
 mod dock_menu;
 mod flash;
+mod hyperlink;
 mod ime;
 mod input;
 pub mod link;

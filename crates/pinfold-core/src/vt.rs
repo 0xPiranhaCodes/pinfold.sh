@@ -90,6 +90,10 @@ pub trait VtEngine {
     /// before the next step means a copy of any size costs one step's text.
     fn copy_step(&self, copy: &mut Copying, text: &mut String) -> CopyStep;
 
+    /// Returns the target of the OSC 8 hyperlink on the cell at `at`, if it has one and the
+    /// row is still held. Program output chose it, so it is untrusted.
+    fn hyperlink(&self, at: Position) -> Option<String>;
+
     /// Returns whether the program has asked for pastes wrapped in brackets.
     fn bracketed_paste(&self) -> bool;
 
@@ -658,6 +662,21 @@ impl VtEngine for AlacrittyEngine {
         let rows = copy.next_rows(&self.held_rows());
         self.visit_rows(rows.clone(), |number, row| copy.row(number, row, text));
         copy.end_step(rows)
+    }
+
+    fn hyperlink(&self, at: Position) -> Option<String> {
+        self.sync();
+        if !self.held_rows().contains(&at.row) {
+            return None;
+        }
+        let mut uri = None;
+        self.visit_rows(at.row..at.row + 1, |_, cells| {
+            let link = cells
+                .get(usize::from(at.column))
+                .and_then(GridCell::hyperlink);
+            uri = link.map(|link| link.uri().to_owned());
+        });
+        uri
     }
 
     fn bracketed_paste(&self) -> bool {

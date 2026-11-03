@@ -38,6 +38,7 @@ use crate::context_menu::{self as menu, Choice, Menu};
 #[cfg(target_os = "macos")]
 use crate::dock_menu;
 use crate::flash::{self, Flash};
+use crate::hyperlink::{self, Target};
 use crate::link::{self, Approval, Link, Screen, Tab};
 use crate::outbox::{self, Inbox, Outbox, Request};
 use crate::paste::Prompt;
@@ -79,6 +80,8 @@ enum Notice {
     /// The last search in this pane ended, and its match is in view if it had one.
     Searched(u32, Option<Selection>),
     Copied(String),
+    /// The hyperlink's target at a pane's cell, empty if it has none.
+    Linked(u32, Position, String),
     /// The core did not carry out a command.
     Refused(proto::Refusal),
     Approval(Approval),
@@ -174,6 +177,9 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
             .take_searched()
             .map(|(pane, found)| Notice::Searched(pane, found));
         let copied = link.take_copied().map(Notice::Copied);
+        let linked = link
+            .take_linked()
+            .map(|(pane, at, uri)| Notice::Linked(pane, at, uri));
         let raised = link.take_raised().then_some(Notice::Raise);
         let refused = link.take_refused().map(Notice::Refused);
         while let Some(approval) = link.take_approval() {
@@ -183,7 +189,9 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
         }
         let ran = link.take_was_running().into_iter();
         let ran = ran.map(|(pane, runnable, command)| Notice::WasRunning(pane, runnable, command));
-        let notices = [searched, copied, raised, refused].into_iter().flatten();
+        let notices = [searched, copied, linked, raised, refused]
+            .into_iter()
+            .flatten();
         for notice in notices.chain(ran) {
             if proxy.send_event(notice).is_err() {
                 return;
@@ -353,6 +361,8 @@ struct App {
     approvals: approval::Queue,
     /// The right-click menu, while open. Every key and press goes to it.
     menu: Option<Menu>,
+    /// The pane and cell the open menu asked the core for a hyperlink at.
+    asking: Option<(u32, Position)>,
     prefix: Prefix,
     flash: Flash,
     selecting: Selecting,
@@ -1005,6 +1015,14 @@ impl App {
                 Some(Prompt::Close { pane, .. }) => {
                     self.core(proto::Request::ClosePane { pane });
                 }
+                Some(Prompt::OpenLink(uri)) => {
+                    let (rows, columns) = self.area;
+                    if hyperlink::fits(&uri, rows, columns) {
+                        launch(&uri, false);
+                    } else {
+                        self.prompt = Some(Prompt::OpenLink(uri));
+                    }
+                }
                 _ => {}
             },
             Key::Named(NamedKey::Escape) => self.prompt = None,
@@ -1095,8 +1113,16 @@ impl App {
                 self.menu = None;
                 match choice {
                     Choice::Run(command) => self.command(event_loop, command),
-                    // Not offered yet: see where the menu opens.
-                    Choice::OpenLink(_) | Choice::CopyLink(_) => {}
+                    Choice::OpenLink(uri) => match hyperlink::check(&uri) {
+                        Some(Target::Web) => launch(&uri, false),
+                        Some(Target::Ask) => self.prompt = Some(Prompt::OpenLink(uri)),
+                        None => {}
+                    },
+                    Choice::CopyLink(uri) => {
+                        if let Some(clipboard) = self.clipboard() {
+                            clipboard.set_text(uri);
+                        }
+                    }
                 }
             }
         }
@@ -1147,8 +1173,11 @@ impl App {
             && self.prompt.is_none()
             && mode.is_some_and(|mode| selection::owns_press(mode, self.modifiers))
         {
-            // shortcut: frames say nothing of hyperlinks, so Open Link and Copy Link never show.
-            // Pass the cell's link here once the core can report it.
+            // The link items join when the core answers, so a slow core cannot hold the menu.
+            self.asking = self.pointer_position().map(|at| (self.focused, at));
+            if let Some((pane, at)) = self.asking {
+                self.core(proto::Request::Link { pane, at });
+            }
             self.menu = Some(Menu::open(self.pointer, self.area, None));
             return self.redraw_soon();
         }
@@ -1289,6 +1318,15 @@ impl ApplicationHandler<Notice> for App {
             Notice::Frame => self.redraw_soon(),
             Notice::Searched(pane, found) => self.searched(pane, found),
             // Blank cells copy as nothing, which must not empty the clipboard.
+            Notice::Linked(pane, at, uri) => {
+                let asked = self.asking == Some((pane, at));
+                let menu = self.menu.as_mut().filter(|_| asked);
+                // Copy Link copies only what Open Link would take.
+                if let Some(menu) = menu.filter(|_| hyperlink::check(&uri).is_some()) {
+                    menu.link(uri);
+                    self.redraw_soon();
+                }
+            }
             Notice::Copied(text) if text.is_empty() => {}
             Notice::Copied(text) => {
                 if let Some(clipboard) = self.clipboard() {
@@ -1425,7 +1463,8 @@ fn launch(target: &str, text: bool) {
         // Reaped on a thread of its own, so it leaves no zombie and the window does not wait.
         Ok(mut child) => drop(thread::spawn(move || child.wait())),
         Err(error) => {
-            let _ = writeln!(io::stderr(), "pinfold: cannot open {target}: {error}");
+            // Not the target, which may be a link that program output chose.
+            let _ = writeln!(io::stderr(), "pinfold: cannot start the opener: {error}");
         }
     }
 }
@@ -1551,6 +1590,7 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
             queue
         },
         menu: None,
+        asking: None,
         flash: Flash::default(),
         selecting: Selecting::default(),
         bar: None,
