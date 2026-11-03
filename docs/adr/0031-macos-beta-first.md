@@ -14,7 +14,8 @@ Wayland machines (#47), and they are the slowest part of a two-platform release.
 The first release is a beta for macOS only. v0.1, the first main release, covers macOS and Linux.
 
 - **Blocks the beta:** the macOS window budget ([ADR-0030](0030-macos-window-fixed-part.md)), the
-  manual Mac checks, and Developer ID signing and notarization.
+  manual Mac checks, Developer ID signing and notarization, and, as the maintainer added on
+  2026-11-03, the menu bar, Dock menu and right-click menu ([ADR-0033](0033-menus.md)).
 - **Blocks v0.1, not the beta:** Linux desktop checks such as #47.
 - **Stays as it is:** Linux in CI on every PR, so it does not rot.
 
