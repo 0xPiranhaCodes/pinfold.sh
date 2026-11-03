@@ -1715,16 +1715,34 @@ mod tests {
         assert_eq!(state.sent.cells.capacity(), 0, "a zoom hides the others");
     }
 
+    /// Kills a fixture's loop and removes its directory, even when the test panics.
+    struct Cleanup(PathBuf);
+
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            if let Ok(pid) = fs::read_to_string(self.0.join("loop")) {
+                let _ = Command::new("kill").arg(pid.trim()).status();
+            }
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn closing_ends_the_shell_frees_the_pane_and_spares_the_rest() {
         let (mut reactor, mut peer, first) = session(24, 80);
         let dir = std::env::temp_dir().join(format!("pinfold-close-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
+        let _cleanup = Cleanup(dir.clone());
         let (pid, hup) = (dir.join("pid"), dir.join("hup"));
+        // The loop outlives the hangup on purpose, so it ends once the directory goes, or
+        // after 1,200 turns if the test dies before removing it.
         let script = format!(
-            "echo $$ > '{}'; (trap 'echo hup > {}' HUP; while :; do sleep 0.05; done) & echo ready; read line",
+            "echo $$ > '{}'; (trap 'echo hup > {}' HUP; n=0; while [ -d '{}' ] && [ $n -lt 1200 ]; \
+             do sleep 0.05; n=$((n+1)); done) & echo $! > '{}'; echo ready; read line",
             pid.display(),
             hup.display(),
+            dir.display(),
+            dir.join("loop").display(),
         );
         let doomed = reactor
             .split(first as usize, shell(&script), SplitWay::Down)
@@ -1758,7 +1776,6 @@ mod tests {
         assert_eq!(peer.shown, [(first, right(0, 80, 24))]);
         assert_eq!(peer.focused, first);
         assert_pty_lives(&mut reactor, first as usize);
-        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

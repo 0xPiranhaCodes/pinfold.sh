@@ -11,6 +11,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Fixed
 
+- On macOS a new pane no longer fails to start, as "Device not configured" or "The shell would not start", when another pane closes at the same moment: opening its PTY is tried once more.
 - A sandboxed agent can no longer write outside its working directory and temporary directories, such as to `~/.zshrc`, and Linux takes `bwrap` only from root-owned system directories, not `PATH`, where an agent could plant one. The working directory must be the user's own and private, not home, above it, a dot-directory of home, `~/Library` or inside `.git`, and git cannot be made to run its code: on Linux its `.git` is read-only, so commits happen outside the sandbox, and on macOS the hooks, config and pointers of the repository and its submodules are, and each listed submodule's `.git` stays read-only on both. The agent reaches no Unix socket but PinFold's API socket and gets no `SSH_AUTH_SOCK`, `GPG_AGENT_INFO` or `DBUS_SESSION_BUS_ADDRESS`; on Linux it also gets its own IPC, host name and cgroup namespaces and ends with the core.
 - The core now applies `api.protect` from the config file; before, only the default patterns protected panes.
 - `past_its_identitys_cap_a_peer_is_closed_unread` no longer fails on macOS when the core closes the extra peer before the test sets its read timeout.
