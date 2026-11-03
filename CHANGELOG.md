@@ -23,6 +23,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Changed
 
+- `cargo xtask mem-gate` also reads each window with a full glyph cache and with 8 tabs, and lists a window with a menu open as not measured yet.
 - The release dry run can no longer be started by hand. It runs on version tags and on pull requests that change packaging or `release.yml`.
 - Refined window chrome with graphite tab surfaces, teal active labels, readable unfocused tabs, quieter search hints, and more space around the terminal.
 

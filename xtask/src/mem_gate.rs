@@ -32,7 +32,13 @@ pub const WINDOW_SETTLE: Duration = Duration::from_secs(7);
 const CJK_FONTS: [&str; 4] = ["Hiragino", "AppleSDGothicNeo", "NotoSansCJK", "wqy-zenhei"];
 
 /// ADR-0021 budgets with nothing to measure yet, and the issue that makes them measurable.
-const NOT_MEASURED: [(&str, &str); 1] = [("Window on Wayland", "a compositor in CI")];
+const NOT_MEASURED: [(&str, &str); 2] = [
+    ("Window on Wayland", "a compositor in CI"),
+    (
+        "Window with a menu open",
+        "the Dock menu (#114) and context menu (#115)",
+    ),
+];
 
 /// Which process of a core with a window to read.
 #[derive(Clone, Copy, PartialEq)]
@@ -336,6 +342,18 @@ mod tests {
     fn the_cjk_font_names_match_the_renderer() {
         let fonts = include_str!("../../crates/pinfold-render/src/font.rs");
         assert!(CJK_FONTS.iter().all(|name| fonts.contains(name)));
+    }
+
+    #[test]
+    fn the_heavy_screen_text_holds_more_glyphs_than_a_full_cache() {
+        let screen = include_str!("../../tests/window/heavy-screen.txt");
+        let text = ["\x1b[0m", "\x1b[1m", "\x1b[3m"]
+            .iter()
+            .fold(screen.to_owned(), |text, sgr| text.replace(sgr, ""));
+        let glyphs: std::collections::HashSet<char> =
+            text.chars().filter(|c| !c.is_whitespace()).collect();
+        // Metal's atlas holds about 2,000 ASCII-sized glyphs (`metal.rs`).
+        assert!(glyphs.len() > 2_000, "{} glyphs", glyphs.len());
     }
 
     #[test]
