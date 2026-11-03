@@ -974,11 +974,18 @@ mod tests {
     #[test]
     fn sends_past_20_a_second_or_a_full_queue_are_refused() {
         let mut reactor = Reactor::new().unwrap();
-        // The shell's own `read` holds the foreground: a program it started could still be
-        // starting, and a loaded machine can then hide its arguments, which protects the pane.
-        let script = "stty raw -echo; echo ready; read line";
+        let script = "stty raw -echo; echo ready; exec sleep 30";
         let pane = reactor.spawn(shell(script), 24, 80).unwrap();
-        assert!(turn_until(&mut reactor, |r| on_screen(r, pane, "ready")));
+        // A program still starting hides its arguments on a loaded Mac, which protects the
+        // pane, so wait until `sleep` holds the foreground with them readable.
+        let started = |r: &Reactor| {
+            let master = std::os::fd::AsFd::as_fd(r.pty(pane).unwrap().master());
+            pinfold_sys::foreground::foreground(master).is_ok_and(|found| {
+                let sleep = |m: &pinfold_sys::foreground::Process| m.name == "sleep";
+                found.members.iter().any(|m| sleep(m) && m.argv.is_some())
+            })
+        };
+        assert!(turn_until(&mut reactor, |r| on_screen(r, pane, "ready") && started(r)));
         let now = Instant::now();
         for _ in 0..SENDS_PER_SECOND {
             assert_eq!(reactor.send(pane, "x", now), Ok(()));

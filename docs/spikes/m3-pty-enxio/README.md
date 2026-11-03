@@ -11,6 +11,11 @@ The cause is a race in XNU's `bsd/kern/tty_ptmx.c`:
 3. If another PTY closes in between, a slot is free, the vector does not grow, the chosen
    minor is out of range, and `posix_openpt` returns ENXIO.
 
+"Every slot in use" means the kernel's slot vector, not `kern.tty.ptmx_max`. The vector
+grows 16 slots at a time (`PTMX_GROW_VECTOR`) and never shrinks, so the race is open each
+time the PTYs in use reach a new high. That is why `race.c` hit it only on its first run
+on this machine, and why CI's fresh runners, filling PTYs from zero, hit it.
+
 Opening again takes the freed slot, so `Pty::spawn` retries once on ENXIO. A table that is
 truly full (`kern.tty.ptmx_max`) refuses the second open too.
 
@@ -24,7 +29,7 @@ Silicon Mac, macOS 27, `ptmx_max` 511, on 2026-11-03:
 | 1   | 2                   | 0 (1 other failure, errno not yet printed) |
 | 2–4 | 0, 0, 0             | 0, 0                 |
 
-The race is rare, as on CI. The fourth retry run was stopped by hand at load average 284.
+Probably only the first run set a new high on this machine (see above); the PTYs in use were not logged. The third retry run was stopped by hand at load average 284.
 
 `stress.sh` runs the whole `pinfold-core` lib suite in the background each round and the
 three tests that flaked on CI in the foreground, under 6 `yes` loaders, 50 rounds. The
