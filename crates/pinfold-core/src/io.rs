@@ -539,9 +539,9 @@ impl Reactor {
         })
     }
 
-    /// A pane's PTY master, for [`Reactor::protection`].
-    pub(crate) fn master(&self, pane: usize) -> Option<&std::fs::File> {
-        Some(self.pane(pane)?.pty.master())
+    /// A pane's PTY, for [`Reactor::protection`].
+    pub(crate) fn pty(&self, pane: usize) -> Option<&Pty> {
+        Some(&self.pane(pane)?.pty)
     }
 
     fn pane(&self, number: usize) -> Option<&Pane> {

@@ -1,10 +1,12 @@
-//! Protected panes, which refuse API writes even with a grant, and sends split at newlines
+//! Protected panes, which refuse API writes even with a grant, and sends split at line ends
 //! (threat model, Authorization).
 //!
 //! A pane is protected while any process of its foreground group is `ssh`, `mosh`, `sudo`, `su`
 //! or `doas` by name, runs as root, cannot be read or matches a command-line pattern, while
-//! the terminal reads a password (echo off), or while it is marked. A send to another pane goes a line at a time, with the check made again
-//! [`LINE_GAP`] after each line, so `ssh prod\nrm -rf ~\n` cannot land its second line in ssh.
+//! the terminal reads a password (echo off), or while it is marked. A send to another pane goes
+//! a line at a time. Each next line waits [`LINE_GAP`] and for the pane's own program to hold
+//! the foreground again, and is checked just before it is written, so `ssh prod\nrm -rf ~\n`
+//! cannot land its second line in ssh.
 
 use std::os::fd::AsFd;
 use std::time::{Duration, Instant};
@@ -13,8 +15,12 @@ use pinfold_sys::foreground::{self, Process};
 
 use crate::io::Reactor;
 
-/// How long a split send waits after a line before it checks the pane again.
+/// The least time between the lines of a split send.
 pub const LINE_GAP: Duration = Duration::from_millis(150);
+/// How long a split send waits for the pane's own program to hold the foreground again.
+pub const SHELL_WAIT: Duration = Duration::from_secs(10);
+/// How often a waiting split send checks the pane.
+const RECHECK: Duration = Duration::from_millis(50);
 
 /// Command-line patterns used until config names others: shells into other machines,
 /// containers and databases.
@@ -35,7 +41,8 @@ pub enum Reason {
     EchoOff,
     /// Marked by the person.
     Marked,
-    /// A command-line pattern, or a process that could not be read.
+    /// A command-line pattern, a process that could not be read, or for a split send, a
+    /// foreground that did not return to the pane's own program in time.
     Rule,
 }
 
@@ -93,13 +100,42 @@ fn matches(pattern: &str, argv: &[String]) -> bool {
     first.rsplit('/').next() == Some(program) && words.all(|word| rest.any(|arg| arg == word))
 }
 
+/// Where the first line of `text` ends: after `\n` or `\r`, as a terminal maps either to a line
+/// end, so `\r\n` is two.
+fn line_end(text: &str) -> usize {
+    text.find(['\n', '\r']).map_or(text.len(), |at| at + 1)
+}
+
+/// Who holds a terminal's foreground.
+#[derive(Debug, PartialEq, Eq)]
+enum Holder {
+    /// The pane's own program, such as its shell.
+    Own,
+    /// A program the pane's own one started.
+    Other,
+    /// A group whose processes have all ended, before the shell takes the terminal back.
+    Nobody,
+}
+
+/// The rest of a split send.
+#[derive(Debug)]
+struct Pending {
+    pane: usize,
+    rest: String,
+    /// When to look at the pane next.
+    check: Instant,
+    /// The next line goes no sooner than this.
+    after: Instant,
+    /// Past this, a foreground that is not the pane's own program drops the rest.
+    give_up: Instant,
+}
+
 /// The reactor's protection state.
 #[derive(Debug)]
 pub(crate) struct Protect {
     patterns: Vec<String>,
     marked: Vec<usize>,
-    /// The rest of each split send, and when its next line is due.
-    pending: Vec<(usize, String, Instant)>,
+    pending: Vec<Pending>,
     refused: Vec<(usize, Reason)>,
 }
 
@@ -115,14 +151,21 @@ impl Default for Protect {
 }
 
 impl Protect {
-    /// When the next line of a split send is due.
+    /// When a split send next looks at its pane.
     pub(crate) fn deadline(&self) -> Option<Instant> {
-        self.pending.iter().map(|(_, _, due)| *due).min()
+        self.pending.iter().map(|pending| pending.check).min()
     }
 
     /// Whether a split send to `pane` still has lines to go.
     pub(crate) fn is_sending(&self, pane: usize) -> bool {
-        self.pending.iter().any(|(to, _, _)| *to == pane)
+        self.pending.iter().any(|pending| pending.pane == pane)
+    }
+
+    fn refuse(&mut self, pane: usize, reason: Reason) {
+        // Bounded, as nothing may take them yet.
+        if self.refused.len() < MAX_REFUSED {
+            self.refused.push((pane, reason));
+        }
     }
 }
 
@@ -130,20 +173,39 @@ impl Reactor {
     /// Why a pane refuses API writes now, or nothing if it takes them.
     #[must_use]
     pub fn protection(&self, pane: usize) -> Option<Reason> {
+        match self.inspect(pane)? {
+            // A group with no live process is not known to be safe either.
+            Ok(Holder::Nobody) => Some(Reason::Rule),
+            Ok(_) => None,
+            Err(reason) => Some(reason),
+        }
+    }
+
+    /// Nothing for an unknown pane, else who holds its foreground, or why it is protected.
+    fn inspect(&self, pane: usize) -> Option<Result<Holder, Reason>> {
         if self.protect.marked.contains(&pane) {
-            return Some(Reason::Marked);
+            return Some(Err(Reason::Marked));
         }
-        // A terminal or process that cannot be read, or a group with no live process, is not
-        // known to be safe.
-        let Ok(found) = foreground::foreground(self.master(pane)?.as_fd()) else {
-            return Some(Reason::Rule);
+        let pty = self.pty(pane)?;
+        // A terminal or process that cannot be read is not known to be safe.
+        let Ok(found) = foreground::foreground(pty.master().as_fd()) else {
+            return Some(Err(Reason::Rule));
         };
-        if found.members.is_empty() {
-            return Some(Reason::Rule);
-        }
         let patterns = &self.protect.patterns;
-        let reason = found.members.iter().find_map(|m| classify(m, patterns));
-        reason.or(found.echo_off.then_some(Reason::EchoOff))
+        if let Some(reason) = found.members.iter().find_map(|m| classify(m, patterns)) {
+            return Some(Err(reason));
+        }
+        if found.echo_off {
+            return Some(Err(Reason::EchoOff));
+        }
+        Some(Ok(if found.members.is_empty() {
+            Holder::Nobody
+        // The program leads its session, so its group's id is the session's.
+        } else if found.group == pty.terminal().session {
+            Holder::Own
+        } else {
+            Holder::Other
+        }))
     }
 
     /// Marks a pane protected, or clears the mark.
@@ -161,28 +223,44 @@ impl Reactor {
         self.protect.patterns = patterns;
     }
 
-    /// Sends `text` to another pane a line at a time: the first now, as [`Reactor::send`] does,
-    /// and each next one [`LINE_GAP`] later if the pane is still unprotected. Returns how many
-    /// lines the text has. A line the check stops is dropped with the rest, and
-    /// [`Reactor::take_refused`] tells of it.
+    /// Sends `text` to another pane a line at a time, splitting after each `\n` and `\r`.
+    /// The first line goes now, as [`Reactor::send`] sends it. Each next one goes once
+    /// [`LINE_GAP`] has passed and the pane's own program holds the foreground again, after a
+    /// check just before it is written. A check that finds the pane protected, or a foreground
+    /// still held by another program after [`SHELL_WAIT`], drops the rest, and
+    /// [`Reactor::take_refused`] tells of it. Returns how many lines the text has.
     ///
     /// # Errors
     ///
-    /// Returns [`Reactor::send`]'s refusal for the first line.
+    /// Refuses, writing nothing, text with control characters other than tab and line ends,
+    /// which could end a line or signal the program, and otherwise returns [`Reactor::send`]'s
+    /// refusal for the first line.
     pub fn send_lines(
         &mut self,
         pane: usize,
         text: &str,
         now: Instant,
     ) -> Result<usize, &'static str> {
-        let (first, rest) = text.split_at(text.find('\n').map_or(text.len(), |at| at + 1));
+        let control = |byte: u8| byte < 0x20 && !matches!(byte, b'\t' | b'\n' | b'\r');
+        if text.bytes().any(control) {
+            return Err("the text has control characters");
+        }
+        let (first, rest) = text.split_at(line_end(text));
         self.send(pane, first, now)?;
         if !rest.is_empty() {
-            self.protect
-                .pending
-                .push((pane, rest.to_owned(), now + LINE_GAP));
+            self.protect.pending.push(Pending {
+                pane,
+                rest: rest.to_owned(),
+                check: now + RECHECK,
+                after: now + LINE_GAP,
+                give_up: now + LINE_GAP + SHELL_WAIT,
+            });
         }
-        Ok(text.split_inclusive('\n').count())
+        let (mut lines, mut left) = (1, rest);
+        while !left.is_empty() {
+            (lines, left) = (lines + 1, &left[line_end(left)..]);
+        }
+        Ok(lines)
     }
 
     /// Returns the panes whose split sends a check stopped since the last call, and why.
@@ -190,25 +268,34 @@ impl Reactor {
         std::mem::take(&mut self.protect.refused)
     }
 
-    /// Sends the next line of each split send that is due.
+    /// Checks each split send that is due, and sends its next line if it may.
     pub(crate) fn send_due(&mut self, now: Instant) {
         let mut pending = std::mem::take(&mut self.protect.pending);
-        pending.retain_mut(|(pane, rest, due)| {
-            if *due > now {
+        pending.retain_mut(|send| {
+            if send.check > now {
                 return true;
             }
-            if let Some(reason) = self.protection(*pane) {
-                // Bounded, as nothing may take them yet.
-                if self.protect.refused.len() < MAX_REFUSED {
-                    self.protect.refused.push((*pane, reason));
+            let holder = match self.inspect(send.pane) {
+                None => return false,
+                Some(Err(reason)) => {
+                    self.protect.refuse(send.pane, reason);
+                    return false;
                 }
-                return false;
+                Some(Ok(holder)) => holder,
+            };
+            if holder != Holder::Own || now < send.after {
+                if now >= send.give_up {
+                    self.protect.refuse(send.pane, Reason::Rule);
+                    return false;
+                }
+                send.check = now + RECHECK;
+                return true;
             }
-            let at = rest.find('\n').map_or(rest.len(), |at| at + 1);
-            let line: String = rest.drain(..at).collect();
-            *due = now + LINE_GAP;
+            let line: String = send.rest.drain(..line_end(&send.rest)).collect();
+            (send.check, send.after) = (now + RECHECK, now + LINE_GAP);
+            send.give_up = now + LINE_GAP + SHELL_WAIT;
             // A full queue drops the rest, as a refused send would.
-            self.write(*pane, line.as_bytes()) && !rest.is_empty()
+            self.write(send.pane, line.as_bytes()) && !send.rest.is_empty()
         });
         self.protect.pending.append(&mut pending);
     }
@@ -270,6 +357,14 @@ mod tests {
         assert!(!matches("", &argv("anything")));
     }
 
+    #[test]
+    fn lines_end_at_either_line_end() {
+        assert_eq!(line_end("a\rb"), 2);
+        assert_eq!(line_end("a\r\nb"), 2);
+        assert_eq!(line_end("a\nb"), 2);
+        assert_eq!(line_end("ab"), 2);
+    }
+
     fn turn_until(reactor: &mut Reactor, done: impl Fn(&mut Reactor) -> bool) -> bool {
         let start = Instant::now();
         while !done(reactor) && start.elapsed() < Duration::from_secs(10) {
@@ -322,18 +417,70 @@ mod tests {
     #[test]
     fn a_split_send_sends_every_line_to_a_shell() {
         let mut reactor = Reactor::new().unwrap();
-        let pane = spawn(&mut reactor, "read a; read b; echo \"got $a $b\"; sleep 30");
-        assert_eq!(
-            reactor.send_lines(pane, "one\ntwo\n", Instant::now()),
-            Ok(2)
-        );
+        let script = "read a; read b; read c; echo \"got $a $b $c\"; sleep 30";
+        let pane = spawn(&mut reactor, script);
+        let sent = reactor.send_lines(pane, "one\rtwo\nthree\n", Instant::now());
+        assert_eq!(sent, Ok(3));
         let got = |reactor: &mut Reactor| {
             reactor
                 .read(pane, None)
-                .is_some_and(|text| text.contains("got one two"))
+                .is_some_and(|text| text.contains("got one two three"))
         };
         assert!(turn_until(&mut reactor, got));
         assert!(reactor.take_refused().is_empty());
+    }
+
+    #[test]
+    fn control_characters_refuse_a_split_send_whole() {
+        let mut reactor = Reactor::new().unwrap();
+        let pane = spawn(&mut reactor, "sleep 30");
+        for text in ["echo hi\x04", "a\x1b[A\n", "\x03", "b\x00"] {
+            let refused = reactor.send_lines(pane, text, Instant::now());
+            assert_eq!(refused, Err("the text has control characters"), "{text:?}");
+        }
+        assert!(!reactor.protect.is_sending(pane));
+        assert_eq!(reactor.send_lines(pane, "a\tb", Instant::now()), Ok(1));
+    }
+
+    /// An interactive shell with job control gives the foreground to each command it runs.
+    fn interactive(dir: &std::path::Path) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command.arg("-i").current_dir(dir).env_clear();
+        command.envs([("PATH", dir), ("HOME", dir)]);
+        command.env("PS1", "ready$ ");
+        command
+    }
+
+    fn at_prompt(reactor: &mut Reactor, pane: usize) {
+        // A person types at a prompt. Typed earlier, both lines would wait for the shell.
+        let ready = |reactor: &mut Reactor| reactor.read(pane, None).unwrap().contains("ready$");
+        assert!(turn_until(reactor, ready));
+    }
+
+    #[test]
+    fn a_next_line_waits_for_the_shell_to_hold_the_foreground() {
+        let dir = std::env::temp_dir().join(format!("pinfold-protect-wait-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::os::unix::fs::symlink("/bin/sleep", dir.join("sleep")).unwrap();
+        let mut reactor = Reactor::new().unwrap();
+        let pane = reactor.spawn(interactive(&dir), 24, 80).unwrap();
+        at_prompt(&mut reactor, pane);
+
+        let start = Instant::now();
+        let sent = reactor.send_lines(pane, "sleep 1\necho after\n", start);
+        assert_eq!(sent, Ok(2));
+        let done = |reactor: &mut Reactor| !reactor.protect.is_sending(pane);
+        assert!(turn_until(&mut reactor, done));
+        assert!(
+            start.elapsed() >= Duration::from_secs(1),
+            "{:?}",
+            start.elapsed()
+        );
+        let ran = |reactor: &mut Reactor| reactor.read(pane, None).unwrap().contains("\nafter");
+        assert!(turn_until(&mut reactor, ran));
+        assert!(reactor.take_refused().is_empty());
+        drop(reactor);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     const FAKE_SSH: &str = "PINFOLD_TEST_FAKE_SSH";
@@ -360,15 +507,11 @@ mod tests {
         linked
             .or_else(|_| std::fs::copy(&this, &ssh).map(drop))
             .unwrap();
-        let mut command = Command::new("/bin/sh");
-        command.arg("-i").current_dir(&dir).env_clear();
-        command.envs([("PATH", &dir), ("HOME", &dir)]);
-        command.envs([(FAKE_SSH, "1"), ("PS1", "ready$ ")]);
+        let mut command = interactive(&dir);
+        command.env(FAKE_SSH, "1");
         let mut reactor = Reactor::new().unwrap();
         let pane = reactor.spawn(command, 24, 80).unwrap();
-        // A person types at a prompt. Typed earlier, both lines would wait for the shell.
-        let ready = |reactor: &mut Reactor| reactor.read(pane, None).unwrap().contains("ready$");
-        assert!(turn_until(&mut reactor, ready));
+        at_prompt(&mut reactor, pane);
 
         let sent = reactor.send_lines(pane, "ssh prod\nrm -rf ~\n", Instant::now());
         assert_eq!(sent, Ok(2));
