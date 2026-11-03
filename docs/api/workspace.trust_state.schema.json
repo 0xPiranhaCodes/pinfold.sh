@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "workspace.trust_state",
+  "description": "Whether a directory is trusted with a layout's hash. Needs hello version 2 and an identified terminal outside every pane.",
+  "type": "object",
+  "properties": {
+    "params": {
+      "type": "object",
+      "required": ["root", "sha256"],
+      "properties": {
+        "root": { "type": "string", "pattern": "^/", "description": "The canonical project directory." },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "result": {
+      "type": "object",
+      "required": ["trusted", "changed"],
+      "additionalProperties": false,
+      "properties": {
+        "trusted": { "type": "boolean" },
+        "changed": { "type": "boolean", "description": "The directory was trusted with another hash." }
+      }
+    }
+  }
+}

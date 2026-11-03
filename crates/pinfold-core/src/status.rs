@@ -18,6 +18,9 @@ use crate::marks::{ShellMarks, ShellPhase};
 /// ```
 pub const ALERT_INTERVAL: Duration = Duration::from_secs(10);
 
+/// The most characters a `pane.status` message may have.
+pub const MAX_MESSAGE: usize = 200;
+
 /// The semantic colour used to draw a status.
 ///
 /// ```
@@ -99,6 +102,39 @@ impl Status {
         }
     }
 
+    /// Returns the status as the API names it.
+    ///
+    /// ```
+    /// use pinfold_core::status::Status;
+    ///
+    /// assert_eq!(Status::NeedsYou.name(), "needs-you");
+    /// assert_eq!(Status::from_name("needs-you"), Some(Status::NeedsYou));
+    /// ```
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::NeedsYou => "needs-you",
+            Self::Running => "running",
+            Self::Done => "done",
+            Self::Error => "error",
+            Self::Idle => "idle",
+        }
+    }
+
+    /// Reads a name that [`Status::name`] returns.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        [
+            Self::NeedsYou,
+            Self::Running,
+            Self::Done,
+            Self::Error,
+            Self::Idle,
+        ]
+        .into_iter()
+        .find(|status| status.name() == name)
+    }
+
     /// Returns the semantic colour role for the status.
     ///
     /// ```
@@ -116,6 +152,37 @@ impl Status {
             Self::Idle => ColourRole::Grey,
         }
     }
+}
+
+/// Returns a reported message without control, bidi or zero-width characters, or state
+/// glyphs, so it cannot move, reorder or fake what Pinfold's chrome draws (T4, T6).
+///
+/// ```
+/// use pinfold_core::status::sanitize;
+///
+/// assert_eq!(sanitize("ok\u{1b}[31m\u{202e}◆"), "ok[31m");
+/// ```
+#[must_use]
+pub fn sanitize(message: &str) -> String {
+    message
+        .chars()
+        .filter(|&character| {
+            !matches!(
+                character,
+                '\u{200b}'..='\u{200f}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2060}'..='\u{2069}'
+                    | '\u{061c}'
+                    | '\u{feff}'
+                    | '◆'
+                    | '●'
+                    | '✓'
+                    | '✕'
+                    | '○'
+            ) && !character.is_control()
+        })
+        .take(MAX_MESSAGE)
+        .collect()
 }
 
 /// A request for the notification layer to alert about a status transition.
@@ -298,6 +365,7 @@ mod tests {
             phase,
             finished,
             exit,
+            prompts: 0,
         }
     }
 
@@ -413,6 +481,15 @@ mod tests {
             assert_eq!(status.glyph(), glyph);
             assert_eq!(status.word(), word);
             assert_eq!(status.colour(), colour);
+            assert_eq!(Status::from_name(status.name()), Some(status));
         }
+        assert_eq!(Status::from_name("needs you"), None);
+    }
+
+    #[test]
+    fn a_message_loses_control_bidi_and_glyphs_and_stays_short() {
+        let hostile = "a\r\n\u{1b}]0;x\u{7}b\u{202e}c\u{2066}d\u{200b}e✓f\u{9b}g";
+        assert_eq!(sanitize(hostile), "a]0;xbcdefg");
+        assert_eq!(sanitize(&"é".repeat(300)).chars().count(), MAX_MESSAGE);
     }
 }
