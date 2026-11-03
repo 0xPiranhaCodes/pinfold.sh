@@ -244,6 +244,25 @@ fn state_dir_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathB
     Some(base.join("pinfold"))
 }
 
+/// Returns the directory for data a Linux sandboxed agent keeps, its shadow git directories
+/// (ADR-0039), or nothing if no base directory is set: `$XDG_DATA_HOME/pinfold`, or
+/// `~/.local/share/pinfold` when that variable is unset. The sandbox does not hide it.
+///
+/// ```
+/// if let Some(dir) = pinfold_config::data_dir() {
+///     assert!(dir.is_absolute());
+/// }
+/// ```
+pub fn data_dir() -> Option<PathBuf> {
+    data_dir_from(env::var_os("XDG_DATA_HOME"), env::var_os("HOME"))
+}
+
+fn data_dir_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    let absolute = |dir: Option<OsString>| dir.map(PathBuf::from).filter(|dir| dir.is_absolute());
+    let base = absolute(xdg).or_else(|| Some(absolute(home)?.join(".local/share")))?;
+    Some(base.join("pinfold"))
+}
+
 /// Returns what a sandboxed agent may not see: `~/.ssh`, the config file's directory and
 /// [`state_dir`], each also as it resolves through symlinks, so a config file linked from a
 /// dotfiles repo hides that repo's directory too. The runtime directory is not among them, as an
@@ -646,6 +665,14 @@ mod tests {
         };
         assert_eq!(found, Some(PathBuf::from(expected)));
         assert_eq!(state_dir_from(None, some("relative")), None);
+        let data = |xdg, home| data_dir_from(xdg, home);
+        assert_eq!(
+            data(some("/xdg"), None),
+            Some(PathBuf::from("/xdg/pinfold"))
+        );
+        let local = Some(PathBuf::from("/home/me/.local/share/pinfold"));
+        assert_eq!(data(some("relative"), some("/home/me")), local);
+        assert_eq!(data(None, None), None);
         let config = parse(b"[api]\naudit_log = true").unwrap();
         assert!(config.api.audit_log && !Config::default().api.audit_log);
     }

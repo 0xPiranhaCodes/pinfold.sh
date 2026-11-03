@@ -8,7 +8,8 @@
 //! The agent writes only to its [`WorkingDirectory`] and temporary directories: a fresh `/tmp` on
 //! Linux, and `/private/tmp` and the user's temporary directory on macOS. Git runs what its
 //! repository's hooks and config name outside the sandbox, so on Linux all of `.git` is read-only,
-//! and on macOS those files, its submodules' and anything that points git elsewhere are. Of other
+//! and the agent commits into a [`shadow`] git directory of its own instead (ADR-0039). On macOS
+//! those files, its submodules' and anything that points git elsewhere are read-only. Of other
 //! programs' Unix sockets, such as ssh-agent's, it reaches only PinFold's API socket, and on
 //! Linux with Landlock ABI 6 no abstract socket bound outside the sandbox (ADR-0038).
 //!
@@ -69,6 +70,8 @@ struct Git {
     /// The `.git` of each submodule that `.gitmodules` lists, a file that points git at the
     /// submodule's repository or that repository itself.
     modules: Vec<PathBuf>,
+    /// The agent's own git directory, from [`shadow`], bound writable on Linux.
+    shadow: Option<PathBuf>,
 }
 
 /// A directory a sandboxed agent may write to, from [`working_directory`].
@@ -198,7 +201,8 @@ fn resolve(path: &Path) -> PathBuf {
 
 /// Returns the command that runs `program` with `hidden` unreadable, only `work` and temporary
 /// directories writable and, of Unix sockets, only the API's at `api` reachable, for
-/// [`Reactor::spawn`](crate::io::Reactor::spawn). On Linux below Landlock ABI 6 abstract sockets
+/// [`Reactor::spawn`](crate::io::Reactor::spawn). On Linux, given a `shadow` directory and a
+/// `work` with a `.git` directory, the agent's git uses [`shadow`] there. On Linux below Landlock ABI 6 abstract sockets
 /// stay reachable. Spawn it once: on Linux its seccomp filter is read to the end by the first
 /// launch.
 ///
@@ -206,8 +210,8 @@ fn resolve(path: &Path) -> PathBuf {
 ///
 /// Returns an error if `program` is empty or starts with `-`, the system has no sandbox, or on
 /// Linux no `bwrap` in `/usr/bin`, `/usr/local/bin` or `/bin` is root's alone, the filter has
-/// no rules for this architecture, or the kernel has Landlock but its probe or rules fail. Rules
-/// that fail in the child fail the spawn.
+/// no rules for this architecture, the kernel has Landlock but its probe or rules fail, or the
+/// shadow cannot be made. Rules that fail in the child fail the spawn.
 ///
 /// # Examples
 ///
@@ -222,7 +226,7 @@ fn resolve(path: &Path) -> PathBuf {
 /// let work = sandbox::working_directory(&project, &[])?;
 /// let program = ["/bin/echo".to_owned(), "hi".to_owned()];
 /// let api = std::env::temp_dir().join("pinfold/pinfold.sock");
-/// match sandbox::command(&program, &[], &work, &api) {
+/// match sandbox::command(&program, &[], &work, &api, None) {
 ///     Ok(command) => assert_ne!(command.get_program(), "/bin/echo"),
 ///     // No bubblewrap here: the pane does not start.
 ///     Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
@@ -235,6 +239,7 @@ pub fn command(
     hidden: &[PathBuf],
     work: &WorkingDirectory,
     api: &Path,
+    shadow: Option<&Path>,
 ) -> io::Result<Command> {
     // `sandbox-exec` would read a leading dash as its own option.
     if program
@@ -246,7 +251,7 @@ pub fn command(
             "a sandboxed agent needs a program that does not start with -",
         ));
     }
-    let git = git_controls(work.path())?;
+    let mut git = git_controls(work.path())?;
     let (tool, args, filter) = if cfg!(target_os = "macos") {
         let tool = PathBuf::from("/usr/bin/sandbox-exec");
         (
@@ -266,7 +271,11 @@ pub fn command(
         let runtime = runtime.as_deref();
         let filter = pinfold_sys::seccomp::filter()?;
         let fd = filter.as_raw_fd();
-        let args = linux_args(hidden, program, work.path(), api, runtime, &git.modules, fd);
+        let real = fs::symlink_metadata(work.path().join(".git")).is_ok_and(|meta| meta.is_dir());
+        if let Some(dir) = shadow.filter(|_| real) {
+            git.shadow = Some(self::shadow(work.path(), dir)?);
+        }
+        let args = linux_args(hidden, program, work.path(), api, runtime, &git, fd);
         (tool, args, Some(filter))
     } else {
         return Err(io::ErrorKind::Unsupported.into());
@@ -284,7 +293,118 @@ pub fn command(
     for name in SOCKET_VARS {
         command.env_remove(name);
     }
+    if let Some(dir) = &git.shadow {
+        command
+            .env("GIT_DIR", dir)
+            .env("GIT_WORK_TREE", work.path());
+    }
     Ok(command)
+}
+
+/// Makes `dir` the agent's own git directory for `work`, if it does not exist yet, and returns it
+/// resolved (ADR-0039). It starts at the commit and index of `work`'s `.git`, and borrows its
+/// objects through `objects/info/alternates`, so nothing is copied. Agent commits stay there,
+/// whose hooks and config only the sandbox runs, until the user fetches them. An existing one is
+/// left as it is: the core never writes where the agent has.
+///
+/// # Errors
+///
+/// Returns an error if `dir` cannot be made or written, or it exists but is a symlink, not a
+/// directory, another user's, or open to others.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::Path;
+/// use pinfold_core::sandbox;
+///
+/// let temp = std::env::temp_dir().join(format!("pinfold-shadow-doc-{}", std::process::id()));
+/// std::fs::create_dir_all(temp.join("work/.git/objects"))?;
+/// std::fs::write(temp.join("work/.git/HEAD"), "ref: refs/heads/main\n")?;
+/// let shadow = sandbox::shadow(&temp.join("work"), &temp.join("data/shadow"))?;
+/// assert_eq!(std::fs::read_to_string(shadow.join("HEAD"))?, "ref: refs/heads/main\n");
+/// std::fs::remove_dir_all(&temp)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn shadow(work: &Path, dir: &Path) -> io::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let git = work.join(".git");
+    let mut builder = fs::DirBuilder::new();
+    builder.mode(0o700);
+    if let Some(parent) = dir.parent() {
+        builder.recursive(true).create(parent)?;
+    }
+    match builder.recursive(false).create(dir) {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            let meta = fs::symlink_metadata(dir)?;
+            let own = meta.uid() == pinfold_sys::effective_uid() && meta.mode() & 0o077 == 0;
+            if !meta.is_dir() || !own {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!(
+                        "{dir:?} is not a private directory of this user's, so the sandboxed \
+                         agent does not start"
+                    ),
+                ));
+            }
+            return dir.canonicalize();
+        }
+        made => made?,
+    }
+    for sub in ["objects/info", "refs/heads", "refs/tags"] {
+        builder.recursive(true).create(dir.join(sub))?;
+    }
+    let mut objects = git.join("objects").canonicalize()?.into_os_string();
+    objects.push("\n");
+    fs::write(
+        dir.join("objects/info/alternates"),
+        objects.as_encoded_bytes(),
+    )?;
+    let head = fs::read_to_string(git.join("HEAD")).unwrap_or_default();
+    let branch = head.strip_prefix("ref: ").map(str::trim).filter(|name| {
+        let name = Path::new(name);
+        name.starts_with("refs/heads")
+            && name
+                .components()
+                .all(|part| matches!(part, Component::Normal(_)))
+    });
+    match branch {
+        Some(name) => {
+            fs::write(dir.join("HEAD"), format!("ref: {name}\n"))?;
+            if let Some(id) = commit(&git, name) {
+                if let Some(parent) = dir.join(name).parent() {
+                    builder.recursive(true).create(parent)?;
+                }
+                fs::write(dir.join(name), format!("{id}\n"))?;
+            }
+        }
+        // A detached HEAD starts there; anything else starts an unborn `main`.
+        None => match object_id(head.trim()) {
+            Some(id) => fs::write(dir.join("HEAD"), format!("{id}\n"))?,
+            None => fs::write(dir.join("HEAD"), "ref: refs/heads/main\n")?,
+        },
+    }
+    // Without it, the agent's git would see every tracked file as newly deleted.
+    let _ = fs::copy(git.join("index"), dir.join("index"));
+    dir.canonicalize()
+}
+
+/// The commit `name` points at in `git`, loose or packed.
+fn commit(git: &Path, name: &str) -> Option<String> {
+    if let Ok(text) = fs::read_to_string(git.join(name)) {
+        return object_id(text.trim());
+    }
+    let packed = fs::read_to_string(git.join("packed-refs")).ok()?;
+    packed.lines().find_map(|line| {
+        let (id, other) = line.split_once(' ')?;
+        (other == name).then(|| object_id(id)).flatten()
+    })
+}
+
+/// `text` if it is a SHA-1 or SHA-256 object name.
+fn object_id(text: &str) -> Option<String> {
+    let hex = text.bytes().all(|byte| byte.is_ascii_hexdigit());
+    (hex && matches!(text.len(), 40 | 64)).then(|| text.to_owned())
 }
 
 /// `sandbox-exec`'s arguments. Paths go in as parameters, so no path is quoted into the rules.
@@ -337,8 +457,8 @@ fn macos_args(
 
 /// `bwrap`'s arguments: the real root read-only, private `/dev`, `/proc`, `/tmp` and IPC, an
 /// empty `runtime` directory but for the API socket's, `work` writable but its `.git` and its
-/// submodules' `modules`, the seccomp filter on fd `filter`, and an empty directory over each
-/// hidden one. A missing directory is skipped, as bwrap would make it outside the sandbox, and so
+/// submodules' `modules`, the seccomp filter on fd `filter`, an empty directory over each
+/// hidden one, and the shadow git directory writable over that. A missing directory is skipped, as bwrap would make it outside the sandbox, and so
 /// is one inside another hidden directory, which that one's mount already covers.
 fn linux_args(
     hidden: &[PathBuf],
@@ -346,7 +466,7 @@ fn linux_args(
     work: &Path,
     api: &Path,
     runtime: Option<&Path>,
-    modules: &[PathBuf],
+    git: &Git,
     filter: i32,
 ) -> Vec<OsString> {
     let fixed = [
@@ -377,11 +497,11 @@ fn linux_args(
     mount("--bind", work);
     // Read-only whole: git makes its locks in `.git`, so a mount cannot stop the agent making a
     // `commondir` or other file that points git at its own hooks and config. Commits happen
-    // outside the sandbox.
-    let git = work.join(".git");
-    for git in std::iter::once(&git).chain(modules) {
-        if fs::symlink_metadata(git).is_ok() {
-            mount("--ro-bind", git);
+    // outside the sandbox, or in the shadow.
+    let dot = work.join(".git");
+    for path in std::iter::once(&dot).chain(&git.modules) {
+        if fs::symlink_metadata(path).is_ok() {
+            mount("--ro-bind", path);
         }
     }
     args.extend(["--seccomp".into(), filter.to_string().into()]);
@@ -394,6 +514,10 @@ fn linux_args(
             continue;
         }
         args.extend([OsString::from("--tmpfs"), path.into()]);
+    }
+    // After the hidden directories, so none of them covers it.
+    if let Some(shadow) = &git.shadow {
+        args.extend(["--bind".into(), shadow.into(), shadow.into()]);
     }
     args.push("--".into());
     args.extend(program.iter().map(OsString::from));
@@ -611,7 +735,11 @@ mod tests {
         let api = Path::new("/run/user/7/pinfold/pinfold.sock");
         let runtime = Some(Path::new("/run/user/7"));
         let module = work.join("sub/.git");
-        let modules = [module.clone()];
+        let found = Git {
+            modules: vec![module.clone()],
+            shadow: Some(PathBuf::from("/nowhere/data/shadow")),
+            ..Git::default()
+        };
         fs::create_dir_all(work.join("sub")).unwrap();
         fs::write(&module, "gitdir: ../.git/modules/sub\n").unwrap();
         let args = linux_args(
@@ -620,14 +748,23 @@ mod tests {
             &work,
             api,
             runtime,
-            &modules,
+            &found,
             7,
         );
         fs::remove_dir(&inner).unwrap();
         fs::remove_dir_all(&work).unwrap();
         let args = strings(&args);
-        let tmpfs = ["--tmpfs", root.to_str().unwrap(), "--", "agent"];
-        assert_eq!(args[args.len() - 4..], tmpfs);
+        let shadow = "/nowhere/data/shadow";
+        let tmpfs = [
+            "--tmpfs",
+            root.to_str().unwrap(),
+            "--bind",
+            shadow,
+            shadow,
+            "--",
+            "agent",
+        ];
+        assert_eq!(args[args.len() - 7..], tmpfs);
         // /tmp, the runtime directory and the outer hidden directory.
         assert_eq!(args.iter().filter(|arg| **arg == "--tmpfs").count(), 3);
         assert!(!args.contains(&"/nowhere/.ssh"));
@@ -768,6 +905,63 @@ mod tests {
     }
 
     #[test]
+    fn a_shadow_starts_at_the_branch_and_is_then_left_alone() {
+        let temp = std::env::temp_dir().join(format!("pinfold-shadow-{}", std::process::id()));
+        let git = temp.join("work/.git");
+        fs::create_dir_all(git.join("objects")).unwrap();
+        let (one, two) = ("1".repeat(40), "2".repeat(64));
+        let packed = format!("# pack-refs\n{one} refs/heads/topic/x\n");
+        for (path, text) in [
+            (git.join("HEAD"), "ref: refs/heads/topic/x\n".to_owned()),
+            (git.join("packed-refs"), packed),
+            (git.join("index"), "INDEX".to_owned()),
+        ] {
+            fs::write(path, text).unwrap();
+        }
+        let dir = temp.join("data/agents/a/shadow");
+        let made = shadow(&temp.join("work"), &dir).unwrap();
+        let read = |path: &str| fs::read_to_string(made.join(path)).unwrap();
+        let first = [read("HEAD"), read("refs/heads/topic/x"), read("index")];
+        let alternates = read("objects/info/alternates");
+        let mode = fs::metadata(&made).unwrap().permissions().mode() & 0o777;
+        // The agent's later changes stay, and a new launch keeps them.
+        fs::write(made.join("HEAD"), "mine").unwrap();
+        let again = shadow(&temp.join("work"), &dir).unwrap();
+        let kept = read("HEAD");
+        // One the core did not make privately is refused.
+        fs::set_permissions(&made, fs::Permissions::from_mode(0o755)).unwrap();
+        let open = shadow(&temp.join("work"), &dir);
+        let link = temp.join("data/link");
+        std::os::unix::fs::symlink(&made, &link).unwrap();
+        let linked = shadow(&temp.join("work"), &link);
+        // A detached HEAD, and one that names no branch.
+        let detached = temp.join("data/detached");
+        fs::write(git.join("HEAD"), format!("{two}\n")).unwrap();
+        let detached =
+            fs::read_to_string(shadow(&temp.join("work"), &detached).unwrap().join("HEAD"));
+        let odd = temp.join("data/odd");
+        fs::write(git.join("HEAD"), "ref: refs/heads/../../x\n").unwrap();
+        let odd = fs::read_to_string(shadow(&temp.join("work"), &odd).unwrap().join("HEAD"));
+        let objects = git.join("objects").canonicalize().unwrap();
+        fs::remove_dir_all(&temp).unwrap();
+        assert_eq!(
+            first,
+            [
+                "ref: refs/heads/topic/x\n".to_owned(),
+                format!("{one}\n"),
+                "INDEX".to_owned()
+            ]
+        );
+        assert_eq!(alternates, format!("{}\n", objects.display()));
+        assert_eq!(mode, 0o700);
+        assert_eq!((again, kept), (made, "mine".to_owned()));
+        assert_eq!(open.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(linked.unwrap_err().kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(detached.unwrap(), format!("{two}\n"));
+        assert_eq!(odd.unwrap(), "ref: refs/heads/main\n");
+    }
+
+    #[test]
     fn a_resolved_path_has_no_trailing_slash() {
         let temp = std::env::temp_dir().canonicalize().unwrap();
         assert_eq!(resolve(&temp).as_os_str(), temp.as_os_str());
@@ -849,6 +1043,7 @@ mod tests {
             &[],
             &work,
             Path::new("/nowhere/api.sock"),
+            None,
         );
         fs::remove_dir(&dir).unwrap();
         // Linux without bubblewrap refuses before it builds a command.
@@ -867,7 +1062,8 @@ mod tests {
     fn an_empty_program_or_an_option_is_refused() {
         for program in [&[][..], &[String::new()], &["-p".to_owned()]] {
             let work = WorkingDirectory(PathBuf::from("/nowhere"));
-            let error = command(program, &[], &work, Path::new("/nowhere/api.sock")).unwrap_err();
+            let error =
+                command(program, &[], &work, Path::new("/nowhere/api.sock"), None).unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         }
     }

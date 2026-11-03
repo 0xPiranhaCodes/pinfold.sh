@@ -29,6 +29,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Added
 
+- On Linux a sandboxed agent can commit: into a shadow git directory under `~/.local/share/pinfold/agents`, which borrows the repository's objects and whose hooks and config only the sandbox runs. `git fetch --no-tags <shadow> '+refs/heads/*:refs/remotes/agent-<profile>/*'` brings its commits into remote-tracking refs; the real `.git` stays read-only.
 - A per-pane status state machine combines OSC 133 marks with authoritative API reports and rate-limited alerts.
 - The release dry run builds Linux x86_64 and aarch64 tarballs with licenses and the font license, writes a SHA-256 file per artifact, and ships Homebrew formula and cask templates.
 - Agent profiles in `[agents.<name>]` may set `sandbox`, which runs the agent under `sandbox-exec` on macOS or bubblewrap on Linux, inside its pane's session, with `~/.ssh`, PinFold's config and state, and other panes' terminals hidden.
