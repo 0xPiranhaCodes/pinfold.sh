@@ -20,6 +20,7 @@ pub mod menu;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub mod metal;
 pub mod pty;
+pub mod seccomp;
 pub mod socket;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub mod window;
@@ -194,6 +195,47 @@ pub fn spawn_detached(mut command: Command, stderr: Stdio) -> io::Result<Child> 
         });
     }
     command.spawn()
+}
+
+/// Hands `fd` to the program `command` starts, at the same number, as bubblewrap's `--seccomp`
+/// needs. The fd stays close-on-exec in this process, so no other child gets it, and closes
+/// here when `command` is dropped.
+///
+/// # Errors
+///
+/// Returns an error if `fd` is 0, 1 or 2, where the child's stdio would land over it.
+///
+/// # Examples
+///
+/// ```
+/// use std::os::fd::{AsRawFd, OwnedFd};
+/// use std::process::Command;
+///
+/// let fd = OwnedFd::from(std::fs::File::open("/dev/null")?);
+/// let mut command = Command::new("/bin/sh");
+/// command.args(["-c", &format!("test -e /dev/fd/{}", fd.as_raw_fd())]);
+/// pinfold_sys::inherit(&mut command, fd)?;
+/// assert!(command.status()?.success());
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn inherit(command: &mut Command, fd: OwnedFd) -> io::Result<()> {
+    if fd.as_raw_fd() < 3 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a descriptor handed to a child must be 3 or above",
+        ));
+    }
+    // SAFETY: fcntl is async-signal-safe, and `fd` is open until the closure, and so `command`,
+    // is dropped.
+    unsafe {
+        command.pre_exec(
+            move || match libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, 0) {
+                -1 => Err(io::Error::last_os_error()),
+                _ => Ok(()),
+            },
+        );
+    }
+    Ok(())
 }
 
 /// Opens the log at `path` empty, for appending: mode 0600 if it is new, and refused if it is a

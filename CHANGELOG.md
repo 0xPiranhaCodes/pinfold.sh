@@ -11,6 +11,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Fixed
 
+- A sandboxed agent can no longer write outside its working directory and temporary directories, such as to `~/.zshrc`, and Linux takes `bwrap` only from root-owned system directories, not `PATH`, where an agent could plant one. The working directory must be the user's own and private, not home, above it, a dot-directory of home, `~/Library` or inside `.git`, and git cannot be made to run its code: on Linux its `.git` is read-only, so commits happen outside the sandbox, and on macOS the hooks, config and pointers of the repository and its submodules are, and each listed submodule's `.git` stays read-only on both. The agent reaches no Unix socket but PinFold's API socket and gets no `SSH_AUTH_SOCK`, `GPG_AGENT_INFO` or `DBUS_SESSION_BUS_ADDRESS`; on Linux it also gets its own IPC, host name and cgroup namespaces and ends with the core.
 - The core now applies `api.protect` from the config file; before, only the default patterns protected panes.
 - `past_its_identitys_cap_a_peer_is_closed_unread` no longer fails on macOS when the core closes the extra peer before the test sets its read timeout.
 - The link test that fills every tab and pane uses 128 by 128 panes instead of 1024 by 1024, so it no longer runs past its 20 second limit on CI's Intel Mac.
@@ -27,6 +28,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 - A per-pane status state machine combines OSC 133 marks with authoritative API reports and rate-limited alerts.
 - Agent profiles in `[agents.<name>]` may set `sandbox`, which runs the agent under `sandbox-exec` on macOS or bubblewrap on Linux, inside its pane's session, with `~/.ssh`, PinFold's config and state, and other panes' terminals hidden.
+- On Linux a sandboxed agent's bubblewrap gets a seccomp filter that fails `ioctl(TIOCSTI)` with `EPERM`, so the agent cannot type into its pane's terminal; on architectures other than x86_64 and aarch64 the agent does not start.
 - The control socket identifies each caller at accept from its controlling terminal and session, which the core maps to a pane, and caps peers at 4 per identity, with all unidentified callers sharing one cap (ADR-0032 step 2).
 - A spike that answers the macOS Dock menu by adding `applicationDockMenu:` to winit's app delegate, in `docs/spikes/m3-dock-menu`.
 - `pane.status` lets an agent report its own pane's state, which outranks OSC 133 marks; `pane.list` and events say whether a status came from marks or a report. Each tab shows its state's glyph in colour, a hidden tab whose pane needs you is marked ◆ in amber, and the title row gives the active state as glyph, colour and word with the agent's message.
