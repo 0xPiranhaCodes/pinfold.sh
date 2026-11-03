@@ -104,35 +104,37 @@ fn match_at(bytes: &[u8], index: usize) -> Option<(usize, usize, Kind)> {
         .or_else(|| entropy_at(bytes, index).map(|end| (index, end, Kind::HighEntropy)))
 }
 
+/// Matches at the first byte of a URI password, so the scheme and user before it are
+/// scanned like any other text and a token used as the user is still found.
 fn uri_password_at(bytes: &[u8], index: usize) -> Option<(usize, usize)> {
-    if !bytes.get(index)?.is_ascii_alphabetic() || (index > 0 && is_uri_scheme(bytes[index - 1])) {
+    let colon: usize = index.checked_sub(1)?;
+    if bytes[colon] != b':' {
         return None;
     }
-    let mut cursor: usize = index + 1;
-    while bytes.get(cursor).is_some_and(|byte| is_uri_scheme(*byte)) {
-        cursor += 1;
-    }
-    if !bytes.get(cursor..)?.starts_with(b"://") {
-        return None;
-    }
-    let authority_start: usize = cursor + 3;
-    let authority_end: usize = bytes[authority_start..]
+    let user_start: usize = bytes[..colon]
         .iter()
-        .position(|byte| byte.is_ascii_whitespace() || matches!(byte, b'/' | b'?' | b'#'))
-        .map_or(bytes.len(), |offset| authority_start + offset);
-    let at: usize = bytes[authority_start..authority_end]
+        .rposition(|byte| ends_authority(*byte) || matches!(byte, b':' | b'@'))
+        .map_or(0, |position| position + 1);
+    if user_start == colon || !bytes[..user_start].ends_with(b"://") {
+        return None;
+    }
+    let scheme_end: usize = user_start - 3;
+    if scheme_end == 0 || !is_uri_scheme(bytes[scheme_end - 1]) {
+        return None;
+    }
+    let authority_end: usize = bytes[index..]
+        .iter()
+        .position(|byte| ends_authority(*byte))
+        .map_or(bytes.len(), |offset| index + offset);
+    let at: usize = bytes[index..authority_end]
         .iter()
         .rposition(|byte| *byte == b'@')
-        .map(|offset| authority_start + offset)?;
-    if at + 1 >= authority_end {
-        return None;
-    }
-    let colon: usize = bytes[authority_start..at]
-        .iter()
-        .position(|byte| *byte == b':')
-        .map(|offset| authority_start + offset)?;
-    let password_start: usize = colon + 1;
-    (colon > authority_start && password_start < at).then_some((password_start, at))
+        .map(|offset| index + offset)?;
+    (at > index && at + 1 < authority_end).then_some((index, at))
+}
+
+fn ends_authority(byte: u8) -> bool {
+    byte.is_ascii_whitespace() || matches!(byte, b'/' | b'?' | b'#')
 }
 
 fn is_uri_scheme(byte: u8) -> bool {
