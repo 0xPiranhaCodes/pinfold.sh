@@ -112,6 +112,16 @@ fn record(
             let pane = wait.pane.or(own);
             ("pane.wait", pane, pane.map_or("self", scope))
         }
+        Method::PaneSpawn(_) => {
+            // The new pane, which the caller spawned.
+            let spawned = result
+                .as_ref()
+                .ok()
+                .and_then(|value| value["pane"].as_u64());
+            let pane = spawned.and_then(|pane| usize::try_from(pane).ok());
+            ("pane.spawn", pane, "children")
+        }
+        Method::PaneClose { pane } => ("pane.close", Some(*pane), scope(*pane)),
         Method::AuditRead { pane, .. } => ("audit.read", *pane, "outside"),
     };
     let mut reason = match result {

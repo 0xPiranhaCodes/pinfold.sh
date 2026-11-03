@@ -145,6 +145,13 @@ pub enum Method {
         /// Only calls by or to this pane.
         pane: Option<usize>,
     },
+    /// `pane.spawn`, its shape checked.
+    PaneSpawn(crate::spawn::Spawn),
+    /// `pane.close`: a pane the caller spawned.
+    PaneClose {
+        /// The pane's number.
+        pane: usize,
+    },
 }
 
 /// What `pane.wait` waits for, until its timeout.
@@ -989,15 +996,14 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
         },
         _ if *greeted == 0 => refuse(Some(id), NO_HELLO, "hello comes first"),
         Some("window.open") => Step::Ask(id.clone(), Method::WindowOpen),
-        Some(method @ ("pane.list" | "pane.read" | "pane.last_output" | "pane.send"))
-            if *greeted < VERSION =>
-        {
-            refuse(
-                Some(id),
-                NO_METHOD,
-                &format!("{method} needs hello version 2"),
-            )
-        }
+        Some(
+            method @ ("pane.list" | "pane.read" | "pane.last_output" | "pane.send" | "pane.spawn"
+            | "pane.close"),
+        ) if *greeted < VERSION => refuse(
+            Some(id),
+            NO_METHOD,
+            &format!("{method} needs hello version 2"),
+        ),
         Some("pane.list") => Step::Ask(id.clone(), Method::PaneList),
         Some(method @ ("pane.wait" | "events.subscribe" | "audit.read")) if *greeted < VERSION => {
             refuse(
@@ -1026,7 +1032,11 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
                 "audit.read takes count up to 1000 and pane",
             ),
         },
-        Some(method @ ("pane.read" | "pane.last_output" | "pane.send")) => {
+        Some("pane.spawn") => match crate::spawn::params(request.get("params")) {
+            Ok(spawn) => Step::Ask(id.clone(), Method::PaneSpawn(spawn)),
+            Err(reason) => refuse(Some(id), BAD_PARAMS, reason),
+        },
+        Some(method @ ("pane.read" | "pane.last_output" | "pane.send" | "pane.close")) => {
             match pane_method(method, request.get("params")) {
                 Ok(method) => Step::Ask(id.clone(), method),
                 Err(reason) => refuse(Some(id), BAD_PARAMS, reason),
@@ -1125,6 +1135,7 @@ fn pane_method(method: &str, params: Option<&Value>) -> Result<Method, &'static 
                 text: text.to_owned(),
             })
         }
+        "pane.close" => Ok(Method::PaneClose { pane }),
         _ => Ok(Method::PaneLastOutput { pane }),
     }
 }
@@ -1257,6 +1268,15 @@ mod tests {
             asked("pane.last_output", json!({"pane": 0})),
             Step::Ask(json!(2), Method::PaneLastOutput { pane: 0 })
         );
+        assert_eq!(
+            asked("pane.close", json!({"pane": 4})),
+            Step::Ask(json!(2), Method::PaneClose { pane: 4 })
+        );
+        let spawn = pane_request("pane.spawn", &json!({"where": "tab", "command": "sh"}));
+        let (reply, _) = replied(spawn.as_bytes(), &mut VERSION.clone());
+        assert_eq!(code(&reply), Some(BAD_PARAMS));
+        let (reply, _) = replied(spawn.as_bytes(), &mut OLDEST.clone());
+        assert_eq!(code(&reply), Some(NO_METHOD));
         let bad = [
             json!(null),
             json!({"pane": -1}),
