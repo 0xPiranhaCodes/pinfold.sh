@@ -78,6 +78,7 @@ impl Session {
         let core = Command::new(self.directory.join("pinfold-core"))
             .args(arguments)
             .env("XDG_RUNTIME_DIR", self.directory.join("run"))
+            .env("XDG_CONFIG_HOME", self.directory.join("config"))
             // The state directory, on macOS from HOME, so a test never writes the person's.
             .env("XDG_STATE_HOME", self.directory.join("state"))
             .env("HOME", self.directory.join("state"))
@@ -1042,4 +1043,66 @@ fn mcp_waits_for_the_next_event_and_times_out_with_none() {
     assert_eq!(texts[2], serde_json::json!({"timeout": true}), "{out}");
     core.kill().unwrap();
     core.wait().unwrap();
+}
+
+/// Runs a core whose first pane spawns a second running `sleep <number>` and sends to it
+/// through `pinfold mcp`, with `protect` as `api.protect` if any, and returns the send's reply.
+fn send_to_a_sleeping_child(
+    name: &str,
+    number: &str,
+    protect: Option<&str>,
+) -> Result<serde_json::Value> {
+    let session = Session::new(name, None)?;
+    if let Some(protect) = protect {
+        fs::create_dir_all(session.directory.join("config/pinfold"))?;
+        let toml = format!("[api]\nprotect = [\"{protect}\"]\n");
+        fs::write(session.directory.join("config/pinfold/pinfold.toml"), toml)?;
+    }
+    let call = |id: u32, name: &str, arguments: serde_json::Value| {
+        let params = serde_json::json!({"name": name, "arguments": arguments});
+        serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": params})
+    };
+    let initialize =
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}});
+    let spawn = call(2, "pane_spawn_v1", serde_json::json!({"where": "tab"}));
+    let send = call(
+        3,
+        "pane_send_v1",
+        serde_json::json!({"pane": 1, "text": "typed"}),
+    );
+    let mcp = format!("'{}' mcp", session.directory.join("pinfold").display());
+    let client = "\"$PINFOLD_TEST_CLIENT\"";
+    // The send waits until the child's shell has become `sleep`, so the check sees it.
+    let shell = format!(
+        "if mkdir {client}/first; then {{ echo '{initialize}'; echo '{spawn}'; \
+         until pgrep -x -f 'sleep {number}' > /dev/null; do sleep 0.05; done; \
+         echo '{send}'; }} | {mcp} > {client}/o && mv {client}/o {client}/out; \
+         exec sleep 30; fi; exec sleep {number}"
+    );
+    let mut core = session.start_core(&["--idle", "1"], &shell)?;
+    assert!(session.wait_for("out"), "{}", session.read_log());
+    core.kill()?;
+    core.wait()?;
+    let out = session.read("out");
+    let replies: Vec<serde_json::Value> = out
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<std::result::Result<_, _>>()?;
+    assert_eq!(replies.len(), 3, "{out}");
+    assert_eq!(replies[1]["result"]["isError"], false, "{out}");
+    Ok(replies[2]["result"].clone())
+}
+
+#[test]
+fn a_configured_protect_pattern_refuses_a_send_to_a_pane_that_runs_it() {
+    // A number of this run's own, so another run's `sleep` is not mistaken for the child.
+    let pid = std::process::id();
+    let allowed = send_to_a_sleeping_child("ua", &format!("{pid}1"), None).unwrap();
+    assert_eq!(allowed["isError"], false, "{allowed}");
+    let number = format!("{pid}2");
+    let refused =
+        send_to_a_sleeping_child("ub", &number, Some(&format!("sleep {number}"))).unwrap();
+    assert_eq!(refused["isError"], true, "{refused}");
+    let message = refused["content"][0]["text"].as_str().unwrap();
+    assert!(message.contains("the pane is protected: rule"), "{refused}");
 }
