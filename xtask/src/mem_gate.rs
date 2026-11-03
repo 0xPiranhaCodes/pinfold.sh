@@ -354,6 +354,13 @@ mod tests {
             text.chars().filter(|c| !c.is_whitespace()).collect();
         // Metal's atlas holds about 2,000 ASCII-sized glyphs (`metal.rs`).
         assert!(glyphs.len() > 2_000, "{} glyphs", glyphs.len());
+        // full-cache.sh sizes its pages from this width, so that wrapped lines never scroll.
+        let script = include_str!("../../tests/window/full-cache.sh");
+        assert!(script.contains("(384 / columns + 2)"));
+        for line in text.lines() {
+            let width: usize = line.chars().map(|c| if c.is_ascii() { 1 } else { 2 }).sum();
+            assert_eq!(width, 384);
+        }
     }
 
     #[test]

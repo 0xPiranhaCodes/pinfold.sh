@@ -87,7 +87,7 @@ The container in `tests/window/` installs no fonts, and the CI jobs install none
 
 Two more rows per window load it the way a long session does, against the same budget.
 `with a full glyph cache` runs `tests/window/full-cache.sh`, which pages through all of
-`heavy-screen.txt` a screen at a time. That text holds more distinct characters than Metal's
+`heavy-screen.txt` a screen at a time, with lines wrapped so no glyph is clipped. That text holds more distinct characters than Metal's
 atlas holds, which a test in `xtask/src/mem_gate.rs` checks, so the cache is full when the
 window is read. `with 8 tabs` opens eight shells, so the tab
 bar draws eight tabs. A pane's scrollback has no row of its own in the window, as the window only
