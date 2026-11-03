@@ -421,7 +421,9 @@ impl Reactor {
 impl Reactor {
     /// Rebuilds the layout `snapshot` saved, with a new shell in each pane, started in the
     /// pane's saved directory if that still is one, else in `$HOME`. A saved command never runs
-    /// from here (ADR-0034). Call it before any tab opens, as it replaces the session.
+    /// from here (ADR-0034): one that is not the shell is kept for a window to show, and runs
+    /// only through [`Reactor::answer_was_running`]. Call it before any tab opens, as it replaces
+    /// the session.
     ///
     /// # Errors
     ///
@@ -431,21 +433,53 @@ impl Reactor {
         let (session, ids) = Session::from_tree(&snapshot.tree(), first)
             .map_err(|_| invalid("the snapshot's layout is bad"))?;
         // Panes are numbered in order from `first`, so pane `index` gets the id it was given.
+        let mut was_running = Vec::new();
         for index in 0..ids.len() {
             let mut command = (self.shell)();
-            if let Some(directory) = start_in(snapshot.panes.get(index)) {
+            let saved = snapshot.panes.get(index);
+            if let Some(directory) = start_in(saved) {
                 command.current_dir(directory);
             }
-            if let Err(error) = self.spawn(command, FIRST_SIZE.rows, FIRST_SIZE.cols) {
-                for started in first as usize..self.next_pane {
-                    self.drop_pane(started);
+            // shortcut: a pane records only its program (#145), so a shell pane shows nothing.
+            // OSC 133 carries no command line, so recording one needs the shell to report it.
+            let shell = Path::new(command.get_program())
+                .file_name()
+                .map(ToOwned::to_owned);
+            let ran = saved.and_then(|pane| pane.command.clone());
+            let ran = ran.filter(|ran| Path::new(ran).file_name() != shell.as_deref());
+            match self.spawn(command, FIRST_SIZE.rows, FIRST_SIZE.cols) {
+                Ok(pane) => was_running.extend(ran.map(|ran| (pane, ran))),
+                Err(error) => {
+                    for started in first as usize..self.next_pane {
+                        self.drop_pane(started);
+                    }
+                    return Err(error);
                 }
-                return Err(error);
             }
         }
+        self.was_running = was_running;
         self.session = session;
         self.lay_out();
         Ok(())
+    }
+}
+
+/// Whether a saved command may be typed: not changed by redaction, and with no control
+/// character, which could end the line early or edit it.
+pub(crate) fn runnable(command: &str) -> bool {
+    !command.contains("«redacted:") && !command.contains(char::is_control)
+}
+
+impl Reactor {
+    /// Answers what a restored pane was running, once: with `run`, types the command and a
+    /// newline into the pane's input queue, unless redaction changed it or it holds a control
+    /// character. Returns whether it typed it.
+    pub fn answer_was_running(&mut self, pane: usize, run: bool) -> bool {
+        let Some(index) = self.was_running.iter().position(|(at, _)| *at == pane) else {
+            return false;
+        };
+        let (_, command) = self.was_running.swap_remove(index);
+        run && runnable(&command) && self.write(pane, format!("{command}\n").as_bytes())
     }
 }
 

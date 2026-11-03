@@ -44,7 +44,9 @@ use crate::search_bar::{Bar, Step};
 use crate::selection::Selecting;
 use crate::top_bar::{Clicks, Hit};
 use crate::vi::{Step as ViStep, Vi, View};
-use crate::{approval, ime, input, menu_bar, mouse, panes, paste, reload, selection, top_bar};
+use crate::{
+    approval, ime, input, menu_bar, mouse, panes, paste, reload, selection, top_bar, was_running,
+};
 
 const DEFAULT_SIZE: LogicalSize<u32> = LogicalSize::new(1000, 640);
 /// Rows under the pane that belong to Pinfold, so program output cannot reach them.
@@ -87,6 +89,8 @@ enum Notice {
     Config(Config),
     /// A menu item was chosen.
     Command(Command),
+    /// A restored pane, whether the core would run what it was running, and that command.
+    WasRunning(u32, bool, String),
 }
 
 /// What the I/O thread has for the window. A screen marked dirty here is one the window has not
@@ -175,7 +179,10 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
                 return;
             }
         }
-        for notice in [searched, copied, raised, refused].into_iter().flatten() {
+        let ran = link.take_was_running().into_iter();
+        let ran = ran.map(|(pane, runnable, command)| Notice::WasRunning(pane, runnable, command));
+        let notices = [searched, copied, raised, refused].into_iter().flatten();
+        for notice in notices.chain(ran) {
             if proxy.send_event(notice).is_err() {
                 return;
             }
@@ -337,6 +344,9 @@ struct App {
     clipboard: Option<Clipboard>,
     /// A question for the user. Every key goes to this until it is answered.
     prompt: Option<Prompt>,
+    /// What restored panes were running, until answered. The focused one's strip takes the next
+    /// key.
+    was_running: was_running::Strips,
     /// Cross-pane prompts, oldest first. Updates replace a batch in place.
     approvals: approval::Queue,
     /// The right-click menu, while open. Every key and press goes to it.
@@ -607,8 +617,12 @@ impl App {
                 flash::ended(&mut self.composed);
             } else if !self.approvals.is_empty() {
                 self.approvals.draw(&mut self.composed, Instant::now());
+                self.was_running.hide();
             } else if let Some(prompt) = &self.prompt {
                 paste::banner(&mut self.composed, prompt);
+                self.was_running.hide();
+            } else if (self.was_running).draw(&mut self.composed, self.focused, Instant::now()) {
+                // The strip is drawn.
             } else if let Some(bar) = &self.bar {
                 bar.draw(&mut self.composed);
             } else if let Some(vi) = self.vi.filter(|_| self.flash.until().is_none()) {
@@ -814,6 +828,9 @@ impl App {
     /// mode, then the pane. A key pressed while composing belongs to the input method, so it
     /// neither reaches a program nor counts as the prefix.
     fn key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) {
+        if self.answer_strip(event) {
+            return;
+        }
         if self.window_key(event, event_loop) {
             self.prefix.cancel();
             return;
@@ -840,6 +857,23 @@ impl App {
         let bytes = input::encode(&event.logical_key, text, self.modifiers, app_cursor, alt);
         if !bytes.is_empty() {
             self.request(Request::Input(self.focused, bytes));
+        }
+    }
+
+    /// Answers the focused pane's strip with any key: Enter, once armed and if offered, runs
+    /// what it was running, and anything else dismisses it. Returns whether the key was used up,
+    /// as Enter and Esc are; any other goes on to the pane.
+    fn answer_strip(&mut self, event: &KeyEvent) -> bool {
+        let key = &event.logical_key;
+        let now = Instant::now();
+        match (self.was_running).key(self.focused, key, event.repeat, now, self.area.1) {
+            None => false,
+            Some(was_running::Answer::Held) => true,
+            Some(was_running::Answer::Answered { pane, run, used }) => {
+                self.core(proto::Request::WasRunningAnswer { pane, run });
+                self.redraw_soon();
+                used
+            }
         }
     }
 
@@ -1281,6 +1315,10 @@ impl ApplicationHandler<Notice> for App {
                 }
             }
             Notice::Config(config) => self.configure(config),
+            Notice::WasRunning(pane, runnable, command) => {
+                self.was_running.add(pane, runnable, command);
+                self.redraw_soon();
+            }
             // A prompt keeps every key until it is answered, menu keys too; only Quit, which
             // leaves the session running, gets past it.
             Notice::Command(command) if self.prompt.is_none() || command == Command::Detach => {
@@ -1302,6 +1340,7 @@ impl ApplicationHandler<Notice> for App {
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::Focused(focused) => {
                 self.has_focus = focused;
+                self.was_running.focus(focused);
                 self.approvals.focus(focused);
                 self.redraw_soon();
                 if !focused {
@@ -1491,6 +1530,7 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
         wheel: 0.0,
         clipboard: None,
         prompt: None,
+        was_running: was_running::Strips::default(),
         approvals: {
             // Matches `has_focus` below; `Focused` events keep them in step.
             let mut queue = approval::Queue::default();

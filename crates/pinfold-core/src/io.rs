@@ -198,6 +198,8 @@ pub struct Reactor {
     /// The read end of the self-pipe, kept open while it is polled.
     signals: Option<pipe::Receiver>,
     terminated: bool,
+    /// Restored panes and the redacted command each was running, until a window answers.
+    pub(crate) was_running: Vec<(usize, String)>,
     /// Answers accepted only from the inherited window link.
     pub(crate) approval_answers: Vec<(u64, ApprovalAnswer)>,
     pub(crate) protect: Protect,
@@ -226,6 +228,7 @@ impl Reactor {
             host: Host::default(),
             signals: None,
             terminated: false,
+            was_running: Vec::new(),
             approval_answers: Vec::new(),
             protect: Protect::default(),
         })
@@ -684,6 +687,7 @@ impl Reactor {
     /// Stops polling a pane and drops it, which ends its program and frees its terminal.
     pub(crate) fn drop_pane(&mut self, number: usize) {
         if let Ok(index) = self.panes.binary_search_by_key(&number, |pane| pane.number) {
+            self.was_running.retain(|(pane, _)| *pane != number);
             let pane = self.panes.remove(index);
             let fd = pane.pty.master().as_raw_fd();
             let _ = self.poll.registry().deregister(&mut SourceFd(&fd));

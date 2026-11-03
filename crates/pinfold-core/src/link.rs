@@ -83,6 +83,8 @@ struct PaneLink {
     noisy: bool,
     /// Whether it raised a "needs you" alert while hidden, and needs you still.
     alerted: bool,
+    /// Whether this window heard what the pane was running before a restore.
+    told_ran: bool,
     /// The state and source the window last heard of, while `naming`.
     told: Option<(u8, bool)>,
     /// The message the window last heard of, while `naming`.
@@ -201,6 +203,9 @@ impl Session {
                 if let Some(state) = self.state(pane as usize).filter(|state| state.watched) {
                     state.synced = false;
                 }
+            }
+            Request::WasRunningAnswer { pane, run } => {
+                reactor.answer_was_running(pane as usize, run);
             }
             Request::ApprovalAnswer { id, answer } => {
                 if reactor.approval_answers.len() < MAX_APPROVALS {
@@ -383,6 +388,19 @@ impl Session {
             return Ok(());
         };
         let pane = state.number;
+        if !state.told_ran {
+            state.told_ran = true;
+            let ran = reactor.was_running.iter().find(|(at, _)| *at == pane);
+            if let Some((_, command)) = ran {
+                let runnable = crate::snapshot::runnable(command);
+                let notice = Notice::WasRunning {
+                    pane: pane as u32,
+                    runnable,
+                    command,
+                };
+                notice.encode(&mut self.out).map_err(|_| Ended)?;
+            }
+        }
         let dirty = reactor.take_dirty(pane);
         if dirty && !state.watched && !state.noisy {
             state.noisy = true;
@@ -766,6 +784,7 @@ mod tests {
         tabs: Vec<u32>,
         shown: Vec<(u32, Rect)>,
         refused: Vec<Refusal>,
+        was_running: Vec<(u32, bool, String)>,
     }
 
     impl Peer {
@@ -792,6 +811,7 @@ mod tests {
                 tabs: Vec::new(),
                 shown: Vec::new(),
                 refused: Vec::new(),
+                was_running: Vec::new(),
             }
         }
 
@@ -866,6 +886,11 @@ mod tests {
                             self.shown = layout.panes().collect();
                         }
                         Notice::Refused { reason } => self.refused.push(reason),
+                        Notice::WasRunning {
+                            pane,
+                            runnable,
+                            command,
+                        } => self.was_running.push((pane, runnable, command.to_owned())),
                         Notice::Approval(_) => {}
                     }
                 }
@@ -1212,6 +1237,80 @@ mod tests {
     }
 
     #[test]
+    fn enter_types_what_a_restored_pane_was_running_and_esc_types_nothing() {
+        use crate::snapshot::{Layout, Pane, Snapshot, Tab, VERSION as SAVED, Way};
+        // Stacked, so each pane is wide enough for a line.
+        let split = |first, second| Layout::Split {
+            direction: Way::Down,
+            ratio: 0.5,
+            first: Box::new(first),
+            second: Box::new(second),
+        };
+        let root = split(
+            Layout::Pane(0),
+            split(Layout::Pane(1), split(Layout::Pane(2), Layout::Pane(3))),
+        );
+        let snapshot = Snapshot {
+            version: SAVED,
+            tabs: vec![Tab {
+                root,
+                focus: 0,
+                zoomed: false,
+            }],
+            active: 0,
+            panes: vec![
+                Pane::new(None, "/bin/sh"),
+                Pane::new(None, "rerun-me"),
+                Pane::new(None, "dismiss-me"),
+                Pane::new(
+                    None,
+                    "deploy --token=ghp_0123456789abcdefghijklmnopqrstuvwxyz",
+                ),
+            ],
+        };
+        let mut reactor = Reactor::new().unwrap();
+        reactor.shell = || shell(ALIVE);
+        reactor.restore(&snapshot).unwrap();
+        let mut peer = Peer::watching(&mut reactor, 0);
+        serve(&mut reactor, &mut peer, |_, p| p.was_running.len() == 3);
+        let (run, esc, redacted) = (1, 2, 3);
+        // The shell pane, by its program's name, shows nothing.
+        let told: Vec<_> = peer
+            .was_running
+            .iter()
+            .map(|(pane, ok, _)| (*pane, *ok))
+            .collect();
+        assert_eq!(told, [(run, true), (esc, true), (redacted, false)]);
+        assert_eq!(peer.was_running[0].2, "rerun-me");
+
+        peer.send(Request::WasRunningAnswer {
+            pane: esc,
+            run: false,
+        });
+        peer.send(Request::WasRunningAnswer {
+            pane: redacted,
+            run: true,
+        });
+        peer.send(Request::WasRunningAnswer {
+            pane: run,
+            run: true,
+        });
+        assert!(turn_until(&mut reactor, |r| on_screen(
+            r,
+            1,
+            "got-rerun-me"
+        )));
+        assert!(reactor.was_running.is_empty());
+        for pane in [esc, redacted] {
+            assert_pty_lives(&mut reactor, pane as usize);
+            assert!(!on_screen(&reactor, pane as usize, "-me"));
+            assert!(!on_screen(&reactor, pane as usize, "deploy"));
+        }
+        // Answered once: a second Enter types nothing.
+        assert!(!reactor.answer_was_running(1, true));
+    }
+
+    #[test]
     fn input_reaches_the_program() {
         let mut reactor = Reactor::new().unwrap();
         let pane = reactor.open_tab(shell(ALIVE), 24, 80).unwrap();
@@ -1412,7 +1511,7 @@ mod tests {
 
     #[test]
     fn a_second_open_starts_nothing_until_the_first_has_gone() {
-        let hello = r"printf '\003\000\000\000\000\007\000' >&3; exec cat <&3 >/dev/null";
+        let hello = r"printf '\003\000\000\000\000\010\000' >&3; exec cat <&3 >/dev/null";
         let (binary, log) = window_script("second-open", hello);
         let mut reactor = Reactor::new().unwrap();
         assert_eq!(spawn_window(&mut reactor, &binary), WindowOpen::Started);
