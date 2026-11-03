@@ -379,9 +379,13 @@ dependencies = [
  "alacritty_terminal",
  "lz4_flex",
  "mio",
+ "pinfold-api",
  "pinfold-mux",
  "pinfold-proto",
  "pinfold-sys",
+ "regex-lite",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -392,6 +396,7 @@ dependencies = [
  "pinfold-api",
  "pinfold-config",
  "pinfold-core",
+ "pinfold-mux",
  "pinfold-proto",
 ]
 
@@ -399,6 +404,7 @@ dependencies = [
 name = "pinfold-mux"
 version = "0.0.0"
 dependencies = [
+ "pinfold-proto",
  "thiserror",
 ]
 
@@ -414,6 +420,7 @@ name = "pinfold-sys"
 version = "0.0.0"
 dependencies = [
  "libc",
+ "signal-hook",
 ]
 
 [[package]]
@@ -484,6 +491,12 @@ dependencies = [
  "memchr",
  "regex-syntax",
 ]
+
+[[package]]
+name = "regex-lite"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
 
 [[package]]
 name = "regex-syntax"

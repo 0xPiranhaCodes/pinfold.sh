@@ -2,10 +2,12 @@
 //! `pinfold ctl` lists panes.
 //!
 //! It takes `hello`, `window.open` and, after `hello` version 2, `pane.list`, `pane.read`,
-//! `pane.last_output`, `pane.send`, `pane.wait`, `events.subscribe` and `audit.read`, as newline-delimited
-//! JSON-RPC 2.0 (ADR-0009, ADR-0028, ADR-0032). `window.open` takes no arguments, so a caller
-//! cannot name a program. This only checks a request's shape: the reactor answers every
-//! [`Request`], checks its scope, parks waits and sends events, so nothing here reaches a pane.
+//! `pane.last_output`, `pane.send`, `pane.wait`, `events.subscribe`, `audit.read`,
+//! `grants.list`, `grants.revoke`, `workspace.trust_state`, `workspace.ask_trust` and
+//! `session.save`, as newline-delimited JSON-RPC 2.0 (ADR-0009, ADR-0028, ADR-0032).
+//! `window.open` takes no arguments, so a caller cannot name a program. This only checks a
+//! request's shape: the reactor answers every [`Request`], checks its scope, parks waits and
+//! sends events, so nothing here reaches a pane.
 //! Same-user controls are guardrails (threat model).
 //!
 //! ```no_run
@@ -51,7 +53,7 @@ pub const OLDEST: u64 = 1;
 pub const STACK: usize = 256 * 1024;
 
 /// The session's name in its file names. There is one session until M2 adds attach.
-const SESSION: &str = "default";
+pub const SESSION: &str = "default";
 /// Most peers served at once (ADR-0032). Past it a new peer is closed unread.
 pub const MAX_PEERS: usize = 16;
 /// Most peers of one caller identity, where all unidentified peers count as one (ADR-0032).
@@ -66,6 +68,10 @@ const READ_CHUNK: usize = 4096;
 pub const MAX_SEND: usize = 4096;
 /// Most bytes queued for a peer. One that will not read past it is closed (ADR-0032 point 5).
 pub const MAX_OUTPUT: usize = 2 * 1024 * 1024;
+/// Most characters of a `pane.status` message. More is refused, not cut.
+pub const MAX_STATUS_MESSAGE: usize = 200;
+/// The states a `pane.status` may report.
+pub const STATES: [&str; 5] = ["needs-you", "running", "done", "error", "idle"];
 /// Most entries one `audit.read` returns.
 pub const MAX_AUDIT_READ: usize = 1000;
 /// Longest `pane.wait` a caller may ask for.
@@ -86,14 +92,15 @@ const EVENTS: usize = MAX_PEERS * EVENTS_EACH;
 /// How long the core waits for a window to say hello. Past it a launcher reports the window as
 /// not ready, so a hung one is heard of, and the window may still open.
 pub const OPEN_WAIT: Duration = Duration::from_secs(2);
+/// Longest a cross-pane request may stay parked for a window answer.
+pub const APPROVAL_WAIT: Duration = Duration::from_secs(60);
 /// [`OPEN_WAIT`] for the first window of a core, which starts with nothing warm, so that a slow
 /// Mac does not report failure for a window that opens (`docs/spikes/m2-cold-start`).
 pub const FIRST_OPEN_WAIT: Duration = Duration::from_secs(10);
 /// Longest reply a client reads: the core closes a peer whose queue reaches [`MAX_OUTPUT`].
 const MAX_REPLY: u64 = MAX_OUTPUT as u64;
-/// Longest a launcher waits for each answer. It can queue behind one peer's first window, then
-/// have its own.
-const REPLY_WAIT: Duration = Duration::from_secs(FIRST_OPEN_WAIT.as_secs() + OPEN_WAIT.as_secs());
+/// Longest a client waits for an answer, including a cross-pane approval prompt.
+const REPLY_WAIT: Duration = Duration::from_secs(APPROVAL_WAIT.as_secs() + OPEN_WAIT.as_secs());
 
 const PARSE_ERROR: i64 = -32700;
 const NOT_A_REQUEST: i64 = -32600;
@@ -133,6 +140,15 @@ pub enum Method {
         /// The text, typed as it is.
         text: String,
     },
+    /// `pane.status`: the state an agent reports for its own pane.
+    PaneStatus {
+        /// The pane's number.
+        pane: usize,
+        /// One of [`STATES`].
+        state: String,
+        /// At most [`MAX_STATUS_MESSAGE`] characters, or empty.
+        message: String,
+    },
     /// `pane.wait`, its shape checked.
     PaneWait(Wait),
     /// `events.subscribe`, its shape checked.
@@ -147,15 +163,45 @@ pub enum Method {
     },
     /// `pane.spawn`, its shape checked.
     PaneSpawn(crate::spawn::Spawn),
+    /// `agent.launch`, its shape checked.
+    AgentLaunch(crate::spawn::Launch),
     /// `pane.close`: a pane the caller spawned.
     PaneClose {
         /// The pane's number.
         pane: usize,
     },
+    /// `session.save`: write the session's snapshot now.
+    SessionSave,
+    /// `workspace.open`, its shape checked.
+    WorkspaceOpen(crate::workspace::Open),
+    /// `grants.list`, accepted only from a terminal outside every pane.
+    GrantsList,
+    /// `grants.revoke`, accepted only from a terminal outside every pane.
+    GrantsRevoke {
+        /// Stable grant id.
+        id: u64,
+    },
+    /// `workspace.trust_state`: whether a directory is trusted with a layout's hash.
+    WorkspaceTrustState(Workspace),
+    /// `workspace.ask_trust`: asks the window whether to trust a layout, showing every `run` line.
+    /// Accepted only from a terminal outside every pane.
+    WorkspaceAskTrust(Workspace, Vec<String>),
 }
 
+/// A workspace named by `workspace.trust_state` and `workspace.ask_trust`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Workspace {
+    /// The project directory, an absolute path the reactor makes canonical.
+    pub root: String,
+    /// The layout file's SHA-256, 64 lowercase hexadecimal digits.
+    pub sha256: String,
+}
+
+/// Most `run` lines one trust prompt shows.
+pub const MAX_RUNS: usize = 64;
+
 /// What `pane.wait` waits for, until its timeout.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Wait {
     /// The pane named, or nothing for `self`, the caller's own.
     pub pane: Option<usize>,
@@ -166,7 +212,7 @@ pub struct Wait {
 }
 
 /// What ends a `pane.wait`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Until {
     /// The shell finishes a command (OSC 133 `D`).
     Exit,
@@ -174,7 +220,15 @@ pub enum Until {
     Prompt,
     /// The program writes anything.
     Output,
+    /// A line printed later matches this regex, at most [`MAX_PATTERN`] bytes, which the
+    /// reactor compiles.
+    Match(String),
+    /// The program writes nothing for this long, from 100 ms to [`MAX_WAIT`].
+    Idle(Duration),
 }
+
+/// Longest `pane.wait` pattern.
+pub const MAX_PATTERN: usize = 1024;
 
 /// The events a subscriber asked for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -185,6 +239,8 @@ pub struct Topics {
     pub closed: bool,
     /// `pane.status`.
     pub status: bool,
+    /// `pane.output`, for the caller's own pane only.
+    pub output: bool,
 }
 
 /// Why the core cannot take the control socket.
@@ -275,7 +331,11 @@ pub fn start_log(directory: &Path) -> Result<File, Error> {
 }
 
 /// Makes `directory` if it is missing, and refuses it unless only this user can reach it.
-fn checked(directory: &Path) -> Result<(), Error> {
+///
+/// # Errors
+///
+/// Returns an error if it cannot be made, or is a symlink, someone else's or open to others.
+pub fn checked(directory: &Path) -> Result<(), Error> {
     match DirBuilder::new().mode(0o700).create(directory) {
         Err(error) if error.kind() != io::ErrorKind::AlreadyExists => return Err(error.into()),
         _ => {}
@@ -431,6 +491,10 @@ impl Control {
                         Method::WindowOpen => mem::replace(&mut wait, OPEN_WAIT),
                         // The reactor answers at the timeout, so this only catches one that cannot.
                         Method::PaneWait(Wait { timeout, .. }) => *timeout + OPEN_WAIT,
+                        Method::PaneRead { .. }
+                        | Method::PaneLastOutput { .. }
+                        | Method::PaneSend { .. }
+                        | Method::WorkspaceAskTrust(..) => APPROVAL_WAIT + OPEN_WAIT,
                         _ => OPEN_WAIT,
                     };
                     ask(Request {
@@ -554,6 +618,7 @@ impl Request {
     pub fn subscriber(&self) -> Subscriber {
         Subscriber {
             peer: self.peer,
+            caller: self.caller,
             alive: self.alive.clone(),
             events: self.events.clone(),
             queued: Arc::default(),
@@ -580,6 +645,7 @@ enum Asked {
 #[derive(Debug)]
 pub struct Subscriber {
     peer: (usize, u64),
+    caller: Option<Terminal>,
     alive: Weak<AtomicBool>,
     events: SyncSender<Event>,
     /// Its events sent and not yet taken by the API thread, at most [`EVENTS_EACH`].
@@ -588,8 +654,15 @@ pub struct Subscriber {
 }
 
 impl Subscriber {
-    /// Sends `{"method": "event", "params": params}`, which must carry no pane contents. It never
-    /// blocks: past `EVENTS_EACH` (64) queued, the connection missed an event and is closed.
+    /// The subscriber's caller, as [`Request::caller`] gives it.
+    #[must_use]
+    pub fn caller(&self) -> Option<Terminal> {
+        self.caller
+    }
+
+    /// Sends `{"method": "event", "params": params}`, which carries pane contents only for the
+    /// caller's own pane. It never blocks: past `EVENTS_EACH` (64) queued, the connection missed
+    /// an event and is closed.
     pub fn send(&self, params: Value) {
         let room = self.queued.fetch_add(1, Ordering::Relaxed) < EVENTS_EACH;
         let sent = room.then(|| {
@@ -650,7 +723,12 @@ fn call(stream: &UnixStream, request: &Value) -> Result<Value, Error> {
     (&mut &*stream).write_all(&bytes)?;
     let mut line = Vec::new();
     BufReader::new(stream.take(MAX_REPLY)).read_until(b'\n', &mut line)?;
-    let reply: Value = serde_json::from_slice(&line)
+    result(&line)
+}
+
+/// The result in one reply line, or its error.
+fn result(line: &[u8]) -> Result<Value, Error> {
+    let reply: Value = serde_json::from_slice(line)
         .map_err(|_| Error::Refused("the reply is not JSON-RPC".to_owned()))?;
     match reply.get("result") {
         Some(result) => Ok(result.clone()),
@@ -714,6 +792,67 @@ pub fn ask(stream: &UnixStream, method: &str, params: &Value) -> Result<(Value, 
     let hello = call(stream, &hello)?;
     let asked = json!({"jsonrpc": "2.0", "id": 2, "method": method, "params": params});
     Ok((hello, call(stream, &asked)?))
+}
+
+/// Says `hello` version 2 to the core on `stream`, subscribes to `topics` (`events.subscribe`'s
+/// params), and returns the next event's params, or `None` once `timeout` passes with none.
+/// Refuses another user's socket, as [`ask`] does.
+///
+/// # Errors
+///
+/// As [`ask`], and [`Error::Io`] if the core closes the connection before an event.
+pub fn next_event(
+    stream: &UnixStream,
+    topics: &Value,
+    timeout: Duration,
+) -> Result<Option<Value>, Error> {
+    check_peer(stream.as_fd(), pinfold_sys::effective_uid())?;
+    stream.set_read_timeout(Some(REPLY_WAIT))?;
+    stream.set_write_timeout(Some(REPLY_WAIT))?;
+    call(
+        stream,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "hello", "params": {"version": VERSION}}),
+    )?;
+    let subscribe =
+        json!({"jsonrpc": "2.0", "id": 2, "method": "events.subscribe", "params": topics});
+    let mut bytes = subscribe.to_string().into_bytes();
+    bytes.push(b'\n');
+    (&mut &*stream).write_all(&bytes)?;
+    // One reader for the result and the events, as an event may come in the same read.
+    let mut reader = BufReader::new(stream.take(MAX_REPLY));
+    let mut line = Vec::new();
+    reader.read_until(b'\n', &mut line)?;
+    result(&line)?;
+    let until = Instant::now() + timeout;
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(None);
+        }
+        reader.get_ref().get_ref().set_read_timeout(Some(left))?;
+        line.clear();
+        reader.get_mut().set_limit(MAX_REPLY);
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into()),
+            Ok(_) if line.ends_with(b"\n") => {
+                let message: Value = serde_json::from_slice(&line)
+                    .map_err(|_| Error::Refused("the event is not JSON-RPC".to_owned()))?;
+                if message["method"] == "event" {
+                    return Ok(Some(message["params"].clone()));
+                }
+            }
+            Ok(_) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 /// One connection on the API thread.
@@ -997,15 +1136,29 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
         _ if *greeted == 0 => refuse(Some(id), NO_HELLO, "hello comes first"),
         Some("window.open") => Step::Ask(id.clone(), Method::WindowOpen),
         Some(
-            method @ ("pane.list" | "pane.read" | "pane.last_output" | "pane.send" | "pane.spawn"
-            | "pane.close"),
+            method @ ("pane.list"
+            | "pane.read"
+            | "pane.last_output"
+            | "pane.send"
+            | "pane.spawn"
+            | "pane.close"
+            | "grants.list"
+            | "grants.revoke"
+            | "workspace.open"
+            | "workspace.trust_state"
+            | "workspace.ask_trust"
+            | "session.save"
+            | "agent.launch"),
         ) if *greeted < VERSION => refuse(
             Some(id),
             NO_METHOD,
             &format!("{method} needs hello version 2"),
         ),
         Some("pane.list") => Step::Ask(id.clone(), Method::PaneList),
-        Some(method @ ("pane.wait" | "events.subscribe" | "audit.read")) if *greeted < VERSION => {
+        Some("session.save") => Step::Ask(id.clone(), Method::SessionSave),
+        Some(method @ ("pane.wait" | "events.subscribe" | "audit.read" | "pane.status"))
+            if *greeted < VERSION =>
+        {
             refuse(
                 Some(id),
                 NO_METHOD,
@@ -1017,7 +1170,7 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
             None => refuse(
                 Some(id),
                 BAD_PARAMS,
-                "pane.wait takes pane, until and timeout_ms",
+                "pane.wait takes pane, until, timeout_ms, and pattern or idle_ms",
             ),
         },
         Some("events.subscribe") => match topics(request.get("params")) {
@@ -1036,8 +1189,36 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
             Ok(spawn) => Step::Ask(id.clone(), Method::PaneSpawn(spawn)),
             Err(reason) => refuse(Some(id), BAD_PARAMS, reason),
         },
-        Some(method @ ("pane.read" | "pane.last_output" | "pane.send" | "pane.close")) => {
-            match pane_method(method, request.get("params")) {
+        Some("agent.launch") => match crate::spawn::launch(request.get("params")) {
+            Ok(launch) => Step::Ask(id.clone(), Method::AgentLaunch(launch)),
+            Err(reason) => refuse(Some(id), BAD_PARAMS, reason),
+        },
+        Some("workspace.open") => match crate::workspace::params(request.get("params")) {
+            Some(open) => Step::Ask(id.clone(), Method::WorkspaceOpen(open)),
+            None => refuse(
+                Some(id),
+                BAD_PARAMS,
+                "workspace.open takes an absolute root and a layout of tabs, splits and cwds",
+            ),
+        },
+        Some(
+            method
+            @ ("pane.read" | "pane.last_output" | "pane.send" | "pane.close" | "pane.status"),
+        ) => match pane_method(method, request.get("params")) {
+            Ok(method) => Step::Ask(id.clone(), method),
+            Err(reason) => refuse(Some(id), BAD_PARAMS, reason),
+        },
+        Some("grants.list") => Step::Ask(id.clone(), Method::GrantsList),
+        Some("grants.revoke") => match request.pointer("/params/id").and_then(Value::as_u64) {
+            Some(grant @ 1..) => Step::Ask(id.clone(), Method::GrantsRevoke { id: grant }),
+            None | Some(0) => refuse(
+                Some(id),
+                BAD_PARAMS,
+                "grants.revoke takes a positive numeric id",
+            ),
+        },
+        Some(method @ ("workspace.trust_state" | "workspace.ask_trust")) => {
+            match workspace(method, request.get("params")) {
                 Ok(method) => Step::Ask(id.clone(), method),
                 Err(reason) => refuse(Some(id), BAD_PARAMS, reason),
             }
@@ -1058,6 +1239,15 @@ fn wait(params: Option<&Value>) -> Option<Wait> {
         "exit" => Until::Exit,
         "prompt" => Until::Prompt,
         "output" => Until::Output,
+        "match" => {
+            let pattern = params.get("pattern")?.as_str()?;
+            (pattern.len() <= MAX_PATTERN).then(|| Until::Match(pattern.to_owned()))?
+        }
+        "idle" => {
+            let quiet = Duration::from_millis(params.get("idle_ms")?.as_u64()?);
+            let allowed = (Duration::from_millis(100)..=MAX_WAIT).contains(&quiet);
+            allowed.then_some(Until::Idle(quiet))?
+        }
         _ => return None,
     };
     let timeout = Duration::from_millis(params.get("timeout_ms")?.as_u64()?);
@@ -1076,6 +1266,7 @@ fn topics(params: Option<&Value>) -> Option<Topics> {
             "pane.opened" => topics.opened = true,
             "pane.closed" => topics.closed = true,
             "pane.status" => topics.status = true,
+            "pane.output" => topics.output = true,
             _ => return None,
         }
     }
@@ -1135,9 +1326,60 @@ fn pane_method(method: &str, params: Option<&Value>) -> Result<Method, &'static 
                 text: text.to_owned(),
             })
         }
+        "pane.status" => {
+            let state = field("state").and_then(Value::as_str);
+            let state = state
+                .filter(|state| STATES.contains(state))
+                .ok_or("params.state must be needs-you, running, done, error or idle")?;
+            let message = match field("message") {
+                None | Some(Value::Null) => "",
+                Some(message) => message.as_str().ok_or("params.message must be a string")?,
+            };
+            if message.chars().count() > MAX_STATUS_MESSAGE {
+                return Err("params.message is over 200 characters");
+            }
+            Ok(Method::PaneStatus {
+                pane,
+                state: state.to_owned(),
+                message: message.to_owned(),
+            })
+        }
         "pane.close" => Ok(Method::PaneClose { pane }),
         _ => Ok(Method::PaneLastOutput { pane }),
     }
+}
+
+/// Checks a workspace method's `params`: an absolute `root`, a lowercase hex `sha256`, and for
+/// `workspace.ask_trust` at most [`MAX_RUNS`] `runs` strings.
+fn workspace(method: &str, params: Option<&Value>) -> Result<Method, &'static str> {
+    let field = |name| params.and_then(|params| params.get(name));
+    let root = field("root")
+        .and_then(Value::as_str)
+        .filter(|root| root.starts_with('/'))
+        .ok_or("params.root must be an absolute path")?;
+    let sha256 = field("sha256")
+        .and_then(Value::as_str)
+        .filter(|hash| {
+            hash.len() == 64 && hash.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
+        .ok_or("params.sha256 must be 64 lowercase hexadecimal digits")?;
+    let workspace = Workspace {
+        root: root.to_owned(),
+        sha256: sha256.to_owned(),
+    };
+    if method == "workspace.trust_state" {
+        return Ok(Method::WorkspaceTrustState(workspace));
+    }
+    let runs = field("runs")
+        .and_then(Value::as_array)
+        .filter(|runs| runs.len() <= MAX_RUNS)
+        .and_then(|runs| {
+            runs.iter()
+                .map(|run| Some(run.as_str()?.to_owned()))
+                .collect()
+        })
+        .ok_or("params.runs must be at most 64 strings")?;
+    Ok(Method::WorkspaceAskTrust(workspace, runs))
 }
 
 /// Feeds one bounded request line through every parser state used by a control-socket peer.
@@ -1236,6 +1478,13 @@ mod tests {
             answer(list, &mut greeted),
             Step::Ask(json!(2), Method::PaneList)
         );
+        let save = br#"{"jsonrpc":"2.0","id":3,"method":"session.save"}"#;
+        assert_eq!(
+            answer(save, &mut greeted),
+            Step::Ask(json!(3), Method::SessionSave)
+        );
+        let (reply, _) = replied(save, &mut OLDEST.clone());
+        assert_eq!(code(&reply), Some(NO_METHOD));
     }
 
     /// A request for a pane method with these params.
@@ -1276,6 +1525,12 @@ mod tests {
         let (reply, _) = replied(spawn.as_bytes(), &mut VERSION.clone());
         assert_eq!(code(&reply), Some(BAD_PARAMS));
         let (reply, _) = replied(spawn.as_bytes(), &mut OLDEST.clone());
+        assert_eq!(code(&reply), Some(NO_METHOD));
+        let launch = pane_request("agent.launch", &json!({"profile": "a", "command": ["sh"]}));
+        let (reply, _) = replied(launch.as_bytes(), &mut VERSION.clone());
+        assert_eq!(code(&reply), Some(BAD_PARAMS));
+        let launch = pane_request("agent.launch", &json!({"profile": "a"}));
+        let (reply, _) = replied(launch.as_bytes(), &mut OLDEST.clone());
         assert_eq!(code(&reply), Some(NO_METHOD));
         let bad = [
             json!(null),
@@ -1320,6 +1575,101 @@ mod tests {
     }
 
     #[test]
+    fn no_api_method_can_answer_an_approval_prompt() {
+        let line = br#"{"jsonrpc":"2.0","id":2,"method":"approval.answer","params":{"id":1,"answer":"allow"}}"#;
+        let (reply, go_on) = replied(line, &mut VERSION.clone());
+        assert_eq!((code(&reply), go_on), (Some(NO_METHOD), false));
+    }
+
+    #[test]
+    fn workspace_trust_takes_an_absolute_root_a_sha256_and_bounded_runs() {
+        let request = |method: &str, params: Value| {
+            json!({"jsonrpc": "2.0", "id": 3, "method": method, "params": params}).to_string()
+        };
+        let hash = "a".repeat(64);
+        let workspace = Workspace {
+            root: "/p".to_owned(),
+            sha256: hash.clone(),
+        };
+        let line = request(
+            "workspace.ask_trust",
+            json!({"root": "/p", "sha256": hash, "runs": ["make"]}),
+        );
+        let (reply, _) = replied(line.as_bytes(), &mut OLDEST.clone());
+        assert_eq!(code(&reply), Some(NO_METHOD));
+        let asked = answer(line.as_bytes(), &mut VERSION.clone());
+        let method = Method::WorkspaceAskTrust(workspace.clone(), vec!["make".to_owned()]);
+        assert_eq!(asked, Step::Ask(json!(3), method));
+        let line = request(
+            "workspace.trust_state",
+            json!({"root": "/p", "sha256": hash}),
+        );
+        let asked = answer(line.as_bytes(), &mut VERSION.clone());
+        assert_eq!(
+            asked,
+            Step::Ask(json!(3), Method::WorkspaceTrustState(workspace))
+        );
+        for (method, params) in [
+            (
+                "workspace.trust_state",
+                json!({"root": "p", "sha256": hash}),
+            ),
+            (
+                "workspace.trust_state",
+                json!({"root": "/p", "sha256": "A".repeat(64)}),
+            ),
+            (
+                "workspace.trust_state",
+                json!({"root": "/p", "sha256": "a"}),
+            ),
+            ("workspace.ask_trust", json!({"root": "/p", "sha256": hash})),
+            (
+                "workspace.ask_trust",
+                json!({"root": "/p", "sha256": hash, "runs": [1]}),
+            ),
+            (
+                "workspace.ask_trust",
+                json!({"root": "/p", "sha256": hash, "runs": vec![""; MAX_RUNS + 1]}),
+            ),
+        ] {
+            let (reply, _) = replied(request(method, params).as_bytes(), &mut VERSION.clone());
+            assert_eq!(code(&reply), Some(BAD_PARAMS), "{method}");
+        }
+    }
+
+    #[test]
+    fn a_status_needs_version_2_a_known_state_and_a_short_message() {
+        let status = |params: Value| pane_request("pane.status", &params);
+        let most = "é".repeat(MAX_STATUS_MESSAGE);
+        let line = status(json!({"pane": 1, "state": "needs-you", "message": most}));
+        assert_eq!(
+            answer(line.as_bytes(), &mut VERSION.clone()),
+            Step::Ask(
+                json!(2),
+                Method::PaneStatus {
+                    pane: 1,
+                    state: "needs-you".to_owned(),
+                    message: most
+                }
+            )
+        );
+        let line = status(json!({"pane": 1, "state": "idle"}));
+        let (reply, _) = replied(line.as_bytes(), &mut OLDEST.clone());
+        assert_eq!(code(&reply), Some(NO_METHOD));
+        let bad = [
+            json!({"pane": 1, "state": "needs you"}),
+            json!({"pane": 1}),
+            json!({"pane": "self", "state": "done"}),
+            json!({"pane": 1, "state": "done", "message": 7}),
+            json!({"pane": 1, "state": "done", "message": "x".repeat(MAX_STATUS_MESSAGE + 1)}),
+        ];
+        for params in bad {
+            let (reply, go_on) = replied(status(params.clone()).as_bytes(), &mut VERSION.clone());
+            assert_eq!((code(&reply), go_on), (Some(BAD_PARAMS), false), "{params}");
+        }
+    }
+
+    #[test]
     fn wait_and_subscribe_need_version_2_and_well_formed_params() {
         let request = |method: &str, params: Value| {
             json!({"jsonrpc": "2.0", "id": 3, "method": method, "params": params}).to_string()
@@ -1341,13 +1691,34 @@ mod tests {
             panic!("pane 4 was refused");
         };
         assert_eq!((asked.pane, asked.until), (Some(4), Until::Output));
+        for (params, until) in [
+            (
+                json!({"until": "match", "pattern": "x".repeat(MAX_PATTERN)}),
+                Until::Match("x".repeat(MAX_PATTERN)),
+            ),
+            (
+                json!({"until": "idle", "idle_ms": 100}),
+                Until::Idle(Duration::from_millis(100)),
+            ),
+        ] {
+            let mut params = params;
+            params["pane"] = json!("self");
+            params["timeout_ms"] = json!(5);
+            let Step::Ask(_, Method::PaneWait(asked)) =
+                answer(wait(params).as_bytes(), &mut VERSION.clone())
+            else {
+                panic!("a well-formed wait was refused");
+            };
+            assert_eq!(asked.until, until);
+        }
 
         let subscribe = |events| request("events.subscribe", json!({"events": events}));
-        let line = subscribe(json!(["pane.opened", "pane.status"]));
+        let line = subscribe(json!(["pane.opened", "pane.status", "pane.output"]));
         let topics = Topics {
             opened: true,
             closed: false,
             status: true,
+            output: true,
         };
         let asked = answer(line.as_bytes(), &mut VERSION.clone());
         assert_eq!(asked, Step::Ask(json!(3), Method::EventsSubscribe(topics)));
@@ -1358,6 +1729,12 @@ mod tests {
             wait(json!({"pane": "other", "until": "exit", "timeout_ms": 1})),
             wait(json!({"pane": -1, "until": "exit", "timeout_ms": 1})),
             wait(json!({"pane": "self", "until": "never", "timeout_ms": 1})),
+            wait(json!({"pane": "self", "until": "match", "timeout_ms": 1})),
+            wait(
+                json!({"pane": "self", "until": "match", "pattern": "x".repeat(MAX_PATTERN + 1), "timeout_ms": 1}),
+            ),
+            wait(json!({"pane": "self", "until": "idle", "idle_ms": 99, "timeout_ms": 1})),
+            wait(json!({"pane": "self", "until": "idle", "idle_ms": 600_001, "timeout_ms": 1})),
             subscribe(json!([])),
             subscribe(json!(["pane.contents"])),
             request("events.subscribe", json!(null)),
@@ -1884,5 +2261,30 @@ mod tests {
         }
         assert_eq!(over.read(&mut [0; 8]).unwrap(), 0);
         drop(held);
+    }
+
+    #[test]
+    fn a_subscriber_that_hangs_up_frees_its_slot() {
+        let path = core(serving(Ok(json!({}))), IDLE);
+        let topics = json!({"events": ["pane.closed"]});
+        // The core hears each hang-up after the next connect may arrive, so each try may be
+        // closed unread at the identity's cap for a moment.
+        fn eventually(mut call: impl FnMut() -> bool) {
+            let until = Instant::now() + TIMEOUT;
+            while !call() {
+                assert!(Instant::now() < until, "slots stayed taken");
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        for _ in 0..2 * MAX_PEERS {
+            eventually(|| {
+                let stream = UnixStream::connect(&path).unwrap();
+                next_event(&stream, &topics, Duration::ZERO).is_ok_and(|event| event.is_none())
+            });
+        }
+        eventually(|| {
+            let stream = UnixStream::connect(&path).unwrap();
+            ask(&stream, "pane.list", &json!({})).is_ok()
+        });
     }
 }

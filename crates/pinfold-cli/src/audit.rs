@@ -92,6 +92,12 @@ pub fn read(log: &Log, reactor: &Reactor, request: &Request) -> Result<Value, St
     Ok(json!({"entries": entries, "verified": broken.is_none(), "broken_at": broken}))
 }
 
+/// The new pane, which the caller spawned, if it opened.
+fn spawned(result: &Result<Value, String>) -> Option<usize> {
+    let pane = result.as_ref().ok()?["pane"].as_u64()?;
+    usize::try_from(pane).ok()
+}
+
 /// The record of one answered request. `own` is the caller's pane, if it is in one.
 fn record(
     method: &Method,
@@ -112,25 +118,29 @@ fn record(
             let pane = wait.pane.or(own);
             ("pane.wait", pane, pane.map_or("self", scope))
         }
-        Method::PaneSpawn(_) => {
-            // The new pane, which the caller spawned.
-            let spawned = result
-                .as_ref()
-                .ok()
-                .and_then(|value| value["pane"].as_u64());
-            let pane = spawned.and_then(|pane| usize::try_from(pane).ok());
-            ("pane.spawn", pane, "children")
-        }
+        Method::PaneSpawn(_) => ("pane.spawn", spawned(result), "children"),
+        Method::AgentLaunch(_) => ("agent.launch", spawned(result), "children"),
         Method::PaneClose { pane } => ("pane.close", Some(*pane), scope(*pane)),
+        Method::PaneStatus { pane, .. } => ("pane.status", Some(*pane), scope(*pane)),
         Method::AuditRead { pane, .. } => ("audit.read", *pane, "outside"),
+        Method::SessionSave => ("session.save", None, "outside"),
+        // A refused call from inside a pane is the caller's own, not one from outside.
+        Method::WorkspaceOpen(_) => ("workspace.open", None, own.map_or("outside", |_| "self")),
+        Method::GrantsList => ("grants.list", None, "outside"),
+        Method::GrantsRevoke { .. } => ("grants.revoke", None, "outside"),
+        // The root and run lines are not recorded.
+        Method::WorkspaceTrustState(_) => ("workspace.trust_state", None, "outside"),
+        Method::WorkspaceAskTrust(..) => ("workspace.ask_trust", None, "outside"),
     };
     let mut reason = match result {
         Ok(_) => "allowed".to_owned(),
         Err(reason) => reason.clone(),
     };
     // A send's text is never recorded, only its size.
-    if let Method::PaneSend { text, .. } = method {
-        reason += &format!(", {} bytes", text.len());
+    match method {
+        Method::PaneSend { text, .. } => reason += &format!(", {} bytes", text.len()),
+        Method::GrantsRevoke { id } => reason += &format!(", grant {id}"),
+        _ => {}
     }
     let at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -180,5 +190,38 @@ mod tests {
         assert_eq!((record.outcome, record.scope.as_str()), (expected, "other"));
         let unidentified = super::record(&Method::PaneList, false, None, &Ok(json!({})));
         assert_eq!((unidentified.caller, unidentified.terminal), (None, false));
+    }
+
+    #[test]
+    fn a_save_is_recorded_without_its_path() {
+        let saved = Ok(json!({"path": "/home/someone/.local/state/pinfold/default.json"}));
+        let record = record(&Method::SessionSave, true, None, &saved);
+        let names = (record.method.as_str(), record.scope.as_str());
+        assert_eq!((names, record.target), (("session.save", "outside"), None));
+        assert_eq!(record.outcome, Outcome::Ok("allowed".to_owned()));
+    }
+
+    #[test]
+    fn a_workspace_open_is_outside_only_from_no_pane() {
+        let open = Method::WorkspaceOpen(pinfold_api::workspace::Open {
+            root: "/p".to_owned(),
+            tabs: Vec::new(),
+            sha256: None,
+        });
+        let refused = Err("workspace.open needs a caller outside any pane".to_owned());
+        let scope = |own| record(&open, true, own, &refused).scope;
+        assert_eq!(
+            (scope(None).as_str(), scope(Some(1)).as_str()),
+            ("outside", "self")
+        );
+    }
+
+    #[test]
+    fn a_revoke_is_recorded_with_its_grant_id() {
+        let revoke = Method::GrantsRevoke { id: 3 };
+        let record = record(&revoke, true, None, &Ok(json!({"revoked": true})));
+        let names = (record.method.as_str(), record.scope.as_str());
+        assert_eq!(names, ("grants.revoke", "outside"));
+        assert_eq!(record.outcome, Outcome::Ok("allowed, grant 3".to_owned()));
     }
 }

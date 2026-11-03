@@ -5,7 +5,7 @@
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::mem::MaybeUninit;
-use std::os::fd::{AsRawFd, BorrowedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
@@ -20,6 +20,7 @@ pub mod menu;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub mod metal;
 pub mod pty;
+pub mod seccomp;
 pub mod socket;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub mod window;
@@ -40,6 +41,19 @@ pub mod window;
 /// ```
 pub fn footprint(pid: u32) -> io::Result<u64> {
     platform::footprint(pid)
+}
+
+/// Writes a byte to `pipe` on each SIGTERM and SIGHUP, the self-pipe the core polls to save its
+/// session before it exits. Neither signal ends the process after this, so the reader must.
+///
+/// # Errors
+///
+/// Returns an error if the descriptor cannot be copied or the system refuses a handler.
+pub fn on_terminate(pipe: &OwnedFd) -> io::Result<()> {
+    for signal in [libc::SIGTERM, libc::SIGHUP] {
+        signal_hook::low_level::pipe::register_raw(signal, pipe.try_clone()?)?;
+    }
+    Ok(())
 }
 
 /// Returns the user this process acts as.
@@ -183,6 +197,47 @@ pub fn spawn_detached(mut command: Command, stderr: Stdio) -> io::Result<Child> 
     command.spawn()
 }
 
+/// Hands `fd` to the program `command` starts, at the same number, as bubblewrap's `--seccomp`
+/// needs. The fd stays close-on-exec in this process, so no other child gets it, and closes
+/// here when `command` is dropped.
+///
+/// # Errors
+///
+/// Returns an error if `fd` is 0, 1 or 2, where the child's stdio would land over it.
+///
+/// # Examples
+///
+/// ```
+/// use std::os::fd::{AsRawFd, OwnedFd};
+/// use std::process::Command;
+///
+/// let fd = OwnedFd::from(std::fs::File::open("/dev/null")?);
+/// let mut command = Command::new("/bin/sh");
+/// command.args(["-c", &format!("test -e /dev/fd/{}", fd.as_raw_fd())]);
+/// pinfold_sys::inherit(&mut command, fd)?;
+/// assert!(command.status()?.success());
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn inherit(command: &mut Command, fd: OwnedFd) -> io::Result<()> {
+    if fd.as_raw_fd() < 3 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a descriptor handed to a child must be 3 or above",
+        ));
+    }
+    // SAFETY: fcntl is async-signal-safe, and `fd` is open until the closure, and so `command`,
+    // is dropped.
+    unsafe {
+        command.pre_exec(
+            move || match libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, 0) {
+                -1 => Err(io::Error::last_os_error()),
+                _ => Ok(()),
+            },
+        );
+    }
+    Ok(())
+}
+
 /// Opens the log at `path` empty, for appending: mode 0600 if it is new, and refused if it is a
 /// symlink. Appending means that a file emptied under a running writer stays free of holes.
 ///
@@ -212,6 +267,29 @@ pub fn open_log(path: &Path) -> io::Result<File> {
     // Not O_TRUNC, which the standard library refuses beside append.
     file.set_len(0)?;
     Ok(file)
+}
+
+/// Opens the file at `path` for reading, refused if it is a symlink. The caller checks that it
+/// got a regular file: O_NONBLOCK, so that a FIFO put here cannot hang the open.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened or is a symlink.
+///
+/// # Examples
+///
+/// ```
+/// let path = std::env::temp_dir().join(format!("pinfold-read-{}", std::process::id()));
+/// std::fs::write(&path, "saved")?;
+/// assert!(pinfold_sys::open_no_follow(&path)?.metadata()?.is_file());
+/// std::fs::remove_file(&path)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn open_no_follow(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)
 }
 
 /// A moment on the local clock.

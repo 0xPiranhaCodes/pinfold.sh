@@ -1,5 +1,6 @@
 //! The `pinfold` launcher: starts the core if none answers, asks it for a window, and exits.
-//! `pinfold ctl` and `pinfold mcp` are thin clients of the core's API (ADR-0032).
+//! `pinfold ctl` and `pinfold mcp` are thin clients of the core's API (ADR-0032), and `pinfold
+//! up` opens a project's workspace through it.
 
 use std::error::Error;
 use std::io::{ErrorKind, Write};
@@ -9,14 +10,18 @@ use std::process::{Command, ExitCode, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use pinfold_api::control;
+use pinfold_api::{control, trust};
+use pinfold_config::workspace::{self, Layout, Split};
 use serde_json::{Value, json};
 
 /// How long a core that was just started gets to answer.
 const START_WAIT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(20);
-const USAGE: &str = "usage: pinfold [ctl list [--json] | ctl send <pane> <text> | \
-    ctl log [--json] [-n <count>] [--pane <pane>] | ctl log --verify <file> | mcp]";
+const USAGE: &str = "usage: pinfold [up [dir] | agent <name> [--right | --down | --tab] | \
+    ctl list [--json] | ctl send <pane> <text> | ctl wait <pane> \
+    --until exit|prompt|output|match|idle [--pattern <regex>] [--idle-ms <n>] --timeout <s> | \
+    ctl grants [--json | revoke <id>] | ctl log [--json] [-n <count>] [--pane <pane>] | \
+    ctl log --verify <file> | ctl session save | mcp]";
 
 /// Connects to a core at `path`. Nothing listening is no error, as that is what starts one.
 fn connect(path: &Path) -> std::io::Result<Option<UnixStream>> {
@@ -66,6 +71,63 @@ fn launch() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// `pinfold up [dir]`: opens `dir`'s `.pinfold/layout.toml` in a window, or focuses its tabs if
+/// they are open. If the file has `run` lines and the directory is not trusted with its hash,
+/// the window asks first. The core, not this, reads the lines from the file again and types
+/// them, and only once trusted. Refused, the layout opens as shells, and this says so and returns
+/// false, so `pinfold up` exits 1 and a script can tell the lines did not run.
+fn up(dir: Option<&str>) -> Result<bool, Box<dyn Error>> {
+    let root = std::fs::canonicalize(dir.unwrap_or("."))?;
+    let bytes = workspace::read(&root.join(".pinfold/layout.toml"), &root)?;
+    let layout = workspace::parse(&bytes, &root)?;
+    let (mut params, runs) = request(&root, &layout)?;
+    let sha256 = trust::sha256(&bytes);
+    control::open_window(&core(&control::runtime_dir())?)?;
+    let asked = json!({"root": params["root"], "sha256": sha256});
+    let mut trusted = true;
+    if !runs.is_empty()
+        && control::ask(&running()?, "workspace.trust_state", &asked)?.1["trusted"] != true
+    {
+        let asked = json!({"root": params["root"], "sha256": sha256, "runs": runs});
+        if let Err(error) = control::ask(&running()?, "workspace.ask_trust", &asked) {
+            let count = runs.len();
+            let lines = if count == 1 { "line" } else { "lines" };
+            eprintln!("pinfold: {count} run {lines} did not run: {error}");
+            trusted = false;
+        }
+    }
+    params["sha256"] = sha256.into();
+    control::ask(&running()?, "workspace.open", &params)?;
+    Ok(trusted)
+}
+
+/// `workspace.open`'s parameters for `layout`, with each pane's cwd, or `root` for none, and
+/// without its `run` lines, and those lines, for the trust prompt.
+fn request<'a>(root: &Path, layout: &'a Layout) -> Result<(Value, Vec<&'a str>), Box<dyn Error>> {
+    let text = |path: &Path| {
+        path.to_str()
+            .map(str::to_owned)
+            .ok_or("a path is not UTF-8")
+    };
+    let mut tabs = Vec::new();
+    for tab in &layout.tabs {
+        let mut panes = Vec::new();
+        for (index, pane) in tab.panes.iter().enumerate() {
+            let cwd = text(pane.cwd.as_deref().unwrap_or(root))?;
+            panes.push(match (index, pane.split.unwrap_or(Split::Right)) {
+                (0, _) => json!({"cwd": cwd}),
+                (_, Split::Right) => json!({"split": "right", "cwd": cwd}),
+                (_, Split::Down) => json!({"split": "down", "cwd": cwd}),
+            });
+        }
+        tabs.push(json!({"panes": panes}));
+    }
+    let panes = layout.tabs.iter().flat_map(|tab| &tab.panes);
+    let runs = panes.filter_map(|pane| pane.run.as_deref()).collect();
+    let params = json!({"root": text(root)?, "layout": {"tabs": tabs}});
+    Ok((params, runs))
+}
+
 /// `pinfold ctl list`: prints the session's panes, as JSON with `json`. It starts no core.
 fn list(json: bool) -> Result<(), Box<dyn Error>> {
     let (hello, list) = control::list_panes(&running()?)?;
@@ -84,6 +146,86 @@ fn send(pane: &str, text: &str) -> Result<(), Box<dyn Error>> {
     let pane: usize = pane.parse().map_err(|_| "the pane must be a number")?;
     let params = json!({"pane": pane, "text": text});
     control::ask(&running()?, "pane.send", &params)?;
+    Ok(())
+}
+
+/// `pinfold agent <name> [--right | --down | --tab]`: opens a pane beside the caller's running
+/// the config's `[agents.<name>]` profile. It starts no core, as it needs a caller in a pane.
+fn agent(name: &str, place: &str) -> Result<(), Box<dyn Error>> {
+    let params = json!({"profile": name, "place": place});
+    control::ask(&running()?, "agent.launch", &params)?;
+    Ok(())
+}
+
+/// `pinfold ctl wait <pane> --until <what> [--pattern <regex>] [--idle-ms <n>] --timeout <s>`:
+/// waits on a pane, `self` or a number, and prints how the wait ended. Returns whether what it
+/// waited for happened, rather than a timeout or the pane closing. It starts no core.
+fn wait(args: &[&str]) -> Result<bool, Box<dyn Error>> {
+    let [pane, flags @ ..] = args else {
+        return Err(USAGE.into());
+    };
+    let pane = match *pane {
+        "self" => json!("self"),
+        pane => json!(
+            pane.parse::<usize>()
+                .map_err(|_| "the pane must be a number or self")?
+        ),
+    };
+    let mut params = json!({"pane": pane});
+    for pair in flags.chunks(2) {
+        let (key, value) = match *pair {
+            ["--until", until] => ("until", json!(until)),
+            ["--pattern", pattern] => ("pattern", json!(pattern)),
+            ["--idle-ms", idle] => ("idle_ms", json!(idle.parse::<u64>()?)),
+            ["--timeout", seconds] => (
+                "timeout_ms",
+                json!(seconds.parse::<u64>()?.saturating_mul(1000)),
+            ),
+            _ => return Err(USAGE.into()),
+        };
+        params[key] = value;
+    }
+    if params["timeout_ms"].is_null() {
+        return Err("--timeout is required".into());
+    }
+    let (_, result) = control::ask(&running()?, "pane.wait", &params)?;
+    let outcome = result["outcome"].as_str().unwrap_or_default();
+    let text = match (outcome, &result["exit"], result["line"].as_str()) {
+        ("exit", Value::Number(exit), _) => format!("exit {exit}"),
+        ("match", _, Some(line)) => format!("match {line}"),
+        _ => outcome.to_owned(),
+    };
+    std::io::stdout().write_all(format!("{}\n", printable(&text)).as_bytes())?;
+    Ok(!matches!(outcome, "timeout" | "closed"))
+}
+
+/// `pinfold ctl session save`: writes the session's snapshot and prints its path. It starts
+/// no core.
+fn save() -> Result<(), Box<dyn Error>> {
+    let (_, saved) = control::ask(&running()?, "session.save", &json!({}))?;
+    let path = saved["path"].as_str().ok_or("the core named no file")?;
+    std::io::stdout().write_all(format!("{}\n", printable(path)).as_bytes())?;
+    Ok(())
+}
+
+/// Lists lasting cross-pane grants. The core accepts this only from a terminal outside panes.
+fn grants(json_output: bool) -> Result<(), Box<dyn Error>> {
+    let (_, listed) = control::ask(&running()?, "grants.list", &json!({}))?;
+    let text = if json_output {
+        format!("{listed}\n")
+    } else {
+        grants_table(&listed)
+    };
+    std::io::stdout().write_all(text.as_bytes())?;
+    Ok(())
+}
+
+fn revoke(id: &str) -> Result<(), Box<dyn Error>> {
+    let id: u64 = id.parse().map_err(|_| "the grant id must be a number")?;
+    let (_, result) = control::ask(&running()?, "grants.revoke", &json!({"id": id}))?;
+    if result["revoked"] == Value::Bool(false) {
+        return Err(format!("no active grant {id}").into());
+    }
     Ok(())
 }
 
@@ -190,6 +332,26 @@ fn table(hello: &Value, list: &Value) -> String {
     text
 }
 
+fn grants_table(list: &Value) -> String {
+    let mut text = format!(
+        "{:<8} {:<8} {:<8} {:<8} EXPIRES\n",
+        "ID", "CALLER", "TARGET", "ACTION"
+    );
+    let grants = list["grants"].as_array().map_or(&[][..], Vec::as_slice);
+    for grant in grants {
+        let seconds = grant["expires_ms"].as_u64().unwrap_or_default() / 1000;
+        let id = grant["id"].to_string();
+        let caller = grant["caller"].to_string();
+        let target = grant["target"].to_string();
+        let action = grant["action"].as_str().unwrap_or("-");
+        text += &format!(
+            "{:<8} {:<8} {:<8} {:<8} {seconds}s\n",
+            id, caller, target, action
+        );
+    }
+    text
+}
+
 /// `text` with each control, bidi or zero-width character as `?`, so a pane's fields cannot
 /// move the cursor, recolour or reorder what the person reads (threat T6).
 fn printable(text: &str) -> String {
@@ -210,15 +372,37 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
         [] => launch(),
+        ["up"] | ["up", _] => match up(args.get(1).map(String::as_str)) {
+            Ok(true) => Ok(()),
+            Ok(false) => return ExitCode::FAILURE,
+            Err(error) => Err(error),
+        },
+        ["agent", name] | ["agent", name, "--right"] => agent(name, "right"),
+        ["agent", name, "--down"] => agent(name, "down"),
+        ["agent", name, "--tab"] => agent(name, "tab"),
         ["ctl", "list"] => list(false),
         ["ctl", "list", "--json"] => list(true),
         ["ctl", "send", pane, text] => send(pane, text),
+        // 0 once what it waited for happened, 1 if not, and 2 on an error.
+        ["ctl", "wait", ref wait_args @ ..] => {
+            return match wait(wait_args) {
+                Ok(happened) => ExitCode::from(u8::from(!happened)),
+                Err(error) => {
+                    eprintln!("pinfold: {error}");
+                    ExitCode::from(2)
+                }
+            };
+        }
+        ["ctl", "session", "save"] => save(),
         ["ctl", "log", ref rest @ ..] => log(rest),
         ["mcp"] => {
             let socket = control::socket_path(&control::runtime_dir());
             pinfold_cli::mcp::serve(std::io::stdin().lock(), std::io::stdout().lock(), &socket)
                 .map_err(Into::into)
         }
+        ["ctl", "grants"] => grants(false),
+        ["ctl", "grants", "--json"] => grants(true),
+        ["ctl", "grants", "revoke", id] => revoke(id),
         _ => {
             eprintln!("{USAGE}");
             return ExitCode::FAILURE;
@@ -230,7 +414,7 @@ fn main() -> ExitCode {
             eprintln!("pinfold: {error}");
             // A core started from a terminal logs there, so this may be an older core's.
             let log = control::log_path(&control::runtime_dir());
-            if args.is_empty() && log.exists() {
+            if (args.is_empty() || args[0] == "up") && log.exists() {
                 eprintln!("pinfold: see {}", log.display());
             }
             ExitCode::FAILURE
@@ -241,6 +425,22 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_request_holds_tabs_splits_and_cwds_and_lists_run_lines_without_sending_them() {
+        let root = std::env::temp_dir().canonicalize().unwrap();
+        let toml = b"[[tabs]]\n[[tabs.panes]]\nrun = 'make'\n\
+            [[tabs]]\n[[tabs.panes]]\ncwd = '.'\n[[tabs.panes]]\nsplit = 'down'\nrun = 'ls'\n\
+            [[tabs.panes]]\n";
+        let layout = workspace::parse(toml, &root).unwrap();
+        let (params, runs) = request(&root, &layout).unwrap();
+        let cwd = root.to_str().unwrap();
+        let expected = json!({"root": cwd, "layout": {"tabs": [
+            {"panes": [{"cwd": cwd}]},
+            {"panes": [{"cwd": cwd}, {"split": "down", "cwd": cwd}, {"split": "right", "cwd": cwd}]},
+        ]}});
+        assert_eq!((params, runs), (expected, vec!["make", "ls"]));
+    }
 
     #[test]
     fn a_table_marks_the_callers_pane_and_dashes_what_is_unknown() {
@@ -283,5 +483,17 @@ chain broken at sequence 8
         let text = table(&json!({"pane": null}), &list);
         assert!(text.contains("a?b") && text.contains("/x?]0;y?") && text.contains("s?h?"));
         assert!(text.lines().count() == 2);
+    }
+
+    #[test]
+    fn a_grants_table_names_the_triple_and_time_left() {
+        let listed = json!({"grants": [{"id": 7, "caller": 1, "target": 2,
+            "action": "send", "expires_ms": 90_000}]});
+        let text = grants_table(&listed);
+        assert!(text.contains("ID       CALLER   TARGET   ACTION"), "{text}");
+        assert!(
+            text.contains("7        1        2        send     90s"),
+            "{text}"
+        );
     }
 }

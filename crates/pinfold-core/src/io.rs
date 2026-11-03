@@ -5,21 +5,25 @@
 //! blocks. That is the backpressure.
 
 use std::io::{self, ErrorKind, Read, Write};
+use std::mem;
 use std::os::fd::AsRawFd;
 use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use mio::unix::SourceFd;
+use mio::unix::{SourceFd, pipe};
 use mio::{Events, Interest, Poll, Token};
 use pinfold_mux::{Session, Size};
+use pinfold_proto::link::ApprovalAnswer;
 use pinfold_sys::Terminal;
 use pinfold_sys::pty::Pty;
 
 use crate::link::{Host, LINK};
-use crate::marks::{ShellMarks, ShellPhase};
+use crate::marks::ShellMarks;
 use crate::protect::Protect;
 use crate::search::{CopyStep, Copying, Direction, Position, Search, SearchStep, Selection};
+use crate::status::{self, Status, Tracker};
+use crate::tap::Tap;
 use crate::vt::{AlacrittyEngine, VtEngine};
 use crate::{paste, shell};
 
@@ -43,6 +47,8 @@ const KEPT_INPUT: usize = 4 * 1024;
 const EVENT_CAPACITY: usize = 64;
 /// Beyond any pane number, so a wake-up is never mistaken for PTY activity.
 const WAKE: Token = Token(usize::MAX);
+/// SIGTERM or SIGHUP, through the self-pipe of [`Reactor::watch_signals`].
+const SIGNAL: Token = Token(usize::MAX - 2);
 
 /// How a pass over one pane ended.
 #[derive(Debug, PartialEq)]
@@ -62,6 +68,7 @@ fn pump(
     replies: &mut Vec<u8>,
     buffer: &mut [u8],
     fed: &mut bool,
+    mut tap: Option<&mut Tap>,
 ) -> Pumped {
     let mut left = READ_BUDGET;
     while left > 0 {
@@ -72,6 +79,9 @@ fn pump(
                 left -= count;
                 *fed = true;
                 engine.feed(&buffer[..count], replies);
+                if let Some(tap) = tap.as_deref_mut() {
+                    tap.feed(&buffer[..count]);
+                }
                 replies.truncate(MAX_REPLIES);
             }
             Err(error) if error.kind() == ErrorKind::WouldBlock => return Pumped::Drained,
@@ -111,11 +121,19 @@ struct Pane {
     dirty: bool,
     /// Counts reads that found output, wrapping, for `pane.wait`.
     output: u64,
+    /// The text it printed, while something listens.
+    tap: Option<Box<Tap>>,
     /// The running search, which gets one step per pass, so PTYs are served between steps.
     search: Option<Search>,
     found: Option<Selection>,
     /// When the current second of `pane.send` calls began, and how many it has had.
     sends: (Instant, u32),
+    /// Its status, from OSC 133 marks until its agent reports one with `pane.status`.
+    status: Tracker,
+    /// The last reported message, already sanitized.
+    message: String,
+    /// Whether it raised a "needs you" alert that no window has taken yet.
+    alerted: bool,
 }
 
 impl Pane {
@@ -128,8 +146,8 @@ impl Pane {
     }
 }
 
-/// What `pane.list` tells of a pane. The title, directory and status come from output, which
-/// can fake them (T4).
+/// What `pane.list` tells of a pane. The title, directory and a status from marks come from
+/// output, which can fake them (T4).
 #[derive(Debug, PartialEq, Eq)]
 pub struct Listed<'a> {
     /// The pane's number.
@@ -140,8 +158,13 @@ pub struct Listed<'a> {
     pub cwd: Option<&'a str>,
     /// The program the pane started, without its arguments.
     pub command: &'a str,
-    /// `running`, `done`, `error` or `idle`, from OSC 133 marks, and `done` once it closed.
-    pub status: &'static str,
+    /// What its agent reported last, or else what its OSC 133 marks say, and `done` once it
+    /// closed.
+    pub status: Status,
+    /// Whether `status` is a report from a caller in the pane rather than from marks.
+    pub reported: bool,
+    /// The reported message, without control or bidi characters. Empty if none.
+    pub message: &'a str,
 }
 
 /// What `pane.wait` watches in a pane, with nothing from its screen.
@@ -172,6 +195,13 @@ pub struct Reactor {
     pub(crate) shell: fn() -> Command,
     buffer: Vec<u8>,
     pub(crate) host: Host,
+    /// The read end of the self-pipe, kept open while it is polled.
+    signals: Option<pipe::Receiver>,
+    terminated: bool,
+    /// Restored panes and the redacted command each was running, until a window answers.
+    pub(crate) was_running: Vec<(usize, String)>,
+    /// Answers accepted only from the inherited window link.
+    pub(crate) approval_answers: Vec<(u64, ApprovalAnswer)>,
     pub(crate) protect: Protect,
 }
 
@@ -196,6 +226,10 @@ impl Reactor {
             shell: shell::command,
             buffer: vec![0; READ_BUDGET],
             host: Host::default(),
+            signals: None,
+            terminated: false,
+            was_running: Vec::new(),
+            approval_answers: Vec::new(),
             protect: Protect::default(),
         })
     }
@@ -231,9 +265,13 @@ impl Reactor {
             closed: false,
             dirty: true,
             output: 0,
+            tap: None,
             search: None,
             found: None,
             sends: (Instant::now(), 0),
+            status: Tracker::default(),
+            message: String::new(),
+            alerted: false,
         });
         Ok(pane)
     }
@@ -269,6 +307,8 @@ impl Reactor {
             result => result?,
         }
         for event in &self.events {
+            // Never read, as the core exits once it has saved.
+            self.terminated |= event.token() == SIGNAL;
             if event.token() == LINK {
                 self.host.wake();
             }
@@ -287,11 +327,18 @@ impl Reactor {
                     &mut pane.replies,
                     &mut self.buffer,
                     &mut fed,
+                    pane.tap.as_deref_mut(),
                 );
                 pane.dirty |= fed;
                 pane.output = pane.output.wrapping_add(u64::from(fed));
                 pane.readable = pumped == Pumped::Budget;
                 pane.closed |= pumped == Pumped::Closed;
+                if fed {
+                    // Marks never say "needs you", so only an error can alert here, and
+                    // nothing draws those yet.
+                    let marks = pane.engine.shell_marks();
+                    let _ = pane.status.observe_shell(marks, Instant::now());
+                }
             }
             if pane
                 .engine
@@ -379,6 +426,29 @@ impl Reactor {
         } else {
             Err("the pane's input is full")
         }
+    }
+
+    /// Sets a pane's status from its own agent, which outranks its OSC 133 marks from then on
+    /// (T4). The message is sanitized and kept for the window's chrome. A report of "needs
+    /// you" alerts, at most once per [`status::ALERT_INTERVAL`].
+    ///
+    /// # Errors
+    ///
+    /// Refused with a reason if the pane is unknown or has closed.
+    pub fn report_status(
+        &mut self,
+        pane: usize,
+        status: Status,
+        message: &str,
+        now: Instant,
+    ) -> Result<(), &'static str> {
+        let pane = pane_mut(&mut self.panes, pane)
+            .filter(|pane| !pane.closed)
+            .ok_or("no such pane")?;
+        pane.message = status::sanitize(message);
+        let alert = pane.status.report(status, now);
+        pane.alerted |= alert.is_some_and(|alert| alert.status() == Status::NeedsYou);
+        Ok(())
     }
 
     /// Returns a pane's history and screen as plain text, newest last, or with `lines` only the
@@ -480,6 +550,35 @@ impl Reactor {
         self.pane(pane).map(|pane| pane.engine.as_ref())
     }
 
+    /// Makes SIGTERM and SIGHUP end a [`Reactor::turn`] and set [`Reactor::is_terminated`],
+    /// instead of ending the process, so the caller can save first.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the pipe cannot be made or polled, or the system refuses a handler.
+    pub fn watch_signals(&mut self) -> io::Result<()> {
+        let (sender, mut receiver) = pipe::new()?;
+        self.poll
+            .registry()
+            .register(&mut receiver, SIGNAL, Interest::READABLE)?;
+        pinfold_sys::on_terminate(&sender.into())?;
+        self.signals = Some(receiver);
+        Ok(())
+    }
+
+    /// Returns whether SIGTERM or SIGHUP has arrived since [`Reactor::watch_signals`].
+    #[must_use]
+    pub fn is_terminated(&self) -> bool {
+        self.terminated
+    }
+
+    /// Returns whether the last [`Reactor::turn`] saw any event, such as output, a request or a
+    /// window's message. A turn that only timed out saw none.
+    #[must_use]
+    pub fn was_active(&self) -> bool {
+        !self.events.is_empty()
+    }
+
     /// Returns how many panes there are. A pane of a tab goes when its program exits or a window
     /// closes it, and its number is not used again.
     #[must_use]
@@ -508,14 +607,7 @@ impl Reactor {
     /// Describes every pane for `pane.list`, in order of number, with nothing from a screen.
     pub fn list(&self) -> impl Iterator<Item = Listed<'_>> {
         self.panes.iter().map(|pane| {
-            let marks = pane.engine.shell_marks();
-            let status = match (pane.closed, marks.phase) {
-                (true, _) => "done",
-                (_, ShellPhase::Running) => "running",
-                (_, ShellPhase::Finished) if marks.exit.is_some_and(|exit| exit != 0) => "error",
-                (_, ShellPhase::Finished) => "done",
-                _ => "idle",
-            };
+            let (status, reported, message) = pane_status(pane);
             let cwd = pane.engine.cwd().map(|cwd| cwd.path.as_str());
             Listed {
                 id: pane.number,
@@ -523,8 +615,22 @@ impl Reactor {
                 cwd,
                 command: &pane.program,
                 status,
+                reported,
+                message,
             }
         })
+    }
+
+    /// Returns a pane's status, whether its agent reported it, and the reported message.
+    #[must_use]
+    pub fn status(&self, pane: usize) -> Option<(Status, bool, &str)> {
+        self.pane(pane).map(pane_status)
+    }
+
+    /// Returns whether a pane raised a "needs you" alert since the last call, and clears that.
+    /// A window takes it to mark the pane's tab while it is hidden.
+    pub fn take_alert(&mut self, pane: usize) -> bool {
+        pane_mut(&mut self.panes, pane).is_some_and(|pane| mem::take(&mut pane.alerted))
     }
 
     /// Returns what `pane.wait` watches in a pane, or nothing once it has closed.
@@ -536,6 +642,21 @@ impl Reactor {
             output: pane.output,
             marks,
         })
+    }
+
+    /// Starts or stops keeping the text `pane` prints, for [`Reactor::take_text`].
+    pub fn tap(&mut self, pane: usize, on: bool) {
+        if let Some(pane) = pane_mut(&mut self.panes, pane)
+            && on != pane.tap.is_some()
+        {
+            pane.tap = on.then(Box::default);
+        }
+    }
+
+    /// Returns the text `pane` printed since the last take, if it is tapped.
+    pub fn take_text(&mut self, pane: usize) -> Option<String> {
+        let tap = pane_mut(&mut self.panes, pane)?.tap.as_deref_mut()?;
+        Some(tap.take())
     }
 
     /// A pane's PTY, for [`Reactor::protection`].
@@ -566,6 +687,7 @@ impl Reactor {
     /// Stops polling a pane and drops it, which ends its program and frees its terminal.
     pub(crate) fn drop_pane(&mut self, number: usize) {
         if let Ok(index) = self.panes.binary_search_by_key(&number, |pane| pane.number) {
+            self.was_running.retain(|(pane, _)| *pane != number);
             let pane = self.panes.remove(index);
             let fd = pane.pty.master().as_raw_fd();
             let _ = self.poll.registry().deregister(&mut SourceFd(&fd));
@@ -595,6 +717,17 @@ fn newest_text(engine: &dyn VtEngine, selection: Selection) -> String {
     text.truncate(text.trim_end_matches('\n').len());
     keep_newest(&mut text);
     text
+}
+
+/// A closed pane is done, whatever was said before.
+fn pane_status(pane: &Pane) -> (Status, bool, &str) {
+    if pane.closed {
+        (Status::Done, false, "")
+    } else if pane.status.from_output() {
+        (pane.status.status(), false, "")
+    } else {
+        (pane.status.status(), true, &pane.message)
+    }
 }
 
 fn pane_mut(panes: &mut [Pane], number: usize) -> Option<&mut Pane> {
@@ -713,16 +846,58 @@ mod tests {
         let mut reactor = Reactor::new().unwrap();
         let marks = r"printf '\033]7;file:///tmp/work\007\033]133;C\007secret'; sleep 30";
         let pane = reactor.spawn(shell(marks), 24, 80).unwrap();
-        let listed = |reactor: &Reactor| reactor.list().any(|pane| pane.status == "running");
+        let listed = |reactor: &Reactor| reactor.list().any(|pane| pane.status == Status::Running);
         assert!(turn_until(&mut reactor, listed));
         let expected = Listed {
             id: pane,
             title: Some("work"),
             cwd: Some("/tmp/work"),
             command: "/bin/sh",
-            status: "running",
+            status: Status::Running,
+            reported: false,
+            message: "",
         };
         assert_eq!(reactor.list().collect::<Vec<_>>(), [expected]);
+    }
+
+    #[test]
+    fn a_report_outranks_later_marks_alerts_once_and_keeps_a_clean_message() {
+        let mut reactor = Reactor::new().unwrap();
+        let script = r"printf '\033]133;C\007'; read line; printf '\033]133;D;0\007'; sleep 30";
+        let pane = reactor.spawn(shell(script), 24, 80).unwrap();
+        let running =
+            |reactor: &Reactor| reactor.status(pane).map(|s| s.0) == Some(Status::Running);
+        assert!(turn_until(&mut reactor, running));
+        assert_eq!(reactor.status(pane), Some((Status::Running, false, "")));
+
+        let now = Instant::now();
+        reactor
+            .report_status(pane, Status::NeedsYou, "ok?\u{1b}[2J\u{202e}", now)
+            .unwrap();
+        assert_eq!(
+            reactor.status(pane),
+            Some((Status::NeedsYou, true, "ok?[2J"))
+        );
+        reactor
+            .report_status(pane, Status::Running, "", now)
+            .unwrap();
+        reactor
+            .report_status(pane, Status::NeedsYou, "ok?", now)
+            .unwrap();
+        assert!(reactor.take_alert(pane));
+        assert!(!reactor.take_alert(pane), "one alert, rate limited");
+
+        // The shell finishes its command, which a report outranks (T4).
+        assert!(reactor.write(pane, b"\n"));
+        let finished = |reactor: &Reactor| reactor.progress(pane).unwrap().marks.finished == 1;
+        assert!(turn_until(&mut reactor, finished));
+        assert_eq!(reactor.status(pane), Some((Status::NeedsYou, true, "ok?")));
+        let listed = reactor.list().next().unwrap();
+        assert_eq!((listed.status, listed.reported), (Status::NeedsYou, true));
+        assert_eq!(
+            reactor.report_status(pane + 1, Status::Done, "", now),
+            Err("no such pane")
+        );
     }
 
     #[test]
@@ -737,6 +912,7 @@ mod tests {
             &mut replies,
             &mut buffer,
             &mut fed,
+            None,
         );
         assert_eq!(pumped, Pumped::Budget);
         assert!(fed);
@@ -754,6 +930,7 @@ mod tests {
             &mut replies,
             &mut buffer,
             &mut false,
+            None,
         );
         assert_eq!(replies.len(), MAX_REPLIES);
     }
@@ -865,9 +1042,18 @@ mod tests {
     #[test]
     fn sends_past_20_a_second_or_a_full_queue_are_refused() {
         let mut reactor = Reactor::new().unwrap();
-        let script = "stty raw -echo; echo ready; sleep 30";
+        let script = "stty raw -echo; echo ready; exec sleep 30";
         let pane = reactor.spawn(shell(script), 24, 80).unwrap();
-        assert!(turn_until(&mut reactor, |r| on_screen(r, pane, "ready")));
+        // A program still starting hides its arguments on a loaded Mac, which protects the
+        // pane, so wait until `sleep` holds the foreground with them readable.
+        let started = |r: &Reactor| {
+            let master = std::os::fd::AsFd::as_fd(r.pty(pane).unwrap().master());
+            pinfold_sys::foreground::foreground(master).is_ok_and(|found| {
+                let sleep = |m: &pinfold_sys::foreground::Process| m.name == "sleep";
+                found.members.iter().any(|m| sleep(m) && m.argv.is_some())
+            })
+        };
+        assert!(turn_until(&mut reactor, |r| on_screen(r, pane, "ready") && started(r)));
         let now = Instant::now();
         for _ in 0..SENDS_PER_SECOND {
             assert_eq!(reactor.send(pane, "x", now), Ok(()));

@@ -36,7 +36,7 @@ use winit::window::{Window, WindowId};
 
 use crate::context_menu::{self as menu, Choice, Menu};
 use crate::flash::{self, Flash};
-use crate::link::{self, Link, Screen, Tab};
+use crate::link::{self, Approval, Link, Screen, Tab};
 use crate::outbox::{self, Inbox, Outbox, Request};
 use crate::paste::Prompt;
 use crate::prefix::{self, Command, Prefix};
@@ -44,7 +44,9 @@ use crate::search_bar::{Bar, Step};
 use crate::selection::Selecting;
 use crate::top_bar::{Clicks, Hit};
 use crate::vi::{Step as ViStep, Vi, View};
-use crate::{ime, input, menu_bar, mouse, panes, paste, reload, selection, top_bar};
+use crate::{
+    approval, ime, input, menu_bar, mouse, panes, paste, reload, selection, top_bar, was_running,
+};
 
 const DEFAULT_SIZE: LogicalSize<u32> = LogicalSize::new(1000, 640);
 /// Rows under the pane that belong to Pinfold, so program output cannot reach them.
@@ -77,6 +79,7 @@ enum Notice {
     Copied(String),
     /// The core did not carry out a command.
     Refused(proto::Refusal),
+    Approval(Approval),
     Exited,
     /// The link ended, so the panes went with the core.
     Ended,
@@ -86,6 +89,8 @@ enum Notice {
     Config(Config),
     /// A menu item was chosen.
     Command(Command),
+    /// A restored pane, whether the core would run what it was running, and that command.
+    WasRunning(u32, bool, String),
 }
 
 /// What the I/O thread has for the window. A screen marked dirty here is one the window has not
@@ -96,6 +101,7 @@ struct Shown {
     tabs: Vec<Tab>,
     active: usize,
     activity: u32,
+    alerts: u32,
     focused: u32,
     total: usize,
     /// Whether what is above, past the screens' contents, changed since the window read it.
@@ -132,9 +138,12 @@ fn publish(link: &mut Link, shown: &mut Shown) -> bool {
         for (ours, tab) in shown.tabs.iter_mut().zip(link.tabs()) {
             ours.pane = tab.pane;
             ours.cwd.clone_from(&tab.cwd);
+            ours.status = tab.status;
+            ours.message.clone_from(&tab.message);
         }
         shown.active = link.active();
         shown.activity = link.activity();
+        shown.alerts = link.alerts();
         shown.focused = link.focused();
         shown.total = link.total();
         shown.laid = true;
@@ -165,7 +174,15 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
         let copied = link.take_copied().map(Notice::Copied);
         let raised = link.take_raised().then_some(Notice::Raise);
         let refused = link.take_refused().map(Notice::Refused);
-        for notice in [searched, copied, raised, refused].into_iter().flatten() {
+        while let Some(approval) = link.take_approval() {
+            if proxy.send_event(Notice::Approval(approval)).is_err() {
+                return;
+            }
+        }
+        let ran = link.take_was_running().into_iter();
+        let ran = ran.map(|(pane, runnable, command)| Notice::WasRunning(pane, runnable, command));
+        let notices = [searched, copied, raised, refused].into_iter().flatten();
+        for notice in notices.chain(ran) {
             if proxy.send_event(notice).is_err() {
                 return;
             }
@@ -298,8 +315,12 @@ struct App {
     /// The tabs' labels, made safe to draw.
     labels: Vec<String>,
     active: usize,
-    /// Which tabs have news, one bit each.
+    /// Which tabs have a mark, news or a state, one bit each.
     activity: u32,
+    /// Each tab's state, as its pill shows it.
+    states: Vec<u8>,
+    /// The active tab's state, whether its agent reported it, and its message.
+    status: Option<(u8, bool, String)>,
     /// The tab under the pointer.
     over_tab: Option<usize>,
     /// Whether the system says this window has the keyboard.
@@ -323,6 +344,11 @@ struct App {
     clipboard: Option<Clipboard>,
     /// A question for the user. Every key goes to this until it is answered.
     prompt: Option<Prompt>,
+    /// What restored panes were running, until answered. The focused one's strip takes the next
+    /// key.
+    was_running: was_running::Strips,
+    /// Cross-pane prompts, oldest first. Updates replace a batch in place.
+    approvals: approval::Queue,
     /// The right-click menu, while open. Every key and press goes to it.
     menu: Option<Menu>,
     prefix: Prefix,
@@ -466,7 +492,14 @@ impl App {
             top_bar::label(&tab.cwd, label);
         }
         self.active = shown.active;
-        self.activity = shown.activity;
+        let tabs = shown.tabs.iter().enumerate();
+        self.states.clear();
+        self.states
+            .extend(tabs.map(|(index, tab)| top_bar::tab_state(tab.status, shown.alerts, index)));
+        self.activity = shown.activity | top_bar::marked(&self.states);
+        let active = shown.tabs.get(shown.active);
+        self.status =
+            active.and_then(|tab| Some((tab.status?.0, tab.status?.1, tab.message.clone())));
         self.total = shown.total;
         // Another pane may have closed under the question.
         if let Some(Prompt::Close { last, .. }) = &mut self.prompt {
@@ -582,8 +615,14 @@ impl App {
             }
             if self.ended {
                 flash::ended(&mut self.composed);
+            } else if !self.approvals.is_empty() {
+                self.approvals.draw(&mut self.composed, Instant::now());
+                self.was_running.hide();
             } else if let Some(prompt) = &self.prompt {
                 paste::banner(&mut self.composed, prompt);
+                self.was_running.hide();
+            } else if (self.was_running).draw(&mut self.composed, self.focused, Instant::now()) {
+                // The strip is drawn.
             } else if let Some(bar) = &self.bar {
                 bar.draw(&mut self.composed);
             } else if let Some(vi) = self.vi.filter(|_| self.flash.until().is_none()) {
@@ -605,6 +644,9 @@ impl App {
                 tabs: &self.labels,
                 active: self.active,
                 activity: self.activity,
+                states: &self.states,
+                status: (self.status.as_ref())
+                    .map(|(state, reported, message)| (*state, *reported, message.as_str())),
                 hovered: self.over_tab,
                 focused: self.has_focus,
                 title: !open.fullscreen,
@@ -786,6 +828,9 @@ impl App {
     /// mode, then the pane. A key pressed while composing belongs to the input method, so it
     /// neither reaches a program nor counts as the prefix.
     fn key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) {
+        if self.answer_strip(event) {
+            return;
+        }
         if self.window_key(event, event_loop) {
             self.prefix.cancel();
             return;
@@ -812,6 +857,23 @@ impl App {
         let bytes = input::encode(&event.logical_key, text, self.modifiers, app_cursor, alt);
         if !bytes.is_empty() {
             self.request(Request::Input(self.focused, bytes));
+        }
+    }
+
+    /// Answers the focused pane's strip with any key: Enter, once armed and if offered, runs
+    /// what it was running, and anything else dismisses it. Returns whether the key was used up,
+    /// as Enter and Esc are; any other goes on to the pane.
+    fn answer_strip(&mut self, event: &KeyEvent) -> bool {
+        let key = &event.logical_key;
+        let now = Instant::now();
+        match (self.was_running).key(self.focused, key, event.repeat, now, self.area.1) {
+            None => false,
+            Some(was_running::Answer::Held) => true,
+            Some(was_running::Answer::Answered { pane, run, used }) => {
+                self.core(proto::Request::WasRunningAnswer { pane, run });
+                self.redraw_soon();
+                used
+            }
         }
     }
 
@@ -947,6 +1009,15 @@ impl App {
         }
     }
 
+    fn answer_approval(&mut self, key: &Key) {
+        let (rows, columns) = self.area;
+        let Some((id, answer)) = self.approvals.key(key, Instant::now(), rows, columns) else {
+            return;
+        };
+        self.core(proto::Request::ApprovalAnswer { id, answer });
+        self.redraw_soon();
+    }
+
     /// Tells `pane` of `event`, at the pointer's nearest cell there.
     fn report(&self, event: mouse::Event, pane: &Screen) {
         if self.vi.is_some() || !top_bar::reaches_program(event, self.on_bar) {
@@ -1027,6 +1098,10 @@ impl App {
     }
 
     fn pressed(&mut self, button: MouseButton, state: ElementState, event_loop: &ActiveEventLoop) {
+        if !self.approvals.is_empty() {
+            // A click cannot answer a prompt, and goes nowhere else while one is up.
+            return;
+        }
         let number = match button {
             MouseButton::Left => 0,
             MouseButton::Middle => 1,
@@ -1218,6 +1293,15 @@ impl ApplicationHandler<Notice> for App {
                 self.flash.refused(reason, Instant::now());
                 self.redraw_soon();
             }
+            Notice::Approval(approval) => {
+                if let Some(id) = self.approvals.add(approval) {
+                    let answer = proto::ApprovalAnswer::Deny;
+                    self.core(proto::Request::ApprovalAnswer { id, answer });
+                }
+                self.prefix.cancel();
+                self.menu = None;
+                self.redraw_soon();
+            }
             Notice::Exited => event_loop.exit(),
             Notice::Ended => {
                 self.ended = true;
@@ -1231,6 +1315,10 @@ impl ApplicationHandler<Notice> for App {
                 }
             }
             Notice::Config(config) => self.configure(config),
+            Notice::WasRunning(pane, runnable, command) => {
+                self.was_running.add(pane, runnable, command);
+                self.redraw_soon();
+            }
             // A prompt keeps every key until it is answered, menu keys too; only Quit, which
             // leaves the session running, gets past it.
             Notice::Command(command) if self.prompt.is_none() || command == Command::Detach => {
@@ -1252,6 +1340,8 @@ impl ApplicationHandler<Notice> for App {
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::Focused(focused) => {
                 self.has_focus = focused;
+                self.was_running.focus(focused);
+                self.approvals.focus(focused);
                 self.redraw_soon();
                 if !focused {
                     self.prefix.cancel();
@@ -1270,6 +1360,11 @@ impl ApplicationHandler<Notice> for App {
                 if let Some(menu) = self.menu.as_mut().filter(|_| event.state.is_pressed()) {
                     let step = menu.key(&event.logical_key);
                     self.menu_step(step, event_loop);
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } if !self.approvals.is_empty() => {
+                if event.state == ElementState::Pressed && !event.repeat {
+                    self.answer_approval(&event.logical_key);
                 }
             }
             // A held key repeating must not answer a prompt it did not see.
@@ -1421,6 +1516,8 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
         labels: Vec::new(),
         active: 0,
         activity: 0,
+        states: Vec::new(),
+        status: None,
         over_tab: None,
         has_focus: true,
         on_title: false,
@@ -1433,6 +1530,13 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
         wheel: 0.0,
         clipboard: None,
         prompt: None,
+        was_running: was_running::Strips::default(),
+        approvals: {
+            // Matches `has_focus` below; `Focused` events keep them in step.
+            let mut queue = approval::Queue::default();
+            queue.focus(true);
+            queue
+        },
         menu: None,
         flash: Flash::default(),
         selecting: Selecting::default(),

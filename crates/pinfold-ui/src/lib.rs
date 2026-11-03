@@ -1,5 +1,6 @@
 //! Window process: winit, chrome as cells, input and IME.
 
+mod approval;
 mod context_menu;
 mod flash;
 mod ime;
@@ -16,6 +17,7 @@ mod search_bar;
 mod selection;
 mod top_bar;
 mod vi;
+mod was_running;
 mod window;
 
 pub use window::{Error, run};

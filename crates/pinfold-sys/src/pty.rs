@@ -48,7 +48,14 @@ use libc::ptsname_r;
 fn open_pair() -> io::Result<(OwnedFd, OwnedFd)> {
     let flags = libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC;
     // SAFETY: posix_openpt takes integer flags and returns a new fd or -1.
-    let master = check(unsafe { libc::posix_openpt(flags) })?;
+    let open = || check(unsafe { libc::posix_openpt(flags) });
+    // macOS refuses with ENXIO when another PTY closes while this one opens with every slot
+    // in use: the kernel picks the slot past the end, then finds one free and grows nothing.
+    // Once more takes the freed slot; a table truly full refuses again.
+    let master = match open() {
+        Err(error) if error.raw_os_error() == Some(libc::ENXIO) => open(),
+        opened => opened,
+    }?;
     // SAFETY: posix_openpt succeeded, so the fd is open and owned only by this function.
     let master = unsafe { OwnedFd::from_raw_fd(master) };
     // SAFETY: `master` is an open PTY master.

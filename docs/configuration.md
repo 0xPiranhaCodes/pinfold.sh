@@ -14,6 +14,7 @@ variable is unset. Saving the file applies it to the running window within about
 | `keys.prefix`         | string | `"C-a"` | Prefix, `C-` and a lowercase letter                      |
 | `api.audit_log`       | bool   | `false` | Also write the API audit log to disk                     |
 | `api.protect`         | list   | below   | Command-line text that protects a pane from API sends    |
+| `agents.<name>`       | table  | none    | An [agent profile](#agent-profiles)                      |
 
 ```toml
 font_size = 14
@@ -88,8 +89,74 @@ replaces it. An empty pattern is refused as a bad value.
 protect = ["kubectl exec", "docker exec", "psql", "aws ssm", "mysql -h prod-db"]
 ```
 
-The window checks `api.protect` now, but the core does not read this file yet, so until it
-does the default list applies.
+The core reads the list when it starts. Copy the defaults into your list to keep them, as the
+example does.
+
+## Agent profiles
+
+An `[agents.<name>]` table describes one agent. `command` is the program and its arguments,
+run with no shell; it must not be empty or start with `-`. `sandbox = true` runs it in the
+system's sandbox. `pinfold agent <name>` in a pane opens a split to its right running the
+profile; `--down` splits below and `--tab` opens a tab. It calls the API's `agent.launch`, which
+takes only a profile's name, never a program ([ADR-0036](adr/0036-launching-agent-profiles.md)).
+The agent starts in the directory the pane's shell last reported with OSC 7, if any. A
+sandboxed profile needs that directory, which must pass the checks below, and is refused
+without it. The core reads profiles once, at start.
+
+```toml
+[agents.claude]
+command = ["claude"]
+sandbox = true
+```
+
+The sandbox hides `~/.ssh`, the directory of this file, PinFold's state directory, and every
+other pane's terminal device, and where any of those directories, or this file, lead
+through a symlink. On macOS it is `/usr/bin/sandbox-exec`, which denies reads and
+writes there. On Linux it is bubblewrap, which puts an empty directory over each one, gives the
+agent its own `/dev` and `/proc`, and needs unprivileged user namespaces. `bwrap` is taken from
+`/usr/bin`, `/usr/local/bin` or `/bin`, never `PATH`, and only if root alone can change it and
+the directories above it.
+If the tool is missing or refuses, the agent does not start: it never runs unsandboxed. A
+directory that does not exist when the agent starts is not hidden on Linux.
+
+The agent stays in its pane's session with the pane as its controlling terminal, so the API
+still knows it as that pane, and its socket stays reachable. On macOS the sandbox denies typing
+into that terminal with `TIOCSTI`. On Linux a seccomp filter does, on x86_64 and aarch64; on
+other architectures the agent does not start.
+
+A sandboxed agent writes only to its working directory and temporary directories: a fresh,
+empty `/tmp` on Linux, and `/private/tmp` and your temporary directory on macOS. Everything else
+it can read but not change, so it cannot edit `~/.zshrc` or put programs on your `PATH`. The
+working directory is the pane's, as its shell reports it, and the agent does not start unless
+that directory is yours, writable by no other user or group, under directories only you or root
+can change, not `/`, your home directory or above it, not a dot-directory of your home such as
+`~/.config` or `~/.local/bin` or inside one, not in `~/Library` on macOS, not inside a `.git`
+directory, and does not hold or sit inside a hidden directory.
+
+Git runs what a repository's hooks and config name outside the sandbox, so the agent cannot
+change them. On Linux the working directory's whole `.git` is read-only: a sandboxed agent
+cannot write the repository's git metadata, so it cannot commit, and commits happen outside the
+sandbox. The `.git` of each submodule that `.gitmodules` lists is read-only too, whether it is
+a file pointing into `.git/modules` or a repository of its own. On macOS the agent can commit,
+but it cannot write the hooks, config, worktree config, `commondir` or `gitdir` of the
+repository or of any submodule or linked worktree, make them where they are missing, rewrite a
+submodule's `.git`, or move `.git` or the directories that hold them. The agent does not start
+if the repository or a submodule has no hooks directory or config, or links one elsewhere. On
+Linux, an agent in a directory with no `.git` yet can still make one, and on both systems a
+nested repository that `.gitmodules` does not list is not protected. A
+`core.hooksPath` or other config setting that names a file inside the working directory, such as
+a `.husky` directory, points at files the agent can change. So do other project files, such as a
+`Makefile`, `.envrc` or a `package.json` script. These run with your full rights when you run
+them, so review an agent's changes before you run git or the project's tools. The sandbox
+keeps git from running the agent's code on its own; it does not try to guard every file in the
+working directory that you might later run, and such cases stay limits of this kind (#161).
+
+The agent gets no `SSH_AUTH_SOCK`, `GPG_AGENT_INFO` or `DBUS_SESSION_BUS_ADDRESS`, and reaches no
+Unix socket but PinFold's API socket, so it cannot sign with your ssh-agent without reading
+`~/.ssh`. On macOS the system's name lookup socket also stays reachable. On Linux the agent's
+`$XDG_RUNTIME_DIR` and `/tmp` are empty but for the API socket's directory, which is read-only.
+Abstract sockets stay reachable there, as the agent keeps the network. The agent also gets its
+own IPC, host name and cgroup namespaces, and ends when the core does.
 
 ## Keys
 

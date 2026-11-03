@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "events.subscribe",
-  "description": "Subscribes the connection to events for every pane in the session, as pane.list sees them. Needs hello version 2 and a caller with a controlling terminal. One subscription per connection; a second is refused. After the result the core sends notifications, {\"jsonrpc\": \"2.0\", \"method\": \"event\", \"params\": <event>}, with no id. A subscriber that lets 2 MiB of them queue unread is closed.",
+  "description": "Subscribes the connection to events for every pane in the session, as pane.list sees them, and to pane.output for the caller's own pane only; other panes' output, its children's included, is never sent, and asking for it is no error, but a caller outside any pane that asks for pane.output is refused. Needs hello version 2 and a caller with a controlling terminal. One subscription per connection; a second is refused. After the result the core sends notifications, {\"jsonrpc\": \"2.0\", \"method\": \"event\", \"params\": <event>}, with no id. A subscriber that lets 2 MiB of them queue unread is closed.",
   "type": "object",
   "properties": {
     "params": {
@@ -11,28 +11,37 @@
         "events": {
           "type": "array",
           "minItems": 1,
-          "items": { "enum": ["pane.opened", "pane.closed", "pane.status"] }
+          "items": { "enum": ["pane.opened", "pane.closed", "pane.status", "pane.output"] }
         }
       }
     },
     "result": { "type": "object", "additionalProperties": false },
     "event": {
-      "description": "The params of a notification: pane numbers, status and exit status only, never screen contents or titles.",
+      "description": "The params of a notification: pane numbers, status, its source and exit status only, never screen contents, titles or messages, except the text of pane.output.",
       "type": "object",
       "required": ["event", "pane"],
       "additionalProperties": false,
       "properties": {
-        "event": { "enum": ["pane.opened", "pane.closed", "pane.status"] },
+        "event": { "enum": ["pane.opened", "pane.closed", "pane.status", "pane.output"] },
         "pane": { "type": "integer", "minimum": 0 },
         "status": {
-          "enum": ["running", "done", "error", "idle"],
-          "description": "Not with pane.closed. As pane.list reports it, from OSC 133 marks that output can fake."
+          "enum": ["needs-you", "running", "done", "error", "idle"],
+          "description": "Not with pane.closed or pane.output. As pane.list reports it."
+        },
+        "source": {
+          "enum": ["marks", "reported"],
+          "description": "Not with pane.closed or pane.output. As pane.list reports it: marks, which output can fake, or a pane.status report."
         },
         "exit": {
           "type": ["integer", "null"],
           "minimum": 0,
           "maximum": 255,
-          "description": "Not with pane.closed. The last exit status the shell gave, or null."
+          "description": "Not with pane.closed or pane.output. The last exit status the shell gave, or null."
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "With pane.output only: what the pane printed, as plain text without escape sequences, at most 4096 bytes an event. Only for the caller's own pane, as it is printed."
         }
       }
     }
