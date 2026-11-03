@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::{Command, ExitCode};
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, TrySendError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use std::{env, thread};
 
 use pinfold_api::control::{self, Control, Method, Request};
@@ -50,18 +50,45 @@ fn listen(waker: Arc<Waker>) -> io::Result<Receiver<Request>> {
 
 /// Answers a request that opens no window. A caller with no terminal is unidentified and may
 /// not list panes (threat model, caller identity point 3). Any caller with a terminal may, in a
-/// pane or not, as a list shows no screen and little a same-user `ps` does not.
-fn answer(reactor: &Reactor, request: &Request) -> Result<Value, String> {
+/// pane or not, as a list shows no screen and little a same-user `ps` does not. Reads and sends
+/// reach only the caller's own pane, the `self` scope, until other scopes ask the person.
+/// Pane contents go to the caller alone, never to a log.
+fn answer(reactor: &mut Reactor, request: &Request) -> Result<Value, String> {
     let identified = request.caller().is_some();
+    let own = request.caller().and_then(|caller| reactor.pane_of(caller));
+    let own_pane = |pane: &usize| {
+        if own == Some(*pane) {
+            Ok(*pane)
+        } else {
+            Err("only the caller's own pane can be read or sent to for now".to_owned())
+        }
+    };
     match request.method() {
         Method::Hello => {
-            let pane = request.caller().and_then(|caller| reactor.pane_of(caller));
-            let methods: &[&str] = if identified {
-                &["window.open", "pane.list"]
-            } else {
-                &["window.open"]
+            let methods: &[&str] = match (identified, own) {
+                (true, Some(_)) => &[
+                    "window.open",
+                    "pane.list",
+                    "pane.read",
+                    "pane.last_output",
+                    "pane.send",
+                ],
+                (true, None) => &["window.open", "pane.list"],
+                (false, _) => &["window.open"],
             };
-            Ok(json!({"version": control::VERSION, "methods": methods, "pane": pane}))
+            Ok(json!({"version": control::VERSION, "methods": methods, "pane": own}))
+        }
+        Method::PaneRead { pane, lines } => {
+            let text = reactor.read(own_pane(pane)?, *lines);
+            Ok(json!({"text": text.unwrap_or_default()}))
+        }
+        Method::PaneLastOutput { pane } => match reactor.last_output(own_pane(pane)?) {
+            Some(text) => Ok(json!({"text": text})),
+            None => Err("the pane has no command output marked with OSC 133".to_owned()),
+        },
+        Method::PaneSend { pane, text } => {
+            let sent = reactor.send(own_pane(pane)?, text, Instant::now());
+            sent.map(|()| json!({})).map_err(str::to_owned)
         }
         Method::PaneList if identified => {
             let panes = reactor.list().map(|pane| {
@@ -100,8 +127,8 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
     loop {
         reactor.turn(Some(IDLE))?;
         while let Ok(request) = asked.try_recv() {
-            if request.method() != Method::WindowOpen {
-                let answer = answer(&reactor, &request);
+            if *request.method() != Method::WindowOpen {
+                let answer = answer(&mut reactor, &request);
                 request.answer(answer);
                 continue;
             }
