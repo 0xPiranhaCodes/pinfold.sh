@@ -56,6 +56,10 @@ criteria = "safe-to-deploy"
 version = "2.13.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.block-buffer]]
+version = "0.12.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.block2]]
 version = "0.5.1"
 criteria = "safe-to-deploy"
@@ -124,6 +128,10 @@ criteria = "safe-to-deploy"
 version = "2.5.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.const-oid]]
+version = "0.10.2"
+criteria = "safe-to-deploy"
+
 [[exemptions.copypasta]]
 version = "0.10.2"
 criteria = "safe-to-deploy"
@@ -150,10 +158,18 @@ criteria = "safe-to-run"
 
 [[exemptions.cpufeatures]]
 version = "0.3.1"
+criteria = "safe-to-deploy"
+
+[[exemptions.cpufeatures]]
+version = "0.3.1"
 criteria = "safe-to-run"
 
 [[exemptions.crossbeam-utils]]
 version = "0.8.23"
+criteria = "safe-to-deploy"
+
+[[exemptions.crypto-common]]
+version = "0.2.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.ctor]]
@@ -162,6 +178,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.cursor-icon]]
 version = "1.2.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.digest]]
+version = "0.11.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.dispatch]]
@@ -266,6 +286,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.home]]
 version = "0.5.12"
+criteria = "safe-to-deploy"
+
+[[exemptions.hybrid-array]]
+version = "0.4.15"
 criteria = "safe-to-deploy"
 
 [[exemptions.indexmap]]
@@ -664,6 +688,10 @@ criteria = "safe-to-deploy"
 version = "1.1.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.sha2]]
+version = "0.11.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.shlex]]
 version = "2.0.1"
 criteria = "safe-to-deploy"
@@ -782,6 +810,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.tracing-core]]
 version = "0.1.36"
+criteria = "safe-to-deploy"
+
+[[exemptions.typenum]]
+version = "1.20.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.unarray]]

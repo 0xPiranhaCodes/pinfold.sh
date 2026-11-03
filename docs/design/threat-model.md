@@ -178,7 +178,8 @@ group or others, or not owned by you, are refused.
 
 **Audit log.** Each API call is recorded with caller, method, target, scope and result
 in a hash chain. The in-memory copy is the source of truth, because an agent running as
-you can rewrite the file on disk.
+you can rewrite the file on disk. A hash chain cannot show that entries were cut from its
+tail, since a shortened chain is still valid.
 
 **Limits.** Requests over 1 MB are rejected. `pane.send` is capped at 4 KB per call and
 20 calls per second per caller, and reads at 2 MB per call. Cold scrollback is capped at 2
