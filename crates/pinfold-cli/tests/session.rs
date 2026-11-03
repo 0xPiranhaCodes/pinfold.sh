@@ -25,6 +25,8 @@ const HARDEN: &str = "PINFOLD_TEST_HARDEN";
 const PANIC: &str = "PINFOLD_TEST_PANIC";
 /// Names the directory of a run, in the pane that calls the API.
 const API: &str = "PINFOLD_TEST_API";
+/// Set in a pane that reports a status.
+const STATUS: &str = "PINFOLD_TEST_STATUS";
 const PATIENCE: Duration = Duration::from_secs(120);
 
 type Result<T = ()> = std::result::Result<T, Box<dyn Error>>;
@@ -546,6 +548,84 @@ fn a_pane_can_send_to_itself_and_not_to_another_pane() {
     core.wait().unwrap();
 }
 
+/// Not a test: each pane of [`a_pane_reports_its_own_status_and_not_another_panes`]. It reports
+/// pane 0's status, lists the panes, and notes both answers in a file named for its own pane.
+#[test]
+fn status_process() {
+    let (Some(directory), Some(_)) = (env::var_os(CLIENT), env::var_os(STATUS)) else {
+        return;
+    };
+    let report = serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "pane.status",
+        "params": {"pane": 0, "state": "needs-you", "message": "approve?\u{1b}[2J"}});
+    let mut lines = api(&[report]).unwrap();
+    let hello = next(&mut lines, || Ok(())).unwrap();
+    let reported = next(&mut lines, || Ok(())).unwrap();
+    // A refusal ends its connection, so each list takes another, until pane 0's report shows.
+    let list = serde_json::json!({"jsonrpc": "2.0", "id": 3, "method": "pane.list"});
+    let start = Instant::now();
+    let listed = loop {
+        let mut lines = api(std::slice::from_ref(&list)).unwrap();
+        next(&mut lines, || Ok(())).unwrap();
+        let listed = next(&mut lines, || Ok(())).unwrap();
+        let shown = listed["result"]["panes"][0]["source"] == "reported";
+        if shown || start.elapsed() > PATIENCE {
+            break listed;
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    let name = format!("pane{}", hello["result"]["pane"]);
+    let heard = format!("{reported}\n{listed}\n");
+    fs::write(Path::new(&directory).join(name), heard).unwrap();
+}
+
+#[test]
+fn a_pane_reports_its_own_status_and_not_another_panes() {
+    let session = Session::new("st", None).unwrap();
+    let exe = env::current_exe().unwrap();
+    let shell = format!(
+        "{STATUS}=1 '{}' --exact status_process; exec sleep 30",
+        exe.display()
+    );
+    let mut core = session.start_core(&["--idle", "2"], &shell).unwrap();
+    assert!(session.wait_for("pane0"), "{}", session.read_log());
+    assert!(session.wait_for("pane1"), "{}", session.read_log());
+    let answers = |name| -> Vec<serde_json::Value> {
+        let text = session.read(name);
+        text.lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    };
+    let own = answers("pane0");
+    assert_eq!(own[0]["result"], serde_json::json!({}));
+    let other = answers("pane1");
+    let refused = other[0]["error"]["message"].to_string();
+    assert!(refused.contains("only the caller's own pane"), "{refused}");
+    // Pane 0 lists after its report, which is labelled as one, its message cleaned (T4).
+    let listed = &own[1]["result"]["panes"][0];
+    let shown = (&listed["status"], &listed["source"], &listed["message"]);
+    assert_eq!(
+        shown,
+        (
+            &"needs-you".into(),
+            &"reported".into(),
+            &"approve?[2J".into()
+        )
+    );
+    // Pane 1 sees pane 0's state and source, and not its message.
+    let listed = &other[1]["result"]["panes"][0];
+    let shown = (&listed["status"], &listed["source"], &listed["message"]);
+    assert_eq!(
+        shown,
+        (
+            &"needs-you".into(),
+            &"reported".into(),
+            &serde_json::Value::Null
+        )
+    );
+    core.kill().unwrap();
+    core.wait().unwrap();
+}
+
 #[test]
 fn hardening_twice_is_harmless() {
     let status = Command::new(env::current_exe().unwrap())
@@ -695,8 +775,8 @@ fn a_caller_waits_on_its_pane_and_hears_panes_open_and_close() {
     let mut events = events
         .lines()
         .map(|line| serde_json::from_str(line).unwrap());
-    let opened =
-        serde_json::json!({"event": "pane.opened", "pane": 1, "status": "idle", "exit": null});
+    let opened = serde_json::json!({"event": "pane.opened", "pane": 1, "status": "idle",
+        "source": "marks", "exit": null});
     assert_eq!(events.next(), Some(opened));
     let closed = serde_json::json!({"event": "pane.closed", "pane": 1});
     assert_eq!(events.next(), Some(closed));
