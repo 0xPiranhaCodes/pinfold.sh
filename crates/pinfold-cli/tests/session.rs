@@ -1036,3 +1036,113 @@ fn mcp_calls_the_core_as_its_pane_and_reports_a_refusal_as_a_tool_error() {
     core.kill().unwrap();
     core.wait().unwrap();
 }
+
+/// Names the directory of a run, in the terminal outside any pane that asks for trust.
+const TRUST: &str = "PINFOLD_TEST_TRUST";
+
+/// Not a test: a terminal outside every pane asks for trust twice, and notes what it hears.
+#[test]
+fn trust_api_process() {
+    let Some(directory) = env::var_os(TRUST) else {
+        return;
+    };
+    let directory = Path::new(&directory);
+    let root = fs::canonicalize(directory.join("project")).unwrap();
+    let root = root.to_str().unwrap();
+    let (old, new) = ("a".repeat(64), "b".repeat(64));
+    let state = |sha256: &str| {
+        ask(
+            "workspace.trust_state",
+            serde_json::json!({"root": root, "sha256": sha256}),
+        )
+        .unwrap()["result"]
+            .clone()
+    };
+    let unknown = serde_json::json!({"trusted": false, "changed": false});
+    assert_eq!(state(&old), unknown);
+    let runs = ["npm run dev", "cargo watch\u{1b}[2J"];
+    let trusted = ask(
+        "workspace.ask_trust",
+        serde_json::json!({"root": root, "sha256": old, "runs": runs}),
+    )
+    .unwrap();
+    assert_eq!(trusted["result"], serde_json::json!({"trusted": true}));
+    assert_eq!(state(&old)["trusted"], true);
+    assert_eq!(state(&new)["changed"], true);
+    let refused = ask(
+        "workspace.ask_trust",
+        serde_json::json!({"root": root, "sha256": new, "runs": []}),
+    )
+    .unwrap();
+    let reason = refused["error"]["message"].as_str().unwrap_or_default();
+    assert!(reason.contains("not trusted"), "{refused}");
+    assert_eq!(state(&old)["trusted"], true);
+    fs::write(directory.join("asked"), "yes").unwrap();
+}
+
+/// Not a test: the window sees each trust prompt with the directory and every run line, then
+/// trusts the first and refuses the second, changed one.
+#[test]
+fn trust_window_process() {
+    let Some(directory) = env::var_os(CLIENT) else {
+        return;
+    };
+    let directory = Path::new(&directory);
+    let core = std::os::unix::process::parent_id().to_string();
+    fs::write(directory.join("core"), core).unwrap();
+    let mut link = Link::new(socket::take_link().unwrap()).unwrap();
+    assert!(link.resize(24, 80));
+    until(&mut link, |link| link.is_greeted()).unwrap();
+    let root = fs::canonicalize(directory.join("project")).unwrap();
+    for (target, runs, answer) in [
+        (
+            0,
+            &["npm run dev", "cargo watch\u{1b}[2J"][..],
+            ApprovalAnswer::AllowOnce,
+        ),
+        (1, &[][..], ApprovalAnswer::Deny),
+    ] {
+        let mut prompt = None;
+        until(&mut link, |link| {
+            prompt = link.take_approval();
+            prompt.is_some()
+        })
+        .unwrap();
+        let prompt = prompt.unwrap();
+        assert_eq!(
+            (prompt.target, prompt.action),
+            (target, ApprovalAction::Trust)
+        );
+        assert_eq!(prompt.texts[0], root.to_str().unwrap());
+        assert_eq!(prompt.texts[1..], *runs);
+        let id = prompt.id;
+        assert!(link.send(Request::ApprovalAnswer { id, answer }));
+    }
+    until(&mut link, |_| directory.join("asked").exists()).unwrap();
+}
+
+#[test]
+fn only_the_window_answers_a_trust_prompt_and_trusting_records_the_layout() {
+    let exe = env::current_exe().unwrap();
+    let window = format!("exec '{}' --exact trust_window_process", exe.display());
+    let session = Session::new("trust", Some(&window)).unwrap();
+    fs::create_dir_all(session.directory.join("project")).unwrap();
+    let (home, state) = (
+        session.directory.join("home"),
+        session.directory.join("state"),
+    );
+    let launched = session
+        .launcher("/bin/sh")
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", &state)
+        .output()
+        .unwrap();
+    assert!(launched.status.success(), "{launched:?}");
+    let mut outside = Command::new(exe);
+    outside
+        .args(["--exact", "trust_api_process"])
+        .env("XDG_RUNTIME_DIR", session.directory.join("run"))
+        .env(TRUST, &session.directory);
+    let _terminal = pinfold_sys::pty::Pty::spawn(outside, 24, 80).unwrap();
+    assert!(session.wait_for("asked"), "{}", session.read_log());
+}
