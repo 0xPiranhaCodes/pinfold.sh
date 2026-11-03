@@ -17,6 +17,8 @@ use serde_json::{Value, json};
 /// How long a core that was just started gets to answer.
 const START_WAIT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(20);
+const USAGE: &str = "usage: pinfold [up [dir] | ctl list [--json] | ctl send <pane> <text> | \
+    ctl log [--json] [-n <count>] [--pane <pane>] | ctl log --verify <file> | mcp]";
 
 /// Connects to a core at `path`. Nothing listening is no error, as that is what starts one.
 fn connect(path: &Path) -> std::io::Result<Option<UnixStream>> {
@@ -133,6 +135,84 @@ fn send(pane: &str, text: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// `pinfold ctl log [--json] [-n <count>] [--pane <pane>]`: prints the newest audit entries,
+/// which only a terminal outside any pane may read. `pinfold ctl log --verify <file>` checks a
+/// written audit log instead. Neither starts a core.
+fn log(args: &[&str]) -> Result<(), Box<dyn Error>> {
+    let mut out = std::io::stdout();
+    if let ["--verify", file] = args {
+        let count = pinfold_api::verify_file(file)?;
+        writeln!(out, "{}: {count} entries, chain intact", printable(file))?;
+        return Ok(());
+    }
+    let (mut params, mut json) = (json!({}), false);
+    let mut args = args.iter();
+    while let Some(&arg) = args.next() {
+        let name = match arg {
+            "--json" => {
+                json = true;
+                continue;
+            }
+            "-n" => "count",
+            "--pane" => "pane",
+            _ => return Err(USAGE.into()),
+        };
+        let value = args.next().and_then(|value| value.parse::<u64>().ok());
+        params[name] = value.ok_or("-n and --pane take a number")?.into();
+    }
+    let (_, read) = control::ask(&running()?, "audit.read", &params)?;
+    let text = if json {
+        format!("{read}\n")
+    } else {
+        entries(&read)
+    };
+    out.write_all(text.as_bytes())?;
+    Ok(())
+}
+
+/// The audit entries as plain text, a line each, every field through [`printable`].
+fn entries(read: &Value) -> String {
+    let mut text = String::new();
+    for entry in read["entries"].as_array().map_or(&[][..], Vec::as_slice) {
+        let field = |name: &str| printable(entry[name].as_str().unwrap_or("-"));
+        let caller = match (entry["caller"].as_u64(), entry["terminal"].as_bool()) {
+            (Some(pane), _) => format!("pane {pane}"),
+            (None, Some(true)) => "outside a pane".to_owned(),
+            (None, _) => "unidentified".to_owned(),
+        };
+        let target = entry["target"].as_u64();
+        let target = target.map_or("-".to_owned(), |pane| format!("pane {pane}"));
+        let (method, outcome, reason) = (field("method"), field("outcome"), field("reason"));
+        let at = utc(entry["at_ms"].as_u64().unwrap_or_default());
+        let seq = entry["seq"].as_u64().unwrap_or_default();
+        text += &format!("{seq} {at} {caller} {method} {target} {outcome}: {reason}\n");
+    }
+    if read["verified"] != true {
+        text += &format!("chain broken at sequence {}\n", read["broken_at"]);
+    }
+    text
+}
+
+/// Unix milliseconds as `YYYY-MM-DD hh:mm:ss UTC`, by Howard Hinnant's `civil_from_days`.
+fn utc(ms: u64) -> String {
+    let seconds = ms / 1000;
+    let z = seconds / 86_400 + 719_468;
+    let day_of_era = z % 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * shifted + 2) / 5 + 1;
+    let month = if shifted < 10 {
+        shifted + 3
+    } else {
+        shifted - 9
+    };
+    let year = year_of_era + z / 146_097 * 400 + u64::from(month <= 2);
+    let (hour, minute, second) = (seconds / 3600 % 24, seconds / 60 % 60, seconds % 60);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} UTC")
+}
+
 /// Connects to the running core, and starts none.
 fn running() -> Result<UnixStream, Box<dyn Error>> {
     let path = control::socket_path(&control::runtime_dir());
@@ -183,15 +263,14 @@ fn main() -> ExitCode {
         ["ctl", "list"] => list(false),
         ["ctl", "list", "--json"] => list(true),
         ["ctl", "send", pane, text] => send(pane, text),
+        ["ctl", "log", ref rest @ ..] => log(rest),
         ["mcp"] => {
             let socket = control::socket_path(&control::runtime_dir());
             pinfold_cli::mcp::serve(std::io::stdin().lock(), std::io::stdout().lock(), &socket)
                 .map_err(Into::into)
         }
         _ => {
-            eprintln!(
-                "usage: pinfold [up [dir] | ctl list [--json] | ctl send <pane> <text> | mcp]"
-            );
+            eprintln!("{USAGE}");
             return ExitCode::FAILURE;
         }
     };
@@ -243,6 +322,23 @@ ID    STATUS   TITLE            COMMAND                  CWD
         assert_eq!(table(&json!({"pane": 3}), &list), expected);
         // Outside a pane none is the caller's.
         assert!(!table(&json!({"pane": null}), &list).contains('*'));
+    }
+
+    #[test]
+    fn a_log_prints_a_line_per_entry_with_no_control_characters() {
+        let read = json!({"verified": false, "broken_at": 8, "entries": [
+            {"seq": 7, "at_ms": 1_700_000_000_123_u64, "caller": 1, "terminal": true,
+             "method": "pane.send", "target": 0, "outcome": "refused", "reason": "no\u{1b}[2J, 5 bytes"},
+            {"seq": 8, "at_ms": 0, "caller": null, "terminal": false, "method": "pane.list",
+             "target": null, "outcome": "ok", "reason": "allowed"},
+        ]});
+        let expected = "\
+7 2023-11-14 22:13:20 UTC pane 1 pane.send pane 0 refused: no?[2J, 5 bytes
+8 1970-01-01 00:00:00 UTC unidentified pane.list - ok: allowed
+chain broken at sequence 8
+";
+        assert_eq!(entries(&read), expected);
+        assert_eq!(utc(951_825_600_000), "2000-02-29 12:00:00 UTC");
     }
 
     #[test]

@@ -11,6 +11,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Fixed
 
+- `past_its_identitys_cap_a_peer_is_closed_unread` no longer fails on macOS when the core closes the extra peer before the test sets its read timeout.
 - The link test that fills every tab and pane uses 128 by 128 panes instead of 1024 by 1024, so it no longer runs past its 20 second limit on CI's Intel Mac.
 - Session and control tests wait for observable events instead of idle-machine timing under load.
 - Missing file and status icons now use installed fallback fonts while preserving the selected text font and terminal cell size.
@@ -46,10 +47,12 @@ Entries are generated from Conventional Commits with git-cliff
 - `hello` version 2 returns the version, the methods a caller may call and its pane id. `pane.list` lists the session's panes (id, title, cwd, command, status, and nothing from a screen) for any caller with a terminal, with a JSON Schema in [docs/api](docs/api/README.md). `pinfold ctl list` prints them, as JSON with `--json`. Version 1 still opens windows and cannot list panes (ADR-0032 step 3).
 - Pill tabs in the top bar, with hover, a mark on a hidden tab that printed, a quiet look for an
   unfocused window, and no title row in fullscreen.
+- Protected panes: `pane.send` is refused while any process in the pane's foreground group is ssh, mosh, sudo, su or doas, runs as root, cannot be read or matches an `api.protect` pattern, at a password prompt, or when marked. Sends to other panes refuse control characters and go a line at a time, each line at least 150 ms after the last, once the pane's shell holds the foreground again, checked just before it is written.
 - Tabs and splits for real. The core owns the session, so a new window finds the same tabs and panes, and only the panes of the active tab are sent to the window, so a hidden tab costs no frame copies. A session holds at most 32 tabs and 64 panes, and past that a command is refused with a note under the pane. Panes are drawn in cells with cell-drawn borders, the focused pane's in the focus accent.
 - `pinfold mcp` serves the API's pane tools over MCP on stdio, so an agent in a pane can list, read, wait on and type into its own pane.
 - Prefix keys work: `Ctrl+a`, or `keys.prefix`, then `c`, `n`, `p`, `0` to `9`, `|`, `-`, the arrows, `z`, `d` and `x`. `x` asks first, and says so in red when it would end the session. On macOS Command+T opens a tab and Command+1 to Command+9 go to one. A click focuses a pane or picks a tab, and the `+` button opens one. Bindings are in [docs/configuration.md](docs/configuration.md).
 - `pinfold-core` runs as a hardened daemon with a private control socket that takes `hello` and `window.open`.
+- The core records each API request that reaches it in a hash-chained audit log, never pane contents or sent text; `audit.read`, `pinfold ctl log` and `pinfold ctl log --verify` read and check it, and `api.audit_log = true` also writes it to disk.
 - `pinfold` is now a launcher: it starts the core if none answers, checks that the socket's owner is you, asks for a window and exits. The window is its own `pinfold-window` process on the link (ADR-0028), so a window that crashes or closes leaves every pane running and `pinfold` reattaches. A second `pinfold` brings the window to the front, and a window whose core dies says the session ended. `pinfold --size` is gone.
 - `cargo xtask mem-gate` measures the window and the core as separate processes, and the core beside a window.
 - `pinfold-mux` exports a session's layout as a plain tree that names panes by index, and rebuilds a session from one, refusing a bad tree with an error.
