@@ -663,7 +663,12 @@ fn call(stream: &UnixStream, request: &Value) -> Result<Value, Error> {
     (&mut &*stream).write_all(&bytes)?;
     let mut line = Vec::new();
     BufReader::new(stream.take(MAX_REPLY)).read_until(b'\n', &mut line)?;
-    let reply: Value = serde_json::from_slice(&line)
+    result(&line)
+}
+
+/// The result in one reply line, or its error.
+fn result(line: &[u8]) -> Result<Value, Error> {
+    let reply: Value = serde_json::from_slice(line)
         .map_err(|_| Error::Refused("the reply is not JSON-RPC".to_owned()))?;
     match reply.get("result") {
         Some(result) => Ok(result.clone()),
@@ -727,6 +732,67 @@ pub fn ask(stream: &UnixStream, method: &str, params: &Value) -> Result<(Value, 
     let hello = call(stream, &hello)?;
     let asked = json!({"jsonrpc": "2.0", "id": 2, "method": method, "params": params});
     Ok((hello, call(stream, &asked)?))
+}
+
+/// Says `hello` version 2 to the core on `stream`, subscribes to `topics` (`events.subscribe`'s
+/// params), and returns the next event's params, or `None` once `timeout` passes with none.
+/// Refuses another user's socket, as [`ask`] does.
+///
+/// # Errors
+///
+/// As [`ask`], and [`Error::Io`] if the core closes the connection before an event.
+pub fn next_event(
+    stream: &UnixStream,
+    topics: &Value,
+    timeout: Duration,
+) -> Result<Option<Value>, Error> {
+    check_peer(stream.as_fd(), pinfold_sys::effective_uid())?;
+    stream.set_read_timeout(Some(REPLY_WAIT))?;
+    stream.set_write_timeout(Some(REPLY_WAIT))?;
+    call(
+        stream,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "hello", "params": {"version": VERSION}}),
+    )?;
+    let subscribe =
+        json!({"jsonrpc": "2.0", "id": 2, "method": "events.subscribe", "params": topics});
+    let mut bytes = subscribe.to_string().into_bytes();
+    bytes.push(b'\n');
+    (&mut &*stream).write_all(&bytes)?;
+    // One reader for the result and the events, as an event may come in the same read.
+    let mut reader = BufReader::new(stream.take(MAX_REPLY));
+    let mut line = Vec::new();
+    reader.read_until(b'\n', &mut line)?;
+    result(&line)?;
+    let until = Instant::now() + timeout;
+    loop {
+        let left = until.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Ok(None);
+        }
+        reader.get_ref().get_ref().set_read_timeout(Some(left))?;
+        line.clear();
+        reader.get_mut().set_limit(MAX_REPLY);
+        match reader.read_until(b'\n', &mut line) {
+            Ok(0) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into()),
+            Ok(_) if line.ends_with(b"\n") => {
+                let message: Value = serde_json::from_slice(&line)
+                    .map_err(|_| Error::Refused("the event is not JSON-RPC".to_owned()))?;
+                if message["method"] == "event" {
+                    return Ok(Some(message["params"].clone()));
+                }
+            }
+            Ok(_) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into()),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                ) =>
+            {
+                return Ok(None);
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
 }
 
 /// One connection on the API thread.
@@ -1950,5 +2016,30 @@ mod tests {
         }
         assert_eq!(over.read(&mut [0; 8]).unwrap(), 0);
         drop(held);
+    }
+
+    #[test]
+    fn a_subscriber_that_hangs_up_frees_its_slot() {
+        let path = core(serving(Ok(json!({}))), IDLE);
+        let topics = json!({"events": ["pane.closed"]});
+        // The core hears each hang-up after the next connect may arrive, so each try may be
+        // closed unread at the identity's cap for a moment.
+        fn eventually(mut call: impl FnMut() -> bool) {
+            let until = Instant::now() + TIMEOUT;
+            while !call() {
+                assert!(Instant::now() < until, "slots stayed taken");
+                thread::sleep(Duration::from_millis(10));
+            }
+        }
+        for _ in 0..2 * MAX_PEERS {
+            eventually(|| {
+                let stream = UnixStream::connect(&path).unwrap();
+                next_event(&stream, &topics, Duration::ZERO).is_ok_and(|event| event.is_none())
+            });
+        }
+        eventually(|| {
+            let stream = UnixStream::connect(&path).unwrap();
+            ask(&stream, "pane.list", &json!({})).is_ok()
+        });
     }
 }
