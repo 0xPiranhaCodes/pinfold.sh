@@ -2,6 +2,8 @@
 
 use std::io::{self, Write};
 
+pub mod mcp;
+
 /// Makes a panic print only its place. Stderr may be the session's log, and a panic's text can
 /// quote pane contents, as a bad `str` slice quotes the string.
 ///

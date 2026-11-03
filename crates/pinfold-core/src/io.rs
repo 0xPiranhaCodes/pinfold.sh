@@ -18,9 +18,7 @@ use pinfold_sys::pty::Pty;
 
 use crate::link::{Host, LINK};
 use crate::marks::{ShellMarks, ShellPhase};
-use crate::search::{
-    CopyStep, Copying, Direction, MAX_SELECTION, Position, Search, SearchStep, Selection,
-};
+use crate::search::{CopyStep, Copying, Direction, Position, Search, SearchStep, Selection};
 use crate::vt::{AlacrittyEngine, VtEngine};
 use crate::{paste, shell};
 
@@ -33,8 +31,9 @@ pub const MAX_REPLIES: usize = 4 * 1024;
 /// Most input waiting for a program that is not reading it. Input past this is refused
 /// whole, since a paste cut short would lose its closing bracket.
 pub const MAX_INPUT: usize = pinfold_proto::link::MAX_INPUT;
-/// Most text one `pane.read` or `pane.last_output` returns (threat model, Limits).
-pub const MAX_READ: usize = MAX_SELECTION;
+/// Most text one `pane.read` or `pane.last_output` returns. Half the API's 2 MiB output cap, so
+/// the reply fits even when JSON escapes every byte (`"` and `\` become two).
+pub const MAX_READ: usize = 1_000_000;
 /// Most `pane.send` calls a second to one pane (threat model, Limits).
 pub const SENDS_PER_SECOND: u32 = 20;
 /// Queue capacity an empty pane keeps, so one large paste does not cost memory for good.
@@ -201,7 +200,7 @@ impl Reactor {
     /// Starts `command` on a new PTY and returns its pane number. The pane is in no tab, so it
     /// stays when its program exits, for reading. [`Reactor::open_tab`] adds one to the session.
     ///
-    /// The reactor's thread makes every spawn, which [`Pty::spawn`] requires.
+    /// The reactor's thread makes every spawn, which `pinfold_sys::socket::pair` requires.
     ///
     /// # Errors
     ///

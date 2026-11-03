@@ -36,7 +36,7 @@ fn duplicate(fd: RawFd, lowest: RawFd) -> io::Result<OwnedFd> {
 /// Returns a connected pair of Unix sockets, both close-on-exec.
 ///
 /// On macOS they are briefly inheritable while they are being made, so one thread must make
-/// every call that creates a child, as [`crate::pty::Pty::spawn`] also requires.
+/// every call that creates a child.
 ///
 /// # Errors
 ///
