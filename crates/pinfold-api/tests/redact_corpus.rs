@@ -63,6 +63,36 @@ const POSITIVES: &[(Kind, &str, &str)] = &[
         "password=«redacted:password»",
     ),
     (Kind::HighEntropy, HIGH_ENTROPY, "«redacted:high-entropy»"),
+    (
+        Kind::Password,
+        "DB_PASSWORD=x",
+        "DB_PASSWORD=«redacted:password»",
+    ),
+    (
+        Kind::Password,
+        "export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        "export AWS_SECRET_ACCESS_KEY=«redacted:password»",
+    ),
+    (
+        Kind::Password,
+        "{\"api_key\": \"abc123\"}",
+        "{\"api_key\": \"«redacted:password»\"}",
+    ),
+    (
+        Kind::Password,
+        "token=\"a\\\"b c\" next",
+        "token=\"«redacted:password»\" next",
+    ),
+    (
+        Kind::PrivateKey,
+        "-----BEGIN PGP PRIVATE KEY BLOCK-----\nlQOYBGZm\n-----END PGP PRIVATE KEY BLOCK-----",
+        "«redacted:private-key»",
+    ),
+    (
+        Kind::HighEntropy,
+        "Zm9vYmFyYmF6cXV4MTIzNDU2/aGVsbG8gd29ybGQ0MjQyNTI2Nzg/c2Vj",
+        "«redacted:high-entropy»",
+    ),
 ];
 
 #[test]
@@ -110,6 +140,8 @@ fn corpus_reports_detection_rates() {
         "token bucket allows 20 calls per second",
         "checksum = \"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\"",
         "CLAUDE_CODE_ENABLE_ASK_USER_QUESTION_TOOL=true",
+        "usage: input_tokens: 1234, output_tokens: 567",
+        "-----BEGIN CERTIFICATE-----",
     ];
     let false_positives: usize = negatives
         .iter()

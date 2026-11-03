@@ -104,38 +104,36 @@ fn match_at(bytes: &[u8], index: usize) -> Option<(usize, usize, Kind)> {
 }
 
 fn private_key_at(bytes: &[u8], index: usize) -> Option<usize> {
-    const BLOCKS: &[(&[u8], &[u8])] = &[
-        (b"-----BEGIN PRIVATE KEY-----", b"-----END PRIVATE KEY-----"),
-        (
-            b"-----BEGIN RSA PRIVATE KEY-----",
-            b"-----END RSA PRIVATE KEY-----",
-        ),
-        (
-            b"-----BEGIN EC PRIVATE KEY-----",
-            b"-----END EC PRIVATE KEY-----",
-        ),
-        (
-            b"-----BEGIN DSA PRIVATE KEY-----",
-            b"-----END DSA PRIVATE KEY-----",
-        ),
-        (
-            b"-----BEGIN OPENSSH PRIVATE KEY-----",
-            b"-----END OPENSSH PRIVATE KEY-----",
-        ),
-        (
-            b"-----BEGIN ENCRYPTED PRIVATE KEY-----",
-            b"-----END ENCRYPTED PRIVATE KEY-----",
-        ),
-    ];
-    for &(begin, end) in BLOCKS {
-        if bytes.get(index..)?.starts_with(begin) {
-            let body_start: usize = index + begin.len();
-            let block_end: usize =
-                find_bytes(bytes, body_start, end).map_or(bytes.len(), |found| found + end.len());
-            return Some(block_end);
-        }
+    const BEGIN: &[u8] = b"-----BEGIN ";
+    if !bytes.get(index..)?.starts_with(BEGIN) {
+        return None;
     }
-    None
+    // Any label with PRIVATE KEY in it: RSA, EC, OPENSSH, ENCRYPTED, PGP ... BLOCK and so on.
+    let label_start: usize = index + BEGIN.len();
+    let label_end: usize = (label_start..bytes.len().min(label_start + 64))
+        .find(|&at| matches!(bytes[at], b'-' | b'\n'))?;
+    let label: &[u8] = &bytes[label_start..label_end];
+    if !contains_ignore_case(label, b"PRIVATE KEY") {
+        return None;
+    }
+    let mut end_marker: Vec<u8> = b"-----END ".to_vec();
+    end_marker.extend_from_slice(label);
+    // Without its END line, the rest of the text is the key.
+    let found: Option<usize> = find_bytes(bytes, label_end, &end_marker);
+    Some(found.map_or(bytes.len(), |at| {
+        let after: usize = at + end_marker.len();
+        after
+            + bytes[after..]
+                .iter()
+                .take_while(|&&byte| byte == b'-')
+                .count()
+    }))
+}
+
+fn contains_ignore_case(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 fn find_bytes(haystack: &[u8], start: usize, needle: &[u8]) -> Option<usize> {
@@ -149,16 +147,30 @@ fn find_bytes(haystack: &[u8], start: usize, needle: &[u8]) -> Option<usize> {
 }
 
 fn pair_value_at(bytes: &[u8], index: usize) -> Option<(usize, usize)> {
-    const KEYS: &[&[u8]] = &[b"password", b"passwd", b"secret", b"token", b"api_key"];
-    if index > 0 && is_word(bytes[index - 1]) {
+    // Matched anywhere in the key, so `DB_PASSWORD=`, `AWS_SECRET_ACCESS_KEY=`, `--token=`
+    // and JSON `"api_key": ` all count.
+    const WORDS: &[&[u8]] = &[
+        b"password",
+        b"passwd",
+        b"secret",
+        b"token",
+        b"api_key",
+        b"apikey",
+        b"private_key",
+        b"credential",
+        b"access_key",
+    ];
+    if index > 0 && is_key(bytes[index - 1]) {
         return None;
     }
-    let rest: &[u8] = bytes.get(index..)?;
-    let key: &[u8] = KEYS
-        .iter()
-        .copied()
-        .find(|key| starts_ascii_case_insensitive(rest, key))?;
-    let mut cursor: usize = index + key.len();
+    let mut cursor: usize = index;
+    while bytes.get(cursor).is_some_and(|byte| is_key(*byte)) {
+        cursor += 1;
+    }
+    let key: &[u8] = &bytes[index..cursor];
+    if !WORDS.iter().any(|word| contains_ignore_case(key, word)) {
+        return None;
+    }
     if matches!(bytes.get(cursor), Some(b'\'' | b'"')) {
         cursor += 1;
     }
@@ -182,6 +194,11 @@ fn pair_value_at(bytes: &[u8], index: usize) -> Option<(usize, usize)> {
     };
     let value_start: usize = cursor;
     while let Some(&byte) = bytes.get(cursor) {
+        if quote.is_some() && byte == b'\\' {
+            // An escaped quote does not end the value.
+            cursor = (cursor + 2).min(bytes.len());
+            continue;
+        }
         let ended: bool = quote.map_or_else(
             || byte.is_ascii_whitespace() || matches!(byte, b',' | b';' | b'&'),
             |delimiter| byte == delimiter,
@@ -191,13 +208,13 @@ fn pair_value_at(bytes: &[u8], index: usize) -> Option<(usize, usize)> {
         }
         cursor += 1;
     }
-    (cursor > value_start).then_some((value_start, cursor))
+    let value: &[u8] = &bytes[value_start..cursor];
+    // Counts such as `max_tokens: 4096` are not secrets.
+    (!value.is_empty() && !value.iter().all(u8::is_ascii_digit)).then_some((value_start, cursor))
 }
 
-fn starts_ascii_case_insensitive(input: &[u8], prefix: &[u8]) -> bool {
-    input
-        .get(..prefix.len())
-        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix))
+fn is_key(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.')
 }
 
 fn prefixed_token_at(bytes: &[u8], index: usize) -> Option<(usize, usize, Kind)> {
@@ -314,17 +331,16 @@ fn entropy_at(bytes: &[u8], index: usize) -> Option<usize> {
         end += 1;
     }
     let candidate: &[u8] = &bytes[index..end];
-    // Pure hex is skipped: in a terminal it is almost always a digest or commit (Cargo.lock
-    // checksums alone were 3% of lines), and hex secrets after `token=` and the like are
-    // caught by the pair rule. Random base64 of 32+ chars has a digit 99.9% of the time,
-    // while long `UPPER_SNAKE` names have none.
-    if candidate.len() < 32
-        || is_hex(candidate)
-        || is_uuid(candidate)
-        || looks_like_path(candidate)
-        || !candidate.iter().any(u8::is_ascii_digit)
-        || !candidate.iter().any(u8::is_ascii_alphabetic)
-    {
+    // A path is not a secret, but base64 can hold `/`, so a path-like run is judged by its
+    // segments: one long random segment is enough.
+    let random: bool = if looks_like_path(candidate) {
+        candidate
+            .split(|&byte| byte == b'/')
+            .any(|segment| segment.len() >= PATH_SEGMENT && is_random(segment))
+    } else {
+        candidate.len() >= 32 && is_random(candidate)
+    };
+    if !random {
         return None;
     }
 
@@ -339,8 +355,28 @@ fn entropy_at(bytes: &[u8], index: usize) -> Option<usize> {
     {
         end = padded;
     }
-    // 3.75 bits/char rejects repetitive identifiers and prose.
-    (shannon_entropy(candidate) > 3.75).then_some(end)
+    Some(end)
+}
+
+/// The shortest path segment judged on its own as a possible secret.
+const PATH_SEGMENT: usize = 24;
+
+/// Pure hex is not random here: in a terminal it is almost always a digest or commit
+/// (Cargo.lock checksums alone were 3% of lines), and hex secrets after `token=` and the like
+/// are caught by the pair rule. Random base64 of 24+ chars has a digit 99.8% of the time, while
+/// long `UPPER_SNAKE` names have none. Base64url has about one `-` or `_` per 32 chars, while
+/// `0032-api-thread-and-m3-order` is words. 3.75 bits/char rejects repetitive identifiers.
+fn is_random(run: &[u8]) -> bool {
+    let separators: usize = run
+        .iter()
+        .filter(|&&byte| matches!(byte, b'-' | b'_'))
+        .count();
+    separators * 12 <= run.len()
+        && !is_hex(run)
+        && !is_uuid(run)
+        && run.iter().any(u8::is_ascii_digit)
+        && run.iter().any(u8::is_ascii_alphabetic)
+        && shannon_entropy(run) > 3.75
 }
 
 fn shannon_entropy(bytes: &[u8]) -> f64 {
@@ -375,10 +411,6 @@ fn is_uuid(bytes: &[u8]) -> bool {
 
 fn looks_like_path(bytes: &[u8]) -> bool {
     bytes.first() == Some(&b'/') || bytes.iter().filter(|&&byte| byte == b'/').take(2).count() == 2
-}
-
-fn is_word(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
 fn is_alnum(byte: u8) -> bool {
