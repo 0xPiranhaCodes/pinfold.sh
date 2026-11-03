@@ -181,6 +181,10 @@ impl MetalRenderer {
 }
 
 impl Renderer for MetalRenderer {
+    fn title_center(&self) -> f64 {
+        self.metrics.title_center()
+    }
+
     fn cell_size(&self) -> (usize, usize) {
         (self.metrics.cell_width, self.metrics.cell_height)
     }

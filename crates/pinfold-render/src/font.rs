@@ -2,7 +2,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::{fs, io};
+use std::{env, fs, io};
 
 use pinfold_sys::mapped::Mapped;
 use swash::{CacheKey, FontRef};
@@ -13,7 +13,6 @@ use crate::glyphs::{can_draw_text, contained};
 const BUNDLED: &[u8] = include_bytes!("../fonts/JetBrainsMono-Regular.ttf");
 const BUNDLED_NAME: &str = "the bundled font";
 
-// shortcut: fixed paths, so a font installed elsewhere is missed, use config paths from #21.
 /// Japanese, then Simplified Chinese, then Korean.
 #[cfg(target_os = "macos")]
 const FALLBACKS: &[&str] = &[
@@ -21,6 +20,76 @@ const FALLBACKS: &[&str] = &[
     "/System/Library/Fonts/Hiragino Sans GB.ttc",
     "/System/Library/Fonts/AppleSDGothicNeo.ttc",
 ];
+
+/// Standard installation directories. No font database or native rasterizer is needed.
+fn font_directories() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(home) = env::var_os("HOME")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+    {
+        if cfg!(target_os = "macos") {
+            paths.push(home.join("Library/Fonts"));
+        } else {
+            paths.push(home.join(".fonts"));
+            let data = env::var_os("XDG_DATA_HOME")
+                .map(PathBuf::from)
+                .filter(|p| p.is_absolute())
+                .unwrap_or_else(|| home.join(".local/share"));
+            paths.push(data.join("fonts"));
+        }
+    }
+    if cfg!(target_os = "macos") {
+        paths.extend(["/Library/Fonts", "/System/Library/Fonts"].map(PathBuf::from));
+    } else {
+        paths.extend(["/usr/local/share/fonts", "/usr/share/fonts"].map(PathBuf::from));
+    }
+    paths
+}
+
+/// Enumerate once, only after the usual fallbacks miss. Do not follow directory symlinks,
+/// open special files, or allow an unbounded directory tree to stall a frame.
+fn installed_fonts(roots: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut pending: Vec<_> = roots.into_iter().map(|path| (path, 0)).collect();
+    let mut files = Vec::new();
+    let mut remaining = 4096;
+    while let Some((dir, depth)) = pending.pop() {
+        let Ok(entries) = fs::read_dir(dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if remaining == 0 {
+                break;
+            }
+            remaining -= 1;
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let path = entry.path();
+            if kind.is_dir() && depth < 8 {
+                pending.push((path, depth + 1));
+            } else if path.extension().is_some_and(|ext| {
+                ["ttf", "otf", "ttc", "otc"]
+                    .iter()
+                    .any(|suffix| ext.eq_ignore_ascii_case(suffix))
+            }) && path.is_file()
+            {
+                files.push(path);
+            }
+        }
+        if remaining == 0 {
+            break;
+        }
+    }
+    // Icon fonts first: avoid paging through every text family for a private-use symbol.
+    files.sort_by_cached_key(|path| {
+        let name = path.to_string_lossy().to_ascii_lowercase();
+        (!(name.contains("nerd") || name.contains("symbol")), name)
+    });
+    files.dedup();
+    files.reverse(); // pop() visits the preferred font first.
+    files
+}
 /// Noto CJK where Debian, Arch, Fedora and Alpine install it, then WenQuanYi.
 #[cfg(not(target_os = "macos"))]
 const FALLBACKS: &[&str] = &[
@@ -170,6 +239,8 @@ impl Font {
 #[derive(Debug)]
 pub struct Fonts {
     primary: Font,
+    directories: Vec<PathBuf>,
+    installed: Vec<PathBuf>,
     /// Paths not tried yet. Each is tried once, so a bad file cannot cost a retry per glyph.
     untried: &'static [&'static str],
     opened: Vec<Font>,
@@ -181,7 +252,10 @@ pub struct Fonts {
 
 impl From<Font> for Fonts {
     fn from(primary: Font) -> Self {
-        Self::with_fallbacks(primary, FALLBACKS)
+        Self {
+            directories: font_directories(),
+            ..Self::with_fallbacks(primary, FALLBACKS)
+        }
     }
 }
 
@@ -189,6 +263,8 @@ impl Fonts {
     pub(crate) fn with_fallbacks(primary: Font, untried: &'static [&'static str]) -> Self {
         Self {
             primary,
+            directories: Vec::new(),
+            installed: Vec::new(),
             untried,
             opened: Vec::new(),
             touched: false,
@@ -228,13 +304,21 @@ impl Fonts {
         if !std::mem::replace(&mut self.bundled, true) {
             self.opened.extend(Font::bundled());
         }
-        let has = |font: &Font| font.glyph(character) != 0;
+        let has = |font: &Font| contained(|| Some(font.glyph(character) != 0)).unwrap_or(false);
         let mut found = self.opened.iter().position(has);
         while found.is_none() {
-            let (path, rest) = self.untried.split_first()?;
-            self.untried = rest;
-            if let Ok(font) = Font::open(Path::new(path)) {
+            let path = if let Some((path, rest)) = self.untried.split_first() {
+                self.untried = rest;
+                PathBuf::from(path)
+            } else {
+                if !self.directories.is_empty() {
+                    self.installed = installed_fonts(std::mem::take(&mut self.directories));
+                }
+                self.installed.pop()?
+            };
+            if let Some(font) = contained(|| Font::open(&path).ok()) {
                 found = has(&font).then_some(self.opened.len());
+                font.release_pages();
                 self.opened.push(font);
             }
         }
@@ -472,6 +556,50 @@ mod tests {
         assert!(fonts.fallback(KANJI).is_none());
         assert_eq!(fonts.untried(), 0);
         assert_eq!(fonts.opened_count(), 1, "only the bundled font");
+    }
+
+    #[test]
+    fn installed_icons_are_found_without_replacing_the_primary_font() {
+        let mut bytes = kanji_font().unwrap();
+        let cmap = table(&bytes, b"cmap").unwrap();
+        // Give the fixture the private-use range used by Nerd Font icons.
+        bytes[cmap + 28..cmap + 32].copy_from_slice(&0xe600_u32.to_be_bytes());
+        bytes[cmap + 32..cmap + 36].copy_from_slice(&0xe6ff_u32.to_be_bytes());
+        let file = File::new(&bytes).unwrap();
+        let dir = Path::new(file.list[0]).with_extension("fonts");
+        fs::create_dir_all(dir.join("nested")).unwrap();
+        fs::write(dir.join("nested/icons.otf"), bytes).unwrap();
+        fs::write(dir.join("broken.ttf"), b"not a font").unwrap();
+        let mut fonts = Fonts::with_fallbacks(bundled(), &[]);
+        fonts.directories = vec![dir.clone()];
+        let ascii = fonts.primary().glyph('A');
+        assert!(fonts.fallback('\u{e606}').is_some());
+        assert_eq!(fonts.primary().glyph('A'), ascii);
+        assert!(fonts.primary().is_bundled());
+        fs::remove_dir_all(dir).unwrap();
+        // Resolved faces remain usable without rescanning files.
+        assert!(fonts.fallback('\u{e606}').is_some());
+        assert!(fonts.fallback('\u{10ffff}').is_none());
+        let mut cache = crate::glyphs::GlyphCache::new(fonts, 16.0, crate::glyphs::CACHE_LIMIT);
+        let icon = cache.get('\u{e606}', 0).unwrap().mask.clone();
+        assert!(!icon.is_empty());
+        assert_ne!(icon, cache.get('\u{10ffff}', 0).unwrap().mask);
+    }
+
+    #[test]
+    fn discovery_skips_directory_loops_and_special_files() {
+        use std::os::unix::fs::symlink;
+        let file = File::new(&plain_font()).unwrap();
+        let dir = Path::new(file.list[0]).with_extension("scan");
+        fs::create_dir(&dir).unwrap();
+        symlink(&dir, dir.join("loop")).unwrap();
+        symlink("/dev/zero", dir.join("device.ttf")).unwrap();
+        symlink(file.list[0], dir.join("linked.TTF")).unwrap();
+        assert_eq!(
+            installed_fonts(vec![dir.clone()]),
+            vec![dir.join("linked.TTF")]
+        );
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

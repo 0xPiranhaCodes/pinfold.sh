@@ -200,6 +200,14 @@ impl Open {
         if self.fullscreen {
             padding.in_fullscreen(scale)
         } else {
+            #[cfg(target_os = "macos")]
+            if let Some(controls) = pinfold_sys::window::controls(&*self.window) {
+                return padding.aligned_title(
+                    controls.left * scale,
+                    controls.center_y * scale,
+                    self.renderer.title_center(),
+                );
+            }
             padding
         }
     }
@@ -569,7 +577,11 @@ impl App {
             let scale = open.window.scale_factor();
             let cell_width = open.renderer.cell_size().0;
             let left = open.padding().left;
-            let inset = top_bar::inset(top_bar::LEFT_POINTS, scale, left, cell_width);
+            let title_left = top_bar::LEFT_POINTS;
+            #[cfg(target_os = "macos")]
+            let title_left = pinfold_sys::window::controls(&*open.window)
+                .map_or(title_left, |controls| controls.right + 12.0);
+            let inset = top_bar::inset(title_left, scale, left, cell_width);
             let bar = top_bar::Bar {
                 tabs: &self.labels,
                 active: self.active,

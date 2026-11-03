@@ -9,6 +9,11 @@ Entries are generated from Conventional Commits with git-cliff
 
 ## [Unreleased]
 
+### Fixed
+
+- Missing file and status icons now use installed fallback fonts while preserving the selected text font and terminal cell size.
+- macOS title text and the grid's left edge align with the actual native window buttons, accounting for font size and display scale.
+
 ### Changed
 
 - Refined window chrome with graphite tab surfaces, teal active labels, readable unfocused tabs, quieter search hints, and more space around the terminal.

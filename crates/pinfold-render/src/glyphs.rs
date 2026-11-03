@@ -281,6 +281,10 @@ pub(crate) struct Metrics {
 const BLEED_PART: usize = 5;
 
 impl Metrics {
+    pub(crate) fn title_center(self) -> f64 {
+        self.cell_height as f64 / 2.0 - f64::from(self.tab_text_drop)
+    }
+
     /// Returns how far a tab's pill reaches past its row, above and below.
     pub(crate) fn bleed(self) -> usize {
         self.cell_height / BLEED_PART
@@ -427,6 +431,32 @@ mod tests {
 
     fn bundled() -> Font {
         Font::bundled().unwrap()
+    }
+
+    #[test]
+    fn title_capitals_align_with_native_buttons_across_sizes_and_scales() {
+        for scale in [1.0, 1.5, 2.0] {
+            for size in [11.0, 13.0, 15.0, 18.0] {
+                let mut cache = GlyphCache::new(bundled(), (size * scale) as f32, CACHE_LIMIT);
+                let metrics = cache.metrics();
+                let center = 16.0 * scale;
+                let padding = crate::padding::Padding::scaled(scale).aligned_title(
+                    8.0 * scale,
+                    center,
+                    metrics.title_center(),
+                );
+                let glyph = cache.get('H', 0).unwrap();
+                let height = glyph.mask.len() / glyph.width;
+                let ink_center = padding.top as f64
+                    + f64::from(metrics.baseline - glyph.top)
+                    + height as f64 / 2.0;
+                assert!(
+                    (ink_center - center).abs() <= 1.0,
+                    "size {size}, scale {scale}: ink {ink_center}, buttons {center}"
+                );
+                assert_eq!(padding.left, (8.0 * scale) as usize);
+            }
+        }
     }
 
     fn with_fallback(list: &'static [&'static str]) -> GlyphCache {

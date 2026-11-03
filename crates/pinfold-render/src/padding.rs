@@ -36,6 +36,21 @@ pub struct Padding {
 }
 
 impl Padding {
+    /// Aligns the grid's left edge and title capitals with native window buttons. All
+    /// inputs are physical pixels. A large font stays inside the window even when its
+    /// title is taller than the native title bar. Fullscreen keeps its own padding.
+    #[must_use]
+    pub fn aligned_title(self, left: f64, center_y: f64, text_center: f64) -> Self {
+        if self.fullscreen {
+            return self;
+        }
+        Self {
+            left: left.max(0.0).round() as usize,
+            top: (center_y - text_center).max(0.0).round() as usize,
+            ..self
+        }
+    }
+
     /// Returns the padding of a window with this ratio of physical to logical pixels.
     ///
     /// ```
@@ -157,6 +172,8 @@ mod tests {
         let rows = |padding: Padding| padding.grid(100, 200, (10, 20)).0;
         assert_eq!(rows(padding), (200 - 8 - 16 - 18 - 16) / 20);
         assert_eq!(rows(full), (200 - 14 - 16 - 18) / 20);
+        assert_eq!(full.aligned_title(8.0, 16.0, 9.0), full);
+        assert_eq!(padding.aligned_title(8.0, 16.0, 40.0).top, 0);
     }
 
     #[test]

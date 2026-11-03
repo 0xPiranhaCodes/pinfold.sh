@@ -17,6 +17,9 @@ pub trait Renderer {
     /// Returns the size of a cell in physical pixels, as `(width, height)`.
     fn cell_size(&self) -> (usize, usize);
 
+    /// Vertical centre of title capitals relative to their row's top, in physical pixels.
+    fn title_center(&self) -> f64;
+
     /// Sets the surface size in physical pixels, and the padding around the grid.
     fn resize(&mut self, width: u32, height: u32, padding: Padding);
 
@@ -102,6 +105,10 @@ where
 {
     fn cell_size(&self) -> (usize, usize) {
         self.painter.cell_size()
+    }
+
+    fn title_center(&self) -> f64 {
+        self.painter.cache().metrics().title_center()
     }
 
     fn resize(&mut self, width: u32, height: u32, padding: Padding) {

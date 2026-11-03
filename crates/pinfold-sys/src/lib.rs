@@ -18,6 +18,8 @@ pub mod mapped;
 pub mod metal;
 pub mod pty;
 pub mod socket;
+#[cfg(all(target_os = "macos", feature = "metal"))]
+pub mod window;
 
 /// Returns a process's memory footprint in bytes: PSS on Linux and `phys_footprint` on
 /// macOS, the two metrics ADR-0021 budgets are written in.
