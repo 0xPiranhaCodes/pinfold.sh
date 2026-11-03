@@ -188,7 +188,7 @@ impl Log {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Io`] when the file cannot be opened or `path` is a symlink, and
+    /// Returns [`Error::Io`] when the file cannot be opened or `path` is not a regular file, and
     /// [`Error::Malformed`] or
     /// [`Error::Broken`] when the existing file fails verification.
     pub fn with_file(path: impl AsRef<Path>) -> Result<Self, Error> {
@@ -405,10 +405,11 @@ fn open_file(path: &Path) -> io::Result<File> {
     // shortcut: a symlink swapped in between this check and the open is still followed; use
     // O_NOFOLLOW if this crate ever depends on libc or rustix.
     match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => {
+        // A symlink could redirect records and a FIFO would block the open.
+        Ok(metadata) if !metadata.file_type().is_file() => {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "audit log path is a symlink",
+                "audit log path is not a regular file",
             ));
         }
         Ok(_) => {}
@@ -697,6 +698,23 @@ mod tests {
         assert_eq!(fs::metadata(&target)?.len(), 0);
         fs::remove_file(link)?;
         fs::remove_file(target)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_fifo_path_is_refused_without_blocking() -> Result<(), Error> {
+        let fifo = path("fifo");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()?
+                .success()
+        );
+        assert!(matches!(
+            Log::with_file(&fifo),
+            Err(Error::Io(error)) if error.kind() == io::ErrorKind::InvalidInput
+        ));
+        fs::remove_file(fifo)?;
         Ok(())
     }
 
