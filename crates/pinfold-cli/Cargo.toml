@@ -35,11 +35,11 @@ window = ["dep:pinfold-ui"]
 pinfold-ui = { path = "../pinfold-ui", version = "0.0.0", optional = true }
 pinfold-api = { path = "../pinfold-api", version = "0.0.0" }
 pinfold-core = { path = "../pinfold-core", version = "0.0.0" }
+pinfold-proto = { path = "../pinfold-proto", version = "0.0.0" }
 pinfold-sys = { path = "../pinfold-sys", version = "0.0.0" }
 serde_json = "1.0.154"
 
 [dev-dependencies]
-pinfold-proto = { path = "../pinfold-proto", version = "0.0.0" }
 pinfold-ui = { path = "../pinfold-ui", version = "0.0.0" }
 
 [lints]

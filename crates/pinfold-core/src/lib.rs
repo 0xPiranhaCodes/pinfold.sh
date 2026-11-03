@@ -1,5 +1,6 @@
 //! Core daemon library: PTY, VT engine, mux, sessions and status engine.
 
+pub mod grants;
 pub mod io;
 pub mod link;
 pub mod marks;

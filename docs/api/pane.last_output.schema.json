@@ -1,14 +1,14 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "pane.last_output",
-  "description": "Returns the output of the pane's last command as plain text, as pane.read does: from the shell's OSC 133 C mark to the D mark after it, or to the end while the command runs. Program output can fake the marks. A pane with no marks is refused. Needs hello version 2, and for now the pane must be the caller's own (the self scope).",
+  "description": "Returns the output of the pane's last command as plain text, as pane.read does: from the shell's OSC 133 C mark to the D mark after it, or to the end while the command runs. Program output can fake the marks. A pane with no marks is refused. Needs hello version 2 and a caller pane. Another pane needs a window approval or live grant and is redacted.",
   "type": "object",
   "properties": {
     "params": {
       "type": "object",
       "required": ["pane"],
       "properties": {
-        "pane": { "type": "integer", "minimum": 0, "description": "The pane's number, which must be the caller's own." }
+        "pane": { "type": "integer", "minimum": 0, "description": "The target pane. Another pane raises a keyboard-only window prompt." }
       }
     },
     "result": {

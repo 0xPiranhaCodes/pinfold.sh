@@ -85,6 +85,27 @@ fn send(pane: &str, text: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Lists lasting cross-pane grants. The core accepts this only from a terminal outside panes.
+fn grants(json_output: bool) -> Result<(), Box<dyn Error>> {
+    let (_, listed) = control::ask(&running()?, "grants.list", &json!({}))?;
+    let text = if json_output {
+        format!("{listed}\n")
+    } else {
+        grants_table(&listed)
+    };
+    std::io::stdout().write_all(text.as_bytes())?;
+    Ok(())
+}
+
+fn revoke(id: &str) -> Result<(), Box<dyn Error>> {
+    let id: u64 = id.parse().map_err(|_| "the grant id must be a number")?;
+    let (_, result) = control::ask(&running()?, "grants.revoke", &json!({"id": id}))?;
+    if result["revoked"] == Value::Bool(false) {
+        return Err(format!("no active grant {id}").into());
+    }
+    Ok(())
+}
+
 /// Connects to the running core, and starts none.
 fn running() -> Result<UnixStream, Box<dyn Error>> {
     let path = control::socket_path(&control::runtime_dir());
@@ -106,6 +127,26 @@ fn table(hello: &Value, list: &Value) -> String {
         let (status, title) = (field("status"), field("title"));
         let (command, cwd) = (field("command"), field("cwd"));
         text += &format!("{id:<5} {status:<8} {title:<16} {command:<24} {cwd}\n");
+    }
+    text
+}
+
+fn grants_table(list: &Value) -> String {
+    let mut text = format!(
+        "{:<8} {:<8} {:<8} {:<8} EXPIRES\n",
+        "ID", "CALLER", "TARGET", "ACTION"
+    );
+    let grants = list["grants"].as_array().map_or(&[][..], Vec::as_slice);
+    for grant in grants {
+        let seconds = grant["expires_ms"].as_u64().unwrap_or_default() / 1000;
+        let id = grant["id"].to_string();
+        let caller = grant["caller"].to_string();
+        let target = grant["target"].to_string();
+        let action = grant["action"].as_str().unwrap_or("-");
+        text += &format!(
+            "{:<8} {:<8} {:<8} {:<8} {seconds}s\n",
+            id, caller, target, action
+        );
     }
     text
 }
@@ -133,8 +174,13 @@ fn main() -> ExitCode {
         ["ctl", "list"] => list(false),
         ["ctl", "list", "--json"] => list(true),
         ["ctl", "send", pane, text] => send(pane, text),
+        ["ctl", "grants"] => grants(false),
+        ["ctl", "grants", "--json"] => grants(true),
+        ["ctl", "grants", "revoke", id] => revoke(id),
         _ => {
-            eprintln!("usage: pinfold [ctl list [--json] | ctl send <pane> <text>]");
+            eprintln!(
+                "usage: pinfold [ctl list [--json] | ctl send <pane> <text> | ctl grants [--json | revoke <id>]]"
+            );
             return ExitCode::FAILURE;
         }
     };
@@ -180,5 +226,17 @@ ID    STATUS   TITLE            COMMAND                  CWD
         let text = table(&json!({"pane": null}), &list);
         assert!(text.contains("a?b") && text.contains("/x?]0;y?") && text.contains("s?h?"));
         assert!(text.lines().count() == 2);
+    }
+
+    #[test]
+    fn a_grants_table_names_the_triple_and_time_left() {
+        let listed = json!({"grants": [{"id": 7, "caller": 1, "target": 2,
+            "action": "send", "expires_ms": 90_000}]});
+        let text = grants_table(&listed);
+        assert!(text.contains("ID       CALLER   TARGET   ACTION"), "{text}");
+        assert!(
+            text.contains("7        1        2        send     90s"),
+            "{text}"
+        );
     }
 }

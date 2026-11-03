@@ -9,9 +9,12 @@ use std::time::{Duration, Instant};
 use std::{env, thread};
 
 use pinfold_api::control::{self, Control, Method, Request, Subscriber, Topics, Until, Wait};
+use pinfold_api::redact;
+use pinfold_core::grants::{Decision, Grants, Released};
 use pinfold_core::io::{Reactor, Waker};
 use pinfold_core::shell;
 use pinfold_core::wait::{Outcome, Waits};
+use pinfold_proto::link::{ApprovalAction, ApprovalAnswer};
 use serde_json::{Value, json};
 
 const ROWS: u16 = 24;
@@ -49,21 +52,60 @@ fn listen(waker: Arc<Waker>) -> io::Result<Receiver<Request>> {
     Ok(asked)
 }
 
-/// Answers a request that opens no window. A caller with no terminal is unidentified and may
-/// not list panes (threat model, caller identity point 3). Any caller with a terminal may, in a
-/// pane or not, as a list shows no screen and little a same-user `ps` does not. Reads and sends
-/// reach only the caller's own pane, the `self` scope, until other scopes ask the person.
-/// Pane contents go to the caller alone, never to a log.
-fn answer(reactor: &mut Reactor, request: &Request) -> Result<Value, String> {
-    let identified = request.caller().is_some();
-    let own = request.caller().and_then(|caller| reactor.pane_of(caller));
-    let own_pane = |pane: &usize| {
-        if own == Some(*pane) {
-            Ok(*pane)
+/// Carries out a pane operation whose scope was already decided. Cross-pane reads are redacted
+/// at this last boundary, after the whole result has been collected.
+fn pane_action(reactor: &mut Reactor, method: &Method, cross_pane: bool) -> Result<Value, String> {
+    let clean = |text: String| {
+        if cross_pane {
+            redact(&text).into_owned()
         } else {
-            Err("only the caller's own pane can be read or sent to for now".to_owned())
+            text
         }
     };
+    match method {
+        Method::PaneRead { pane, lines } => {
+            let text = reactor.read(*pane, *lines).ok_or("no such pane")?;
+            Ok(json!({"text": clean(text)}))
+        }
+        Method::PaneLastOutput { pane } => match reactor.last_output(*pane) {
+            Some(text) => Ok(json!({"text": clean(text)})),
+            None if reactor.engine(*pane).is_none() => Err("no such pane".to_owned()),
+            None => Err("the pane has no command output marked with OSC 133".to_owned()),
+        },
+        Method::PaneSend { pane, text } => reactor
+            .send(*pane, text, Instant::now())
+            .map(|()| json!({}))
+            .map_err(str::to_owned),
+        _ => Err("not a pane action".to_owned()),
+    }
+}
+
+fn cross_pane(method: &Method) -> Option<(usize, ApprovalAction, Option<String>)> {
+    match method {
+        Method::PaneRead { pane, .. } | Method::PaneLastOutput { pane } => {
+            Some((*pane, ApprovalAction::Read, None))
+        }
+        Method::PaneSend { pane, text } => Some((*pane, ApprovalAction::Send, Some(text.clone()))),
+        _ => None,
+    }
+}
+
+fn grants_list<T, C: pinfold_core::grants::Clock>(grants: &mut Grants<T, C>) -> Value {
+    let listed = grants.list().into_iter().map(|grant| {
+        json!({"id": grant.id, "caller": grant.caller, "target": grant.target,
+               "action": grant.action.as_str(), "expires_ms": grant.remaining.as_millis()})
+    });
+    json!({"grants": listed.collect::<Vec<_>>()})
+}
+
+/// Answers an immediate method, after approval methods have been separated out.
+fn immediate<T, C: pinfold_core::grants::Clock>(
+    reactor: &mut Reactor,
+    grants: &mut Grants<T, C>,
+    request: &Request,
+) -> Result<Value, String> {
+    let identified = request.caller().is_some();
+    let own = request.caller().and_then(|caller| reactor.pane_of(caller));
     match request.method() {
         Method::Hello => {
             let methods: &[&str] = match (identified, own) {
@@ -76,22 +118,16 @@ fn answer(reactor: &mut Reactor, request: &Request) -> Result<Value, String> {
                     "pane.wait",
                     "events.subscribe",
                 ],
-                (true, None) => &["window.open", "pane.list", "events.subscribe"],
+                (true, None) => &[
+                    "window.open",
+                    "pane.list",
+                    "events.subscribe",
+                    "grants.list",
+                    "grants.revoke",
+                ],
                 (false, _) => &["window.open"],
             };
             Ok(json!({"version": control::VERSION, "methods": methods, "pane": own}))
-        }
-        Method::PaneRead { pane, lines } => {
-            let text = reactor.read(own_pane(pane)?, *lines);
-            Ok(json!({"text": text.unwrap_or_default()}))
-        }
-        Method::PaneLastOutput { pane } => match reactor.last_output(own_pane(pane)?) {
-            Some(text) => Ok(json!({"text": text})),
-            None => Err("the pane has no command output marked with OSC 133".to_owned()),
-        },
-        Method::PaneSend { pane, text } => {
-            let sent = reactor.send(own_pane(pane)?, text, Instant::now());
-            sent.map(|()| json!({})).map_err(str::to_owned)
         }
         Method::PaneList if identified => {
             let panes = reactor.list().map(|pane| {
@@ -101,9 +137,67 @@ fn answer(reactor: &mut Reactor, request: &Request) -> Result<Value, String> {
             Ok(json!({"panes": panes.collect::<Vec<_>>()}))
         }
         Method::PaneList => Err("pane.list needs a caller in a terminal".to_owned()),
+        Method::GrantsList if identified && own.is_none() => Ok(grants_list(grants)),
+        Method::GrantsRevoke { id } if identified && own.is_none() => {
+            Ok(json!({"revoked": grants.revoke(*id)}))
+        }
+        Method::GrantsList | Method::GrantsRevoke { .. } => {
+            Err("grant administration needs a terminal outside every pane".to_owned())
+        }
         // Never sent here: the loop opens windows, parks waits and keeps subscribers.
-        Method::WindowOpen | Method::PaneWait(_) | Method::EventsSubscribe(_) => {
-            Err("not here".to_owned())
+        Method::WindowOpen
+        | Method::PaneWait(_)
+        | Method::EventsSubscribe(_)
+        | Method::PaneRead { .. }
+        | Method::PaneLastOutput { .. }
+        | Method::PaneSend { .. } => Err("not here".to_owned()),
+    }
+}
+
+fn answer_released(reactor: &mut Reactor, released: Vec<Released<Request>>) {
+    for released in released {
+        let answer = if released.allowed {
+            pane_action(reactor, released.ticket.method(), true)
+        } else {
+            Err(released.reason.to_owned())
+        };
+        released.ticket.answer(answer);
+    }
+}
+
+fn decide(reactor: &mut Reactor, grants: &mut Grants<Request>, request: Request) {
+    let own = request.caller().and_then(|caller| reactor.pane_of(caller));
+    let Some((target, action, text)) = cross_pane(request.method()) else {
+        let answer = immediate(reactor, grants, &request);
+        return request.answer(answer);
+    };
+    let Some(caller) = own else {
+        return request.answer(Err("cross-pane actions need a caller pane".to_owned()));
+    };
+    if reactor.engine(target).is_none() {
+        return request.answer(Err("no such pane".to_owned()));
+    }
+    if caller == target {
+        let answer = pane_action(reactor, request.method(), false);
+        return request.answer(answer);
+    }
+    match grants.decide(
+        request,
+        caller,
+        target,
+        action,
+        text,
+        reactor.is_window_ready(),
+    ) {
+        Decision::Allow(request) => {
+            let answer = pane_action(reactor, request.method(), true);
+            request.answer(answer);
+        }
+        Decision::Refuse(request, reason) => request.answer(Err(reason.to_owned())),
+        Decision::Ask(prompt) if reactor.ask_approval(&prompt) => {}
+        // Fail closed for this prompt alone, so one oversized batch cannot drop the others.
+        Decision::Ask(prompt) => {
+            answer_released(reactor, grants.answer(prompt.id, ApprovalAnswer::Deny));
         }
     }
 }
@@ -202,15 +296,23 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
     // and hears nothing.
     let mut waiting = Vec::new();
     let mut waits: Waits<Request> = Waits::default();
+    let mut grants: Grants<Request> = Grants::default();
     let mut subscribers: Vec<(Subscriber, Topics)> = Vec::new();
     let mut known = Seen::new();
     loop {
-        let wait = waits
-            .deadline()
-            .map(|at| at.saturating_duration_since(Instant::now()));
+        let deadline = waits.deadline().into_iter().chain(grants.deadline()).min();
+        let wait = deadline.map(|at| at.saturating_duration_since(Instant::now()));
         reactor.turn(Some(wait.unwrap_or(IDLE)))?;
         waits.retain(|request| !request.is_gone());
+        grants.retain(|request| !request.is_gone());
         subscribers.retain(|(subscriber, _)| !subscriber.is_gone());
+        while let Some((id, answer)) = reactor.take_approval_answer() {
+            answer_released(&mut reactor, grants.answer(id, answer));
+        }
+        if !reactor.has_window() && grants.deadline().is_some() {
+            answer_released(&mut reactor, grants.window_closed());
+        }
+        answer_released(&mut reactor, grants.expire());
         while let Ok(request) = asked.try_recv() {
             // Its peer has been told the core is busy, so acting now would surprise a retry.
             if *request.method() != Method::WindowOpen && request.is_late() {
@@ -238,8 +340,7 @@ fn daemon(panes: usize, measured: Option<&str>) -> io::Result<()> {
                     request.answer(Err(reason.to_owned()));
                 }
                 _ => {
-                    let answer = answer(&mut reactor, &request);
-                    request.answer(answer);
+                    decide(&mut reactor, &mut grants, request);
                 }
             }
         }
