@@ -48,6 +48,7 @@ Entries are generated from Conventional Commits with git-cliff
 - `pinfold` is now a launcher: it starts the core if none answers, checks that the socket's owner is you, asks for a window and exits. The window is its own `pinfold-window` process on the link (ADR-0028), so a window that crashes or closes leaves every pane running and `pinfold` reattaches. A second `pinfold` brings the window to the front, and a window whose core dies says the session ended. `pinfold --size` is gone.
 - `cargo xtask mem-gate` measures the window and the core as separate processes, and the core beside a window.
 - A TOML config file with `font_size` and `macos_option_as_alt`. A bad file means the defaults.
+- Workspace layout parsing for `.pinfold/layout.toml`, bounded to 32 tabs, 64 panes and 64 KiB, with unknown keys, symlinks and project-escaping working directories refused.
 - Padding around the grid, and on macOS a full-height window under the native traffic lights, with `background_opacity` and `background_blur`.
 - Config hot reload: saving the file applies it to the running window, and a bad save keeps the current settings.
 - CJK text from a system font, opened only when the bundled font lacks a character.

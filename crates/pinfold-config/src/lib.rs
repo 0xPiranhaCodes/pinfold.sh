@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, de};
 
+pub mod workspace;
+
 /// The largest file read. A file written by hand is a few KiB, and this bounds startup.
 pub const MAX_BYTES: u64 = 64 * 1024;
 
