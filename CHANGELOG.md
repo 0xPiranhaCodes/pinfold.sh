@@ -22,10 +22,10 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Added
 
-- A 256 KiB hash-chained API audit log with optional private, rotating persistence. The file must be a regular file, not a symlink or FIFO, and after a failed write the log stops mirroring to disk and keeps only memory.
 - A per-pane status state machine combines OSC 133 marks with authoritative API reports and rate-limited alerts.
 - A spike that answers the macOS Dock menu by adding `applicationDockMenu:` to winit's app delegate, in `docs/spikes/m3-dock-menu`.
 - Right-click in a pane opens a menu drawn in cells: Copy, Paste, Select All, Find, Split Right, Split Down, New Tab, Zoom and Close Pane. Arrows, Enter and Esc work it as well as the mouse. When a program has turned on mouse reporting, the click goes to it, and `Shift`+right-click opens the menu (ADR-0033).
+- A 256 KiB hash-chained API audit log with optional private, rotating persistence. The file must be a regular file, not a symlink or FIFO, and after a failed write the log stops mirroring to disk and keeps only memory.
 - A native menu bar on macOS: PinFold, Shell, Edit, View, Window and Help, holding every Command shortcut, with new Select All, Bigger, Smaller, Actual Size, Settings and Help commands, and items greyed out when they cannot apply (ADR-0033).
 - ADR-0033: a native menu bar and Dock menu on macOS, and a right-click menu drawn in cells, all running the same commands as the keys.
 - The core serves up to 16 callers of its control socket at once on one `mio` thread, so a caller waiting for a window holds up no one (ADR-0032).
