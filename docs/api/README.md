@@ -24,6 +24,7 @@ Every connection starts with `hello`:
 | `pane.spawn`       | Version 2 and its own pane  | [`pane.spawn.schema.json`](pane.spawn.schema.json)           |
 | `pane.close`       | Version 2, a spawned pane   | [`pane.close.schema.json`](pane.close.schema.json)           |
 | `events.subscribe` | Version 2 and a terminal    | [`events.subscribe.schema.json`](events.subscribe.schema.json) |
+| `audit.read`       | Version 2, outside any pane | [`audit.read.schema.json`](audit.read.schema.json)           |
 
 A pane in reach is the caller's own, the `self` scope, or one it spawned, or one they spawned in
 turn, the `children` scope. Any other pane is refused. `pane.spawn` opens a split or tab running
@@ -41,6 +42,21 @@ the core took too long to answer; a refusal, such as "the core is busy", does no
 waits. `events.subscribe` sends `event` notifications on its connection. A connection is closed
 if 2 MiB of replies queue unread, or if the core has more events for it than it can queue, so a
 subscriber that was closed may have missed events.
+
+The core records each request it answers in a hash-chained audit log: when, the caller's pane
+(or outside a pane, or unidentified), the method, the target pane, and whether it was allowed,
+with a short reason. It never records pane contents or sent text, only a send's size in bytes.
+Requests the API thread answers itself are not recorded: a malformed line, an unsupported
+`hello` version, and "the core is busy".
+The log is a 256 KiB ring in memory, which is the source of truth; `api.audit_log` in the
+[config file](../configuration.md) also writes it to disk. `audit.read` returns at most 1000 of
+the newest entries and whether the chain verifies. Only a terminal outside any pane may call it,
+so an agent in a pane cannot read what other agents did.
+
+`pinfold ctl log` prints `audit.read` a line per entry, `--json` its result, `-n <count>` the
+newest entries and `--pane <pane>` only calls by or to that pane. `pinfold ctl log --verify
+<file>` checks a written log and its rotated `.1`, and fails if the chain is broken. A chain
+cannot show entries cut from its end.
 
 `pinfold ctl list` prints `pane.list` as plain text, with `*` by the caller's own pane, and
 `pinfold ctl list --json` prints its result. Its title, directory and status come from what
