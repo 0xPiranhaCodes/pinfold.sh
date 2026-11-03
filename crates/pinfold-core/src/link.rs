@@ -1267,6 +1267,7 @@ mod tests {
                     "deploy --token=ghp_0123456789abcdefghijklmnopqrstuvwxyz",
                 ),
             ],
+            workspaces: Vec::new(),
         };
         let mut reactor = Reactor::new().unwrap();
         reactor.shell = || shell(ALIVE);

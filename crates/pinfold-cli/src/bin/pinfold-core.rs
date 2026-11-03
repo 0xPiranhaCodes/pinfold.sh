@@ -19,10 +19,11 @@ use pinfold_api::trust::{self, State};
 use pinfold_cli::audit;
 use pinfold_cli::output;
 use pinfold_config::Agent;
+use pinfold_config::workspace as layout;
 use pinfold_core::family::{self, Family, SplitWay};
 use pinfold_core::grants::{Decision, Grants, Released};
 use pinfold_core::io::{Reactor, Waker};
-use pinfold_core::snapshot::{self, Saver};
+use pinfold_core::snapshot::{self, Saver, Snapshot};
 use pinfold_core::status::Status;
 use pinfold_core::wait::{Outcome, Waits};
 use pinfold_core::workspace::Workspaces;
@@ -243,7 +244,7 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
         // Like audit.read: a guardrail against a pane's program, not proof of a person.
         Method::SessionSave if identified && own.is_none() => {
             let state = pinfold_config::state_dir().ok_or("HOME is not set")?;
-            let path = reactor.snapshot().write(&state, control::SESSION);
+            let path = saved(reactor, workspaces).write(&state, control::SESSION);
             path.map(|path| json!({"path": path.to_string_lossy()}))
                 .map_err(|error| format!("cannot save the session: {error}"))
         }
@@ -270,8 +271,15 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
             let pane = |(place, cwd): &(Place, String)| (way(*place), cwd.clone());
             let tabs = open.tabs.iter();
             let tabs: Vec<Vec<_>> = tabs.map(|tab| tab.iter().map(pane).collect()).collect();
-            let opened = workspaces.open(reactor, &open.root, &tabs)?;
-            Ok(json!({"opened": opened}))
+            let sha256 = open.sha256.as_deref();
+            let opened = workspaces.open(reactor, &open.root, sha256, &tabs)?;
+            let root = Path::new(&open.root);
+            let runs = sha256.and_then(|sha256| trusted_runs(root, sha256, opened.len()));
+            if let (Some(runs), false) = (runs, opened.is_empty()) {
+                let panes: Vec<_> = opened.iter().copied().map(Some).collect();
+                type_runs(reactor, &panes, &runs);
+            }
+            Ok(json!({"opened": opened.len()}))
         }
         Method::WorkspaceOpen(_) => {
             Err("workspace.open needs a caller in a terminal outside any pane".to_owned())
@@ -523,10 +531,58 @@ fn wants(topics: Topics, event: &Value) -> bool {
     }
 }
 
+/// A trusted layout's panes in the file's order: each one's directory and `run` line.
+type Runs = Vec<(PathBuf, Option<String>)>;
+
+/// Types each `run` line into its pane, then a newline, through the pane's input queue as keys
+/// go: the core never runs one itself. The pane is a shell the core just started, so the checks
+/// that keep an API send out of a program's prompt would only race its start.
+fn type_runs(reactor: &mut Reactor, panes: &[Option<usize>], runs: &Runs) {
+    for (pane, (_, run)) in panes.iter().zip(runs) {
+        // One line each, as the prompt showed it: no control character can end or edit it.
+        let run = run
+            .as_ref()
+            .filter(|run| !run.chars().any(char::is_control));
+        if let (Some(pane), Some(run)) = (pane, run) {
+            reactor.write(*pane, format!("{run}\n").as_bytes());
+        }
+    }
+}
+
+/// The panes of the layout at `root`, read again, never taken from a caller or a snapshot, if
+/// `root` is canonical, the file's bytes hash to `sha256`, the trust store holds `root` with that
+/// hash (ADR-0034, points 5 and 6), and it has `panes` panes, as another shape is another file.
+fn trusted_runs(root: &Path, sha256: &str, panes: usize) -> Option<Runs> {
+    if std::fs::canonicalize(root).ok()? != root {
+        return None;
+    }
+    let bytes = layout::read(&root.join(".pinfold/layout.toml"), root).ok()?;
+    let hash = trust::sha256(&bytes);
+    let trusted = trust::state(&trust_path().ok()?, root.to_str()?, &hash) == State::Trusted;
+    if hash != sha256 || !trusted {
+        return None;
+    }
+    let tabs = layout::parse(&bytes, root).ok()?.tabs;
+    let pane = |pane: layout::Pane| (pane.cwd.unwrap_or_else(|| root.to_path_buf()), pane.run);
+    let runs: Runs = tabs
+        .into_iter()
+        .flat_map(|tab| tab.panes)
+        .map(pane)
+        .collect();
+    (runs.len() == panes).then_some(runs)
+}
+
+/// The session's snapshot, with the workspaces it opened.
+fn saved(reactor: &Reactor, workspaces: &Workspaces) -> Snapshot {
+    let mut snapshot = reactor.snapshot();
+    snapshot.workspaces = workspaces.saved(reactor);
+    snapshot
+}
+
 /// Saves the session, logging a failure by its kind alone, which names no path or pane. A
 /// failed save stops nothing.
-fn save(saver: &mut Saver, reactor: &Reactor) {
-    if let Err(error) = saver.save(&reactor.snapshot()) {
+fn save(saver: &mut Saver, reactor: &Reactor, workspaces: &Workspaces) {
+    if let Err(error) = saver.save(&saved(reactor, workspaces)) {
         let _ = writeln!(
             io::stderr(),
             "pinfold-core: cannot save the session: {}",
@@ -535,12 +591,38 @@ fn save(saver: &mut Saver, reactor: &Reactor) {
     }
 }
 
-/// Restores the saved session (ADR-0034), and says whether it did. A failure is logged by its
-/// kind alone, which names no path or pane, and leaves the core to start fresh.
-fn restore_session(reactor: &mut Reactor, state: &Path) -> bool {
+/// Restores the saved session (ADR-0034), runs the trusted `run` lines of its workspaces once,
+/// and says whether it did. A failure is logged by its kind alone, which names no path or pane,
+/// and leaves the core to start fresh.
+fn restore_session(reactor: &mut Reactor, workspaces: &mut Workspaces, state: &Path) -> bool {
     let restored = snapshot::load(state, control::SESSION).and_then(|snapshot| {
         snapshot
-            .map(|snapshot| reactor.restore(&snapshot))
+            .map(|mut snapshot| {
+                let trusted = snapshot.workspaces.iter().map(|saved| {
+                    trusted_runs(Path::new(&saved.root), &saved.sha256, saved.panes.len())
+                });
+                let trusted: Vec<_> = trusted.collect();
+                // A trusted line runs where its file says, never where output said the pane was.
+                for (saved, runs) in snapshot.workspaces.iter().zip(&trusted) {
+                    for (index, (cwd, _)) in saved.panes.iter().zip(runs.iter().flatten()) {
+                        if let Some(pane) = index.and_then(|index| snapshot.panes.get_mut(index)) {
+                            pane.cwd = cwd.to_str().map(str::to_owned);
+                        }
+                    }
+                }
+                reactor.restore(&snapshot)?;
+                let opened = workspaces.restored(reactor, &snapshot.workspaces);
+                for ((_, _, panes), runs) in opened.iter().zip(trusted) {
+                    // A directory restore refuses starts a shell in `$HOME`: nothing runs there.
+                    let kept = |(cwd, run): (PathBuf, Option<String>)| {
+                        let run = run.filter(|_| snapshot::is_private(&cwd));
+                        (cwd, run)
+                    };
+                    let runs: Runs = runs.into_iter().flatten().map(kept).collect();
+                    type_runs(reactor, panes, &runs);
+                }
+                Ok(())
+            })
             .transpose()
     });
     restored
@@ -567,7 +649,9 @@ fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result
         .clone()
         .map(|state| Saver::new(state, control::SESSION));
     let asked = listen(reactor.waker())?;
-    if restore && state.is_some_and(|state| restore_session(&mut reactor, &state)) {
+    let mut workspaces = Workspaces::default();
+    if restore && state.is_some_and(|state| restore_session(&mut reactor, &mut workspaces, &state))
+    {
         panes = 0;
     }
     for _ in 0..panes {
@@ -588,7 +672,6 @@ fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result
     let mut waits: Waits<Request> = Waits::default();
     let mut grants: Grants<Request> = Grants::default();
     let mut family = Family::default();
-    let mut workspaces = Workspaces::default();
     let mut subscribers: Vec<(Subscriber, Topics)> = Vec::new();
     let mut known = Seen::new();
     // Read once: the core takes no hot reload.
@@ -710,7 +793,7 @@ fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result
             }
             let closed = window && !reactor.has_window();
             if ending || closed || saver.is_due(now) {
-                save(saver, &reactor);
+                save(saver, &reactor, &workspaces);
             }
         }
         window = reactor.has_window();
