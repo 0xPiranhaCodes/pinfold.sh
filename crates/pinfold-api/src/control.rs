@@ -67,6 +67,10 @@ pub const MAX_SEND: usize = 4096;
 const MAX_CONNECTION: u64 = 2 * MAX_LINE as u64;
 /// Most bytes queued for a peer. One that will not read past it is closed (ADR-0032 point 5).
 pub const MAX_OUTPUT: usize = 2 * 1024 * 1024;
+/// Most characters of a `pane.status` message. More is refused, not cut.
+pub const MAX_STATUS_MESSAGE: usize = 200;
+/// The states a `pane.status` may report.
+pub const STATES: [&str; 5] = ["needs-you", "running", "done", "error", "idle"];
 /// Longest `pane.wait` a caller may ask for.
 pub const MAX_WAIT: Duration = Duration::from_secs(600);
 /// Longest a peer may spend sending, however it spaces its bytes, so it cannot hold a slot.
@@ -120,6 +124,15 @@ pub enum Method {
         pane: usize,
         /// The text, typed as it is.
         text: String,
+    },
+    /// `pane.status`: the state an agent reports for its own pane.
+    PaneStatus {
+        /// The pane's number.
+        pane: usize,
+        /// One of [`STATES`].
+        state: String,
+        /// At most [`MAX_STATUS_MESSAGE`] characters, or empty.
+        message: String,
     },
     /// `pane.wait`, its shape checked.
     PaneWait(Wait),
@@ -894,11 +907,13 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
             )
         }
         Some("pane.list") => Step::Ask(id.clone(), Method::PaneList),
-        Some(method @ ("pane.wait" | "events.subscribe")) if *greeted < VERSION => refuse(
-            Some(id),
-            NO_METHOD,
-            &format!("{method} needs hello version 2"),
-        ),
+        Some(method @ ("pane.wait" | "events.subscribe" | "pane.status")) if *greeted < VERSION => {
+            refuse(
+                Some(id),
+                NO_METHOD,
+                &format!("{method} needs hello version 2"),
+            )
+        }
         Some("pane.wait") => match wait(request.get("params")) {
             Some(wait) => Step::Ask(id.clone(), Method::PaneWait(wait)),
             None => refuse(
@@ -911,7 +926,7 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
             Some(topics) => Step::Ask(id.clone(), Method::EventsSubscribe(topics)),
             None => refuse(Some(id), BAD_PARAMS, "events.subscribe takes known events"),
         },
-        Some(method @ ("pane.read" | "pane.last_output" | "pane.send")) => {
+        Some(method @ ("pane.read" | "pane.last_output" | "pane.send" | "pane.status")) => {
             match pane_method(method, request.get("params")) {
                 Ok(method) => Step::Ask(id.clone(), method),
                 Err(reason) => refuse(Some(id), BAD_PARAMS, reason),
@@ -982,6 +997,24 @@ fn pane_method(method: &str, params: Option<&Value>) -> Result<Method, &'static 
             Ok(Method::PaneSend {
                 pane,
                 text: text.to_owned(),
+            })
+        }
+        "pane.status" => {
+            let state = field("state").and_then(Value::as_str);
+            let state = state
+                .filter(|state| STATES.contains(state))
+                .ok_or("params.state must be needs-you, running, done, error or idle")?;
+            let message = match field("message") {
+                None | Some(Value::Null) => "",
+                Some(message) => message.as_str().ok_or("params.message must be a string")?,
+            };
+            if message.chars().count() > MAX_STATUS_MESSAGE {
+                return Err("params.message is over 200 characters");
+            }
+            Ok(Method::PaneStatus {
+                pane,
+                state: state.to_owned(),
+                message: message.to_owned(),
             })
         }
         _ => Ok(Method::PaneLastOutput { pane }),
@@ -1150,6 +1183,38 @@ mod tests {
         let line = pane_request("pane.send", &json!({"pane": 1}));
         let (reply, _) = replied(line.as_bytes(), &mut VERSION.clone());
         assert_eq!(code(&reply), Some(BAD_PARAMS));
+    }
+
+    #[test]
+    fn a_status_needs_version_2_a_known_state_and_a_short_message() {
+        let status = |params: Value| pane_request("pane.status", &params);
+        let most = "é".repeat(MAX_STATUS_MESSAGE);
+        let line = status(json!({"pane": 1, "state": "needs-you", "message": most}));
+        assert_eq!(
+            answer(line.as_bytes(), &mut VERSION.clone()),
+            Step::Ask(
+                json!(2),
+                Method::PaneStatus {
+                    pane: 1,
+                    state: "needs-you".to_owned(),
+                    message: most
+                }
+            )
+        );
+        let line = status(json!({"pane": 1, "state": "idle"}));
+        let (reply, _) = replied(line.as_bytes(), &mut OLDEST.clone());
+        assert_eq!(code(&reply), Some(NO_METHOD));
+        let bad = [
+            json!({"pane": 1, "state": "needs you"}),
+            json!({"pane": 1}),
+            json!({"pane": "self", "state": "done"}),
+            json!({"pane": 1, "state": "done", "message": 7}),
+            json!({"pane": 1, "state": "done", "message": "x".repeat(MAX_STATUS_MESSAGE + 1)}),
+        ];
+        for params in bad {
+            let (reply, go_on) = replied(status(params.clone()).as_bytes(), &mut VERSION.clone());
+            assert_eq!((code(&reply), go_on), (Some(BAD_PARAMS), false), "{params}");
+        }
     }
 
     #[test]

@@ -22,6 +22,7 @@ Every connection starts with `hello`:
 | `pane.send`        | Version 2 and its own pane  | [`pane.send.schema.json`](pane.send.schema.json)             |
 | `pane.wait`        | Version 2 and its own pane  | [`pane.wait.schema.json`](pane.wait.schema.json)             |
 | `events.subscribe` | Version 2 and a terminal    | [`events.subscribe.schema.json`](events.subscribe.schema.json) |
+| `pane.status`      | Version 2 and its own pane  | [`pane.status.schema.json`](pane.status.schema.json)         |
 
 For now a caller reads and sends only to the pane it runs in, the `self` scope, and any other
 pane is refused. Reads return at most 2,000,000 bytes, keeping the newest. A send carries at
@@ -31,6 +32,12 @@ most 4096 bytes, and a pane takes at most 20 sends a second.
 waits. `events.subscribe` sends `event` notifications on its connection. A connection with a
 wait or a subscription stays open past the usual limit, and is closed if 2 MiB of replies
 queue unread.
+
+`pane.status` lets an agent say what state its own pane is in: `needs-you`, `running`, `done`,
+`error` or `idle`, with a message of at most 200 characters. A report outranks the pane's OSC 133
+marks, which output can fake, so `pane.list` and `pane.status` events carry `source`: `marks` or
+`reported`. The window shows the state as glyph, colour and word, and the message only in its
+own chrome.
 
 `pinfold ctl list` prints `pane.list` as plain text, with `*` by the caller's own pane, and
 `pinfold ctl list --json` prints its result. Its title, directory and status come from what

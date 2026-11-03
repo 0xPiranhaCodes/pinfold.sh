@@ -11,6 +11,7 @@ use std::{env, thread};
 use pinfold_api::control::{self, Control, Method, Request, Subscriber, Topics, Until, Wait};
 use pinfold_core::io::{Reactor, Waker};
 use pinfold_core::shell;
+use pinfold_core::status::Status;
 use pinfold_core::wait::{Outcome, Waits};
 use serde_json::{Value, json};
 
@@ -75,6 +76,7 @@ fn answer(reactor: &mut Reactor, request: &Request) -> Result<Value, String> {
                     "pane.send",
                     "pane.wait",
                     "events.subscribe",
+                    "pane.status",
                 ],
                 (true, None) => &["window.open", "pane.list", "events.subscribe"],
                 (false, _) => &["window.open"],
@@ -93,10 +95,22 @@ fn answer(reactor: &mut Reactor, request: &Request) -> Result<Value, String> {
             let sent = reactor.send(own_pane(pane)?, text, Instant::now());
             sent.map(|()| json!({})).map_err(str::to_owned)
         }
+        Method::PaneStatus {
+            pane,
+            state,
+            message,
+        } => {
+            let status = Status::from_name(state).ok_or("unknown state")?;
+            let set = reactor.report_status(own_pane(pane)?, status, message, Instant::now());
+            set.map(|()| json!({})).map_err(str::to_owned)
+        }
         Method::PaneList if identified => {
             let panes = reactor.list().map(|pane| {
+                // A message is the caller's own business: other panes' stay in the window.
+                let message = (pane.reported && own == Some(pane.id)).then_some(pane.message);
                 json!({"id": pane.id, "title": pane.title, "cwd": pane.cwd,
-                       "command": pane.command, "status": pane.status})
+                       "command": pane.command, "status": pane.status.name(),
+                       "source": source(pane.reported), "message": message})
             });
             Ok(json!({"panes": panes.collect::<Vec<_>>()}))
         }
@@ -138,8 +152,13 @@ fn ended(outcome: Outcome) -> Value {
     }
 }
 
-/// Each pane's number, status and exit status, which is all an event tells.
-type Seen = Vec<(usize, &'static str, Option<u8>)>;
+/// Where a status came from: output's marks, which it can fake, or its agent's report (T4).
+fn source(reported: bool) -> &'static str {
+    if reported { "reported" } else { "marks" }
+}
+
+/// Each pane's number, status, its source and exit status, which is all an event tells.
+type Seen = Vec<(usize, &'static str, &'static str, Option<u8>)>;
 
 fn seen(reactor: &Reactor) -> Seen {
     let exit = |pane| {
@@ -149,7 +168,10 @@ fn seen(reactor: &Reactor) -> Seen {
     };
     let panes = reactor.list();
     panes
-        .map(|pane| (pane.id, pane.status, exit(pane.id)))
+        .map(|pane| {
+            let status = pane.status.name();
+            (pane.id, status, source(pane.reported), exit(pane.id))
+        })
         .collect()
 }
 
@@ -161,13 +183,15 @@ fn changes(before: &Seen, after: &Seen) -> Vec<Value> {
     let mut events: Vec<Value> = gone
         .map(|&(id, ..)| json!({"event": "pane.closed", "pane": id}))
         .collect();
-    for &(id, status, exit) in after {
+    for &(id, status, source, exit) in after {
         let event = match before.iter().find(|was| was.0 == id) {
             None => "pane.opened",
-            Some(&was) if was != (id, status, exit) => "pane.status",
+            Some(&was) if was != (id, status, source, exit) => "pane.status",
             Some(_) => continue,
         };
-        events.push(json!({"event": event, "pane": id, "status": status, "exit": exit}));
+        let event = json!({"event": event, "pane": id, "status": status, "source": source,
+                           "exit": exit});
+        events.push(event);
     }
     events
 }
