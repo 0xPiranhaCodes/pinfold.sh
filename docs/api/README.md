@@ -45,7 +45,9 @@ A pane in reach is the caller's own, the `self` scope, or one it spawned, or one
 turn, the `children` scope. `pane.spawn` opens a split or tab running the user's shell, never a
 program the caller names, and a program in that pane is that pane, not its parent.
 `agent.launch` opens one running an `[agents.<name>]` profile from the user's config, named
-by the caller and never described by it.
+by the caller and never described by it. In the first seconds after the core starts, a
+sandboxed launch may be refused while the core reads the user's shell `PATH`, with a message
+that says to try again; a caller may retry it, as `pinfold agent` does for up to 12 seconds.
 
 `pane.read`, `pane.last_output` and `pane.send` on any other pane park the call for up to 60
 seconds and ask in trusted window chrome. `y` allows the batch once, `a` grants that caller,

@@ -215,6 +215,19 @@ on. `a_sandboxed_agent_cannot_open_a_new_terminal` in `crates/pinfold-core/tests
 checks both with the real tools. A restored session runs shells, never agents, and no
 agent runs in them.
 
+A sandboxed agent writes only to its working directory and temporary directories. That
+directory comes from the launching pane, whose OSC 7 report any program there can print (T4),
+so before the containment rule above it must pass an allowlist: a private directory of the
+user's strictly inside `$HOME`, never `~/bin`, `~/Applications`, `~/Library` on macOS or a
+dot-directory of home, never inside `.git`, never an entry of the user's `PATH` or above one,
+and never inside the directory that holds a `PATH` entry in home, such as `~/go`. Outside home,
+the user may own a package manager's prefix such as `/opt/homebrew`, whose programs and config
+every pane uses. The `PATH` is the one the user's shell sets, read once from that shell,
+interactive as in a pane, followed by the core's own, which is launchd's
+`/usr/bin:/bin:/usr/sbin:/sbin`. An agent cannot change the shell's, since it cannot write the
+shell's startup files. The reactor never waits for that shell: a launch before it answers is
+refused. A `PATH` changed later inside a pane, such as by direnv, is not seen.
+
 ## Hardening untrusted input
 
 Bytes from programs, files and repos may change what is drawn. They never become

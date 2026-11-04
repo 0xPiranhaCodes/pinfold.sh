@@ -74,8 +74,15 @@ impl Session {
 
     /// Starts a core with `arguments` and a one-line shell, and notes the core.
     fn start_core(&self, arguments: &[&str], shell: &str) -> Result<Child> {
+        self.start_core_at(arguments, shell, &self.directory.join("state"))
+    }
+
+    /// As [`Session::start_core`], with the core's HOME at `home`.
+    fn start_core_at(&self, arguments: &[&str], shell: &str, home: &Path) -> Result<Child> {
         let script = self.directory.join("shell");
-        fs::write(&script, format!("#!/bin/sh\n{shell}\n"))?;
+        // The core asks the shell for its PATH with `-i -c`, for sandboxed agents.
+        let ask = "case $1 in -i) exec /bin/sh \"$@\";; esac";
+        fs::write(&script, format!("#!/bin/sh\n{ask}\n{shell}\n"))?;
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(&script, fs::Permissions::from_mode(0o700))?;
         let core = Command::new(self.directory.join("pinfold-core"))
@@ -84,7 +91,7 @@ impl Session {
             .env("XDG_CONFIG_HOME", self.directory.join("config"))
             // The state directory, on macOS from HOME, so a test never writes the person's.
             .env("XDG_STATE_HOME", self.directory.join("state"))
-            .env("HOME", self.directory.join("state"))
+            .env("HOME", home)
             .env("SHELL", &script)
             .env(CLIENT, &self.directory)
             // As a launcher starts one.
@@ -1945,6 +1952,39 @@ fn an_agent_launches_by_profile_as_the_callers_child_and_an_unknown_one_is_refus
     }
 }
 
+#[test]
+fn a_sandboxed_agent_does_not_start_outside_home() {
+    let session = Session::new("oh", None).unwrap();
+    fs::create_dir_all(session.directory.join("config/pinfold")).unwrap();
+    let ran = session.directory.join("agent.ran");
+    let toml = format!(
+        "[agents.boxed]\ncommand = [\"/bin/sh\", \"-c\", \"echo ran > '{}'; exec sleep 30\"]\n\
+         sandbox = true\n",
+        ran.display()
+    );
+    fs::write(session.directory.join("config/pinfold/pinfold.toml"), toml).unwrap();
+    // A private directory of the user's outside HOME, as /opt/homebrew is. The shell moves there
+    // and reports it with OSC 7, so the pane's directory is that one whichever the core reads.
+    let pinfold = format!("'{}'", session.directory.join("pinfold").display());
+    let client = "\"$PINFOLD_TEST_CLIENT\"";
+    let shell = format!(
+        "mkdir -m 700 {client}/outside; cd {client}/outside; \
+         printf '\\033]7;file://%s\\007' \"$PWD\"; \
+         {pinfold} agent boxed 2> {client}/b; mv {client}/b {client}/boxed; \
+         {pinfold} ctl list --json > {client}/j; mv {client}/j {client}/json; exec sleep 30"
+    );
+    let mut core = session.start_core(&["--idle", "1"], &shell).unwrap();
+    assert!(session.wait_for("json"), "{}", session.read_log());
+    core.kill().unwrap();
+    core.wait().unwrap();
+
+    let boxed = session.read("boxed");
+    let list: serde_json::Value = serde_json::from_str(&session.read("json")).unwrap();
+    assert_eq!(list["panes"].as_array().unwrap().len(), 1, "{list}");
+    assert!(!ran.exists(), "{boxed}");
+    assert!(boxed.contains("inside your home folder"), "{boxed}");
+}
+
 /// Not a test: the window of
 /// [`up_runs_a_trusted_workspace_and_a_restore_runs_it_again_until_its_file_changes`], which
 /// refuses a first project, then checks that nothing ran before it trusts the second and waits
@@ -2245,7 +2285,11 @@ fn a_sandboxed_agent_starts_nothing_outside_its_sandbox() {
          exec sleep 60; fi; exec /bin/sh",
         work.display()
     );
-    let mut core = session.start_core(&["--idle", "1"], &shell).unwrap();
+    // The core's HOME is the base: a sandboxed agent's working directory must be strictly inside
+    // home, and this one must also be outside the temporary directory.
+    let mut core = session
+        .start_core_at(&["--idle", "1"], &shell, &base)
+        .unwrap();
     let done = wait_file(&work.join("level1"));
     // Long enough for a shell to run a typed line.
     thread::sleep(Duration::from_secs(2));
