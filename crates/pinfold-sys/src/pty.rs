@@ -84,6 +84,8 @@ impl Pty {
     ///
     /// The master is non-blocking, and both ends are close-on-exec from the moment they are
     /// opened, so a child another thread starts at the same time inherits neither.
+    /// The child gets no other descriptor past stderr, unless it is handed over with
+    /// [`crate::inherit`].
     ///
     /// # Errors
     ///
@@ -117,6 +119,7 @@ impl Pty {
             .stdin(Stdio::from(slave.try_clone()?))
             .stdout(Stdio::from(slave.try_clone()?))
             .stderr(Stdio::from(slave));
+        crate::mark_strays(&mut command);
         // SAFETY: the closure makes only async-signal-safe calls, and runs after the
         // standard library has put the PTY on fd 0.
         unsafe {
@@ -281,6 +284,66 @@ mod tests {
             .status()
             .unwrap();
         assert!(!alive.success(), "process {pid} survived");
+    }
+
+    /// The descriptors `command` finds open, read from /dev/fd by ls, which opens only its own,
+    /// numbered low.
+    fn open_in_child(mut command: Command) -> Vec<i32> {
+        command.env_remove("CLICOLOR").env_remove("CLICOLOR_FORCE");
+        let pty = Pty::spawn(command, 24, 80).unwrap();
+        let text = read_until(&pty, "end");
+        text.lines()
+            .map_while(|line| line.trim().parse().ok())
+            .collect()
+    }
+
+    #[test]
+    fn a_descriptor_inheritable_on_another_thread_does_not_reach_the_child() {
+        // As an accept on macOS leaves a connection for a moment before marking it. No
+        // close-on-exec, on purpose, and numbered high so it cannot be one ls opens.
+        // SAFETY: F_DUPFD takes an integer and touches no memory.
+        let made = thread::spawn(|| unsafe { libc::fcntl(2, libc::F_DUPFD, 40) });
+        let leak = check(made.join().unwrap()).unwrap();
+        // SAFETY: `leak` is open and owned only by this test.
+        let _leak = unsafe { OwnedFd::from_raw_fd(leak) };
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "ls -1 /dev/fd; echo end"]);
+        let open = open_in_child(command);
+        assert!(open.contains(&0), "{open:?}");
+        assert!(open.iter().all(|fd| *fd < 10), "{open:?}");
+    }
+
+    #[test]
+    fn a_descriptor_handed_on_purpose_still_reaches_the_child() {
+        let fd = OwnedFd::from(File::open("/dev/null").unwrap());
+        let number = fd.as_raw_fd();
+        let mut command = Command::new("/bin/sh");
+        command.args([
+            "-c",
+            &format!("test -e /dev/fd/{number} && echo found; echo end"),
+        ]);
+        crate::inherit(&mut command, fd).unwrap();
+        let pty = Pty::spawn(command, 24, 80).unwrap();
+        assert!(read_until(&pty, "end").contains("found"));
+    }
+
+    /// The time a pane spawn takes, to the child's exit: `cargo test -p pinfold-sys --release
+    /// --lib spawn_cost -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement, not a check"]
+    fn spawn_cost() {
+        let runs = 200;
+        let start = Instant::now();
+        for _ in 0..runs {
+            let mut pty = Pty::spawn(Command::new("/usr/bin/true"), 24, 80).unwrap();
+            while pty.try_wait().unwrap().is_none() {
+                thread::sleep(Duration::from_micros(50));
+            }
+        }
+        let each = start.elapsed() / runs;
+        // SAFETY: sysconf reads a limit and touches no memory.
+        let limit = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
+        eprintln!("{runs} spawns, {each:?} each, open-files limit {limit}");
     }
 
     #[test]

@@ -12,11 +12,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// The descriptor a program started by [`spawn_with_link`] finds its end of the link on.
 pub const LINK_FD: RawFd = 3;
 
-/// Highest descriptor checked before a spawn, which bounds the work in the child.
-// shortcut: a descriptor above this that is not close-on-exec would reach the child, walk
-// /proc/self/fd or use close_range if the core ever holds that many.
-const MAX_CHECKED_FD: libc::c_long = 65_536;
-
 fn check(result: libc::c_int) -> io::Result<libc::c_int> {
     if result < 0 {
         Err(io::Error::last_os_error())
@@ -35,8 +30,8 @@ pub(crate) fn duplicate(fd: RawFd, lowest: RawFd) -> io::Result<OwnedFd> {
 
 /// Returns a connected pair of Unix sockets, both close-on-exec.
 ///
-/// On macOS they are briefly inheritable while they are being made, so one thread must make
-/// every call that creates a child.
+/// On macOS they are briefly inheritable while they are being made, which reaches no child that
+/// this crate starts.
 ///
 /// # Errors
 ///
@@ -90,19 +85,13 @@ pub fn spawn_with_link(mut command: Command, link: UnixStream) -> io::Result<Chi
     // and be overwritten in the child, which would turn a failed start into a success.
     let _hold = duplicate(link.as_raw_fd(), LINK_FD)?;
     let source = high.as_raw_fd();
-    // SAFETY: sysconf reads a limit and touches no memory.
-    let limit = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) }.clamp(0, MAX_CHECKED_FD) as RawFd;
-    // SAFETY: the closure makes only async-signal-safe calls, on integers it owns.
+    // Before the link lands, which marking would undo.
+    crate::mark_strays(&mut command);
+    // SAFETY: dup2 is async-signal-safe and the closure uses only integers it owns.
     unsafe {
         command.pre_exec(move || {
             // SAFETY: both are descriptor numbers, and the copy comes without close-on-exec.
             check(libc::dup2(source, LINK_FD))?;
-            for fd in LINK_FD + 1..limit {
-                // Marked, not closed: the standard library's exec pipe is among them. A number
-                // that is not open only fails.
-                // SAFETY: F_SETFD takes an integer flag and touches no memory.
-                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
-            }
             Ok(())
         });
     }
