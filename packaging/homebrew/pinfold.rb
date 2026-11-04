@@ -28,6 +28,6 @@ class Pinfold < Formula
   end
 
   test do
-    assert_match "usage: pinfold", shell_output("#{bin}/pinfold --help 2>&1", 1)
+    assert_match "Usage: pinfold", shell_output("#{bin}/pinfold --help")
   end
 end

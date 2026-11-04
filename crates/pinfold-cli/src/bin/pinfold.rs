@@ -18,11 +18,273 @@ use serde_json::{Value, json};
 /// How long a core that was just started gets to answer.
 const START_WAIT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(20);
-const USAGE: &str = "usage: pinfold [up [dir] | agent <name> [--right | --down | --tab] | \
-    ctl list [--json] | ctl send <pane> <text> | ctl wait <pane> \
-    --until exit|prompt|output|match|idle [--pattern <regex>] [--idle-ms <n>] --timeout <s> | \
-    ctl grants [--json | revoke <id>] | ctl log [--json] [-n <count>] [--pane <pane>] | \
-    ctl log --verify <file> | ctl session save | mcp]";
+/// What follows a bad argument's one-line error.
+const HINT: &str = "Run 'pinfold --help' for usage.";
+
+const HELP: &str = "\
+PinFold: a memory-first terminal for agentic coding.
+
+Usage: pinfold [command]
+
+With no command, opens a PinFold window, and starts PinFold first if it is not running.
+
+Commands:
+  up [dir]          Open a project's .pinfold/layout.toml as tabs and panes
+  agent <name>      Open a pane running an agent profile from your config
+  ctl list          List the session's panes
+  ctl send          Type text into a pane
+  ctl wait          Wait until a pane's command exits, it prints or it goes quiet
+  ctl grants        List or revoke lasting cross-pane grants
+  ctl log           Print or verify the audit log of API calls
+  ctl session save  Save the session now and print the snapshot's path
+  mcp               Serve PinFold's tools to a coding agent over MCP
+  help [command]    Print this, or a command's help
+
+Options:
+  -h, --help        Print help. 'pinfold <command> --help' prints a command's help
+  -V, --version     Print the version
+
+Docs: https://github.com/0xPiranhaCodes/pinfold.sh#readme
+";
+
+const UP: &str = "\
+pinfold up: open a project's workspace.
+
+Usage: pinfold up [dir]
+
+Reads <dir>/.pinfold/layout.toml and opens its tabs and panes in a PinFold window, starting
+PinFold if it is not running. If they are open already, it focuses them. The layout's run lines
+run only once you trust that version of the file: the window asks first. Refused, the panes
+open as plain shells and this exits 1.
+
+Arguments:
+  [dir]  The project directory (default: the current directory)
+
+Examples:
+  pinfold up
+  pinfold up ~/src/myapp
+";
+
+const AGENT: &str = "\
+pinfold agent: open a pane running an agent profile.
+
+Usage: pinfold agent <name> [--right | --down | --tab]
+
+Run it in a PinFold pane. It opens a pane beside that one running the [agents.<name>] profile
+from ~/.config/pinfold/pinfold.toml, in the directory the pane's shell is in. PinFold reads
+profiles when it starts.
+
+Arguments:
+  <name>   The profile's name
+
+Options:
+  --right  Split to the right (the default)
+  --down   Split below
+  --tab    Open a new tab
+
+Examples:
+  pinfold agent claude
+  pinfold agent codex --tab
+";
+
+const CTL: &str = "\
+pinfold ctl: control the running PinFold session from a shell or script.
+
+Usage: pinfold ctl <command> [arguments]
+
+These commands talk to the running PinFold and never start it.
+
+Commands:
+  list          List the session's panes
+  send          Type text into a pane
+  wait          Wait until a pane's command exits, it prints or it goes quiet
+  grants        List or revoke lasting cross-pane grants
+  log           Print or verify the audit log of API calls
+  session save  Save the session now and print the snapshot's path
+
+Run 'pinfold ctl <command> --help' for a command's arguments.
+
+Examples:
+  pinfold ctl list
+  pinfold ctl wait self --until exit --timeout 600
+";
+
+const LIST: &str = "\
+pinfold ctl list: list the session's panes.
+
+Usage: pinfold ctl list [--json]
+
+Prints a line per pane: ID, STATUS, TITLE, COMMAND and CWD, with * by the pane it runs in.
+Programs set their title, directory and status, so read them as hints.
+
+Options:
+  --json  Print the API's pane.list result as JSON
+
+Examples:
+  pinfold ctl list
+  pinfold ctl list --json
+";
+
+const SEND: &str = "\
+pinfold ctl send: type text into a pane.
+
+Usage: pinfold ctl send <pane> <text>
+
+Run it in a PinFold pane. It types <text> as it is, so add a line end to run a command. The
+pane it runs in, and panes that one opened, take the text at once; any other pane asks you in
+the PinFold window first. A pane running ssh or sudo, or reading a password, refuses it.
+
+Arguments:
+  <pane>  The pane's ID, from 'pinfold ctl list'
+  <text>  At most 4096 bytes
+
+Example:
+  pinfold ctl send 2 $'make test\\r'
+";
+
+const WAIT: &str = "\
+pinfold ctl wait: wait for something to happen in a pane.
+
+Usage: pinfold ctl wait <pane> --until <event> [--pattern <regex>] [--idle-ms <ms>] --timeout <seconds>
+
+Prints how the wait ended: exit and the status, match and the line, prompt, output, idle,
+timeout or closed. Exits 0 if what it waited for happened, 1 on a timeout or a closed pane,
+and 2 on an error.
+
+Arguments:
+  <pane>  A pane's ID, or self for the pane it runs in
+
+Options:
+  --until <event>      What to wait for:
+                         exit    the shell finishes a command
+                         prompt  the shell draws its next prompt
+                         output  the program prints anything
+                         match   a line printed from now on matches --pattern
+                         idle    the program prints nothing for --idle-ms
+                       exit and prompt need a shell that marks its prompts (OSC 133)
+  --pattern <regex>    The regex for match, at most 1024 bytes
+  --idle-ms <ms>       The quiet time for idle, from 100 to 600000
+  --timeout <seconds>  Required: give up after this long, at most 600
+
+Examples:
+  pinfold ctl wait self --until exit --timeout 600
+  pinfold ctl wait 2 --until match --pattern 'test result' --timeout 120
+";
+
+const GRANTS: &str = "\
+pinfold ctl grants: list or revoke lasting cross-pane grants.
+
+Usage: pinfold ctl grants [--json]
+       pinfold ctl grants revoke <id>
+
+Pressing a in an approval prompt lets one pane do one action on another for 30 minutes. Run
+this in a terminal outside PinFold's panes, such as Terminal.app.
+
+Options:
+  --json       Print the API's grants.list result as JSON
+
+Commands:
+  revoke <id>  Revoke the grant with that ID
+
+Examples:
+  pinfold ctl grants
+  pinfold ctl grants revoke 7
+";
+
+const LOG: &str = "\
+pinfold ctl log: print or verify the audit log of API calls.
+
+Usage: pinfold ctl log [--json] [-n <count>] [--pane <pane>]
+       pinfold ctl log --verify <file>
+
+Prints the newest entries, a line each, and says if the log's chain is broken. Run it in a
+terminal outside PinFold's panes, such as Terminal.app.
+
+Options:
+  --json           Print the API's audit.read result as JSON
+  -n <count>       How many of the newest entries (default 100, at most 1000)
+  --pane <pane>    Only calls by or to that pane
+  --verify <file>  Check a written log and its rotated .1 instead, with or without PinFold
+                   running. PinFold writes one only with api.audit_log set in its config
+
+Examples:
+  pinfold ctl log -n 20
+  pinfold ctl log --verify \"$HOME/Library/Application Support/PinFold/audit.log\"
+";
+
+const SESSION: &str = "\
+pinfold ctl session save: save the session now.
+
+Usage: pinfold ctl session save
+
+Writes the session's snapshot, which PinFold restores when it starts, and prints its path. Run
+it in a terminal outside PinFold's panes, such as Terminal.app.
+
+Example:
+  pinfold ctl session save
+";
+
+const MCP: &str = "\
+pinfold mcp: serve PinFold's tools to a coding agent over MCP.
+
+Usage: pinfold mcp
+
+Speaks MCP on stdin and stdout, so an agent in a PinFold pane can list, read, send to, open,
+close and wait on panes, with the same approval prompts as 'pinfold ctl'. Add it to your
+agent's MCP servers rather than running it by hand.
+
+Example:
+  claude mcp add pinfold -- pinfold mcp
+";
+
+/// The help for `topic`, a command and its subcommand, if it names one.
+fn help(topic: &[&str]) -> Option<&'static str> {
+    Some(match topic {
+        [] => HELP,
+        ["up"] => UP,
+        ["agent"] => AGENT,
+        ["ctl"] => CTL,
+        ["ctl", "list"] => LIST,
+        ["ctl", "send"] => SEND,
+        ["ctl", "wait"] => WAIT,
+        ["ctl", "grants"] => GRANTS,
+        ["ctl", "log"] => LOG,
+        ["ctl", "session"] | ["ctl", "session", "save"] => SESSION,
+        ["mcp"] => MCP,
+        _ => return None,
+    })
+}
+
+/// A bad argument, which exits 2 with [`HINT`].
+#[derive(Debug)]
+struct Misuse(String);
+
+impl std::fmt::Display for Misuse {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl Error for Misuse {}
+
+fn misuse(text: impl Into<String>) -> Box<dyn Error> {
+    Box::new(Misuse(text.into()))
+}
+
+/// What is wrong with `args`, which no command takes: an unknown command, or a known one's usage.
+fn wrong(args: &[&str]) -> String {
+    let (topic, name) = match args {
+        [first, ..] if first.starts_with('-') => return format!("unknown option '{first}'"),
+        ["ctl", sub, ..] => (&args[..2], format!("ctl {sub}")),
+        [first, ..] => (&args[..1], (*first).to_owned()),
+        [] => return "no command".to_owned(),
+    };
+    let usage = help(topic).and_then(|text| text.lines().find_map(|l| l.strip_prefix("Usage: ")));
+    match usage {
+        Some(usage) => format!("wrong arguments to '{name}': usage: {usage}"),
+        None => format!("unknown command '{name}'"),
+    }
+}
 
 /// Connects to a core at `path`. Nothing listening is no error, as that is what starts one.
 fn connect(path: &Path) -> std::io::Result<Option<UnixStream>> {
@@ -243,7 +505,9 @@ fn list(json: bool) -> Result<(), Box<dyn Error>> {
 /// `pinfold ctl send <pane> <text>`: types `text` into a pane, which for now must be the
 /// caller's own. It starts no core.
 fn send(pane: &str, text: &str) -> Result<(), Box<dyn Error>> {
-    let pane: usize = pane.parse().map_err(|_| "the pane must be a number")?;
+    let pane: usize = pane
+        .parse()
+        .map_err(|_| misuse("the pane must be a number"))?;
     let params = json!({"pane": pane, "text": text});
     control::ask(&running()?, "pane.send", &params)?;
     Ok(())
@@ -262,13 +526,13 @@ fn agent(name: &str, place: &str) -> Result<(), Box<dyn Error>> {
 /// waited for happened, rather than a timeout or the pane closing. It starts no core.
 fn wait(args: &[&str]) -> Result<bool, Box<dyn Error>> {
     let [pane, flags @ ..] = args else {
-        return Err(USAGE.into());
+        return Err(misuse("'ctl wait' needs a pane"));
     };
     let pane = match *pane {
         "self" => json!("self"),
         pane => json!(
             pane.parse::<usize>()
-                .map_err(|_| "the pane must be a number or self")?
+                .map_err(|_| misuse("the pane must be a number or self"))?
         ),
     };
     let mut params = json!({"pane": pane});
@@ -276,17 +540,19 @@ fn wait(args: &[&str]) -> Result<bool, Box<dyn Error>> {
         let (key, value) = match *pair {
             ["--until", until] => ("until", json!(until)),
             ["--pattern", pattern] => ("pattern", json!(pattern)),
-            ["--idle-ms", idle] => ("idle_ms", json!(idle.parse::<u64>()?)),
+            ["--idle-ms", idle] => ("idle_ms", json!(number(idle, "--idle-ms")?)),
             ["--timeout", seconds] => (
                 "timeout_ms",
-                json!(seconds.parse::<u64>()?.saturating_mul(1000)),
+                json!(number(seconds, "--timeout")?.saturating_mul(1000)),
             ),
-            _ => return Err(USAGE.into()),
+            [flag] => return Err(misuse(format!("'{flag}' needs a value"))),
+            [flag, ..] => return Err(misuse(format!("unknown option '{flag}' for 'ctl wait'"))),
+            [] => continue,
         };
         params[key] = value;
     }
     if params["timeout_ms"].is_null() {
-        return Err("--timeout is required".into());
+        return Err(misuse("--timeout is required"));
     }
     let (_, result) = control::ask(&running()?, "pane.wait", &params)?;
     let outcome = result["outcome"].as_str().unwrap_or_default();
@@ -321,7 +587,9 @@ fn grants(json_output: bool) -> Result<(), Box<dyn Error>> {
 }
 
 fn revoke(id: &str) -> Result<(), Box<dyn Error>> {
-    let id: u64 = id.parse().map_err(|_| "the grant id must be a number")?;
+    let id: u64 = id
+        .parse()
+        .map_err(|_| misuse("the grant id must be a number"))?;
     let (_, result) = control::ask(&running()?, "grants.revoke", &json!({"id": id}))?;
     if result["revoked"] == Value::Bool(false) {
         return Err(format!("no active grant {id}").into());
@@ -349,10 +617,13 @@ fn log(args: &[&str]) -> Result<(), Box<dyn Error>> {
             }
             "-n" => "count",
             "--pane" => "pane",
-            _ => return Err(USAGE.into()),
+            "--verify" => return Err(misuse("--verify takes a file and no other option")),
+            _ => return Err(misuse(format!("unknown option '{arg}' for 'ctl log'"))),
         };
         let value = args.next().and_then(|value| value.parse::<u64>().ok());
-        params[name] = value.ok_or("-n and --pane take a number")?.into();
+        params[name] = value
+            .ok_or_else(|| misuse(format!("{arg} takes a number")))?
+            .into();
     }
     let (_, read) = control::ask(&running()?, "audit.read", &params)?;
     let text = if json {
@@ -405,6 +676,12 @@ fn utc(ms: u64) -> String {
     let year = year_of_era + z / 146_097 * 400 + u64::from(month <= 2);
     let (hour, minute, second) = (seconds / 3600 % 24, seconds / 60 % 60, seconds % 60);
     format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} UTC")
+}
+
+/// `text` as a whole number, or a misuse naming `flag`.
+fn number(text: &str, flag: &str) -> Result<u64, Box<dyn Error>> {
+    text.parse()
+        .map_err(|_| misuse(format!("{flag} takes a whole number")))
 }
 
 /// Connects to the running core, and starts none.
@@ -470,7 +747,27 @@ fn printable(text: &str) -> String {
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let result = match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+    let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    // Only where no command takes an argument, so `ctl send 3 --help` still types `--help`.
+    let topic = match words[..] {
+        ["-h" | "--help"] => Some(&words[..0]),
+        [_, "-h" | "--help"] | ["ctl", _, "-h" | "--help"] => Some(&words[..words.len() - 1]),
+        ["help", ref topic @ ..] => Some(topic),
+        _ => None,
+    };
+    let text = match (topic, &words[..]) {
+        (Some(topic), _) => help(topic).map(str::to_owned),
+        (None, ["-V" | "--version"]) => Some(format!("pinfold {}\n", env!("CARGO_PKG_VERSION"))),
+        _ => None,
+    };
+    if let Some(text) = text {
+        return match std::io::stdout().write_all(text.as_bytes()) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(_) => ExitCode::FAILURE,
+        };
+    }
+    let result = match words[..] {
+        _ if topic.is_some() => Err(misuse(wrong(topic.unwrap_or_default()))),
         [] => launch(),
         ["up"] | ["up", _] => match up(args.get(1).map(String::as_str)) {
             Ok(true) => Ok(()),
@@ -489,6 +786,9 @@ fn main() -> ExitCode {
                 Ok(happened) => ExitCode::from(u8::from(!happened)),
                 Err(error) => {
                     eprintln!("pinfold: {error}");
+                    if error.is::<Misuse>() {
+                        eprintln!("{HINT}");
+                    }
                     ExitCode::from(2)
                 }
             };
@@ -503,13 +803,14 @@ fn main() -> ExitCode {
         ["ctl", "grants"] => grants(false),
         ["ctl", "grants", "--json"] => grants(true),
         ["ctl", "grants", "revoke", id] => revoke(id),
-        _ => {
-            eprintln!("{USAGE}");
-            return ExitCode::FAILURE;
-        }
+        _ => Err(misuse(wrong(&words))),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
+        Err(error) if error.is::<Misuse>() => {
+            eprintln!("pinfold: {error}\n{HINT}");
+            ExitCode::from(2)
+        }
         Err(error) => {
             eprintln!("pinfold: {error}");
             // A core started from a terminal logs there, so this may be an older core's.
