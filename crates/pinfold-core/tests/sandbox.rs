@@ -267,6 +267,44 @@ fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
     assert!(output.contains(&uid), "{output}");
 }
 
+/// A sandboxed agent cannot open a new terminal: its session would be no pane's, and the API
+/// would take it for a person's terminal outside every pane.
+#[test]
+fn a_sandboxed_agent_cannot_open_a_new_terminal() {
+    let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("pinfold-terminal-{}", std::process::id()));
+    fs::create_dir_all(&work).unwrap();
+    let _removed = Removed(work.clone());
+    fs::set_permissions(&work, fs::Permissions::from_mode(0o700)).unwrap();
+    let work = sandbox::working_directory(&work, &[]).unwrap();
+    let api = work.path().join("api.sock");
+    // `script` opens a terminal and starts a session on it, as an agent would.
+    let probe = "echo new=$(tty)";
+    let script = if cfg!(target_os = "macos") {
+        format!("script -q /dev/null /bin/sh -c '{probe}'; echo end=reached")
+    } else {
+        format!("script -qec '{probe}' /dev/null; echo end=reached")
+    };
+    // Outside the sandbox the probe opens one, so a missing `script` cannot pass.
+    let mut plain = Command::new("/bin/sh");
+    plain.args(["-c", &script]);
+    let output = read_until(&Pty::spawn(plain, 24, 80).unwrap(), "end=reached");
+    assert!(output.contains("new=/dev/"), "{output}");
+    let program = ["/bin/sh".to_owned(), "-c".to_owned(), script];
+    let command = match sandbox::command(&program, &[], &work, &api, None) {
+        Err(error) if cfg!(target_os = "linux") && error.kind() == ErrorKind::NotFound => {
+            assert!(std::env::var_os("CI").is_none(), "{error}");
+            eprintln!("skipped: no bwrap");
+            return;
+        }
+        command => command.unwrap(),
+    };
+    let pty = Pty::spawn(command, 24, 80).unwrap();
+    let output = read_until(&pty, "end=reached");
+    assert!(output.contains("end=reached"), "{output}");
+    assert!(!output.contains("new=/dev/"), "{output}");
+}
+
 #[test]
 fn a_bwrap_planted_on_path_is_ignored() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))

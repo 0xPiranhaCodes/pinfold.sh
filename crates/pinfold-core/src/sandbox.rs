@@ -3,7 +3,9 @@
 //! The sandbox wraps the pane's whole program: `sandbox-exec` on macOS and bubblewrap on Linux.
 //! Neither starts a session, so the agent keeps the pane's controlling terminal and session, by
 //! which the API knows it. TIOCSTI, which would type into that terminal, is denied: by the rules
-//! on macOS and by a seccomp filter on Linux.
+//! on macOS and by a seccomp filter on Linux. Nor can it open a new terminal, whose session the API
+//! would take for a person's outside every pane: macOS denies every terminal by name, and Linux
+//! gets an empty `/dev/pts`.
 //!
 //! The agent writes only to its [`WorkingDirectory`] and temporary directories: a fresh `/tmp` on
 //! Linux, and `/private/tmp` and the user's temporary directory on macOS. Git runs what its
@@ -480,7 +482,8 @@ fn macos_args(
     all
 }
 
-/// `bwrap`'s arguments: the real root read-only, private `/dev`, `/proc`, `/tmp` and IPC, an
+/// `bwrap`'s arguments: the real root read-only, private `/dev` with no `/dev/pts`, `/proc`,
+/// `/tmp` and IPC, an
 /// empty `runtime` directory but for the API socket's, `work` writable but its `.git` and its
 /// submodules' `modules`, the seccomp filter on fd `filter`, an empty directory over each
 /// hidden one, and the shadow git directory writable over that. A missing directory is skipped, as bwrap would make it outside the sandbox, and so
@@ -500,6 +503,10 @@ fn linux_args(
         "/",
         "--dev",
         "/dev",
+        // `/dev/ptmx` leads here: a new terminal would be a session no pane holds, which the API
+        // takes for a person's terminal outside every pane. The agent's own is already open.
+        "--tmpfs",
+        "/dev/pts",
         "--unshare-pid",
         "--unshare-ipc",
         "--unshare-uts",
@@ -790,13 +797,14 @@ mod tests {
             "agent",
         ];
         assert_eq!(args[args.len() - 7..], tmpfs);
-        // /tmp, the runtime directory and the outer hidden directory.
-        assert_eq!(args.iter().filter(|arg| **arg == "--tmpfs").count(), 3);
+        // /dev/pts, /tmp, the runtime directory and the outer hidden directory.
+        assert_eq!(args.iter().filter(|arg| **arg == "--tmpfs").count(), 4);
         assert!(!args.contains(&"/nowhere/.ssh"));
         assert!(!args.contains(&"--new-session"));
         assert!(!args.contains(&"--unshare-net"));
         assert_eq!(args[..3], ["--ro-bind", "/", "/"]);
         let has = |want: &[&str]| args.windows(want.len()).any(|got| got == want);
+        assert!(has(&["--dev", "/dev", "--tmpfs", "/dev/pts"]));
         assert!(has(&["--seccomp", "7"]));
         let (work, git) = (work.to_str().unwrap(), work.join(".git"));
         let (git, module) = (git.to_str().unwrap(), module.to_str().unwrap());

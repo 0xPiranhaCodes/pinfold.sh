@@ -205,9 +205,13 @@ and those it spawned, which are then sandboxed too. A send to any other pane nee
 person's approval in the window, so a grant the person gives a sandboxed agent lets it type
 outside its sandbox. `workspace.open`, `session.save`, workspace trust and grant
 administration need a caller in a terminal outside every pane, which a sandboxed agent
-cannot be: the sandbox opens no other terminal (`sandbox-exec` denies them by name and
-bubblewrap gives a fresh `/dev`), and a caller with no terminal is unidentified. A restored session runs shells, never agents, and no agent
-runs in them.
+cannot be. A caller with no terminal is unidentified, and the sandbox cannot open a new
+terminal, whose session no pane would hold: on macOS `sandbox-exec` denies every
+`/dev/ttys*` by name, so `openpty` fails, and on Linux bubblewrap's private `/dev` has an
+empty `/dev/pts`, so `/dev/ptmx` leads nowhere. The agent keeps the terminal it was started
+on. `a_sandboxed_agent_cannot_open_a_new_terminal` in `crates/pinfold-core/tests/sandbox.rs`
+checks both with the real tools. A restored session runs shells, never agents, and no
+agent runs in them.
 
 ## Hardening untrusted input
 

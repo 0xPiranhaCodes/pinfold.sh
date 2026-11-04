@@ -2121,24 +2121,33 @@ fn probes(ran: &str) -> usize {
     ran.matches("probe").count()
 }
 
-/// Where a sandboxed agent of the run in `directory` must not write: under the target, not the
-/// temporary directory, which the sandbox lets it write.
-fn outside(directory: &Path) -> PathBuf {
+/// The directory of the sandbox run in `directory`: under the target, not the temporary
+/// directory, which the sandbox lets an agent write on macOS and hides on Linux. It holds
+/// `out`, where no agent may write, and `proj/work`, the first agent's working directory.
+fn sandbox_base(directory: &Path) -> PathBuf {
     let name = directory.file_name().unwrap_or_default();
     Path::new(env!("CARGO_TARGET_TMPDIR")).join(name)
 }
 
 /// Not a test: each sandboxed agent of
-/// [`a_sandboxed_agent_starts_nothing_outside_its_sandbox`]. The first spawns a shell and types
-/// a write outside into it, launches an unsandboxed profile, then a sandboxed one, the second,
-/// which does the same, and last moves its reported directory up and launches a third there.
+/// [`a_sandboxed_agent_starts_nothing_outside_its_sandbox`], which notes what it heard in its
+/// working directory. The first spawns a shell and types a write outside into it, launches an
+/// unsandboxed profile, then a sandboxed one, the second, which does the same, and last moves
+/// its reported directory up and launches a third there.
 #[test]
 fn boxed_process() {
-    let Some(directory) = env::var_os(CLIENT) else {
+    if env::var_os(CLIENT).is_none() {
         return;
-    };
-    let directory = Path::new(&directory);
-    let out = outside(directory);
+    }
+    let work = env::current_dir().unwrap();
+    // A third agent, which starts above the work directory.
+    if !work.ends_with("work") {
+        fs::write(work.join("level3"), "").unwrap();
+        thread::sleep(Duration::from_secs(30));
+        return;
+    }
+    let wide = work.parent().unwrap().to_path_buf();
+    let out = wide.parent().unwrap().join("out");
     let touch = |name: &str| format!("touch '{}'\n", out.join(name).display());
     let mut heard = String::new();
     let spawn_and_type = |heard: &mut String, name: &str| {
@@ -2150,14 +2159,14 @@ fn boxed_process() {
             writeln!(heard, "{}", sent.unwrap()).unwrap();
         }
     };
-    if fs::create_dir(directory.join("b1")).is_ok() {
+    if fs::create_dir(work.join("b1")).is_ok() {
         spawn_and_type(&mut heard, "child");
         let plain = ask("agent.launch", serde_json::json!({"profile": "plain"})).unwrap();
         let boxed = ask("agent.launch", serde_json::json!({"profile": "boxed"})).unwrap();
         writeln!(heard, "{plain}\n{boxed}").unwrap();
-        assert!(wait_file(&directory.join("level2")));
+        assert!(wait_file(&work.join("level2")));
         // Its directory, as OSC 7 reports it, moves above the one it was given.
-        let wide = fs::read_to_string(directory.join("wide")).unwrap();
+        let wide = wide.to_str().unwrap();
         let mut stdout = std::io::stdout();
         let osc = format!("\x1b]7;file://{wide}\x07");
         std::io::Write::write_all(&mut stdout, osc.as_bytes()).unwrap();
@@ -2181,12 +2190,10 @@ fn boxed_process() {
         }
         let wider = ask("agent.launch", serde_json::json!({"profile": "boxed"})).unwrap();
         writeln!(heard, "{wider}").unwrap();
-        fs::write(directory.join("level1"), heard).unwrap();
-    } else if fs::create_dir(directory.join("b2")).is_ok() {
+        fs::write(work.join("level1"), heard).unwrap();
+    } else if fs::create_dir(work.join("b2")).is_ok() {
         spawn_and_type(&mut heard, "grandchild");
-        fs::write(directory.join("level2"), heard).unwrap();
-    } else {
-        fs::write(directory.join("level3"), "").unwrap();
+        fs::write(work.join("level2"), heard).unwrap();
     }
     thread::sleep(Duration::from_secs(30));
 }
@@ -2201,23 +2208,26 @@ fn wait_file(path: &Path) -> bool {
 
 #[test]
 fn a_sandboxed_agent_starts_nothing_outside_its_sandbox() {
-    // `sandbox-exec` is on every Mac; bubblewrap is tested in crates/pinfold-core/tests.
-    if !cfg!(target_os = "macos") {
+    let bwrap = ["/usr/bin/bwrap", "/usr/local/bin/bwrap", "/bin/bwrap"];
+    if cfg!(target_os = "linux") && !bwrap.iter().any(|path| Path::new(path).exists()) {
+        // CI must run the real bwrap (#106), so only a local machine may skip.
+        assert!(env::var_os("CI").is_none(), "no bwrap");
+        eprintln!("skipped: no bwrap");
         return;
     }
     let session = Session::new("sx", None).unwrap();
-    let out = outside(&session.directory);
-    let _ = fs::remove_dir_all(&out);
-    fs::create_dir_all(&out).unwrap();
-    let wide = session.directory.join("state/proj");
+    let base = sandbox_base(&session.directory);
+    let _ = fs::remove_dir_all(&base);
+    let (out, wide) = (base.join("out"), base.join("proj"));
     let work = wide.join("work");
-    fs::create_dir_all(&work).unwrap();
-    for dir in [&wide, &work] {
+    for dir in [&out, &work] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    for dir in [&base, &wide, &work] {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
     }
-    let wide = wide.canonicalize().unwrap();
-    fs::write(session.directory.join("wide"), wide.to_str().unwrap()).unwrap();
+    let (wide, work) = (wide.canonicalize().unwrap(), work.canonicalize().unwrap());
     let exe = env::current_exe().unwrap();
     let toml = format!(
         "[agents.boxed]\ncommand = [\"{}\", \"--exact\", \"boxed_process\"]\nsandbox = true\n\
@@ -2236,21 +2246,22 @@ fn a_sandboxed_agent_starts_nothing_outside_its_sandbox() {
         work.display()
     );
     let mut core = session.start_core(&["--idle", "1"], &shell).unwrap();
-    let done = session.wait_for("level1");
+    let done = wait_file(&work.join("level1"));
     // Long enough for a shell to run a typed line.
     thread::sleep(Duration::from_secs(2));
     core.kill().unwrap();
     core.wait().unwrap();
-    assert!(done, "{} {}", session.read("e"), session.read_log());
+    let read = |path: PathBuf| fs::read_to_string(path).unwrap_or_default();
+    let (level1, level2) = (read(work.join("level1")), read(work.join("level2")));
     let written: Vec<_> = ["child", "grandchild", "plain"]
         .into_iter()
         .filter(|name| out.join(name).exists())
         .collect();
-    let _ = fs::remove_dir_all(&out);
-    let level1 = session.read("level1");
-    let level2 = session.read("level2");
+    let level3 = wide.join("level3").exists();
+    let _ = fs::remove_dir_all(&base);
+    assert!(done, "{} {}", session.read("e"), session.read_log());
     assert!(written.is_empty(), "{written:?}\n{level1}\n{level2}");
-    assert!(!session.directory.join("level3").exists(), "{level1}");
+    assert!(!level3, "{level1}");
     let replies: Vec<serde_json::Value> = level1
         .lines()
         .chain(level2.lines())
