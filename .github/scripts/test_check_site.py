@@ -43,6 +43,15 @@ class CheckSite(unittest.TestCase):
         })
         self.assertEqual(len(errors), 8, errors)
 
+    def test_only_the_404_page_may_use_root_relative_paths(self):
+        errors = errors_for({
+            "index.html": '<a href="/">home</a>',
+            "404.html": '<a href="/">home</a><a href="/index.html">i</a><a href="/gone.html">g</a>',
+            "docs/404.html": '<a href="/">home</a>',
+        })
+        self.assertEqual(len(errors), 3, errors)
+        self.assertTrue(any("404.html: <a> /gone.html: no such file" in e for e in errors), errors)
+
     def test_only_links_reach_another_origin(self):
         errors = errors_for({"index.html": '<script src="https://cdn.example/x.js"></script>'
                                            '<link rel="stylesheet canonical-ish" href="//fonts.example/f.css">'

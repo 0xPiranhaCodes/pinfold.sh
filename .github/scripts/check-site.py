@@ -70,10 +70,14 @@ def check(root):
             if parts.scheme not in ("http", "https", "") or tag not in ("a", "link rel=canonical"):
                 errors.append(f"{where}: only <a> and a canonical <link> may point at another origin")
             continue
+        base = source.parent
         if parts.path.startswith("/"):
-            errors.append(f"{where}: root-relative paths break under /pinfold.sh/; use a relative path")
-            continue
-        target = (source.parent / unquote(parts.path)).resolve() if parts.path else source
+            # Pages serves 404.html at any missing path, where only a root-relative path works.
+            if source != root / "404.html":
+                errors.append(f"{where}: root-relative paths break under /pinfold.sh/; use a relative path")
+                continue
+            base = root
+        target = (base / unquote(parts.path).lstrip("/")).resolve() if parts.path else source
         if not target.is_relative_to(root):
             errors.append(f"{where}: points outside the site")
             continue
