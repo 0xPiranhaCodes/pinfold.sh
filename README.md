@@ -88,7 +88,7 @@ enforced yet. The automated tests run on macOS 26.6 and the app has been run by 
 | Config                                   | `~/.config/pinfold/pinfold.toml`           |
 | Saved session, workspace trust, audit log | `~/Library/Application Support/PinFold`   |
 | Agents' shadow git directories           | `~/.local/share/pinfold`                   |
-| Socket and the log, `default.log`        | `$TMPDIR/pinfold-$(id -u)`                 |
+| Socket and the logs, `default.log` and `.1` | `$TMPDIR/pinfold-$(id -u)`              |
 
 `XDG_CONFIG_HOME` and `XDG_DATA_HOME` move the first and third.
 [docs/configuration.md](docs/configuration.md) explains each of them.

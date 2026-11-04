@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Not found · PinFold</title>
+<meta name="robots" content="noindex">
+<!-- Served for a missing path at any depth, so this page links to no file of its own. -->
+<style>
+:root { color-scheme: dark light; --bg: #0e1014; --text: #e2e5ea; --muted: #9aa1ac; --accent: #5cd6cb; --red: #ff8a8a; }
+@media (prefers-color-scheme: light) { :root { --bg: #f4f5f7; --text: #1b1f24; --muted: #545b66; --accent: #0b6b64; --red: #b42828; } }
+body { margin: 0 auto; max-width: 72ch; padding: 3rem 2ch; background: var(--bg); color: var(--text); font: 15px/1.5rem ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+h1 { font-size: 1rem; color: var(--accent); }
+a { color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.err { color: var(--red); } .muted { color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <h1>── 404 ──────────────────────────</h1>
+  <p><span class="err">✕ error</span> pinfold: no such page</p>
+  <p>That page does not exist. <a id="home" href="/">Go to the PinFold home page</a>.</p>
+</main>
+<script>
+// On a github.io project site the home page is the first path segment, not "/".
+if (location.hostname.endsWith(".github.io")) {
+  document.getElementById("home").href = "/" + location.pathname.split("/")[1] + "/";
+}
+</script>
+</body>
+</html>

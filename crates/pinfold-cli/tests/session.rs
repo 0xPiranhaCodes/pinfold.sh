@@ -87,6 +87,8 @@ impl Session {
             .env("HOME", self.directory.join("state"))
             .env("SHELL", &script)
             .env(CLIENT, &self.directory)
+            // As a launcher starts one.
+            .stderr(control::start_log(&self.directory.join("run/pinfold"))?)
             .spawn()?;
         fs::write(self.directory.join("core"), core.id().to_string())?;
         Ok(core)
@@ -291,16 +293,71 @@ fn two_launchers_at_once_share_one_core_and_one_window() {
     assert_eq!(session.read("starts").lines().count(), 1);
 }
 
+/// A window script that notes each core that starts it, and speaks another link version the
+/// first time, as the window of a newer install does, and this one after.
+fn updated_window() -> Result<String> {
+    let hello = say_hello()?;
+    let [low, high] = (VERSION + 1).to_le_bytes();
+    let other = format!("printf '\\003\\000\\000\\000\\000\\{low:03o}\\{high:03o}' >&3");
+    Ok(format!(
+        "cd \"$PINFOLD_TEST_CLIENT\"\n{NOTE_CORE}\necho $PPID >> cores\n\
+         if [ -e updated ]; then {hello}; else : > updated; {other}; fi\n{STAY}"
+    ))
+}
+
+#[test]
+fn an_updated_window_restarts_a_core_at_a_prompt_and_opens() {
+    let session = Session::new("u", Some(&updated_window().unwrap())).unwrap();
+    let launched = session.launch().unwrap();
+    let error = String::from_utf8_lossy(&launched.stderr);
+    assert!(launched.status.success(), "{error}");
+    let next = VERSION + 1;
+    let said = format!("restarting its session, link version {VERSION} to {next}");
+    assert!(error.contains(&said), "{error}");
+    let cores = session.read("cores");
+    let cores: Vec<_> = cores.lines().collect();
+    assert!(cores.len() == 2 && cores[0] != cores[1], "{cores:?}");
+}
+
+#[test]
+fn an_updated_window_never_restarts_a_core_running_a_program_unasked() {
+    let session = Session::new("r", Some(&updated_window().unwrap())).unwrap();
+    let mut core = session
+        .start_core(
+            &[],
+            "sleep 60 &\necho $$ > \"$PINFOLD_TEST_CLIENT/pane\"\nwait",
+        )
+        .unwrap();
+    assert!(session.wait_for("pane"));
+    let error = launch_failure(&session).unwrap();
+    assert!(error.contains("PinFold was updated"), "{error}");
+    assert!(error.contains("pane 0: "), "{error}");
+    assert!(error.contains("Not now keeps them running"), "{error}");
+    assert!(core.try_wait().unwrap().is_none(), "the core was ended");
+    // The core says why, with both versions.
+    let next = VERSION + 1;
+    let logged = format!("the window is link version {next} and this core {VERSION}");
+    assert!(
+        session.read_log().contains(&logged),
+        "{}",
+        session.read_log()
+    );
+}
+
 #[test]
 fn a_window_that_exits_during_start_fails_the_launcher() {
     let window = format!("{NOTE_CORE}\necho why-it-ended >&2\nexit 3");
     let session = Session::new("d", Some(&window)).unwrap();
+    older_log(&session, "an-older-core").unwrap();
     let error = launch_failure(&session).unwrap();
     assert!(
         error.contains("the window ended before it was ready"),
         "{error}"
     );
-    assert!(error.contains(session.log().to_str().unwrap()), "{error}");
+    // The hint names the last core's log too.
+    let previous = session.log().with_extension("log.1");
+    let both = format!("{} and {}", session.log().display(), previous.display());
+    assert!(error.contains(&both), "{error}");
     assert!(session.read_log().contains("why-it-ended"));
     use std::os::unix::fs::PermissionsExt;
     let mode = fs::metadata(session.log()).unwrap().permissions().mode();
@@ -333,22 +390,49 @@ fn a_first_window_may_take_longer_than_a_later_one() {
     assert!(launched.status.success(), "{error}");
 }
 
+/// The run directory with a log that `text` stands in for an older core's.
+fn older_log(session: &Session, text: &str) -> Result {
+    let run = session.directory.join("run/pinfold");
+    fs::create_dir_all(&run)?;
+    fs::write(session.log(), text)?;
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&run, fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
 #[test]
-fn a_new_core_empties_the_log_and_a_running_one_keeps_it() {
+fn a_new_core_keeps_the_last_log_and_a_running_one_keeps_its_own() {
     let window = format!(
         "{NOTE_CORE}\necho this-core >&2\n{}\n{STAY}",
         say_hello().unwrap()
     );
     let session = Session::new("h", Some(&window)).unwrap();
-    fs::create_dir_all(session.log().parent().unwrap()).unwrap();
-    fs::write(session.log(), "an-older-core").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    let private = fs::Permissions::from_mode(0o700);
-    fs::set_permissions(session.log().parent().unwrap(), private).unwrap();
+    older_log(&session, "an-older-core").unwrap();
+    let previous = || fs::read_to_string(session.log().with_extension("log.1")).unwrap();
     for _ in 0..2 {
         assert!(session.launch().unwrap().status.success());
         assert_eq!(session.read_log(), "this-core\n");
+        assert_eq!(previous(), "an-older-core");
     }
+
+    // A core that crashed: its panic line outlives the next launch.
+    assert!(
+        kill(session.read("core").trim())
+            .status()
+            .unwrap()
+            .success()
+    );
+    let panicked = "this-core\npinfold: panicked at crates/pinfold-core/src/vt.rs:1:1\n";
+    let socket = control::socket_path(&session.directory.join("run/pinfold"));
+    let start = Instant::now();
+    while UnixStream::connect(&socket).is_ok() {
+        assert!(start.elapsed() < PATIENCE, "the killed core still answers");
+        thread::sleep(Duration::from_millis(20));
+    }
+    fs::write(session.log(), panicked).unwrap();
+    assert!(session.launch().unwrap().status.success());
+    assert_eq!(session.read_log(), "this-core\n");
+    assert_eq!(previous(), panicked);
 }
 
 #[test]

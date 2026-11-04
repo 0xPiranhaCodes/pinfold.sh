@@ -55,6 +55,6 @@ body:
     attributes:
       label: Log excerpt
       description: |
-        The lines around the problem from `$TMPDIR/pinfold-$(id -u)/default.log`. It starts empty each time a core starts, as after a restart, so copy it first.
+        The lines around the problem from `$TMPDIR/pinfold-$(id -u)/default.log`, and from `default.log.1` beside it after a crash: a new core starts `default.log` empty and keeps the last one with text in `default.log.1`.
         **Remove secrets first.** PinFold keeps pane contents out of its log, but check for tokens, passwords, hostnames and paths you do not want public.
       render: text

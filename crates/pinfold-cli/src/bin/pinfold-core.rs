@@ -28,7 +28,7 @@ use pinfold_core::status::Status;
 use pinfold_core::wait::{Outcome, Waits};
 use pinfold_core::workspace::Workspaces;
 use pinfold_core::{sandbox, shell};
-use pinfold_proto::link::{ApprovalAction, ApprovalAnswer};
+use pinfold_proto::link::{self, ApprovalAction, ApprovalAnswer};
 use serde_json::{Value, json};
 
 const ROWS: u16 = 24;
@@ -168,7 +168,10 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                 ],
                 (false, _) => &["window.open"],
             };
-            Ok(json!({"version": control::VERSION, "methods": methods, "pane": own}))
+            Ok(
+                json!({"version": control::VERSION, "methods": methods, "pane": own,
+                      "link": link::VERSION}),
+            )
         }
         Method::PaneStatus {
             pane,
@@ -821,14 +824,13 @@ fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result
         }
         let ended = !reactor.has_window();
         if ended || reactor.is_window_ready() {
+            let result = match (ended, reactor.take_other_version()) {
+                (false, _) => Ok(json!({})),
+                (true, Some(theirs)) => Ok(updated(&reactor, theirs)),
+                (true, None) => Err("the window ended before it was ready".to_owned()),
+            };
             for request in waiting.drain(..) {
-                let reason = "the window ended before it was ready";
-                let result = if ended {
-                    Err(reason.to_owned())
-                } else {
-                    Ok(json!({}))
-                };
-                audit::reply(&mut log, &reactor, request, result);
+                audit::reply(&mut log, &reactor, request, result.clone());
             }
         }
         started |= reactor.pane_count() > 0 || reactor.has_window();
@@ -851,6 +853,32 @@ fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result
             return Ok(());
         }
     }
+}
+
+/// Most characters of a title or command in an `update`.
+const MAX_NAMED: usize = 40;
+
+/// `window.open`'s answer when the window binary beside this core speaks link version
+/// `theirs`: PinFold was installed again under a running session. It names the panes that a
+/// restart would end, by their cwd's last part and foreground program, redacted and cut short, so the
+/// launcher can ask the person first. A restart that ends none goes ahead without asking.
+fn updated(reactor: &Reactor, theirs: u16) -> Value {
+    let short = |text: &str| redact(text).chars().take(MAX_NAMED).collect::<String>();
+    let running: Vec<Value> = reactor
+        .list()
+        .filter_map(|pane| {
+            let program = reactor.would_end(pane.id)?;
+            Some(json!({"pane": pane.id, "title": pane.title.map(short), "program": short(&program)}))
+        })
+        .collect();
+    let _ = writeln!(
+        io::stderr(),
+        "pinfold-core: the window is link version {theirs} and this core {}: \
+         PinFold was updated; panes running a program a restart would end: {}",
+        link::VERSION,
+        running.len()
+    );
+    json!({"update": {"window": theirs, "core": link::VERSION, "running": running}})
 }
 
 /// Hardens, then runs `panes` shells, the user's, unless it restores a session.

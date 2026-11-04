@@ -15,7 +15,7 @@ Every connection starts with `hello`:
 | Method             | Needs                       | Schema                                                       |
 | ------------------ | --------------------------- | ------------------------------------------------------------ |
 | `hello`            | First, once                 | [`hello.schema.json`](hello.schema.json)                     |
-| `window.open`      | Any `hello`                 | Takes nothing, returns `{}`                                  |
+| `window.open`      | Any `hello`                 | Takes nothing, returns `{}`, or an `update` (below)          |
 | `pane.list`        | Version 2 and a terminal    | [`pane.list.schema.json`](pane.list.schema.json)             |
 | `pane.read`        | Version 2, a pane in reach  | [`pane.read.schema.json`](pane.read.schema.json)             |
 | `pane.last_output` | Version 2, a pane in reach  | [`pane.last_output.schema.json`](pane.last_output.schema.json) |
@@ -33,6 +33,13 @@ Every connection starts with `hello`:
 | `grants.revoke`    | Version 2, outside panes    | [`grants.revoke.schema.json`](grants.revoke.schema.json)     |
 | `workspace.trust_state` | Version 2, outside panes | [`workspace.trust_state.schema.json`](workspace.trust_state.schema.json) |
 | `workspace.ask_trust` | Version 2, outside panes | [`workspace.ask_trust.schema.json`](workspace.ask_trust.schema.json) |
+
+`window.open` returns `{"update": {"window": 10, "core": 9, "running": [...]}}` and opens no
+window when the window binary beside the core speaks another link version, as one does once
+PinFold is installed again under a running core. `running` lists the panes a restart would
+end, each `{"pane", "title", "program"}`, with the title and the foreground program redacted
+and cut to 40 characters. The launcher then sends that core SIGTERM, which saves the session,
+and a new core restores it, asking the person first when `running` is not empty.
 
 A pane in reach is the caller's own, the `self` scope, or one it spawned, or one they spawned in
 turn, the `children` scope. `pane.spawn` opens a split or tab running the user's shell, never a

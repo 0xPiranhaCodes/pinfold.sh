@@ -309,7 +309,25 @@ pub fn log_path(directory: &Path) -> PathBuf {
     directory.join(SESSION).with_extension("log")
 }
 
-/// Opens an empty log for a core that is about to start, which is all that bounds its size.
+/// Returns the last core's log in `directory`, which [`start_log`] keeps.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::Path;
+///
+/// let path = pinfold_api::control::previous_log_path(Path::new("/run/user/1000/pinfold"));
+/// assert_eq!(path, Path::new("/run/user/1000/pinfold/default.log.1"));
+/// ```
+#[must_use]
+pub fn previous_log_path(directory: &Path) -> PathBuf {
+    directory.join(SESSION).with_extension("log.1")
+}
+
+/// Opens an empty log for a core that is about to start. A log with something in it, such as
+/// the panic line of a core that crashed, moves to [`previous_log_path`] first, over the one
+/// there. An empty one does not, so a clean run keeps the crash before it. Two generations are
+/// all that bound the size.
 ///
 /// # Errors
 ///
@@ -327,7 +345,14 @@ pub fn log_path(directory: &Path) -> PathBuf {
 /// ```
 pub fn start_log(directory: &Path) -> Result<File, Error> {
     checked(directory)?;
-    Ok(pinfold_sys::open_log(&log_path(directory))?)
+    let path = log_path(directory);
+    // Not a symlink or FIFO, which `open_log` refuses. A rename moves the entry and follows
+    // nothing, and the moved file keeps its mode.
+    if fs::symlink_metadata(&path).is_ok_and(|found| found.is_file() && found.len() > 0) {
+        // A log that cannot move is emptied, as before, rather than left without a core.
+        let _ = fs::rename(&path, previous_log_path(directory));
+    }
+    Ok(pinfold_sys::open_log(&path)?)
 }
 
 /// Makes `directory` if it is missing, and refuses it unless only this user can reach it.
@@ -742,12 +767,14 @@ fn result(line: &[u8]) -> Result<Value, Error> {
 
 /// Asks the core on `stream` for a window: a launcher's whole conversation. Refuses a peer that
 /// is not this user before saying anything to it, as a socket path alone proves nothing.
+/// Returns the core's result, which holds an `update` when the window binary is from another
+/// install than the running core, so no window opened.
 ///
 /// # Errors
 ///
 /// [`Error::WrongPeer`] for another user's socket, [`Error::Refused`] if the core says no, and
 /// [`Error::Io`] if it does not answer.
-pub fn open_window(stream: &UnixStream) -> Result<(), Error> {
+pub fn open_window(stream: &UnixStream) -> Result<Value, Error> {
     check_peer(stream.as_fd(), pinfold_sys::effective_uid())?;
     stream.set_read_timeout(Some(REPLY_WAIT))?;
     stream.set_write_timeout(Some(REPLY_WAIT))?;
@@ -757,8 +784,7 @@ pub fn open_window(stream: &UnixStream) -> Result<(), Error> {
     call(
         stream,
         &json!({"jsonrpc": "2.0", "id": 2, "method": "window.open"}),
-    )?;
-    Ok(())
+    )
 }
 
 /// Asks the core on `stream` for its panes and returns the `hello` and `pane.list` results:
@@ -1404,6 +1430,20 @@ mod tests {
 
     static NEXT: AtomicUsize = AtomicUsize::new(0);
 
+    #[test]
+    fn a_new_log_keeps_the_last_one_with_text_and_never_an_empty_one() {
+        let directory = fresh();
+        writeln!(start_log(&directory).unwrap(), "panicked at here").unwrap();
+        let _log = start_log(&directory).unwrap();
+        let read = |path: PathBuf| fs::read_to_string(path).unwrap();
+        assert_eq!(read(log_path(&directory)), "");
+        assert_eq!(read(previous_log_path(&directory)), "panicked at here\n");
+        let _log = start_log(&directory).unwrap();
+        assert_eq!(read(previous_log_path(&directory)), "panicked at here\n");
+        let mode = fs::metadata(previous_log_path(&directory)).unwrap().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
     /// A new path in a fresh private directory.
     fn fresh() -> PathBuf {
         let parent = std::env::temp_dir().join(format!(
@@ -2040,7 +2080,7 @@ mod tests {
             thread::spawn(move || control.serve(open));
             let stream = UnixStream::connect(socket_path(&directory)).unwrap();
             match open_window(&stream) {
-                Ok(()) => assert!(opened),
+                Ok(result) => assert!(opened && result == json!({})),
                 Err(error) => {
                     assert!(!opened);
                     let refused = "the core refused: no window can open: why";

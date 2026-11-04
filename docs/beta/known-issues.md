@@ -14,6 +14,10 @@ still welcome if it adds a case not listed here. Report bugs with the
   versions and the app on Intel are untested. If PinFold does not start on your Mac, report it
   with your macOS version ([#190](https://github.com/0xPiranhaCodes/pinfold.sh/issues/190)).
 - **No update check.** To update, download the new `.dmg` and replace the app.
+- **An update can end running programs.** When the new window cannot speak to the session still
+  running from the old version, the next launch restarts the session, which restores its tabs and
+  directories but not what ran in them. If a pane is running a program, PinFold asks first, and
+  "Not now" keeps it running.
 - **No `pinfold --version`.** The version is in PinFold > About PinFold.
 
 ## Memory
