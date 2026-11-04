@@ -6,7 +6,7 @@
 <title>PinFold: a memory-first terminal for agentic coding</title>
 <meta name="description" content="PinFold is a terminal for macOS and Linux, written in Rust, with tabs, splits and sessions built in, a local API for coding agents, and prompts no program can fake.">
 <link rel="canonical" href="https://pinfold.sh/">
-<meta name="theme-color" content="#0e1014">
+<meta name="theme-color" content="#0B0D11">
 <link rel="icon" href="img/icon-32.png" sizes="32x32" type="image/png">
 <link rel="apple-touch-icon" href="img/apple-touch-icon.png">
 <link rel="preload" href="fonts/jetbrains-mono-subset.woff2" as="font" type="font/woff2" crossorigin>
@@ -24,229 +24,204 @@
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
-<div class="window">
-  <header>
-    <div class="bar">
-      <span class="lights" aria-hidden="true"><i></i><i></i><i></i></span>
-      <span class="title">pinfold.sh</span>
-      <span class="clock" id="clock" aria-hidden="true"></span>
+<div class="wrap">
+
+  <div class="window" role="banner">
+    <div class="titlebar">
+      <div class="lights" aria-hidden="true"><i></i><i></i><i></i></div>
+      <nav aria-label="Sections" style="min-width:0">
+        <ul class="tabs" id="tabs">
+          <li><a href="#top" aria-current="page" data-key="1">pinfold.sh <kbd>⌘1</kbd></a></li>
+          <li><a href="#why" data-key="2">why <kbd>⌘2</kbd></a></li>
+          <li><a href="#memory" data-key="3">memory <kbd>⌘3</kbd></a></li>
+          <li><a href="#agents" data-key="4">agents <kbd>⌘4</kbd></a></li>
+          <li><a href="#try" data-key="5">try it <kbd>⌘5</kbd></a></li>
+          <li><a href="#install" data-key="6">install <kbd>⌘6</kbd></a></li>
+        </ul>
+      </nav>
+      <span class="title">~/code/pinfold · zsh · 1 agent</span>
     </div>
-    <nav aria-label="Sections">
-      <ul class="tabs">
-        <li><a href="#about">about <kbd>1</kbd></a></li>
-        <li><a href="#agents"><span class="needs" aria-hidden="true">◆</span> agents <kbd>2</kbd></a></li>
-        <li><a href="#workflow">workflow <kbd>3</kbd></a></li>
-        <li><a href="#security">security <kbd>4</kbd></a></li>
-        <li><a href="#memory">memory <kbd>5</kbd></a></li>
-        <li><a href="#install">install <kbd>6</kbd></a></li>
-        <li><a href="#shell">shell <kbd>7</kbd></a></li>
-      </ul>
-    </nav>
-  </header>
+
+    <div class="hero" id="top">
+      <section class="pane" aria-labelledby="h1">
+        <span class="pane-label">1 · about</span>
+        <div class="eyebrow"><span class="dot" aria-hidden="true"></span> macOS beta soon · <b>◆ 0.1.0-beta.1</b> · Rust</div>
+<pre class="logo" aria-hidden="true">
+ ██████╗ ██╗███╗   ██╗███████╗ ██████╗ ██╗     ██████╗
+ ██╔══██╗██║████╗  ██║██╔════╝██╔═══██╗██║     ██╔══██╗
+ ██████╔╝██║██╔██╗ ██║█████╗  ██║   ██║██║     ██║  ██║
+ ██╔═══╝ ██║██║╚██╗██║██╔══╝  ██║   ██║██║     ██║  ██║
+ ██║     ██║██║ ╚████║██║     ╚██████╔╝███████╗██████╔╝
+ ╚═╝     ╚═╝╚═╝  ╚═══╝╚═╝      ╚═════╝ ╚══════╝╚═════╝</pre>
+        <h1 id="h1">A memory-first terminal for <em>agentic coding</em>.</h1>
+        <p class="lede">Tabs, splits and sessions built in. Agents drive panes through a <b>scoped, audited API</b>, and when one needs you, PinFold asks with a prompt <b>no program can fake</b>.</p>
+        <div class="cta">
+          <a class="btn" href="#install" aria-disabled="true">↓ macOS beta · coming soon</a>
+          <a class="btn ghost" href="https://github.com/0xPiranhaCodes/pinfold.sh">GitHub ↗</a>
+        </div>
+        <div class="copy"><span class="m">$</span><code id="src-cmd">cargo build --release -p pinfold-cli</code><button type="button" id="copy-btn" aria-label="Copy build command" hidden data-js>copy</button></div>
+      </section>
+
+      <section class="pane" aria-label="Example session">
+        <span class="pane-label">2 · agent</span>
+        <div class="term" id="term" aria-live="off"><span class="p">~/code/api ❯</span> cat .pinfold/layout.toml
+<span class="m">[[tabs]]</span>
+<span class="m">[[tabs.panes]]</span>
+<span class="m">run = "cargo run"</span>
+<span class="m">[[tabs.panes]]</span>
+<span class="m">split = "right"</span>
+<span class="m">run = "claude"</span>
+<span class="p">~/code/api ❯</span> pinfold up
+<div class="prompt-card" role="img" aria-label="Workspace trust prompt drawn by PinFold: Trust the layout of /Users/you/code/api? It types 2 run lines: cargo run, claude. Keys: y trust, n or Esc don't trust.">
+<div class="head"><span>◆ needs you  Trust the layout of /Users/you/code/api?</span><small>drawn by PinFold</small></div><span class="m">It types 2 run line(s):</span>
+run 1: cargo run
+run 2: claude
+<div class="choices"><span>trust<kbd>y</kbd></span><span>don't trust<kbd>n/Esc</kbd></span></div></div>
+</div>
+      </section>
+    </div>
+
+    <div class="statusbar" aria-label="Pane states">
+      <span class="st-needs">◆ needs you</span>
+      <span class="st-run">● running</span>
+      <span class="st-done">✓ done</span>
+      <span class="st-err">✕ error</span>
+      <span class="st-idle">○ idle</span>
+      <span class="mem">core 3.65 MB · window 51 MB</span>
+    </div>
+  </div>
 
   <main id="main">
-    <section id="about" aria-labelledby="about-h">
-      <div class="split">
-        <div>
-          <span class="label"><b>1</b>about</span>
-          <h1 id="about-h">A memory-first terminal for <em>agentic coding</em>.</h1>
-          <p>A standalone terminal for macOS and Linux, written in Rust. Tabs, splits and sessions are built in, so you need no tmux. Coding agents drive panes through a local, permissioned API, and when one needs you, PinFold says so in a prompt that program output cannot fake.</p>
-          <p class="cta">
-            <a class="btn solid" href="#install">macOS beta: coming soon</a>
-            <a class="btn" href="https://github.com/0xPiranhaCodes/pinfold.sh">GitHub</a>
-          </p>
-        </div>
-        <div>
-          <span class="label"><b>2</b>zsh</span>
-<pre class="term" id="term" aria-label="A real session: pinfold up, then pinfold ctl list"><span class="p">$</span> pinfold up /private/tmp/pf/home/code/api
-<span class="p">$</span> pinfold ctl list
-ID    STATUS   TITLE            COMMAND                  CWD
-0     idle     docs             /bin/zsh                 /private/tmp/pf/home/code/docs
-1     <span class="needs">needs-you</span> api              /bin/zsh                 /private/tmp/pf/home/code/api
-2     idle     src              /bin/zsh                 /private/tmp/pf/home/code/api/src
-3     idle     infra            /bin/zsh                 /private/tmp/pf/home/code/api/infra
-<span class="p">$</span> <span class="cursor"> </span></pre>
-        </div>
-      </div>
-      <p class="muted">Output copied from a real run, with a temporary <code>HOME</code>. The agent in pane 1 said it needs you through <code>pane.status</code>.</p>
-    </section>
+  <section id="why" class="block" aria-labelledby="why-h">
+    <div class="section-head"><h2 id="why-h">why</h2><span class="rule" aria-hidden="true"></span><span class="meta">three guarantees</span></div>
+    <div class="grid3">
+      <article class="box hover">
+        <h3>memory <span>/ budgets in CI</span></h3>
+        <p>Every subsystem has a <b>memory budget</b>, and CI fails a change that breaks one. The core that owns your shells stays under <b>4 MB</b>.</p>
+        <pre>$ cargo xtask mem-gate
+| Core, 8 idle panes | 2.87 | 4.00 | <span class="st-done">pass</span> |</pre>
+      </article>
+      <article class="box hover">
+        <h3>security <span>/ prompts you can trust</span></h3>
+        <p>Agents get a <b>scoped, permissioned</b> channel into panes. Approvals are drawn by PinFold <b>outside pane text</b>, so output can't impersonate them. These are guardrails, not a security boundary: only a sandboxed agent is contained. Read the <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/docs/design/threat-model.md">threat model</a>.</p>
+        <pre><span class="st-needs">◆ needs you  Pane 1 asks to send to pane 2, 1 text(s):</span>
+text 1 (11 bytes): cargo test⏎
+y allow once · a allow 30 min · n/Esc deny</pre>
+      </article>
+      <article class="box hover">
+        <h3>isolation <span>/ crashes stay small</span></h3>
+        <p>A small <b>core process</b> owns your PTYs. If the window crashes, your agents keep running, and <b>pinfold</b> reattaches.</p>
+        <pre>Ctrl+a d   <span class="m">window closes, panes keep running</span>
+$ pinfold  <span class="st-run">reopens the session</span></pre>
+      </article>
+    </div>
+  </section>
 
-    <section id="agents" aria-labelledby="agents-h">
-      <h2 id="agents-h">agents <kbd>2</kbd></h2>
-      <p>Every pane has a state, and PinFold always shows it as a glyph, a colour and a word, so it reads in greyscale too.</p>
-      <ul class="states">
-        <li><span class="needs" aria-hidden="true">◆</span><b class="needs">needs you</b><span>The agent is waiting for you.</span></li>
-        <li><span class="run" aria-hidden="true">●</span><b class="run">running</b><span>A command or agent is working.</span></li>
-        <li><span class="done" aria-hidden="true">✓</span><b class="done">done</b><span>Work completed successfully.</span></li>
-        <li><span class="err" aria-hidden="true">✕</span><b class="err">error</b><span>Work failed.</span></li>
-        <li><span class="idle" aria-hidden="true">○</span><b class="idle">idle</b><span>The pane is at rest.</span></li>
-      </ul>
-      <p>States come from your shell's OSC 133 marks, or from the agent itself through <code>pane.status</code>. A report outranks the marks, since output can fake marks but cannot fake who is calling. A hidden tab whose pane needs you is marked <span class="needs">◆</span>, and the title row gives the state with the agent's message.</p>
+  <section id="memory" class="block" aria-labelledby="mem-h">
+    <div class="section-head"><h2 id="mem-h">memory</h2><span class="rule" aria-hidden="true"></span><span class="meta">measured, not promised</span></div>
+    <div class="box table-wrap">
+      <table>
+        <thead><tr><th scope="col">process</th><th scope="col">platform</th><th scope="col" class="num">measured</th><th scope="col" class="num">budget</th><th scope="col">headroom</th></tr></thead>
+        <tbody>
+          <tr><td>core, 8 idle panes</td><td>macOS</td><td class="num"><b>2.87 MB</b></td><td class="num">4.00 MB</td><td><span class="bar"><span class="track"><i style="width:72%"></i></span><span class="pct">72%</span></span></td></tr>
+          <tr><td>each idle pane</td><td>macOS</td><td class="num"><b>0.17 MB</b></td><td class="num">0.25 MB</td><td><span class="bar"><span class="track"><i style="width:68%"></i></span><span class="pct">68%</span></span></td></tr>
+          <tr><td>10k lines of typical text</td><td>macOS</td><td class="num"><b>0.61 MB</b></td><td class="num">1.50 MB</td><td><span class="bar"><span class="track"><i style="width:41%"></i></span><span class="pct">41%</span></span></td></tr>
+          <tr><td>scrollback at its cap</td><td>macOS</td><td class="num"><b>1.28 MB</b></td><td class="num">2.00 MB</td><td><span class="bar"><span class="track"><i style="width:64%"></i></span><span class="pct">64%</span></span></td></tr>
+          <tr><td>window, idle</td><td>macOS</td><td class="num"><b>50.78 MB</b></td><td class="num">55.86 MB</td><td><span class="bar"><span class="track"><i class="warm" style="width:91%"></i></span><span class="pct">91%</span></span></td></tr>
+          <tr><td>window, worst row</td><td>macOS</td><td class="num"><b>51.46 MB</b></td><td class="num">55.86 MB</td><td><span class="bar"><span class="track"><i class="warm" style="width:92%"></i></span><span class="pct">92%</span></span></td></tr>
+          <tr><td>core, beside window</td><td>macOS</td><td class="num"><b>3.65 MB</b></td><td class="num">4.00 MB</td><td><span class="bar"><span class="track"><i class="warm" style="width:91%"></i></span><span class="pct">91%</span></span></td></tr>
+          <tr><td>core, 8 idle panes</td><td>Linux</td><td class="num"><b>2.67 MB</b></td><td class="num">4.00 MB</td><td><span class="bar"><span class="track"><i style="width:67%"></i></span><span class="pct">67%</span></span></td></tr>
+          <tr><td>each idle pane</td><td>Linux</td><td class="num"><b>0.11 MB</b></td><td class="num">0.25 MB</td><td><span class="bar"><span class="track"><i style="width:44%"></i></span><span class="pct">44%</span></span></td></tr>
+          <tr><td>10k lines of typical text</td><td>Linux</td><td class="num"><b>0.62 MB</b></td><td class="num">1.00 MB</td><td><span class="bar"><span class="track"><i style="width:62%"></i></span><span class="pct">62%</span></span></td></tr>
+          <tr><td>scrollback at its cap</td><td>Linux</td><td class="num"><b>1.61 MB</b></td><td class="num">2.00 MB</td><td><span class="bar"><span class="track"><i class="warm" style="width:81%"></i></span><span class="pct">81%</span></span></td></tr>
+          <tr><td>window, idle</td><td>Linux</td><td class="num"><b>11.68 MB</b></td><td class="num">24.59 MB</td><td><span class="bar"><span class="track"><i style="width:47%"></i></span><span class="pct">47%</span></span></td></tr>
+          <tr><td>window, worst row</td><td>Linux</td><td class="num"><b>12.93 MB</b></td><td class="num">24.59 MB</td><td><span class="bar"><span class="track"><i style="width:53%"></i></span><span class="pct">53%</span></span></td></tr>
+          <tr><td>core, beside window</td><td>Linux</td><td class="num"><b>3.79 MB</b></td><td class="num">4.00 MB</td><td><span class="bar"><span class="track"><i class="warm" style="width:95%"></i></span><span class="pct">95%</span></span></td></tr>
+        </tbody>
+      </table>
+      <div class="caption"><span>From <a href="https://github.com/0xPiranhaCodes/pinfold.sh/pull/169">PR #169</a>: an M1 Pro at 1512×1890 (<code>phys_footprint</code>) and Linux CI under Xvfb at 1920×1080 (PSS). The worst window row is an open menu on macOS and a full glyph cache on Linux. A macOS window reads about 45.5 or 51 MB from run to run as Metal pools memory; ten runs all passed.</span><span>reproduce: <code>XDG_CONFIG_HOME="$(mktemp -d)" cargo xtask mem-gate</code></span></div>
+    </div>
+  </section>
+
+  <section id="agents" class="block" aria-labelledby="ag-h">
+    <div class="section-head"><h2 id="ag-h">agents</h2><span class="rule" aria-hidden="true"></span><span class="meta">five states, one glance</span></div>
+    <div class="states">
+      <div class="state st-needs"><span class="g" aria-hidden="true">◆</span><b>needs you</b><small>waiting on your answer</small></div>
+      <div class="state st-run"><span class="g" aria-hidden="true">●</span><b>running</b><small>working in its pane</small></div>
+      <div class="state st-done"><span class="g" aria-hidden="true">✓</span><b>done</b><small>finished cleanly</small></div>
+      <div class="state st-err"><span class="g" aria-hidden="true">✕</span><b>error</b><small>the work failed</small></div>
+      <div class="state st-idle"><span class="g" aria-hidden="true">○</span><b>idle</b><small>nothing happening</small></div>
+    </div>
+    <p class="hint">Every state is a glyph, a colour and a word, so it reads without colour too. States come from your shell's OSC 133 marks, or from the agent through <code>pane.status</code>, which outranks them. A hidden tab whose pane needs you is marked ◆.</p>
+    <div class="shots">
       <figure>
         <img src="img/session.webp" width="1600" height="1024" alt="A PinFold window with three tabs. The api tab and the title row show ◆ needs you: Allow edit to src/config.rs?. The left pane holds an agent's output; the right pane shows a failed cargo test run.">
         <figcaption>A real PinFold window. The agent is a script that prints and reports through the API.</figcaption>
       </figure>
-
-      <h3>Approval prompts</h3>
-      <p>An agent that reads or types into another pane waits for you. PinFold draws the request in its own chrome, outside every pane, with the exact text and its byte count. Only your keyboard answers it, and a request too long to show whole offers only deny. Grants last 30 minutes, and <code>pinfold ctl grants</code> lists and revokes them.</p>
-<pre class="ask" aria-label="Approval prompt: pane 1 asks to send to pane 2. Keys: y allow once, a allow 30 minutes, n or Esc deny.">api % claude
-  Re-running the failing test in pane 2 so you can watch it.
-
-<span class="a">── Pinfold approval ────────────────────────────────────────────────────────────</span>
-<span class="a"> ◆ needs you  Pane 1 asks to send to pane 2, 1 text(s):</span>
-<span class="t">text 1 (34 bytes): cargo test limiter -- --nocapture⏎</span>
-<span class="t"> y allow once · a allow 30 min · n/Esc deny · the 3 rows above are this prompt</span></pre>
-      <p class="muted">Drawn cell for cell from <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/crates/pinfold-ui/src/approval.rs"><code>approval.rs</code></a>.</p>
-    </section>
-
-    <section id="workflow" aria-labelledby="workflow-h">
-      <h2 id="workflow-h">workflow <kbd>3</kbd></h2>
-      <div class="grid">
-        <div>
-          <h3>Splits and tabs</h3>
-          <dl class="keys">
-            <dt><kbd>⌘T</kbd></dt><dd>new tab</dd>
-            <dt><kbd>⌘D</kbd></dt><dd>split right</dd>
-            <dt><kbd>⇧⌘D</kbd></dt><dd>split down</dd>
-            <dt><kbd>⌘1</kbd>–<kbd>⌘9</kbd></dt><dd>go to a tab</dd>
-            <dt><kbd>Ctrl+a</kbd></dt><dd>prefix, then:</dd>
-            <dt><kbd>c</kbd> <kbd>|</kbd> <kbd>-</kbd></dt><dd>tab, split right, split down</dd>
-            <dt><kbd>arrows</kbd> <kbd>z</kbd></dt><dd>move focus, zoom</dd>
-            <dt><kbd>d</kbd></dt><dd>close the window; the session stays</dd>
-          </dl>
-          <p>A small core process owns your shells. If the window crashes or closes, every pane keeps running, and <code>pinfold</code> reattaches.</p>
-        </div>
-        <div>
-          <h3>pinfold up</h3>
-          <p>Opens a project's <code>.pinfold/layout.toml</code> as tabs and panes. Before typing any <code>run</code> line it asks you to trust the layout, and asks again if the file changes.</p>
-<pre class="muted">[[tabs]]
-[[tabs.panes]]
-cwd = "."
-run = "cargo test"
-
-[[tabs.panes]]
-split = "right"
-cwd = "crates/pinfold-core"</pre>
-          <h3>pinfold agent</h3>
-          <p><code>pinfold agent claude</code> in a pane opens a split running a profile from your config, sandboxed if it says so.</p>
-<pre class="muted">[agents.claude]
-command = ["claude"]
-sandbox = true</pre>
-        </div>
-      </div>
       <figure>
-        <img src="img/trust.webp" width="1600" height="1024" loading="lazy" alt="The PinFold workspace trust prompt under an amber border: ◆ needs you, Trust the layout of /private/tmp/pf/home/code/docs? It types 2 run line(s): npm install, and curl -fsSL https://example.com/setup.sh | sh. Keys: y trust, n or Esc don't trust.">
-        <figcaption>A real trust prompt. The pane text behind it is muted while it waits.</figcaption>
+        <img src="img/trust.webp" width="1600" height="1024" alt="The PinFold workspace trust prompt under an amber border: ◆ needs you, Trust the layout of /private/tmp/pf/home/code/docs? It types 2 run line(s): npm install, and curl -fsSL https://example.com/setup.sh | sh. Keys: y trust, n or Esc don't trust.">
+        <figcaption>A real trust prompt from <code>pinfold up</code>, drawn below the panes.</figcaption>
       </figure>
-    </section>
+    </div>
+  </section>
 
-    <section id="security" aria-labelledby="security-h">
-      <h2 id="security-h">security <kbd>4</kbd></h2>
-      <p>PinFold gives agents a programmable channel into your shells, so that channel is scoped, audited and gated. In plain words:</p>
-      <ul>
-        <li>The core knows who is calling from the caller's terminal, never from anything the caller says. Its socket is yours alone, and there is no network listener.</li>
-        <li>An agent may read and type into its own pane and the panes it opened. Any other pane needs your yes.</li>
-        <li>Panes running <code>ssh</code>, <code>sudo</code>, <code>su</code>, root or a password prompt refuse typing from the API, even with a grant.</li>
-        <li>Pastes are cleaned, so pasted text cannot end bracketed paste early and run.</li>
-        <li>Every API request is kept in a hash-chained audit log; <code>pinfold ctl log --verify</code> checks it. It never holds pane text.</li>
-        <li>A sandboxed agent profile (<code>sandbox-exec</code> on macOS, bubblewrap on Linux) writes only to its working and temporary directories, and cannot see <code>~/.ssh</code> or other panes' terminals.</li>
-      </ul>
-      <p>These controls are guardrails, not a security boundary: an agent without a sandbox runs as you. Only a sandboxed agent is contained. The <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/docs/design/threat-model.md">threat model</a> says what is and is not defended.</p>
-    </section>
-
-    <section id="memory" aria-labelledby="memory-h">
-      <h2 id="memory-h">memory <kbd>5</kbd></h2>
-      <p>Every subsystem has a budget in megabytes, and <code>cargo xtask mem-gate</code> fails a change that exceeds one. These numbers are from <a href="https://github.com/0xPiranhaCodes/pinfold.sh/pull/169">PR #169</a>, commit <code>156b222</code>.</p>
-      <div class="scroll">
-        <table>
-          <caption class="vh">macOS, M1 Pro with a Retina display, in MB</caption>
-          <thead><tr><th scope="col">macOS · M1 Pro</th><th scope="col">MB</th><th scope="col">budget</th><th scope="col"><span class="vh">share of budget</span></th></tr></thead>
-          <tbody>
-<tr><td>Core, 8 idle panes</td><td class="n">2.87</td><td class="n">4.00</td><td class="meter" aria-hidden="true">███████████<i>░░░░░</i></td></tr>
-<tr><td>Each idle pane</td><td class="n">0.17</td><td class="n">0.25</td><td class="meter" aria-hidden="true">███████████<i>░░░░░</i></td></tr>
-<tr><td>10k lines of typical text</td><td class="n">0.61</td><td class="n">1.50</td><td class="meter" aria-hidden="true">███████<i>░░░░░░░░░</i></td></tr>
-<tr><td>Scrollback at its cap</td><td class="n">1.28</td><td class="n">2.00</td><td class="meter" aria-hidden="true">██████████<i>░░░░░░</i></td></tr>
-<tr><td>Window, 1512×1890, idle</td><td class="n">50.78</td><td class="n">55.86</td><td class="meter" aria-hidden="true">███████████████<i>░</i></td></tr>
-<tr><td>Window, full glyph cache</td><td class="n">51.40</td><td class="n">55.86</td><td class="meter" aria-hidden="true">███████████████<i>░</i></td></tr>
-<tr><td>Core beside that window</td><td class="n">3.65</td><td class="n">4.00</td><td class="meter" aria-hidden="true">███████████████<i>░</i></td></tr>
-          </tbody>
-        </table>
+  <section id="try" class="block" aria-labelledby="try-h">
+    <div class="section-head"><h2 id="try-h">try it</h2><span class="rule" aria-hidden="true"></span><span class="meta">a tiny shell, in the page</span></div>
+    <div class="box repl">
+      <div class="repl-head"><b>pinfold.sh</b> · site shell · <span>↑↓ history · Tab completes</span></div>
+      <div class="repl-body">
+        <pre class="repl-out" id="out" aria-live="polite"><span hidden data-js><span class="m">PinFold site shell. Type </span>help<span class="m"> and press Enter.</span>
+</span><span class="p">~/pinfold.sh ❯</span> pinfold --help
+usage: pinfold [up [dir] | agent &lt;name&gt; [--right | --down | --tab] | ctl list [--json] | ctl send &lt;pane&gt; &lt;text&gt; | ctl wait &lt;pane&gt; --until exit|prompt|output|match|idle [--pattern &lt;regex&gt;] [--idle-ms &lt;n&gt;] --timeout &lt;s&gt; | ctl grants [--json | revoke &lt;id&gt;] | ctl log [--json] [-n &lt;count&gt;] [--pane &lt;pane&gt;] | ctl log --verify &lt;file&gt; | ctl session save | mcp]
+</pre>
+        <form class="repl-line" id="repl" autocomplete="off" hidden data-js>
+          <label for="cmd">~/pinfold.sh ❯</label>
+          <input id="cmd" name="cmd" spellcheck="false" autocapitalize="off" autocorrect="off" placeholder="help">
+        </form>
+        <p class="hint" hidden data-js>try: <kbd class="k" tabindex="0" role="button">pinfold --help</kbd> · <kbd class="k" tabindex="0" role="button">keys</kbd> · <kbd class="k" tabindex="0" role="button">states</kbd> · <kbd class="k" tabindex="0" role="button">mem</kbd> · <kbd class="k" tabindex="0" role="button">install</kbd> · <kbd class="k" tabindex="0" role="button">clear</kbd></p>
       </div>
-      <div class="scroll">
-        <table>
-          <caption class="vh">Linux, GitHub Actions ubuntu-latest under Xvfb, in MB</caption>
-          <thead><tr><th scope="col">Linux · CI, X11</th><th scope="col">MB</th><th scope="col">budget</th><th scope="col"><span class="vh">share of budget</span></th></tr></thead>
-          <tbody>
-<tr><td>Core, 8 idle panes</td><td class="n">2.67</td><td class="n">4.00</td><td class="meter" aria-hidden="true">███████████<i>░░░░░</i></td></tr>
-<tr><td>Each idle pane</td><td class="n">0.11</td><td class="n">0.25</td><td class="meter" aria-hidden="true">███████<i>░░░░░░░░░</i></td></tr>
-<tr><td>10k lines of typical text</td><td class="n">0.62</td><td class="n">1.00</td><td class="meter" aria-hidden="true">██████████<i>░░░░░░</i></td></tr>
-<tr><td>Scrollback at its cap</td><td class="n">1.61</td><td class="n">2.00</td><td class="meter" aria-hidden="true">█████████████<i>░░░</i></td></tr>
-<tr><td>Window, 1920×1080, idle</td><td class="n">11.68</td><td class="n">24.59</td><td class="meter" aria-hidden="true">████████<i>░░░░░░░░</i></td></tr>
-<tr><td>Window, full glyph cache</td><td class="n">12.93</td><td class="n">24.59</td><td class="meter" aria-hidden="true">████████<i>░░░░░░░░</i></td></tr>
-<tr><td>Core beside that window</td><td class="n">3.79</td><td class="n">4.00</td><td class="meter" aria-hidden="true">███████████████<i>░</i></td></tr>
-          </tbody>
-        </table>
-      </div>
-      <p>Memory is PSS on Linux and <code>phys_footprint</code> on macOS. A macOS window reads about 45.5 or about 51 MB from run to run, as Metal pools its memory; ten runs all passed. Reproduce with an empty config:</p>
-<pre><span class="muted">$</span> XDG_CONFIG_HOME="$(mktemp -d)" cargo xtask mem-gate</pre>
-    </section>
+    </div>
+  </section>
 
-    <section id="install" aria-labelledby="install-h">
-      <h2 id="install-h">install <kbd>6</kbd></h2>
-      <div class="grid">
-        <div>
-          <h3>macOS beta <span class="muted">· coming soon</span></h3>
-          <p>A signed and notarized <code>PinFold.dmg</code>, one app for Apple silicon and Intel, will be on <a href="https://github.com/0xPiranhaCodes/pinfold.sh/releases">GitHub Releases</a>. There is no release yet. The <a href="https://github.com/0xPiranhaCodes/pinfold.sh#install-the-beta">install guide</a> and the <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/docs/beta/known-issues.md">known issues</a> are ready; so far the app has been tried by hand only on Apple silicon. Linux follows in v0.1.</p>
-        </div>
-        <div>
-          <h3>From source <span class="muted">· today</span></h3>
-<pre>git clone https://github.com/0xPiranhaCodes/pinfold.sh.git
+  <section class="block" aria-labelledby="keys-h">
+    <div class="section-head"><h2 id="keys-h">keys</h2><span class="rule" aria-hidden="true"></span><span class="meta">tmux muscle memory works</span></div>
+    <div class="box keys">
+      <div><span>new tab</span><kbd class="k"><i>⌘</i><i>T</i></kbd></div>
+      <div><span>split right</span><kbd class="k"><i>⌘</i><i>D</i></kbd></div>
+      <div><span>split down</span><kbd class="k"><i>⇧</i><i>⌘</i><i>D</i></kbd></div>
+      <div><span>prefix</span><kbd class="k"><i>Ctrl</i><i>a</i></kbd></div>
+      <div><span>prefix → tab · right · down</span><kbd class="k"><i>c</i><i>|</i><i>-</i></kbd></div>
+      <div><span>open a project layout</span><kbd class="k"><i>pinfold up</i></kbd></div>
+    </div>
+  </section>
+
+  <section id="install" class="block" aria-labelledby="in-h">
+    <div class="section-head"><h2 id="in-h">install</h2><span class="rule" aria-hidden="true"></span><span class="meta">macOS first, Linux next</span></div>
+    <div class="grid3">
+      <article class="box hover">
+        <h3>macOS beta <span>/ coming soon</span></h3>
+        <p>A signed, notarized <b>PinFold.dmg</b> on <a href="https://github.com/0xPiranhaCodes/pinfold.sh/releases">GitHub Releases</a>. Apple silicon and Intel in one app. There is no release yet; the <a href="https://github.com/0xPiranhaCodes/pinfold.sh#install-the-beta">install guide</a> and <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/docs/beta/known-issues.md">known issues</a> are ready, and so far it has been tried by hand only on Apple silicon.</p>
+      </article>
+      <article class="box hover">
+        <h3>from source <span>/ today</span></h3>
+        <p>Rust toolchain pinned in the repo. Build, then run <b>pinfold</b>. A build from source lacks the hardened runtime, so another program running as you can read its memory; the signed app has it.</p>
+        <pre>git clone https://github.com/0xPiranhaCodes/pinfold.sh.git
 cd pinfold.sh
 cargo build --release -p pinfold-cli
 ./target/release/pinfold</pre>
-          <p class="muted"><code>rust-toolchain.toml</code> picks the toolchain. A build from source lacks the hardened runtime, so another program running as you can read its memory; the signed app has it.</p>
-        </div>
-      </div>
-      <h3>Docs and links</h3>
-      <ul>
-        <li><a href="https://github.com/0xPiranhaCodes/pinfold.sh">Source on GitHub</a> · <a href="https://github.com/0xPiranhaCodes/pinfold.sh/issues">issues</a> · <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/CHANGELOG.md">changelog</a></li>
-        <li><a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/docs/configuration.md">Configuration and keys</a> · <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/docs/api/README.md">the agent API</a></li>
-        <li><a href="https://github.com/0xPiranhaCodes/pinfold.sh/tree/main/docs/adr">Decision records</a> · <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/docs/roadmap.md">roadmap</a></li>
-        <li><a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/CONTRIBUTING.md">Contributing</a> · <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/SECURITY.md">reporting a vulnerability</a></li>
-      </ul>
-    </section>
-
-    <section id="shell" aria-labelledby="shell-h">
-      <h2 id="shell-h">shell <kbd>7</kbd></h2>
-<pre class="out" id="out" aria-live="polite"><span class="p">$</span> help
-help  pinfold --help  states  keys  mem  install  clear
-<span class="p">$</span> pinfold --help
-usage: pinfold [up [dir] | agent &lt;name&gt; [--right | --down | --tab] | ctl list [--json] | ctl send &lt;pane&gt; &lt;text&gt; | ctl wait &lt;pane&gt; --until exit|prompt|output|match|idle [--pattern &lt;regex&gt;] [--idle-ms &lt;n&gt;] --timeout &lt;s&gt; | ctl grants [--json | revoke &lt;id&gt;] | ctl log [--json] [-n &lt;count&gt;] [--pane &lt;pane&gt;] | ctl log --verify &lt;file&gt; | ctl session save | mcp]
-</pre>
-      <form class="line js-only" id="shell-form" autocomplete="off">
-        <label for="cmd">$</label>
-        <input id="cmd" name="cmd" spellcheck="false" autocapitalize="off" autocorrect="off" placeholder="type help and press Enter">
-      </form>
-      <h3>Page keys</h3>
-      <dl class="keys">
-        <dt><kbd>1</kbd>–<kbd>7</kbd></dt><dd>go to a section</dd>
-        <dt><kbd>/</kbd></dt><dd>type in the shell</dd>
-        <dt><kbd>Esc</kbd></dt><dd>leave the shell</dd>
-      </dl>
-    </section>
+      </article>
+      <article class="box hover">
+        <h3>Linux <span>/ v0.1</span></h3>
+        <p>X11 and Wayland, with tarballs and a Homebrew formula, after the macOS beta.</p>
+      </article>
+    </div>
+  </section>
   </main>
 
-  <div class="status" aria-label="Agent states">
-    <span class="needs">◆ needs you</span>
-    <span class="run">● running</span>
-    <span class="done">✓ done</span>
-    <span class="err">✕ error</span>
-    <span class="idle">○ idle</span>
-    <a class="mem" href="#memory">core 2.87 MB · M1 Pro</a>
-  </div>
+  <footer>
+    <span>PinFold · <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/LICENSE-MIT">MIT</a> OR <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/LICENSE-APACHE">Apache-2.0</a> · <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/TRADEMARK.md">trademark</a> · set in Consolas, or JetBrains Mono (<a href="fonts/OFL.txt">OFL</a>) · no cookies, trackers or third-party requests</span>
+    <span><a href="https://github.com/0xPiranhaCodes/pinfold.sh">source</a> · <a href="https://github.com/0xPiranhaCodes/pinfold.sh/issues">issues</a> · <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/CHANGELOG.md">changelog</a> · <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/docs/configuration.md">config</a> · <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/docs/api/README.md">agent API</a> · <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/SECURITY.md">security</a></span>
+  </footer>
 </div>
-<footer>
-  <p>PinFold is licensed under <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/LICENSE-MIT">MIT</a> or <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/LICENSE-APACHE">Apache-2.0</a>. The name and logo are covered by the <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/TRADEMARK.md">trademark policy</a>. This page uses JetBrains Mono under the <a href="fonts/OFL.txt">SIL Open Font License 1.1</a>. No cookies, trackers or third-party requests.</p>
-</footer>
 </body>
 </html>

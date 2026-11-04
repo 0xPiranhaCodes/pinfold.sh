@@ -1,113 +1,98 @@
 // Enhancements only: the page is complete without this file.
 "use strict";
-document.documentElement.classList.add("js");
+document.querySelectorAll("[data-js]").forEach((el) => { el.hidden = false; });
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
-const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-// The title row's clock, in the app's format: "Wed 04 Nov  14:22".
-function tick() {
-  const d = new Date();
-  const part = (o) => d.toLocaleString("en-GB", o);
-  $("clock").textContent = `${part({ weekday: "short" })} ${part({ day: "2-digit" })} ${part({ month: "short" })}  ${part({ hour: "2-digit", minute: "2-digit" })}`;
-}
-tick();
-setInterval(tick, 10000);
-
-// Hero: type the commands of the real session, print each output at once.
-const term = $("term");
-if (!still) {
-  const done = term.innerHTML;
-  const lines = done.split("\n");
-  term.innerHTML = "";
-  let shown = "";
-  const step = (i) => {
-    if (i >= lines.length) return void (term.innerHTML = done);
-    const line = lines[i];
-    const command = line.match(/^(<span class="p">\$<\/span> )(.+)$/);
-    if (!command || line.includes("cursor")) {
-      shown += `${line}\n`;
-      term.innerHTML = shown;
-      return void setTimeout(step, 60, i + 1);
-    }
-    let n = 0;
-    const type = () => {
-      term.innerHTML = `${shown}${command[1]}${command[2].slice(0, n)}<span class="cursor"> </span>`;
-      if (n++ < command[2].length) return void setTimeout(type, 35 + Math.random() * 45);
-      shown += `${line}\n`;
-      setTimeout(step, 400, i + 1);
-    };
-    type();
-  };
-  setTimeout(step, 600, 0);
-}
-
-// The site shell. Output is either verbatim from the binary or from this page's own text.
-const usage = $("out").textContent.split("\n").find((l) => l.startsWith("usage: pinfold"));
-const shell = {
-  help: () => "help  pinfold --help  states  keys  mem  install  ls  cd <section>  clear",
-  "pinfold --help": () => usage,
-  states: () => [...document.querySelectorAll(".states li")].map((li) => { const [glyph, word, what] = li.children; return `${glyph.textContent} ${word.textContent.padEnd(10)} ${what.textContent}`; }).join("\n"),
-  keys: () => [...document.querySelectorAll("#workflow .keys dt")].map((dt) => `${dt.textContent.padEnd(14)}${dt.nextElementSibling.textContent}`).join("\n"),
-  mem: () => [...document.querySelectorAll("#memory tbody tr")].slice(0, 7).map((tr) => { const c = tr.cells; return `${c[0].textContent.padEnd(26)}${c[1].textContent.padStart(6)} / ${c[2].textContent} MB`; }).join("\n") + "\nmacOS, M1 Pro, PR #169",
-  install: () => "macOS beta: coming soon, on GitHub Releases\nfrom source: cargo build --release -p pinfold-cli",
-  ls: () => [...document.querySelectorAll("main section")].map((s) => `${s.id}/`).join("  "),
-};
-shell["pinfold -h"] = shell["pinfold help"] = shell["pinfold --help"];
-
+// The site shell. `pinfold --help` is the binary's own text, already in the page.
 const out = $("out");
 const input = $("cmd");
+const usage = out.textContent.split("\n").find((l) => l.startsWith("usage: pinfold"));
+const html = new Set(["states", "sudo"]);
+const cmds = {
+  help: () => "commands: pinfold --help · keys · states · mem · install · about · clear",
+  "pinfold --help": () => usage,
+  keys: () => "⌘T new tab\n⌘D split right\n⇧⌘D split down\nCtrl+a, then c · | · -   tab · right · down",
+  states: () => '<span class="st-needs">◆ needs you</span>  <span class="st-run">● running</span>  <span class="st-done">✓ done</span>  <span class="st-err">✕ error</span>  <span class="st-idle">○ idle</span>',
+  mem: () => [...document.querySelectorAll("#memory tbody tr")].map((tr) => { const c = tr.cells; return `${c[0].textContent.padEnd(26)}${c[2].textContent.padStart(9)} / ${c[3].textContent.padEnd(9)} (${c[1].textContent})`; }).join("\n") + "\nreproduce: cargo xtask mem-gate",
+  install: () => "macOS beta: coming soon on GitHub Releases\nfrom source: cargo build --release -p pinfold-cli",
+  about: () => "PinFold: a memory-first terminal for agentic coding, written in Rust.",
+  ls: () => "why/  memory/  agents/  try/  install/",
+  whoami: () => "you, the one the ◆ prompt is for",
+  sudo: () => '<span class="st-err">✕ error</span>  agents ask first. so do you.',
+};
+cmds["pinfold -h"] = cmds["pinfold help"] = cmds["pinfold --help"];
 const history = [];
-let back = 0;
-$("shell-form").addEventListener("submit", (event) => {
-  event.preventDefault();
+let h = 0;
+$("repl").addEventListener("submit", (e) => {
+  e.preventDefault();
   const raw = input.value.trim().replace(/\s+/g, " ");
   input.value = "";
   if (!raw) return;
   history.push(raw);
-  back = history.length;
+  h = history.length;
   if (raw === "clear") return void (out.innerHTML = "");
-  let reply;
-  const cd = raw.match(/^cd (\w+)\/?$/);
-  if (cd && $(cd[1])?.matches("main section")) {
-    $(cd[1]).scrollIntoView({ behavior: still ? "auto" : "smooth" });
-    reply = "";
-  } else if (shell[raw]) {
-    reply = esc(shell[raw]());
-  } else {
-    reply = `<span class="err">✕ error</span> ${esc(raw.split(" ")[0])}: not on this page. Try help`;
-  }
-  out.innerHTML += `<span class="p">$</span> ${esc(raw)}\n${reply}${reply ? "\n" : ""}`;
+  const f = cmds[raw];
+  const res = f ? (html.has(raw) ? f() : esc(f())) : `<span class="st-err">✕</span> ${esc(raw)}: not found. try <span class="p">help</span>`;
+  out.innerHTML += `<span class="p">~/pinfold.sh ❯</span> ${esc(raw)}\n${res}\n`;
   out.scrollTop = out.scrollHeight;
 });
-input.addEventListener("keydown", (event) => {
-  if (event.key === "ArrowUp" && back > 0) input.value = history[--back];
-  else if (event.key === "ArrowDown") input.value = history[(back = Math.min(history.length, back + 1))] ?? "";
-  else if (event.key === "Escape") input.blur();
-  else return;
-  event.preventDefault();
-});
-
-// Page keys: 1 to 7 pick a tab, "/" types in the shell. Nothing fires while typing.
-const tabs = [...document.querySelectorAll(".tabs a")];
-document.addEventListener("keydown", (event) => {
-  if (event.ctrlKey || event.metaKey || event.altKey || event.target.closest("input, textarea")) return;
-  const tab = tabs[Number(event.key) - 1];
-  if (tab) {
-    tab.click();
-    tab.focus();
-  } else if (event.key === "/") {
-    event.preventDefault();
-    input.focus();
+input.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowUp" && h > 0) { input.value = history[--h]; e.preventDefault(); }
+  if (e.key === "ArrowDown") { h = Math.min(history.length, h + 1); input.value = history[h] || ""; e.preventDefault(); }
+  if (e.key === "Tab" && input.value) {
+    const m = Object.keys(cmds).find((k) => k.startsWith(input.value));
+    if (m) { input.value = m; e.preventDefault(); }
   }
 });
+document.querySelectorAll(".hint .k").forEach((k) => {
+  const pick = () => { input.value = k.textContent; input.focus(); };
+  k.addEventListener("click", pick);
+  k.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); } });
+});
 
-// The tab of the section in view is the active one.
-const seen = new IntersectionObserver((entries) => {
-  for (const entry of entries) {
-    if (!entry.isIntersecting) continue;
-    for (const tab of tabs) tab.setAttribute("aria-current", tab.hash === `#${entry.target.id}` ? "true" : "false");
-  }
-}, { rootMargin: "-40% 0px -55% 0px" });
-document.querySelectorAll("main section").forEach((s) => seen.observe(s));
+// Copy the build command.
+const copyBtn = $("copy-btn");
+copyBtn.addEventListener("click", async () => {
+  try { await navigator.clipboard.writeText($("src-cmd").textContent); copyBtn.textContent = "copied"; }
+  catch { const r = document.createRange(); r.selectNodeContents($("src-cmd")); const s = getSelection(); s.removeAllRanges(); s.addRange(r); copyBtn.textContent = "select"; }
+  setTimeout(() => { copyBtn.textContent = "copy"; }, 1400);
+});
+
+// Tab strip: scroll-spy, and ⌘1..6 or Ctrl+1..6.
+const links = [...document.querySelectorAll("#tabs a")];
+const targets = links.map((a) => document.querySelector(a.hash)).filter(Boolean);
+const setCurrent = (id) => links.forEach((a) => (a.hash === `#${id}` ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current")));
+if ("IntersectionObserver" in window) {
+  const io = new IntersectionObserver((es) => {
+    const vis = es.filter((e) => e.isIntersecting).sort((a, b) => a.boundingClientRect.top - b.boundingClientRect.top)[0];
+    if (vis) setCurrent(vis.target.id);
+  }, { rootMargin: "-25% 0px -60% 0px" });
+  targets.forEach((t) => io.observe(t));
+}
+addEventListener("keydown", (e) => {
+  if (!(e.metaKey || e.ctrlKey) || e.target === input) return;
+  const a = links.find((l) => l.dataset.key === e.key);
+  if (a) { e.preventDefault(); a.click(); }
+});
+
+// Hero: replay the session; the static markup is the resting state.
+const term = $("term");
+if (!matchMedia("(prefers-reduced-motion: reduce)").matches) {
+  const finalHTML = term.innerHTML;
+  const p = '<span class="p">~/code/api ❯</span> ';
+  const m = (s) => [`<span class="m">${s}</span>`, ""];
+  const lines = [[p, "cat .pinfold/layout.toml"], m("[[tabs]]"), m("[[tabs.panes]]"), m('run = "cargo run"'), m("[[tabs.panes]]"), m('split = "right"'), m('run = "claude"'), [p, "pinfold up"]];
+  let i = 0, j = 0, buf = "";
+  const cursor = '<span class="cursor">&nbsp;</span>';
+  term.innerHTML = cursor;
+  const tick = () => {
+    if (i >= lines.length) return void setTimeout(() => { term.innerHTML = `${finalHTML}\n${cursor}`; }, 300);
+    const [pre, typed] = lines[i];
+    if (j === 0) buf += pre;
+    if (j < typed.length) { buf += esc(typed[j++]); term.innerHTML = buf + cursor; return void setTimeout(tick, 65); }
+    buf += "\n"; i++; j = 0; term.innerHTML = buf + cursor; setTimeout(tick, typed ? 380 : 120);
+  };
+  setTimeout(tick, 450);
+}
