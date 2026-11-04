@@ -1617,15 +1617,18 @@ mod tests {
 
     #[test]
     fn a_pane_child_does_not_inherit_the_link() {
-        // These take the lowest free numbers, so neither end shares one with the two that ls
-        // opens for itself, which are the lowest free in the child.
-        let _low = [(); 2].map(|()| fs::File::open("/dev/null").unwrap());
         let (ours, theirs) = socket::pair().unwrap();
         let ends = [ours.as_raw_fd(), theirs.as_raw_fd()];
         let mut reactor = Reactor::new().unwrap();
         reactor.attach_window(ours, None).unwrap();
-        let script = "ls -1 /dev/fd; echo checked; sleep 30";
-        let pane = reactor.open_tab(shell(script), 24, 80).unwrap();
+        // The test opens nothing in the child, so only an inherited end can hold an end's
+        // number. Listing /dev/fd opens a descriptor, which can take a free end's number when
+        // parallel tests leave the ends low (#178).
+        let script = format!(
+            "for fd in 2 {} {}; do [ -e /dev/fd/$fd ] && echo $fd; done; echo checked; sleep 30",
+            ends[0], ends[1]
+        );
+        let pane = reactor.open_tab(shell(&script), 24, 80).unwrap();
         assert!(turn_until(&mut reactor, |r| on_screen(r, pane, "checked")));
         let engine = reactor.engine(pane).unwrap();
         let open: Vec<i32> = (0..24)
