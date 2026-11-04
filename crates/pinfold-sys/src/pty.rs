@@ -6,7 +6,6 @@ use std::mem::{ManuallyDrop, MaybeUninit};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::ptr;
 
 use crate::Terminal;
 
@@ -35,13 +34,56 @@ fn window_size(rows: u16, columns: u16) -> libc::winsize {
     }
 }
 
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    // In macOS since 10.13.4, which the `libc` crate does not declare.
+    fn ptsname_r(fd: libc::c_int, buf: *mut libc::c_char, buflen: libc::size_t) -> libc::c_int;
+}
+#[cfg(not(target_os = "macos"))]
+use libc::ptsname_r;
+
+/// Opens a PTY's master and slave, each close-on-exec from the moment it exists, so a child
+/// that another thread forks meanwhile inherits neither. A master a stray child holds would
+/// keep a killed pane's program from ending on macOS, as it waits for its output to drain.
+fn open_pair() -> io::Result<(OwnedFd, OwnedFd)> {
+    let flags = libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC;
+    // SAFETY: posix_openpt takes integer flags and returns a new fd or -1.
+    let open = || check(unsafe { libc::posix_openpt(flags) });
+    // macOS refuses with ENXIO when another PTY closes while this one opens with every slot
+    // in use: the kernel picks the slot past the end, then finds one free and grows nothing.
+    // Once more takes the freed slot; a table truly full refuses again.
+    let master = match open() {
+        Err(error) if error.raw_os_error() == Some(libc::ENXIO) => open(),
+        opened => opened,
+    }?;
+    // SAFETY: posix_openpt succeeded, so the fd is open and owned only by this function.
+    let master = unsafe { OwnedFd::from_raw_fd(master) };
+    // SAFETY: `master` is an open PTY master.
+    check(unsafe { libc::grantpt(master.as_raw_fd()) })?;
+    // SAFETY: `master` is an open PTY master.
+    check(unsafe { libc::unlockpt(master.as_raw_fd()) })?;
+    let mut name = [0 as libc::c_char; 128];
+    // SAFETY: `name` is writable for its whole length, which is the length passed.
+    let named = unsafe { ptsname_r(master.as_raw_fd(), name.as_mut_ptr(), name.len()) };
+    if named != 0 {
+        // Linux returns the error, macOS -1 with errno.
+        return Err(match named {
+            -1 => io::Error::last_os_error(),
+            error => io::Error::from_raw_os_error(error),
+        });
+    }
+    // SAFETY: ptsname_r succeeded, so `name` holds a NUL-terminated path.
+    let slave = check(unsafe { libc::open(name.as_ptr(), flags) })?;
+    // SAFETY: open succeeded, so the fd is open and owned only by this function.
+    Ok((master, unsafe { OwnedFd::from_raw_fd(slave) }))
+}
+
 impl Pty {
     /// Starts `command` as a session leader with a new PTY as its controlling terminal
     /// and its stdin, stdout and stderr.
     ///
-    /// The master is non-blocking and close-on-exec. It is briefly inheritable while it
-    /// is being opened, so one thread must make every call that creates a child, or
-    /// another pane's child could inherit this master.
+    /// The master is non-blocking, and both ends are close-on-exec from the moment they are
+    /// opened, so a child another thread starts at the same time inherits neither.
     ///
     /// # Errors
     ///
@@ -59,26 +101,10 @@ impl Pty {
     /// # Ok::<(), std::io::Error>(())
     /// ```
     pub fn spawn(mut command: Command, rows: u16, columns: u16) -> io::Result<Self> {
-        let (mut master, mut slave) = (-1, -1);
-        let mut size = window_size(rows, columns);
-        // SAFETY: both fd pointers are writable, null name and termios are allowed, and
-        // `size` outlives the call.
-        check(unsafe {
-            libc::openpty(
-                &raw mut master,
-                &raw mut slave,
-                ptr::null_mut(),
-                ptr::null_mut(),
-                (&raw mut size).cast(),
-            )
-        })?;
-        // SAFETY: openpty succeeded, so each fd is open and owned only by this function.
-        let (master, slave) =
-            unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
-        for fd in [&master, &slave] {
-            // SAFETY: `fd` is open, and F_SETFD takes an integer flag.
-            check(unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) })?;
-        }
+        let (master, slave) = open_pair()?;
+        let size = window_size(rows, columns);
+        // SAFETY: `master` is open, and `size` is a valid winsize for TIOCSWINSZ.
+        check(unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ as _, &raw const size) })?;
         // SAFETY: `master` is open, and F_SETFL takes an integer flag.
         check(unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFL, libc::O_NONBLOCK) })?;
         let mut found = MaybeUninit::<libc::stat>::zeroed();
@@ -176,6 +202,16 @@ mod tests {
         let mut command = Command::new("/bin/sh");
         command.args(["-c", script]);
         Pty::spawn(command, 24, 80).unwrap()
+    }
+
+    #[test]
+    fn both_ends_are_close_on_exec_from_the_start() {
+        let (master, slave) = open_pair().unwrap();
+        for fd in [master, slave] {
+            // SAFETY: `fd` is open, and F_GETFD takes no argument.
+            let flags = unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_GETFD) };
+            assert_eq!(flags & libc::FD_CLOEXEC, libc::FD_CLOEXEC);
+        }
     }
 
     /// Reads until `wanted` appears or five seconds pass.

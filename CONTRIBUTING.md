@@ -85,6 +85,17 @@ font: if the window opened none of the fallbacks in `pinfold-render`, its result
 `no CJK font` instead of `pass`, and the gate does not fail for that. Over budget still fails.
 The container in `tests/window/` installs no fonts, and the CI jobs install none either.
 
+Three more rows per window load it the way a long session does, against the same budget.
+`with a full glyph cache` runs `tests/window/full-cache.sh`, which pages through all of
+`heavy-screen.txt` a screen at a time, with lines wrapped so no glyph is clipped. That text holds
+more distinct characters than Metal's atlas holds, which a test in `xtask/src/mem_gate.rs`
+checks, so the cache is full when the window is read. `with 8 tabs` opens eight shells, so the
+tab bar draws eight tabs. `with its context menu open` runs the heavy screen with
+`PINFOLD_MEASURE_MENU` set, which a measured window, and only a measured one, takes as asking for
+its right-click menu to open in the middle of the grid. The Dock menu has no row: the Dock draws
+it, and no script can right-click the Dock. A pane's scrollback has no row in the window, as the
+window only holds the rows on screen; the core's `Scrollback at its cap` row covers it.
+
 `tests/window/run.sh` drives the real processes in a container: it types into a shell under
 Xvfb through `pinfold`, kills the window and reattaches, kills the core and checks that the window
 says so, and starts a window under headless Weston. `crates/pinfold-cli/tests/session.rs` covers

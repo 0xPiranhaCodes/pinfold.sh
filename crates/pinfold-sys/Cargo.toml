@@ -13,6 +13,9 @@ publish.workspace = true
 copypasta = { version = "0.10.2", optional = true }
 libc = "0.2.191"
 raw-window-handle = { version = "0.6.2", optional = true }
+# Its safe self-pipe handler, already built for alacritty_terminal. Off by default: its
+# channel and iterator, which the core does not use.
+signal-hook = { version = "0.4.6", default-features = false }
 
 [features]
 # Off in the core, which never touches the clipboard.
@@ -41,6 +44,11 @@ objc2-app-kit = { version = "0.3.2", optional = true, default-features = false, 
 objc2-foundation = { version = "0.3.2", optional = true }
 objc2-metal = { version = "0.3.2", optional = true }
 objc2-quartz-core = { version = "0.3.2", optional = true }
+
+[[test]]
+name = "dock_menu"
+harness = false
+required-features = ["menu"]
 
 # A crate cannot relax an inherited `forbid`, so this mirrors [workspace.lints].
 [lints.rust]

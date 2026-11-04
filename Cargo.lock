@@ -1313,6 +1313,7 @@ name = "pinfold-cli"
 version = "0.0.0"
 dependencies = [
  "pinfold-api",
+ "pinfold-config",
  "pinfold-core",
  "pinfold-proto",
  "pinfold-sys",
@@ -1341,16 +1342,21 @@ dependencies = [
  "insta",
  "lz4_flex",
  "mio",
+ "pinfold-api",
  "pinfold-mux",
  "pinfold-proto",
  "pinfold-sys",
  "proptest",
+ "regex-lite",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
 name = "pinfold-mux"
 version = "0.0.0"
 dependencies = [
+ "pinfold-proto",
  "proptest",
  "thiserror 2.0.21",
 ]
@@ -1388,6 +1394,7 @@ dependencies = [
  "objc2-metal 0.3.2",
  "objc2-quartz-core 0.3.2",
  "raw-window-handle",
+ "signal-hook",
 ]
 
 [[package]]
@@ -1603,6 +1610,12 @@ dependencies = [
  "memchr",
  "regex-syntax",
 ]
+
+[[package]]
+name = "regex-lite"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
 
 [[package]]
 name = "regex-syntax"

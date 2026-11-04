@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "pane.wait",
+  "description": "Waits on the caller's own pane, or one it spawned, until its shell finishes a command, draws its next prompt, its program writes anything, a later line matches a pattern or the program is quiet for a while, or the pane closes, or the timeout passes. Needs hello version 2 and a caller in a pane; a pane it did not spawn is refused, and match and idle waits take only the caller's own pane. At most 64 waits are parked in the core at once, and past that a wait is refused as busy. A wait whose connection closes is dropped.",
+  "type": "object",
+  "properties": {
+    "params": {
+      "type": "object",
+      "required": ["pane", "until", "timeout_ms"],
+      "properties": {
+        "pane": {
+          "description": "\"self\", or the number of the caller's own pane or one it spawned. Other panes are refused.",
+          "oneOf": [{ "const": "self" }, { "type": "integer", "minimum": 0 }]
+        },
+        "until": {
+          "enum": ["exit", "prompt", "output", "match", "idle"],
+          "description": "exit: OSC 133 D. prompt: OSC 133 A. output: any bytes from the program. match: a line printed after the wait began, as plain text without escape sequences, matches pattern. Each finished line is tried once, keeping its newest 64 KiB, and the newest 4 KiB of the line being printed is tried as it grows. idle: the program writes nothing for idle_ms. match and idle are refused on any pane but the caller's own, as streamed text from another pane would need redaction across reads. Output can fake the marks."
+        },
+        "pattern": {
+          "type": "string",
+          "maxLength": 1024,
+          "description": "With match only, and required there: a regex in the syntax of the Rust regex-lite crate, at most 1024 bytes, matched in linear time. Its \\w, \\d, \\s and case folding are ASCII only. One that compiles to more than 64 KiB is refused."
+        },
+        "idle_ms": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 600000,
+          "description": "With idle only, and required there."
+        },
+        "timeout_ms": { "type": "integer", "minimum": 0, "maximum": 600000 }
+      }
+    },
+    "result": {
+      "type": "object",
+      "required": ["outcome"],
+      "additionalProperties": false,
+      "properties": {
+        "outcome": {
+          "enum": ["exit", "prompt", "output", "match", "idle", "closed", "timeout"],
+          "description": "What ended the wait. A timeout is a result, not an error."
+        },
+        "exit": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 255,
+          "description": "With exit only: the status the shell gave in its D mark, or null if it gave none."
+        },
+        "line": {
+          "type": "string",
+          "description": "With match only: the line that matched, without its line end."
+        }
+      }
+    }
+  }
+}

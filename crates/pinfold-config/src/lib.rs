@@ -2,6 +2,7 @@
 //!
 //! The file is untrusted input, so nothing here panics on what it holds.
 
+use std::collections::BTreeMap;
 use std::env;
 use std::ffi::OsString;
 use std::fs::{self, Metadata, OpenOptions};
@@ -10,6 +11,8 @@ use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, de};
+
+pub mod workspace;
 
 /// The largest file read. A file written by hand is a few KiB, and this bounds startup.
 pub const MAX_BYTES: u64 = 64 * 1024;
@@ -40,6 +43,42 @@ pub struct Config {
     pub background_blur: bool,
     /// The `[keys]` table.
     pub keys: Keys,
+    /// The `[api]` table.
+    pub api: Api,
+    /// The `[agents.<name>]` tables: agent profiles, by name.
+    pub agents: BTreeMap<String, Agent>,
+}
+
+/// An `[agents.<name>]` table: how to start one agent.
+///
+/// ```
+/// let config = pinfold_config::parse(b"[agents.claude]\ncommand = [\"claude\"]\nsandbox = true")?;
+/// assert!(config.agents["claude"].sandbox);
+/// # Ok::<(), pinfold_config::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Agent {
+    /// The program and its arguments, run with no shell.
+    #[serde(deserialize_with = "command")]
+    pub command: Vec<String>,
+    /// Whether the agent runs in the system's sandbox, which hides [`private_dirs`] and other
+    /// panes' terminals from it.
+    #[serde(default)]
+    pub sandbox: bool,
+}
+
+/// The `[api]` table.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Api {
+    /// Whether the audit log is also written to `audit.log` in [`state_dir`], not only kept in
+    /// memory.
+    pub audit_log: bool,
+    /// Text that protects a pane when it appears in its foreground command line, with the
+    /// arguments joined by spaces. Nothing means the core's defaults.
+    #[serde(deserialize_with = "protect")]
+    pub protect: Option<Vec<String>>,
 }
 
 /// The `[keys]` table.
@@ -67,6 +106,8 @@ impl Default for Config {
             background_opacity: 1.0,
             background_blur: false,
             keys: Keys::default(),
+            api: Api::default(),
+            agents: BTreeMap::new(),
         }
     }
 }
@@ -117,6 +158,27 @@ fn prefix<'de, D: Deserializer<'de>>(deserializer: D) -> Result<char, D::Error> 
     }
 }
 
+fn protect<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Vec<String>>, D::Error> {
+    let patterns = Vec::<String>::deserialize(deserializer)?;
+    // An empty pattern would protect every pane, which is surely a mistake.
+    if patterns.iter().all(|pattern| !pattern.trim().is_empty()) {
+        Ok(Some(patterns))
+    } else {
+        Err(de::Error::custom("protect patterns must not be empty"))
+    }
+}
+
+fn command<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    let command = Vec::<String>::deserialize(deserializer)?;
+    // A leading dash would be read as an option by the sandbox tool that runs the program.
+    match command.first() {
+        Some(program) if !program.is_empty() && !program.starts_with('-') => Ok(command),
+        _ => Err(de::Error::custom(
+            "command must start with a program, not be empty or start with -",
+        )),
+    }
+}
+
 /// Why a config file was not used.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -158,6 +220,99 @@ fn path_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
     let absolute = |dir: Option<OsString>| dir.map(PathBuf::from).filter(|dir| dir.is_absolute());
     let base = absolute(xdg).or_else(|| Some(absolute(home)?.join(".config")))?;
     Some(base.join("pinfold/pinfold.toml"))
+}
+
+/// Returns the directory for state PinFold keeps between runs, or nothing if no base directory
+/// is set: `~/Library/Application Support/PinFold` on macOS, and elsewhere
+/// `$XDG_STATE_HOME/pinfold`, or `~/.local/state/pinfold` when that variable is unset.
+///
+/// ```
+/// if let Some(dir) = pinfold_config::state_dir() {
+///     assert!(dir.is_absolute());
+/// }
+/// ```
+pub fn state_dir() -> Option<PathBuf> {
+    state_dir_from(env::var_os("XDG_STATE_HOME"), env::var_os("HOME"))
+}
+
+fn state_dir_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    let absolute = |dir: Option<OsString>| dir.map(PathBuf::from).filter(|dir| dir.is_absolute());
+    if cfg!(target_os = "macos") {
+        return Some(absolute(home)?.join("Library/Application Support/PinFold"));
+    }
+    let base = absolute(xdg).or_else(|| Some(absolute(home)?.join(".local/state")))?;
+    Some(base.join("pinfold"))
+}
+
+/// Returns the directory for data a Linux sandboxed agent keeps, its shadow git directories
+/// (ADR-0039), or nothing if no base directory is set: `$XDG_DATA_HOME/pinfold`, or
+/// `~/.local/share/pinfold` when that variable is unset. The sandbox does not hide it.
+///
+/// ```
+/// if let Some(dir) = pinfold_config::data_dir() {
+///     assert!(dir.is_absolute());
+/// }
+/// ```
+pub fn data_dir() -> Option<PathBuf> {
+    data_dir_from(env::var_os("XDG_DATA_HOME"), env::var_os("HOME"))
+}
+
+fn data_dir_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    let absolute = |dir: Option<OsString>| dir.map(PathBuf::from).filter(|dir| dir.is_absolute());
+    let base = absolute(xdg).or_else(|| Some(absolute(home)?.join(".local/share")))?;
+    Some(base.join("pinfold"))
+}
+
+/// Returns what a sandboxed agent may not see: `~/.ssh`, the config file's directory and
+/// [`state_dir`], each also as it resolves through symlinks, so a config file linked from a
+/// dotfiles repo hides that repo's directory too. The runtime directory is not among them, as an
+/// agent needs its socket to call the API, which knows each caller by its terminal.
+///
+/// ```
+/// for dir in pinfold_config::private_dirs() {
+///     assert!(dir.is_absolute());
+/// }
+/// ```
+pub fn private_dirs() -> Vec<PathBuf> {
+    private_dirs_from(
+        env::var_os("XDG_CONFIG_HOME"),
+        env::var_os("XDG_STATE_HOME"),
+        env::var_os("HOME"),
+    )
+}
+
+fn private_dirs_from(
+    xdg_config: Option<OsString>,
+    xdg_state: Option<OsString>,
+    home: Option<OsString>,
+) -> Vec<PathBuf> {
+    let ssh = home
+        .clone()
+        .map(PathBuf::from)
+        .filter(|home| home.is_absolute())
+        .map(|home| home.join(".ssh"));
+    let config = path_from(xdg_config, home.clone());
+    // The file's own target, which may sit in another directory than the link.
+    let target = config.as_ref().and_then(|path| fs::canonicalize(path).ok());
+    let parent = |path: Option<PathBuf>| Some(path?.parent()?.to_path_buf());
+    let mut dirs = Vec::new();
+    for dir in [
+        ssh,
+        parent(config),
+        parent(target),
+        state_dir_from(xdg_state, home),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let real = fs::canonicalize(&dir).ok();
+        for dir in [Some(dir), real].into_iter().flatten() {
+            if !dirs.contains(&dir) {
+                dirs.push(dir);
+            }
+        }
+    }
+    dirs
 }
 
 /// Reads the config file, following a symlink, or returns the defaults if there is none.
@@ -328,6 +483,23 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_profile_is_read_and_unsandboxed_by_default() {
+        let config = parse(b"[agents.a]\ncommand = [\"/bin/a\", \"-x\"]\n[agents.b]\ncommand = [\"b\"]\nsandbox = true\n").unwrap();
+        assert_eq!(config.agents["a"].command, ["/bin/a", "-x"]);
+        assert!(!config.agents["a"].sandbox);
+        assert!(config.agents["b"].sandbox);
+        for command in ["[]", "[\"\"]", "[\"-p\"]"] {
+            let text = message(format!("[agents.a]\ncommand = {command}\n").as_bytes());
+            assert!(text.contains("line 2"), "{command}: {text}");
+            assert!(
+                text.contains("must start with a program"),
+                "{command}: {text}"
+            );
+        }
+        assert!(message(b"[agents.a]\nsandbox = true\n").contains("command"));
+    }
+
+    #[test]
     fn a_font_path_is_read() {
         assert_eq!(parse(b"").unwrap().font_path, None);
         let config = parse(b"font_path = \"/fonts/Mono.ttf\"").unwrap();
@@ -396,6 +568,18 @@ mod tests {
     }
 
     #[test]
+    fn protect_patterns_are_read() {
+        assert_eq!(parse(b"").unwrap().api.protect, None);
+        let config = parse(b"[api]\nprotect = [\"kubectl exec\"]\n").unwrap();
+        assert_eq!(config.api.protect, Some(vec!["kubectl exec".to_owned()]));
+        let text = message(b"[api]\nprotect = [\"psql\", \" \"]\n");
+        assert!(
+            text.contains("line 2") && text.contains("must not be empty"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn wrong_types_are_errors() {
         assert!(message(b"macos_option_as_alt = 1").contains("line 1"));
         assert!(message(b"background_blur = 30").contains("line 1"));
@@ -437,6 +621,60 @@ mod tests {
         }
         assert_eq!(path_from(None, None), None);
         assert_eq!(path_from(None, some("")), None);
+    }
+
+    #[test]
+    fn private_dirs_hide_where_a_linked_config_really_lives() {
+        let root = tempdir().unwrap();
+        let (home, dotfiles) = (root.path().join("home"), root.path().join("dotfiles"));
+        fs::create_dir_all(home.join(".config/pinfold")).unwrap();
+        fs::create_dir_all(&dotfiles).unwrap();
+        fs::write(dotfiles.join("pinfold.toml"), "").unwrap();
+        symlink(
+            dotfiles.join("pinfold.toml"),
+            home.join(".config/pinfold/pinfold.toml"),
+        )
+        .unwrap();
+        // Each link leads somewhere else, so each resolution is checked on its own.
+        let keys = root.path().join("keys");
+        fs::create_dir_all(&keys).unwrap();
+        symlink(&keys, home.join(".ssh")).unwrap();
+        let dirs = private_dirs_from(None, None, Some(home.clone().into()));
+        let dotfiles = fs::canonicalize(&dotfiles).unwrap();
+        let keys = fs::canonicalize(&keys).unwrap();
+        assert!(dirs.contains(&home.join(".ssh")), "{dirs:?}");
+        assert!(dirs.contains(&keys), "{dirs:?}");
+        assert!(dirs.contains(&home.join(".config/pinfold")), "{dirs:?}");
+        assert!(dirs.contains(&dotfiles), "{dirs:?}");
+        // A directory that is already real is listed once.
+        assert!(
+            dirs.iter()
+                .all(|dir| dirs.iter().filter(|other| *other == dir).count() == 1)
+        );
+        assert!(private_dirs_from(None, None, None).is_empty());
+    }
+
+    #[test]
+    fn the_state_dir_is_application_support_on_macos_and_xdg_elsewhere() {
+        let some = |dir: &str| Some(OsString::from(dir));
+        let found = state_dir_from(some("/xdg"), some("/home/me"));
+        let expected = if cfg!(target_os = "macos") {
+            "/home/me/Library/Application Support/PinFold"
+        } else {
+            "/xdg/pinfold"
+        };
+        assert_eq!(found, Some(PathBuf::from(expected)));
+        assert_eq!(state_dir_from(None, some("relative")), None);
+        let data = |xdg, home| data_dir_from(xdg, home);
+        assert_eq!(
+            data(some("/xdg"), None),
+            Some(PathBuf::from("/xdg/pinfold"))
+        );
+        let local = Some(PathBuf::from("/home/me/.local/share/pinfold"));
+        assert_eq!(data(some("relative"), some("/home/me")), local);
+        assert_eq!(data(None, None), None);
+        let config = parse(b"[api]\naudit_log = true").unwrap();
+        assert!(config.api.audit_log && !Config::default().api.audit_log);
     }
 
     #[test]

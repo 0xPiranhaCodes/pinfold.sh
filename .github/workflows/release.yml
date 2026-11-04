@@ -1,7 +1,8 @@
 name: Release (dry run)
 
-# Dry run: builds artifacts and keeps them on the run. Nothing is published, and no step
-# has write access. Signing, notarization, SBOM and publishing arrive in M5 (ADR-0016).
+# Dry run: builds artifacts and their SHA-256 files and keeps them on the run. Nothing is
+# published, and no step has write access. Signing, notarization, SBOM and publishing arrive
+# in M5 (ADR-0016).
 on:
   push:
     tags: ["v*"]
@@ -27,11 +28,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: cargo build --locked --release -p pinfold-cli --bin pinfold --bin pinfold-window
       - run: cargo build --locked --profile release-core -p pinfold-cli --bin pinfold-core
-      - run: tar -czf "pinfold-linux-${{ matrix.arch }}.tar.gz" -C target/release pinfold pinfold-window -C ../release-core pinfold-core
+      - name: Package Linux tarball
+        run: |
+          archive="pinfold-linux-${{ matrix.arch }}.tar.gz"
+          mkdir -p package
+          install -m 0755 target/release/pinfold target/release/pinfold-window package/
+          install -m 0755 target/release-core/pinfold-core package/
+          install -m 0644 LICENSE-MIT LICENSE-APACHE README.md package/
+          install -m 0644 crates/pinfold-render/fonts/OFL.txt package/
+          tar -czf "$archive" -C package .
+          sha256sum "$archive" > "$archive.sha256"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pinfold-linux-${{ matrix.arch }}
-          path: pinfold-linux-${{ matrix.arch }}.tar.gz
+          path: pinfold-linux-${{ matrix.arch }}.tar.gz*
 
   macos:
     runs-on: macos-latest
@@ -51,6 +61,7 @@ jobs:
           sh packaging/macos/bundle.sh universal/pinfold universal/pinfold-core universal/pinfold-window universal
           ditto -c -k --keepParent universal/PinFold.app universal/PinFold.app.zip
           rm -rf universal/PinFold.app
+          (cd universal && shasum -a 256 PinFold.app.zip > PinFold.app.zip.sha256)
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pinfold-macos-universal
