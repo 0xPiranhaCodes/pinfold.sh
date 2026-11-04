@@ -11,6 +11,8 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Fixed
 
+- The sandbox test fails on CI when Linux has no root-owned `bwrap`, instead of passing without running, so a green Linux job shows that the real bubblewrap hid the private paths and kept the caller's identity ([#106](https://github.com/0xPiranhaCodes/pinfold.sh/issues/106)).
+
 - A pane's program, a window and a detached core start with no descriptor past stderr but those handed to them on purpose, so a pane shell can no longer inherit an API connection that another thread accepted at the same moment, which on macOS is inheritable until it is marked ([#187](https://github.com/0xPiranhaCodes/pinfold.sh/issues/187)). On macOS each pane start then marks up to 65,536 descriptors, which adds about 11 ms when the core's open-file limit is that high and none at the default of 256.
 - The workspace trust store is read and written only in a state directory that passes the same owner and mode check as `sessions/`, and `trust.json` is opened without following a symlink, so another user who can write the state directory cannot make a layout's `run` lines type without a prompt. A refused directory trusts nothing, and the core logs why.
 - A core that `pinfold up` starts no longer idles forever when its window never opens: with no pane and no window 30 seconds after it starts, it exits ([#177](https://github.com/0xPiranhaCodes/pinfold.sh/issues/177)).
@@ -28,6 +30,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Changed
 
+- The version is `0.1.0-beta.1`, for the macOS beta. `PinFold.app` carries `0.1.0` as its short version and `0.1.1` as its build version, since Apple reads at most three integers there, and shows `0.1.0-beta.1` in the About panel. A `v*` tag that is not `v` and the workspace version fails the release run before it builds anything.
 - `packaging/macos/bundle.sh` takes an optional signing identity, signs the `pinfold` launcher and the app with the hardened runtime as well as the core and window, and checks the result. The release dry run keeps an ad-hoc-signed `PinFold-adhoc.dmg` built by the new `packaging/macos/dmg.sh` instead of a `.zip`.
 - `cargo xtask mem-gate` also reads each window with a full glyph cache, with 8 tabs and with its context menu open, and lists the Dock menu as not measured.
 - The release dry run can no longer be started by hand. It runs on version tags and on pull requests that change packaging or `release.yml`.
@@ -36,6 +39,7 @@ Entries are generated from Conventional Commits with git-cliff
 ### Added
 
 - The PinFold website in `site/`: one static page drawn as a PinFold window, with real screenshots, the agent states, approval and trust prompts, the memory gate's numbers from #169, install and licences. It makes no third-party requests and works without JavaScript; `site/README.md` says how to preview it.
+- Beta docs: an install guide, system requirements, file locations and uninstall steps in the README, the manual Mac checks ADR-0031 requires before the beta in `docs/beta/manual-checks.md`, known issues for testers in `docs/beta/known-issues.md`, and a macOS beta bug form that asks for the version, macOS, chip and a log excerpt with secrets removed.
 - On macOS, PinFold > About PinFold shows how to get started: the keys for tabs and splits, `pinfold agent` and `pinfold up`, the agent state glyphs, where the config file and log are, links to the website, docs and issues, and the licenses. The text is `Credits.rtf` in the app's resources, and `bundle.sh` fails if it is missing or does not parse.
 - A `v*` tag creates a draft GitHub release holding `PinFold.dmg`, the Linux tarballs, a CycloneDX SBOM from `cargo-cyclonedx` and `SHA256SUMS` over all of them, with a Sigstore-backed build provenance attestation per file. Only that job can write, it builds nothing, and the maintainer publishes the draft ([#181](https://github.com/0xPiranhaCodes/pinfold.sh/issues/181)).
 - A `v*` tag signs the macOS app with the Developer ID, the hardened runtime and a timestamp, and builds `PinFold.dmg`, notarized with `notarytool` and stapled, in a job that reads the signing secrets only from the maintainer-approved `release` environment and builds nothing ([#179](https://github.com/0xPiranhaCodes/pinfold.sh/issues/179), [#180](https://github.com/0xPiranhaCodes/pinfold.sh/issues/180)).

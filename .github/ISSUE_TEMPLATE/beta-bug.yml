@@ -1,0 +1,60 @@
+name: macOS beta bug
+description: Something in the macOS beta does not work as documented
+labels: ["type/bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check the [known issues](https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/docs/beta/known-issues.md) first. Report vulnerabilities privately, as [SECURITY.md](https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/SECURITY.md) says, not here.
+  - type: input
+    id: version
+    attributes:
+      label: PinFold version
+      description: From PinFold > About PinFold, such as `0.1.0-beta.1`.
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      description: From Apple menu > About This Mac, such as `26.6`.
+    validations:
+      required: true
+  - type: dropdown
+    id: chip
+    attributes:
+      label: Chip
+      options:
+        - Apple Silicon
+        - Intel
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open PinFold
+        2. Press ⌘D
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log excerpt
+      description: |
+        The lines around the problem from `$TMPDIR/pinfold-$(id -u)/default.log`. It starts empty each time a core starts, as after a restart, so copy it first.
+        **Remove secrets first.** PinFold keeps pane contents out of its log, but check for tokens, passwords, hostnames and paths you do not want public.
+      render: text
