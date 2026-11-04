@@ -55,6 +55,7 @@ Entries are generated from Conventional Commits with git-cliff
 - Fuzz targets `api_request` and `api_params` feed arbitrary control-socket request lines and `hello` parameters to the API parser, in the fuzz smoke run on each PR and nightly.
 - Tests that fail if the core stops refusing a debugger, or a pane's shell starts refusing one, and `tests/hardening/audit.sh`, which attacks real binaries by hand and is where the threat model's table comes from.
 - ADR-0031: a macOS beta comes before v0.1, which covers macOS and Linux.
+- ADR-0034, proposed: M5 in 13 steps. Snapshots hold the layout and the program each pane started, redacted, not the screen, restore runs only what a person trusted or confirms, and `pinfold up` opens a `.pinfold/layout.toml` trusted by its hash. Signing and notarization come first, for the macOS beta.
 - A spike measures what waiting for each Metal frame costs: a median 0.44 to 0.47 ms on a full 200x60 grid on an M1 Pro, so the wait stays rather than spending about 750 KB on more instance buffers.
 - The app is called PinFold: `PinFold.app`, the window's title and the Dock.
 - API `pane.spawn` opens a split or tab running the user's shell without taking focus, and `pane.close` closes it: a caller reads, sends to, waits on and closes the panes it spawned and theirs, the `children` scope.
