@@ -1,0 +1,158 @@
+/* Graphite Grid (docs/design/ui): one font, one cell grid, colour only where something needs you. */
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/jetbrains-mono-subset.woff2") format("woff2");
+  font-display: swap;
+}
+
+:root {
+  color-scheme: dark light;
+  --bg: #0e1014;
+  --pane: #12151a;
+  --chrome: #1c2026;
+  --lift: #2b323b;
+  --line: #343a44;
+  --text: #e2e5ea;
+  --muted: #9aa1ac;
+  --accent: #5cd6cb;
+  --accent-bg: #253c3b;
+  --amber: #f5b544;
+  --blue: #7aa7ff;
+  --green: #63d29a;
+  --red: #ff8a8a;
+  --grey: #9aa1ac;
+  --lh: 1.5rem;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #f4f5f7;
+    --pane: #ffffff;
+    --chrome: #e8eaee;
+    --lift: #dde1e6;
+    --line: #c3c8d0;
+    --text: #1b1f24;
+    --muted: #545b66;
+    --accent: #0b6b64;
+    --accent-bg: #d3efeb;
+    --amber: #8a5a00;
+    --blue: #1d5bc6;
+    --green: #1b7542;
+    --red: #b42828;
+    --grey: #5c6470;
+  }
+}
+
+* { box-sizing: border-box; }
+html { font-size: 15px; scroll-behavior: smooth; scroll-padding-top: var(--lh); }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 400 1rem/var(--lh) var(--mono);
+  font-variant-ligatures: none;
+  -webkit-text-size-adjust: 100%;
+}
+h1, h2, h3, p, ul, ol, pre, figure, table, dl { margin: 0 0 var(--lh); }
+h1, h2, h3 { font-size: 1rem; }
+a { color: var(--accent); text-underline-offset: 3px; }
+a:hover { background: var(--accent-bg); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+code, kbd, pre, samp { font: inherit; }
+kbd { color: var(--accent); }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+img { display: block; max-width: 100%; height: auto; }
+.vh { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.skip { position: absolute; left: 1ch; top: -3rem; background: var(--accent); color: var(--bg); padding: 0 1ch; z-index: 2; }
+.skip:focus { top: 0; }
+.muted { color: var(--muted); }
+.needs { color: var(--amber); } .run { color: var(--blue); } .done { color: var(--green); }
+.err { color: var(--red); } .idle { color: var(--grey); }
+
+/* The page is one PinFold window. */
+.window { max-width: 104ch; margin: var(--lh) auto; background: var(--pane); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; }
+.bar { display: flex; align-items: center; gap: 2ch; padding: calc(var(--lh) / 2) 2ch; background: var(--chrome); border-bottom: 1px solid var(--line); }
+.lights { display: flex; gap: 1ch; flex: none; }
+.lights i { width: 12px; height: 12px; border-radius: 50%; background: var(--line); }
+.bar .title { color: var(--muted); }
+.bar .clock { margin-left: auto; color: var(--muted); white-space: nowrap; }
+.tabs { display: flex; gap: 1ch; margin: 0; padding: calc(var(--lh) / 2) 2ch; list-style: none; overflow-x: auto; background: var(--chrome); border-bottom: 1px solid var(--line); }
+.tabs a { display: inline-flex; gap: 1ch; padding: 0 1.5ch; border-radius: 999px; background: var(--bg); color: var(--muted); text-decoration: none; white-space: nowrap; }
+.tabs a:hover, .tabs a[aria-current="true"] { background: var(--accent-bg); color: var(--accent); }
+.tabs kbd { color: inherit; opacity: 0.8; }
+main { padding: var(--lh) 2ch 0; }
+
+/* Sections take the app's own border row: "── Pinfold approval ─────". */
+section { margin-bottom: calc(var(--lh) * 2); }
+h2 { display: flex; gap: 1ch; white-space: nowrap; overflow: hidden; color: var(--accent); }
+h2::before { content: "──"; color: var(--line); }
+h2::after { content: "────────────────────────────────────────────────────────────────────────────────────────────────────────────────"; color: var(--line); }
+h2 kbd { color: var(--muted); }
+h3 { color: var(--text); }
+
+/* Hero: split down, like ⇧⌘D in the app. */
+.split { border: 1px solid var(--line); margin-bottom: var(--lh); }
+.split > * { padding: var(--lh) 2ch 0; }
+.split > * + * { border-top: 1px solid var(--accent); }
+.label { display: block; margin-bottom: var(--lh); color: var(--muted); }
+.label b { color: var(--bg); background: var(--accent); padding: 0 0.5ch; margin-right: 1ch; }
+h1 { font-size: 2rem; line-height: calc(var(--lh) * 2); font-weight: 700; text-wrap: balance; }
+h1 em { font-style: normal; color: var(--accent); }
+.cta { display: flex; flex-wrap: wrap; gap: 1ch 2ch; }
+.btn { padding: 0 1.5ch; border: 1px solid var(--accent); border-radius: 6px; text-decoration: none; }
+.btn.solid { background: var(--accent); color: var(--bg); }
+.term { min-height: calc(var(--lh) * 9); white-space: pre; overflow-x: auto; overflow-wrap: normal; }
+.term .p { color: var(--accent); }
+.cursor { background: var(--accent); }
+@media (prefers-reduced-motion: no-preference) {
+  .cursor { animation: blink 1.1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+}
+
+/* Panes in a section. */
+.pane { border: 1px solid var(--line); padding: var(--lh) 2ch 0; margin-bottom: var(--lh); }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(30ch, 1fr)); gap: 0 2ch; }
+.states { list-style: none; padding: 0; display: grid; grid-template-columns: 3ch 12ch minmax(0, 1fr); }
+.states li { display: contents; }
+figure img { border-radius: 10px; aspect-ratio: 1600 / 1024; background: var(--bg); }
+figcaption { color: var(--muted); }
+
+/* A cell-accurate copy of crates/pinfold-ui/src/approval.rs, drawn over muted pane text. */
+.ask { background: var(--bg); color: var(--muted); padding: 0 1ch; overflow-x: auto; white-space: pre; overflow-wrap: normal; }
+.ask .a { color: var(--amber); } .ask .t { color: var(--text); }
+
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+.scroll { overflow-x: auto; margin-bottom: var(--lh); }
+.scroll table { margin: 0; }
+th, td { text-align: left; padding: 0 2ch 0 0; white-space: nowrap; border-bottom: 1px dashed var(--line); line-height: calc(var(--lh) - 1px); }
+th { color: var(--muted); font-weight: 400; }
+td.n { text-align: right; }
+.meter { color: var(--accent); }
+.meter i { font-style: normal; color: var(--line); }
+
+/* The site shell. */
+.out { max-height: calc(var(--lh) * 16); overflow-y: auto; }
+.line { display: flex; gap: 1ch; margin-bottom: var(--lh); }
+.line label { color: var(--accent); white-space: nowrap; }
+.line input { flex: 1; min-width: 0; padding: 0; border: 0; background: transparent; color: var(--text); font: inherit; line-height: var(--lh); caret-color: var(--accent); }
+.line input:focus { outline: none; }
+.line:focus-within { box-shadow: 0 1px 0 var(--accent); }
+.js-only { display: none; }
+.js .js-only { display: flex; }
+
+dl.keys { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0 3ch; }
+dd { margin: 0; }
+
+.status { display: flex; flex-wrap: wrap; gap: 0 2ch; padding: calc(var(--lh) / 2) 2ch; background: var(--chrome); border-top: 1px solid var(--line); color: var(--muted); }
+.status .mem { margin-left: auto; }
+footer { max-width: 104ch; margin: 0 auto var(--lh); padding: 0 2ch; color: var(--muted); }
+
+@media (max-width: 720px) {
+  html { font-size: 14px; }
+  .window { margin: 0; border-radius: 0; border-inline: 0; }
+  .bar .clock { display: none; }
+  h1 { font-size: 1.5rem; }
+  main { padding-inline: 1ch; }
+  .pane, .split > * { padding-inline: 1ch; }
+}

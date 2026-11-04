@@ -35,6 +35,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Added
 
+- The PinFold website in `site/`: one static page drawn as a PinFold window, with real screenshots, the agent states, approval and trust prompts, the memory gate's numbers from #169, install and licences. It makes no third-party requests and works without JavaScript; `site/README.md` says how to preview it.
 - On macOS, PinFold > About PinFold shows how to get started: the keys for tabs and splits, `pinfold agent` and `pinfold up`, the agent state glyphs, where the config file and log are, links to the website, docs and issues, and the licenses. The text is `Credits.rtf` in the app's resources, and `bundle.sh` fails if it is missing or does not parse.
 - A `v*` tag creates a draft GitHub release holding `PinFold.dmg`, the Linux tarballs, a CycloneDX SBOM from `cargo-cyclonedx` and `SHA256SUMS` over all of them, with a Sigstore-backed build provenance attestation per file. Only that job can write, it builds nothing, and the maintainer publishes the draft ([#181](https://github.com/0xPiranhaCodes/pinfold.sh/issues/181)).
 - A `v*` tag signs the macOS app with the Developer ID, the hardened runtime and a timestamp, and builds `PinFold.dmg`, notarized with `notarytool` and stapled, in a job that reads the signing secrets only from the maintainer-approved `release` environment and builds nothing ([#179](https://github.com/0xPiranhaCodes/pinfold.sh/issues/179), [#180](https://github.com/0xPiranhaCodes/pinfold.sh/issues/180)).
