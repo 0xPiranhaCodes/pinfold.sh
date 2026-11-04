@@ -33,14 +33,9 @@ body:
     id: version
     attributes:
       label: Version
-      description: Output of `pinfold --version`, or a commit hash.
+      description: From PinFold > About PinFold, such as `0.1.0-beta.1`, or a commit hash.
     validations:
       required: true
-  - type: textarea
-    id: mem
-    attributes:
-      label: "`pinfold ctl mem` output"
-      render: text
   - type: textarea
     id: repro
     attributes:

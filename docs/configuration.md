@@ -257,8 +257,8 @@ wakes once a second for this. Changes to the font file itself are not noticed.
 
 ## Workspace layouts
 
-A project may describe tabs and panes in `.pinfold/layout.toml`. PinFold validates this format
-now; `pinfold up` and the trust prompt arrive separately, so it does not open the layout yet.
+A project may describe tabs and panes in `.pinfold/layout.toml`. `pinfold up [dir]` opens it,
+from the current directory if no `dir` is given, and a second run focuses its first open tab.
 
 ```toml
 [[tabs]]
@@ -279,8 +279,12 @@ directory and resolve inside the project, including after following directory sy
 
 A layout must have at least one tab and one pane in each tab. It may hold at most 32 tabs and 64
 panes in total, and the file may be at most 64 KiB. Unknown keys, invalid values, non-UTF-8,
-special files, and a symlink in place of `layout.toml` are refused. `run` is only data at this
-stage; a later trust prompt will show it before anything can run.
+special files, and a symlink in place of `layout.toml` are refused.
+
+A `run` line is typed into its pane's shell only once you trust the layout. The first time, and
+whenever the file changes, the window asks, showing the directory and every `run` line. `y`
+trusts it. `n` or Esc opens the layout as plain shells; `pinfold up` then says how many lines did
+not run and exits 1. The [API reference](api/README.md) has the details.
 
 ## Vi mode
 
