@@ -115,7 +115,8 @@ PinFold so that a new core starts.
 `pinfold up [dir]` reads `<dir>/.pinfold/layout.toml`, the current directory's by default,
 starts a core and a window as `pinfold` does, and sends `workspace.open` with each pane's split
 and cwd. A core it starts opens no shell of its own, so with no session to restore the window
-holds only the layout's tabs; a restored session stays, and the workspace joins it. A second run for the same directory focuses its first open tab. `run` lines are never
+holds only the layout's tabs; a restored session stays, and the workspace joins it. If no
+pane or window comes within 30 seconds, as when the window cannot start, that empty core exits. A second run for the same directory focuses its first open tab. `run` lines are never
 sent. If the layout has any, `pinfold up` asks `workspace.trust_state`, and unless the directory
 is trusted with the file's SHA-256 it asks `workspace.ask_trust`, so the window shows the
 prompt. It sends the hash with `workspace.open`, and the core reads the file again and types each

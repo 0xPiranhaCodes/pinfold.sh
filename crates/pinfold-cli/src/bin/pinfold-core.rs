@@ -36,6 +36,9 @@ const COLUMNS: u16 = 80;
 // A read with every byte escaped by JSON still fits in a peer's output queue.
 const _: () = assert!(2 * pinfold_core::io::MAX_READ + 4096 < control::MAX_OUTPUT);
 const IDLE: Duration = Duration::from_secs(3600);
+/// How long a core that starts with no pane waits for its first pane or window. `pinfold up`
+/// asks for the window within its 5 s start wait, so past this one is never coming.
+const EMPTY_WAIT: Duration = Duration::from_secs(30);
 
 /// Returns the window binary beside this one. It is resolved once, so nothing later can name
 /// another program.
@@ -726,13 +729,15 @@ fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result
     let mut window = reactor.has_window();
     // A core with no pane waits for its first window, as `pinfold up` asks for one next.
     let mut started = reactor.pane_count() > 0 || window;
+    let empty_until = Instant::now() + EMPTY_WAIT;
     loop {
         let now = Instant::now();
         let deadline = waits.deadline().into_iter().chain(grants.deadline()).min();
         let wait = deadline.map(|at| at.saturating_duration_since(now));
         let wait = wait
             .into_iter()
-            .chain(saver.as_ref().and_then(|saver| saver.wait(now)));
+            .chain(saver.as_ref().and_then(|saver| saver.wait(now)))
+            .chain((!started).then(|| empty_until.saturating_duration_since(now)));
         output::tap(&mut reactor, &waits, &subscribers);
         reactor.turn(Some(wait.min().unwrap_or(IDLE)))?;
         output::hand_out(&mut reactor, &mut waits, &subscribers);
@@ -830,9 +835,11 @@ fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result
                 audit::reply(&mut log, &reactor, request, result);
             }
         }
-        started |= reactor.has_window();
+        started |= reactor.pane_count() > 0 || reactor.has_window();
         let ending = reactor.is_terminated()
-            || started && reactor.pane_count() == 0 && !reactor.has_window();
+            || (started || Instant::now() >= empty_until)
+                && reactor.pane_count() == 0
+                && !reactor.has_window();
         if let Some(saver) = saver.as_mut() {
             let now = Instant::now();
             if reactor.was_active() {

@@ -420,6 +420,29 @@ fn a_launcher_reports_a_core_with_no_window_and_that_core_exits_with_its_shell()
     }
 }
 
+/// The core's `EMPTY_WAIT`.
+const EMPTY_WAIT: Duration = Duration::from_secs(30);
+
+#[test]
+fn a_core_started_with_no_shell_exits_if_no_window_ever_opens() {
+    let session = Session::new("ns", None).unwrap();
+    let mut core = session.start_core(&["--no-shell"], NOTE_PANE).unwrap();
+    let start = Instant::now();
+    let status = loop {
+        if let Some(status) = core.try_wait().unwrap() {
+            break status;
+        }
+        assert!(start.elapsed() < PATIENCE, "the empty core never exited");
+        thread::sleep(Duration::from_millis(100));
+    };
+    assert!(status.success(), "{}", session.read_log());
+    assert!(
+        start.elapsed() >= EMPTY_WAIT,
+        "it did not wait for a window"
+    );
+    assert!(session.read("pane").is_empty(), "it started a shell");
+}
+
 /// Whether a debugger can reach `pid`, as far as hardening decides that. On macOS a plain process
 /// is refused whatever the target, so the answer is how.
 #[cfg(target_os = "macos")]
