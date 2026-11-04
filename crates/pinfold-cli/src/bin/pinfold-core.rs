@@ -49,8 +49,7 @@ fn window_binary() -> io::Result<PathBuf> {
 }
 
 /// Binds the control socket and answers it on the API thread (ADR-0007, ADR-0032). The
-/// reactor's thread makes every spawn (see `pinfold_sys::socket::pair`) and holds the panes, so
-/// every request crosses to it. The channel holds one request per peer the API thread serves.
+/// reactor's thread makes every spawn and holds the panes, so every request crosses to it. The channel holds one request per peer the API thread serves.
 fn listen(waker: Arc<Waker>) -> io::Result<Receiver<Request>> {
     let control = Control::bind(&control::runtime_dir()).map_err(io::Error::other)?;
     let (ask, asked) = mpsc::sync_channel(control::MAX_PEERS);

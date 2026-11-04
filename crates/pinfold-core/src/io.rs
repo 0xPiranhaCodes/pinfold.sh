@@ -237,8 +237,6 @@ impl Reactor {
     /// Starts `command` on a new PTY and returns its pane number. The pane is in no tab, so it
     /// stays when its program exits, for reading. [`Reactor::open_tab`] adds one to the session.
     ///
-    /// The reactor's thread makes every spawn, which `pinfold_sys::socket::pair` requires.
-    ///
     /// # Errors
     ///
     /// Returns an error if the PTY cannot be created or polled, or the program cannot start.

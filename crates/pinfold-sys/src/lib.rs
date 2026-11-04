@@ -5,11 +5,12 @@
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::mem::MaybeUninit;
-use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd};
+use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd};
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(feature = "clipboard")]
 pub mod clipboard;
@@ -165,8 +166,59 @@ pub fn peer_terminal(socket: BorrowedFd<'_>) -> io::Result<Option<Terminal>> {
     platform::peer_terminal(socket.as_raw_fd())
 }
 
+/// Highest descriptor marked in a child where the system has no call to mark them all, which
+/// bounds the work there.
+// shortcut: a descriptor above this that is not close-on-exec would reach the child, walk
+// /dev/fd before the fork if the core ever holds that many.
+const MAX_CHECKED_FD: libc::c_long = 65_536;
+
+/// Set in a child once its strays are marked. Only children write it, each in its own copy of
+/// memory, so it reads false in every parent.
+static STRAYS_MARKED: AtomicBool = AtomicBool::new(false);
+
+/// Makes every descriptor past stderr close-on-exec in the child `command` starts, so it gets
+/// only those handed to it on purpose after this, or by [`inherit`]. Another thread can make a
+/// descriptor that is inheritable for a moment, such as a connection accepted on macOS, and a
+/// fork in that moment copies it. Every function here that starts a child calls this.
+pub(crate) fn mark_strays(command: &mut Command) {
+    // SAFETY: sysconf reads a limit and touches no memory.
+    let limit = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) }.clamp(0, MAX_CHECKED_FD) as RawFd;
+    // SAFETY: the closure makes only async-signal-safe calls, on integers it owns, and writes
+    // only an atomic in the child's own memory.
+    unsafe {
+        command.pre_exec(move || {
+            // Once, so a later closure cannot undo what an earlier one handed over.
+            if STRAYS_MARKED.swap(true, Ordering::Relaxed) {
+                return Ok(());
+            }
+            #[cfg(target_os = "linux")]
+            {
+                // SAFETY: close_range takes integers and touches no memory. Kernels before
+                // 5.11 refuse the flag, and the loop below does the same work.
+                let all = libc::syscall(
+                    libc::SYS_close_range,
+                    3,
+                    libc::c_uint::MAX,
+                    libc::CLOSE_RANGE_CLOEXEC,
+                );
+                if all == 0 {
+                    return Ok(());
+                }
+            }
+            for fd in 3..limit {
+                // Marked, not closed: the standard library's exec pipe is among them. A number
+                // that is not open only fails.
+                // SAFETY: F_SETFD takes an integer flag and touches no memory.
+                libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC);
+            }
+            Ok(())
+        });
+    }
+}
+
 /// Starts `command` in a session of its own, with nothing on stdin or stdout and `stderr` as its
-/// stderr, so it outlives the caller and the caller's terminal.
+/// stderr, so it outlives the caller and the caller's terminal. It gets no other descriptor
+/// past stderr.
 ///
 /// The caller exits soon after, and the system reaps the child from then on.
 ///
@@ -188,6 +240,7 @@ pub fn spawn_detached(mut command: Command, stderr: Stdio) -> io::Result<Child> 
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(stderr);
+    mark_strays(&mut command);
     // SAFETY: setsid is async-signal-safe, and the closure touches nothing else.
     unsafe {
         command.pre_exec(|| match libc::setsid() {
@@ -226,6 +279,8 @@ pub fn inherit(command: &mut Command, fd: OwnedFd) -> io::Result<()> {
             "a descriptor handed to a child must be 3 or above",
         ));
     }
+    // First, so a spawn here that marks strays later leaves this one alone.
+    mark_strays(command);
     // SAFETY: fcntl is async-signal-safe, and `fd` is open until the closure, and so `command`,
     // is dropped.
     unsafe {
