@@ -77,6 +77,29 @@ empty window takes about 19 MB there.
    The command finds the rest of PinFold beside the file the link points to, so link it, do
    not copy it.
 
+## Use it
+
+Open PinFold from Applications, or run `pinfold` in a terminal. The prefix is `Ctrl+a`: press
+it, then `c` for a tab, `|` to split right or `-` to split down; on macOS `⌘T`, `⌘D` and `⇧⌘D`
+do the same. [docs/configuration.md](docs/configuration.md#keys) lists every key.
+
+| Command                                     | What it does                                                  |
+| ------------------------------------------- | ------------------------------------------------------------- |
+| `pinfold`                                   | Open a window, starting PinFold if it is not running          |
+| `pinfold up [dir]`                          | Open a project's `.pinfold/layout.toml` as tabs and panes     |
+| `pinfold agent <name>`                      | In a pane, open a split running an `[agents.<name>]` profile  |
+| `pinfold ctl list`                          | List the session's panes                                      |
+| `pinfold ctl send <pane> <text>`            | Type text into a pane                                         |
+| `pinfold ctl wait <pane> --until <event> --timeout <seconds>` | Wait until a pane's command exits, it prints or it goes quiet |
+| `pinfold ctl grants`                        | List or revoke lasting cross-pane grants                      |
+| `pinfold ctl log`                           | Print or verify the audit log of API calls                    |
+| `pinfold ctl session save`                  | Save the session now                                          |
+| `pinfold mcp`                               | Serve PinFold's tools to a coding agent over MCP              |
+
+`pinfold --help` lists them, `pinfold <command> --help` explains one with examples, and
+`pinfold --version` prints the version. The [API reference](docs/api/README.md) covers what
+agents can do and what asks you first.
+
 **Requirements:** macOS on Apple Silicon or Intel; the app is universal. No minimum version is
 enforced yet. The automated tests run on macOS 26.6 and the app has been run by hand on macOS 27
 ([#190](https://github.com/0xPiranhaCodes/pinfold.sh/issues/190)).

@@ -36,7 +36,7 @@ cargo install --locked cargo-deny cargo-audit cargo-vet cargo-fuzz typos-cli
 | `pinfold-tools`  | Markdown reader, file manager, diff viewer                    |
 | `pinfold-config` | TOML schema, validation, hot reload, permission checks        |
 | `pinfold-sys`    | The only crate allowed `unsafe`                               |
-| `pinfold-cli`    | The `pinfold` and `pinfold-core` binaries                     |
+| `pinfold-cli`    | The `pinfold`, `pinfold-core` and `pinfold-window` binaries   |
 
 ## Running the checks
 

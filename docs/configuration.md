@@ -199,7 +199,7 @@ Press the prefix, then one of these. The prefix pressed twice sends it to the pr
 | `c`                | New tab                                                      |
 | `x`                | Close the pane, after Enter. Esc cancels                     |
 | `n`, `p`           | Next or previous tab, wrapping                               |
-| `0` to `9`         | Tab at that index, from `0`                                  |
+| `1` to `9`, `0`    | Tab 1 to 9, and `0` for tab 10                               |
 | <code>&#124;</code> or `%` | Split right                                          |
 | `-` or `"`         | Split down                                                   |
 | Arrows             | Move focus                                                   |

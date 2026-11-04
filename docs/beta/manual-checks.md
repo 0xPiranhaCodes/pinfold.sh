@@ -15,7 +15,8 @@ one was there. Record each run in the [results](#results) table.
    opens with one shell.
 4. Quit with `⌘Q` and open PinFold again. Expected: no Gatekeeper prompt this time.
 5. Add the CLI, as the [README](../../README.md#install-the-beta) says, and run `pinfold ctl list`
-   in a new Terminal.app window. Expected: the one pane is listed.
+   in a new Terminal.app window. Expected: the one pane is listed. `pinfold --version` prints
+   `pinfold 0.1.0-beta.1`, and `pinfold --help` lists every command.
 
 ## 2. Menu bar
 
