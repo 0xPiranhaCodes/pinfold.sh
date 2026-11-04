@@ -11,6 +11,8 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Fixed
 
+- The sandbox test fails on CI when Linux has no root-owned `bwrap`, instead of passing without running, so a green Linux job shows that the real bubblewrap hid the private paths and kept the caller's identity ([#106](https://github.com/0xPiranhaCodes/pinfold.sh/issues/106)).
+
 - A pane's program, a window and a detached core start with no descriptor past stderr but those handed to them on purpose, so a pane shell can no longer inherit an API connection that another thread accepted at the same moment, which on macOS is inheritable until it is marked ([#187](https://github.com/0xPiranhaCodes/pinfold.sh/issues/187)). On macOS each pane start then marks up to 65,536 descriptors, which adds about 11 ms when the core's open-file limit is that high and none at the default of 256.
 - The workspace trust store is read and written only in a state directory that passes the same owner and mode check as `sessions/`, and `trust.json` is opened without following a symlink, so another user who can write the state directory cannot make a layout's `run` lines type without a prompt. A refused directory trusts nothing, and the core logs why.
 - A core that `pinfold up` starts no longer idles forever when its window never opens: with no pane and no window 30 seconds after it starts, it exits ([#177](https://github.com/0xPiranhaCodes/pinfold.sh/issues/177)).
