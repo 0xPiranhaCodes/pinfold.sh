@@ -724,6 +724,8 @@ fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result
     }
     let mut log = audit::open(&config.api);
     let mut window = reactor.has_window();
+    // A core with no pane waits for its first window, as `pinfold up` asks for one next.
+    let mut started = reactor.pane_count() > 0 || window;
     loop {
         let now = Instant::now();
         let deadline = waits.deadline().into_iter().chain(grants.deadline()).min();
@@ -828,7 +830,9 @@ fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result
                 audit::reply(&mut log, &reactor, request, result);
             }
         }
-        let ending = reactor.is_terminated() || reactor.pane_count() == 0 && !reactor.has_window();
+        started |= reactor.has_window();
+        let ending = reactor.is_terminated()
+            || started && reactor.pane_count() == 0 && !reactor.has_window();
         if let Some(saver) = saver.as_mut() {
             let now = Instant::now();
             if reactor.was_active() {
@@ -846,10 +850,10 @@ fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result
     }
 }
 
-/// Hardens, then runs the first pane, whose shell is the user's.
-fn serve() -> io::Result<()> {
+/// Hardens, then runs `panes` shells, the user's, unless it restores a session.
+fn serve(panes: usize) -> io::Result<()> {
     pinfold_sys::harden()?;
-    daemon(1, None, true)
+    daemon(panes, None, true)
 }
 
 /// Plays `file` through a real pane, says so on stdout, then idles until killed.
@@ -870,7 +874,9 @@ fn replay(file: &str) -> io::Result<()> {
 
 fn run(args: &[&str]) -> io::Result<()> {
     match *args {
-        [] => serve(),
+        [] => serve(1),
+        // `pinfold up`, whose workspace is all a fresh core should open.
+        ["--no-shell"] => serve(0),
         // The daemon without hardening, which also leaves a way to attach a debugger
         // (ADR-0020). `cargo xtask mem-gate` measures these two, as /proc refuses a hardened one,
         // so they restore nothing, which would change what it measures.
@@ -880,7 +886,7 @@ fn run(args: &[&str]) -> io::Result<()> {
         }
         ["--replay", file] => replay(file),
         _ => Err(io::Error::other(
-            "usage: pinfold-core [--idle <panes> | --window <panes> <width>x<height> | --replay <file>]",
+            "usage: pinfold-core [--no-shell | --idle <panes> | --window <panes> <width>x<height> | --replay <file>]",
         )),
     }
 }

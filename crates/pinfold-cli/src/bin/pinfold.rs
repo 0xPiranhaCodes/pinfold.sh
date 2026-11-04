@@ -43,7 +43,8 @@ fn connect(path: &Path) -> std::io::Result<Option<UnixStream>> {
 /// Two launchers can both start one: the second core exits on the lock, and both connect to the
 /// first, so its exit status means nothing and only the socket decides. The second also empties
 /// the log, moments after the first core started, when there is next to nothing in it.
-fn core(directory: &Path) -> Result<UnixStream, Box<dyn Error>> {
+/// `arguments` go to a core this starts.
+fn core(directory: &Path, arguments: &[&str]) -> Result<UnixStream, Box<dyn Error>> {
     let path = &control::socket_path(directory);
     if let Some(stream) = connect(path)? {
         return Ok(stream);
@@ -54,7 +55,9 @@ fn core(directory: &Path) -> Result<UnixStream, Box<dyn Error>> {
     // Windows inherit this and panes do not, as a pane's stderr is its terminal. A log that will
     // not open is no reason to go without a core.
     let log = control::start_log(directory).map_or_else(|_| Stdio::null(), Stdio::from);
-    pinfold_sys::spawn_detached(Command::new(&binary), log)
+    let mut command = Command::new(&binary);
+    command.args(arguments);
+    pinfold_sys::spawn_detached(command, log)
         .map_err(|error| format!("cannot start {}: {error}", binary.display()))?;
     let start = Instant::now();
     while start.elapsed() < START_WAIT {
@@ -67,7 +70,7 @@ fn core(directory: &Path) -> Result<UnixStream, Box<dyn Error>> {
 }
 
 fn launch() -> Result<(), Box<dyn Error>> {
-    control::open_window(&core(&control::runtime_dir())?)?;
+    control::open_window(&core(&control::runtime_dir(), &[])?)?;
     Ok(())
 }
 
@@ -82,7 +85,8 @@ fn up(dir: Option<&str>) -> Result<bool, Box<dyn Error>> {
     let layout = workspace::parse(&bytes, &root)?;
     let (mut params, runs) = request(&root, &layout)?;
     let sha256 = trust::sha256(&bytes);
-    control::open_window(&core(&control::runtime_dir())?)?;
+    // A core this starts opens only the workspace, beside a restored session if there is one.
+    control::open_window(&core(&control::runtime_dir(), &["--no-shell"])?)?;
     let asked = json!({"root": params["root"], "sha256": sha256});
     let mut trusted = true;
     if !runs.is_empty()
