@@ -1481,9 +1481,10 @@ fn ctl(session: &Session, arguments: &str, name: &str) -> Result<String> {
     Ok(session.read(name))
 }
 
-/// Saves the session until each of its `panes` has a directory, from OSC 7 or its shell, and
-/// returns the snapshot.
-fn save_with_cwds(session: &Session, panes: usize) -> Result<serde_json::Value> {
+/// Saves the session until each of its `panes` has a directory under `under`, from OSC 7 or its
+/// shell, and returns the snapshot. A shell's own directory is known from its start, so a save
+/// can come before the shell's `cd`.
+fn save_with_cwds(session: &Session, panes: usize, under: &Path) -> Result<serde_json::Value> {
     let start = Instant::now();
     loop {
         // Until the core answers, ctl says why not, which is no JSON.
@@ -1493,7 +1494,12 @@ fn save_with_cwds(session: &Session, panes: usize) -> Result<serde_json::Value> 
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
         let listed = saved["panes"].as_array().map_or(&[][..], Vec::as_slice);
-        if listed.len() == panes && listed.iter().all(|pane| pane["cwd"].is_string()) {
+        let moved = |pane: &serde_json::Value| {
+            pane["cwd"]
+                .as_str()
+                .is_some_and(|cwd| Path::new(cwd).starts_with(under))
+        };
+        if listed.len() == panes && listed.iter().all(moved) {
             return Ok(saved);
         }
         assert!(start.elapsed() < PATIENCE, "{said}");
@@ -1538,7 +1544,7 @@ fn a_new_core_restores_the_layout_and_cwds_of_a_killed_one() {
     let mut core = session
         .start_core(&["--window", "2", "80x24"], &first)
         .unwrap();
-    let saved = save_with_cwds(&session, 3).unwrap();
+    let saved = save_with_cwds(&session, 3, &work).unwrap();
     assert_eq!(saved["tabs"].as_array().unwrap().len(), 2, "{saved}");
     assert!(saved["tabs"][1]["root"]["split"].is_object(), "{saved}");
     core.kill().unwrap();
@@ -1548,7 +1554,7 @@ fn a_new_core_restores_the_layout_and_cwds_of_a_killed_one() {
     // saved directory.
     let second = format!("pwd -P >> \"$PINFOLD_TEST_CLIENT/pwds\"; {tell}; exec sleep 60");
     let mut core = session.start_core(&[], &second).unwrap();
-    let restored = save_with_cwds(&session, 3).unwrap();
+    let restored = save_with_cwds(&session, 3, &work).unwrap();
     assert_eq!(restored["tabs"], saved["tabs"]);
     assert_eq!(restored["active"], saved["active"]);
     let cwds = |snapshot: &serde_json::Value| {
@@ -1559,6 +1565,11 @@ fn a_new_core_restores_the_layout_and_cwds_of_a_killed_one() {
         cwds.collect::<Vec<_>>()
     };
     assert_eq!(cwds(&restored), cwds(&saved));
+    // The restored shells say where they started, after the core already knows.
+    let start = Instant::now();
+    while session.read("pwds").lines().count() < 3 && start.elapsed() < PATIENCE {
+        thread::sleep(Duration::from_millis(10));
+    }
     let mut pwds: Vec<String> = session.read("pwds").lines().map(str::to_owned).collect();
     let mut expected = cwds(&saved);
     pwds.sort();
