@@ -309,9 +309,24 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
     }
 }
 
-/// The trust store, `trust.json` in the state directory.
+/// The trust store, `trust.json` in the state directory, once that directory is made and passes
+/// [`control::checked`]. A refused directory is logged and trusts nothing, so every layout
+/// prompts.
 fn trust_path() -> Result<PathBuf, String> {
+    use std::os::unix::fs::DirBuilderExt;
     let dir = pinfold_config::state_dir().ok_or("no state directory: HOME is not set")?;
+    let made = std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir);
+    if let Err(error) = made
+        .map_err(control::Error::from)
+        .and_then(|()| control::checked(&dir))
+    {
+        let reason = format!("the trust store is refused: {error}");
+        let _ = writeln!(io::stderr(), "pinfold-core: {reason}");
+        return Err(reason);
+    }
     Ok(dir.join("trust.json"))
 }
 
