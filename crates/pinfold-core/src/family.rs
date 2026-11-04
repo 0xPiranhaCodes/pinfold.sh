@@ -5,8 +5,11 @@
 //! the caller names, and goes through the same session code as the window's keys, so a window
 //! shows it like any other. It takes neither focus nor the active tab, so the keyboard stays
 //! where the person left it.
+//!
+//! A sandboxed agent and every pane under it start only sandboxed agents in its own working
+//! directory, so nothing it spawns runs outside its sandbox (threat model, Sandbox).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub use pinfold_proto::link::SplitWay;
@@ -17,6 +20,10 @@ use crate::tabs::FIRST_SIZE;
 /// Why a pane is out of a caller's reach.
 pub const NOT_YOURS: &str = "only the caller's own pane and the panes it spawned can be reached";
 
+/// Why a sandboxed caller may not start a pane.
+pub const CONTAINED: &str = "a sandboxed agent and the panes under it start only sandboxed agents, \
+                             in its own working directory";
+
 /// Which pane spawned which. Pane numbers are never used again, so an entry cannot come to
 /// name another pane.
 #[derive(Debug, Default)]
@@ -24,6 +31,8 @@ pub struct Family {
     /// `(child, parent)`, one for each spawned pane that is still open. A parent always has the
     /// lower number, as it was there first.
     parents: Vec<(usize, usize)>,
+    /// `(pane, working directory)`, one for each open pane that runs under a sandbox.
+    sandboxes: Vec<(usize, PathBuf)>,
 }
 
 impl Family {
@@ -82,12 +91,42 @@ impl Family {
         self.spawn_command(reactor, caller, of, way, cwd, shell)
     }
 
+    /// Returns why `caller` may not start a pane that runs under a sandbox writing to `sandbox`,
+    /// or under none: `caller`, or a pane above it, is sandboxed, and `sandbox` is not that
+    /// sandbox's working directory. Both paths are resolved, as
+    /// [`crate::sandbox::working_directory`] gives them. Not a directory inside it: on Linux
+    /// the agent could swap one for a symlink between this check and bubblewrap's bind, but it
+    /// cannot rename its own working directory or anything above it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CONTAINED`].
+    pub fn contain(
+        &mut self,
+        reactor: &Reactor,
+        caller: usize,
+        sandbox: Option<&Path>,
+    ) -> Result<(), &'static str> {
+        self.forget_closed(reactor);
+        let mut pane = Some(caller);
+        while let Some(at) = pane {
+            let held = self.sandboxes.iter().find(|entry| entry.0 == at);
+            if let Some((_, work)) = held
+                && sandbox != Some(work.as_path())
+            {
+                return Err(CONTAINED);
+            }
+            pane = self.parent(at);
+        }
+        Ok(())
+    }
+
     /// As [`Family::spawn`], but the pane runs `command`, which must come from the user, such as
     /// an agent profile, and never from the caller.
     ///
     /// # Errors
     ///
-    /// As [`Family::spawn`].
+    /// As [`Family::spawn`], and [`CONTAINED`] for a sandboxed caller.
     pub fn spawn_command(
         &mut self,
         reactor: &mut Reactor,
@@ -95,10 +134,45 @@ impl Family {
         of: usize,
         way: Option<SplitWay>,
         cwd: Option<&str>,
-        mut command: Command,
+        command: Command,
     ) -> Result<usize, String> {
         self.reach(reactor, Some(caller), of)?;
-        if let Some(cwd) = cwd.map(Path::new) {
+        self.contain(reactor, caller, None)?;
+        self.open(reactor, caller, of, way, cwd.map(Path::new), command)
+    }
+
+    /// As [`Family::spawn_command`], but `command` runs under a sandbox that writes to `work`,
+    /// where it starts. The pane, and every pane under it, is then held to `work`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Family::spawn`], and [`CONTAINED`] if [`Family::contain`] refuses `work`.
+    pub fn spawn_sandboxed(
+        &mut self,
+        reactor: &mut Reactor,
+        caller: usize,
+        of: usize,
+        way: Option<SplitWay>,
+        work: &Path,
+        command: Command,
+    ) -> Result<usize, String> {
+        self.reach(reactor, Some(caller), of)?;
+        self.contain(reactor, caller, Some(work))?;
+        let pane = self.open(reactor, caller, of, way, Some(work), command)?;
+        self.sandboxes.push((pane, work.to_path_buf()));
+        Ok(pane)
+    }
+
+    fn open(
+        &mut self,
+        reactor: &mut Reactor,
+        caller: usize,
+        of: usize,
+        way: Option<SplitWay>,
+        cwd: Option<&Path>,
+        mut command: Command,
+    ) -> Result<usize, String> {
+        if let Some(cwd) = cwd {
             if !cwd.is_absolute() || !cwd.is_dir() {
                 return Err("cwd must be an existing directory's absolute path".to_owned());
             }
@@ -155,6 +229,7 @@ impl Family {
                 }
             }
         }
+        self.sandboxes.retain(|entry| !reactor.is_closed(entry.0));
     }
 }
 
@@ -245,6 +320,47 @@ mod tests {
         assert_eq!(family.close(&mut reactor, Some(own), grandchild), Ok(()));
         assert!(reactor.is_closed(grandchild) && !reactor.is_closed(other));
         assert_eq!(family.parents, [(tab, own)]);
+    }
+
+    #[test]
+    fn a_sandboxed_pane_and_those_under_it_start_only_sandboxes_in_its_own_directory() {
+        let (mut reactor, own) = reactor();
+        let mut family = Family::default();
+        // Real directories, as a pane starts in its working directory.
+        let work = Path::new("/usr");
+        let boxed =
+            |family: &mut Family, reactor: &mut Reactor, caller, work: Option<&Path>| match work {
+                Some(work) => {
+                    family.spawn_sandboxed(reactor, caller, caller, None, work, waiting())
+                }
+                None => family.spawn_command(reactor, caller, caller, None, None, waiting()),
+            };
+        // An unsandboxed caller is as before.
+        let agent = boxed(&mut family, &mut reactor, own, Some(work)).unwrap();
+        assert!(family.spawn(&mut reactor, own, own, None, None).is_ok());
+
+        let refused = Err(CONTAINED.to_owned());
+        assert_eq!(
+            family.spawn(&mut reactor, agent, agent, None, None),
+            refused
+        );
+        let others = ["/", "/usrx", "/usr/bin"].map(|other| Some(Path::new(other)));
+        for other in [None].into_iter().chain(others) {
+            assert_eq!(boxed(&mut family, &mut reactor, agent, other), refused);
+        }
+        // A sandbox in its own directory may start, and is held to it.
+        let child = boxed(&mut family, &mut reactor, agent, Some(work)).unwrap();
+        assert_eq!(
+            family.spawn(&mut reactor, child, child, None, None),
+            refused
+        );
+        assert!(boxed(&mut family, &mut reactor, child, Some(work)).is_ok());
+        // Still held once the sandboxed pane above has closed.
+        assert_eq!(family.close(&mut reactor, Some(own), agent), Ok(()));
+        assert_eq!(
+            family.spawn(&mut reactor, child, child, None, None),
+            refused
+        );
     }
 
     #[test]

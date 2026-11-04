@@ -194,7 +194,26 @@ MB per pane by default, because hostile output can defeat a line limit.
 bubblewrap or Landlock on Linux and `sandbox-exec` on macOS, or under the agent CLI's own
 sandbox mode. The sandbox hides `~/.ssh`, `~/.config/pinfold`, `~/.local/state/pinfold`
 and other users' panes. Sandboxed agents run inside their pane's session, so they keep
-their identity.
+their identity. Everything a sandboxed agent starts stays sandboxed: it, and every pane
+under it, may start only sandboxed agent profiles (`agent.launch`) in its own working
+directory, and `pane.spawn`, which runs the user's plain shell, is refused. The core
+records each sandboxed pane's working directory when it launches it, as OSC 7 from the
+agent cannot be trusted. Not a directory inside it: on Linux the agent could swap that
+for a symlink before bubblewrap binds it, but it cannot rename its own working directory or
+what is above it. `pane.send` without approval reaches only the caller's own pane
+and those it spawned, which are then sandboxed too. A send to any other pane needs the
+person's approval in the window, so a grant the person gives a sandboxed agent lets it type
+outside its sandbox. `workspace.open`, `session.save`, workspace trust and grant
+administration need a caller in a terminal outside every pane, which a sandboxed agent
+cannot be. A caller with no terminal is unidentified, and the sandbox cannot open a new
+terminal, whose session no pane would hold: on macOS `sandbox-exec` denies every
+`/dev/ttys*` by name, so `openpty` fails, and on Linux bubblewrap's private `/dev` has an
+empty `/dev/pts`, so `/dev/ptmx` leads nowhere, and the agent may make no user namespace of
+its own, where it could mount a new devpts (`--disable-userns`, so bubblewrap 0.8 or later;
+an older one refuses the flag and the agent does not start). The agent keeps the terminal it was started
+on. `a_sandboxed_agent_cannot_open_a_new_terminal` in `crates/pinfold-core/tests/sandbox.rs`
+checks both with the real tools. A restored session runs shells, never agents, and no
+agent runs in them.
 
 ## Hardening untrusted input
 

@@ -2120,3 +2120,161 @@ run = "echo work''space-ran | tee -a \"$PINFOLD_TEST_CLIENT/ran\""
 fn probes(ran: &str) -> usize {
     ran.matches("probe").count()
 }
+
+/// The directory of the sandbox run in `directory`: under the target, not the temporary
+/// directory, which the sandbox lets an agent write on macOS and hides on Linux. It holds
+/// `out`, where no agent may write, and `proj/work`, the first agent's working directory.
+fn sandbox_base(directory: &Path) -> PathBuf {
+    let name = directory.file_name().unwrap_or_default();
+    Path::new(env!("CARGO_TARGET_TMPDIR")).join(name)
+}
+
+/// Not a test: each sandboxed agent of
+/// [`a_sandboxed_agent_starts_nothing_outside_its_sandbox`], which notes what it heard in its
+/// working directory. The first spawns a shell and types a write outside into it, launches an
+/// unsandboxed profile, then a sandboxed one, the second, which does the same, and last moves
+/// its reported directory up and launches a third there.
+#[test]
+fn boxed_process() {
+    if env::var_os(CLIENT).is_none() {
+        return;
+    }
+    let work = env::current_dir().unwrap();
+    // A third agent, which starts above the work directory.
+    if !work.ends_with("work") {
+        fs::write(work.join("level3"), "").unwrap();
+        thread::sleep(Duration::from_secs(30));
+        return;
+    }
+    let wide = work.parent().unwrap().to_path_buf();
+    let out = wide.parent().unwrap().join("out");
+    let touch = |name: &str| format!("touch '{}'\n", out.join(name).display());
+    let mut heard = String::new();
+    let spawn_and_type = |heard: &mut String, name: &str| {
+        let spawned = ask("pane.spawn", serde_json::json!({"where": "tab"})).unwrap();
+        writeln!(heard, "{spawned}").unwrap();
+        if let Some(pane) = spawned["result"]["pane"].as_u64() {
+            let text = touch(name);
+            let sent = ask("pane.send", serde_json::json!({"pane": pane, "text": text}));
+            writeln!(heard, "{}", sent.unwrap()).unwrap();
+        }
+    };
+    if fs::create_dir(work.join("b1")).is_ok() {
+        spawn_and_type(&mut heard, "child");
+        let plain = ask("agent.launch", serde_json::json!({"profile": "plain"})).unwrap();
+        let boxed = ask("agent.launch", serde_json::json!({"profile": "boxed"})).unwrap();
+        writeln!(heard, "{plain}\n{boxed}").unwrap();
+        assert!(wait_file(&work.join("level2")));
+        // Its directory, as OSC 7 reports it, moves above the one it was given.
+        let wide = wide.to_str().unwrap();
+        let mut stdout = std::io::stdout();
+        let osc = format!("\x1b]7;file://{wide}\x07");
+        std::io::Write::write_all(&mut stdout, osc.as_bytes()).unwrap();
+        std::io::Write::flush(&mut stdout).unwrap();
+        let mut hello = api(&[call(2, "pane.list", serde_json::json!({}))]).unwrap();
+        let own = next(&mut hello, || Ok(())).unwrap()["result"]["pane"].clone();
+        let start = Instant::now();
+        while start.elapsed() < PATIENCE {
+            let list = ask("pane.list", serde_json::json!({})).unwrap();
+            let panes = list["result"]["panes"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            if panes
+                .iter()
+                .any(|pane| pane["id"] == own && pane["cwd"] == wide)
+            {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        let wider = ask("agent.launch", serde_json::json!({"profile": "boxed"})).unwrap();
+        writeln!(heard, "{wider}").unwrap();
+        fs::write(work.join("level1"), heard).unwrap();
+    } else if fs::create_dir(work.join("b2")).is_ok() {
+        spawn_and_type(&mut heard, "grandchild");
+        fs::write(work.join("level2"), heard).unwrap();
+    }
+    thread::sleep(Duration::from_secs(30));
+}
+
+fn wait_file(path: &Path) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < PATIENCE && !path.exists() {
+        thread::sleep(Duration::from_millis(10));
+    }
+    path.exists()
+}
+
+#[test]
+fn a_sandboxed_agent_starts_nothing_outside_its_sandbox() {
+    let bwrap = ["/usr/bin/bwrap", "/usr/local/bin/bwrap", "/bin/bwrap"];
+    if cfg!(target_os = "linux") && !bwrap.iter().any(|path| Path::new(path).exists()) {
+        // CI must run the real bwrap (#106), so only a local machine may skip.
+        assert!(env::var_os("CI").is_none(), "no bwrap");
+        eprintln!("skipped: no bwrap");
+        return;
+    }
+    let session = Session::new("sx", None).unwrap();
+    let base = sandbox_base(&session.directory);
+    let _ = fs::remove_dir_all(&base);
+    let (out, wide) = (base.join("out"), base.join("proj"));
+    let work = wide.join("work");
+    for dir in [&out, &work] {
+        fs::create_dir_all(dir).unwrap();
+    }
+    for dir in [&base, &wide, &work] {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let (wide, work) = (wide.canonicalize().unwrap(), work.canonicalize().unwrap());
+    let exe = env::current_exe().unwrap();
+    let toml = format!(
+        "[agents.boxed]\ncommand = [\"{}\", \"--exact\", \"boxed_process\"]\nsandbox = true\n\
+         [agents.plain]\ncommand = [\"/usr/bin/touch\", \"{}\"]\n",
+        exe.display(),
+        out.join("plain").display()
+    );
+    fs::create_dir_all(session.directory.join("config/pinfold")).unwrap();
+    fs::write(session.directory.join("config/pinfold/pinfold.toml"), toml).unwrap();
+    let pinfold = format!("'{}'", session.directory.join("pinfold").display());
+    let client = "\"$PINFOLD_TEST_CLIENT\"";
+    // The first pane launches the first agent from the work directory; every other is a shell.
+    let shell = format!(
+        "if mkdir {client}/first; then cd '{}'; {pinfold} agent boxed --tab 2> {client}/e; \
+         exec sleep 60; fi; exec /bin/sh",
+        work.display()
+    );
+    let mut core = session.start_core(&["--idle", "1"], &shell).unwrap();
+    let done = wait_file(&work.join("level1"));
+    // Long enough for a shell to run a typed line.
+    thread::sleep(Duration::from_secs(2));
+    core.kill().unwrap();
+    core.wait().unwrap();
+    let read = |path: PathBuf| fs::read_to_string(path).unwrap_or_default();
+    let (level1, level2) = (read(work.join("level1")), read(work.join("level2")));
+    let written: Vec<_> = ["child", "grandchild", "plain"]
+        .into_iter()
+        .filter(|name| out.join(name).exists())
+        .collect();
+    let level3 = wide.join("level3").exists();
+    let _ = fs::remove_dir_all(&base);
+    assert!(done, "{} {}", session.read("e"), session.read_log());
+    assert!(written.is_empty(), "{written:?}\n{level1}\n{level2}");
+    assert!(!level3, "{level1}");
+    let replies: Vec<serde_json::Value> = level1
+        .lines()
+        .chain(level2.lines())
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    // Spawn, plain and wider launches are refused; the sandboxed launch is not.
+    let refused = |reply: &serde_json::Value| {
+        let message = reply["error"]["message"].as_str().unwrap_or_default();
+        message.contains("start only sandboxed agents")
+    };
+    assert_eq!(replies.len(), 5, "{level1}\n{level2}");
+    for index in [0, 1, 3, 4] {
+        assert!(refused(&replies[index]), "{index}: {level1}\n{level2}");
+    }
+    assert!(replies[2]["result"]["pane"].is_u64(), "{level1}");
+}

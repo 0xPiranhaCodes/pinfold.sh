@@ -3,7 +3,9 @@
 //! The sandbox wraps the pane's whole program: `sandbox-exec` on macOS and bubblewrap on Linux.
 //! Neither starts a session, so the agent keeps the pane's controlling terminal and session, by
 //! which the API knows it. TIOCSTI, which would type into that terminal, is denied: by the rules
-//! on macOS and by a seccomp filter on Linux.
+//! on macOS and by a seccomp filter on Linux. Nor can it open a new terminal, whose session the API
+//! would take for a person's outside every pane: macOS denies every terminal by name, and Linux
+//! gets an empty `/dev/pts` and no user namespace of its own to mount another in.
 //!
 //! The agent writes only to its [`WorkingDirectory`] and temporary directories: a fresh `/tmp` on
 //! Linux, and `/private/tmp` and the user's temporary directory on macOS. Git runs what its
@@ -26,6 +28,9 @@ use std::process::Command;
 /// Where bubblewrap is looked for. Not `PATH`, where an agent could put its own `bwrap` for the
 /// next launch.
 const BWRAP: [&str; 3] = ["/usr/bin/bwrap", "/usr/local/bin/bwrap", "/bin/bwrap"];
+
+/// The oldest bubblewrap with `--disable-userns`.
+const BWRAP_OLDEST: (u32, u32) = (0, 8);
 
 /// Variables that name other programs' sockets, which the agent does not get.
 const SOCKET_VARS: [&str; 3] = [
@@ -209,7 +214,8 @@ fn resolve(path: &Path) -> PathBuf {
 /// # Errors
 ///
 /// Returns an error if `program` is empty or starts with `-`, the system has no sandbox, or on
-/// Linux no `bwrap` in `/usr/bin`, `/usr/local/bin` or `/bin` is root's alone, the filter has
+/// Linux no `bwrap` in `/usr/bin`, `/usr/local/bin` or `/bin` is root's alone or it is older than
+/// 0.8, the filter has
 /// no rules for this architecture, the kernel has Landlock but its probe or rules fail, or the
 /// shadow cannot be made. Rules that fail in the child fail the spawn.
 ///
@@ -267,6 +273,8 @@ pub fn command(
                  change, so the sandboxed agent does not start",
             )
         })?;
+        let version = Command::new(&tool).arg("--version").output()?.stdout;
+        new_enough(&String::from_utf8_lossy(&version))?;
         let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
         let runtime = runtime.as_deref();
         let filter = pinfold_sys::seccomp::filter()?;
@@ -480,7 +488,8 @@ fn macos_args(
     all
 }
 
-/// `bwrap`'s arguments: the real root read-only, private `/dev`, `/proc`, `/tmp` and IPC, an
+/// `bwrap`'s arguments: the real root read-only, private `/dev` with no `/dev/pts`, `/proc`,
+/// `/tmp` and IPC, an
 /// empty `runtime` directory but for the API socket's, `work` writable but its `.git` and its
 /// submodules' `modules`, the seccomp filter on fd `filter`, an empty directory over each
 /// hidden one, and the shadow git directory writable over that. A missing directory is skipped, as bwrap would make it outside the sandbox, and so
@@ -500,6 +509,13 @@ fn linux_args(
         "/",
         "--dev",
         "/dev",
+        // `/dev/ptmx` leads here: a new terminal would be a session no pane holds, which the API
+        // takes for a person's terminal outside every pane. The agent's own is already open.
+        "--tmpfs",
+        "/dev/pts",
+        // Nor may the agent make a user namespace of its own, where it could mount a new devpts.
+        "--unshare-user",
+        "--disable-userns",
         "--unshare-pid",
         "--unshare-ipc",
         "--unshare-uts",
@@ -659,6 +675,27 @@ fn submodules(work: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Refuses a bubblewrap older than [`BWRAP_OLDEST`], from its `--version` text, such as
+/// `bubblewrap 0.11.0`, or one whose version it cannot read.
+fn new_enough(version: &str) -> io::Result<()> {
+    let version = version.trim();
+    let mut parts = version
+        .strip_prefix("bubblewrap ")
+        .unwrap_or_default()
+        .split('.');
+    let mut part = || parts.next().and_then(|part| part.parse::<u32>().ok());
+    match (part(), part()) {
+        (Some(major), Some(minor)) if (major, minor) >= BWRAP_OLDEST => Ok(()),
+        _ => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "sandboxed agents need bubblewrap 0.8 or later, for --disable-userns, but this is \
+                 {version:?}, so the sandboxed agent does not start"
+            ),
+        )),
+    }
+}
+
 /// The first of [`BWRAP`] that is [`trusted`].
 fn bwrap() -> Option<PathBuf> {
     BWRAP.iter().map(PathBuf::from).find(|tool| trusted(tool))
@@ -694,6 +731,32 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(mode)).unwrap();
         dir
+    }
+
+    #[test]
+    fn bubblewrap_before_0_8_or_of_no_known_version_is_refused_by_name() {
+        for version in ["bubblewrap 0.8.0\n", "bubblewrap 0.11.0", "bubblewrap 1.0"] {
+            assert!(new_enough(version).is_ok(), "{version}");
+        }
+        for version in [
+            "bubblewrap 0.6.1\n",
+            "bubblewrap 0.7",
+            "",
+            "bwrap",
+            "bubblewrap x.9",
+        ] {
+            let error = new_enough(version).unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+            let message = error.to_string();
+            assert!(
+                message.contains("need bubblewrap 0.8 or later"),
+                "{message}"
+            );
+            assert!(
+                message.contains(&format!("{:?}", version.trim())),
+                "{message}"
+            );
+        }
     }
 
     #[test]
@@ -790,13 +853,14 @@ mod tests {
             "agent",
         ];
         assert_eq!(args[args.len() - 7..], tmpfs);
-        // /tmp, the runtime directory and the outer hidden directory.
-        assert_eq!(args.iter().filter(|arg| **arg == "--tmpfs").count(), 3);
+        // /dev/pts, /tmp, the runtime directory and the outer hidden directory.
+        assert_eq!(args.iter().filter(|arg| **arg == "--tmpfs").count(), 4);
         assert!(!args.contains(&"/nowhere/.ssh"));
         assert!(!args.contains(&"--new-session"));
         assert!(!args.contains(&"--unshare-net"));
         assert_eq!(args[..3], ["--ro-bind", "/", "/"]);
         let has = |want: &[&str]| args.windows(want.len()).any(|got| got == want);
+        assert!(has(&["--dev", "/dev", "--tmpfs", "/dev/pts"]));
         assert!(has(&["--seccomp", "7"]));
         let (work, git) = (work.to_str().unwrap(), work.join(".git"));
         let (git, module) = (git.to_str().unwrap(), module.to_str().unwrap());
@@ -807,7 +871,13 @@ mod tests {
         assert!(has(&["--ro-bind", dir, dir]));
         assert!(has(&["--bind", work, work]));
         assert!(has(&["--ro-bind", git, git]));
-        for flag in ["--die-with-parent", "--unshare-ipc", "--unshare-uts"] {
+        for flag in [
+            "--die-with-parent",
+            "--unshare-ipc",
+            "--unshare-uts",
+            "--unshare-user",
+            "--disable-userns",
+        ] {
             assert!(args.contains(&flag), "{flag}");
         }
     }
