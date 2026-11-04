@@ -619,6 +619,18 @@ impl Reactor {
         })
     }
 
+    /// Returns where a pane is: its last OSC 7 directory, which output can fake (T4), or with
+    /// none its shell's working directory from the system, as most shells send no OSC 7.
+    #[must_use]
+    pub fn cwd(&self, pane: usize) -> Option<String> {
+        let pane = self.pane(pane)?;
+        let reported = pane.engine.cwd().map(|cwd| cwd.path.clone());
+        reported.or_else(|| {
+            let cwd = pinfold_sys::foreground::cwd(pane.pty.terminal().session).ok()?;
+            cwd.into_os_string().into_string().ok()
+        })
+    }
+
     /// Returns a pane's status, whether its agent reported it, and the reported message.
     #[must_use]
     pub fn status(&self, pane: usize) -> Option<(Status, bool, &str)> {
@@ -856,6 +868,21 @@ mod tests {
             message: "",
         };
         assert_eq!(reactor.list().collect::<Vec<_>>(), [expected]);
+    }
+
+    #[test]
+    fn a_cwd_is_the_last_osc_7_or_else_the_shells_own() {
+        let mut reactor = Reactor::new().unwrap();
+        let silent = reactor
+            .spawn(shell("cd /; echo ready; sleep 30"), 24, 80)
+            .unwrap();
+        let script = r"cd /; printf '\033]7;file:///tmp/work\007'; sleep 30";
+        let told = reactor.spawn(shell(script), 24, 80).unwrap();
+        let both = |r: &Reactor| on_screen(r, silent, "ready") && r.list().any(|p| p.cwd.is_some());
+        assert!(turn_until(&mut reactor, both));
+        assert_eq!(reactor.cwd(silent).as_deref(), Some("/"));
+        assert_eq!(reactor.cwd(told).as_deref(), Some("/tmp/work"));
+        assert_eq!(reactor.cwd(told + 1), None);
     }
 
     #[test]

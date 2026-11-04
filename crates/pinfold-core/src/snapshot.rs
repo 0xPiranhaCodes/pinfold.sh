@@ -1,5 +1,5 @@
-//! Session snapshots (ADR-0034): the layout and, per pane, its OSC 7 directory and the program it
-//! started, redacted. No scrollback, no screen and no environment, so the file holds nothing
+//! Session snapshots (ADR-0034): the layout and, per pane, its directory (ADR-0040) and the
+//! program it started, redacted. No scrollback, no screen and no environment, so the file holds nothing
 //! secret by design.
 
 use std::env;
@@ -117,7 +117,7 @@ pub enum Way {
 /// What a snapshot keeps of a pane.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pane {
-    /// The last OSC 7 directory, a hint that output can fake.
+    /// [`Reactor::cwd`](crate::io::Reactor::cwd): OSC 7, a hint output can fake, or the shell's.
     pub cwd: Option<String>,
     /// The program the pane started, without arguments, redacted and at most 4,096 bytes.
     pub command: Option<String>,
@@ -424,7 +424,9 @@ impl Reactor {
         let (tree, ids): (SessionTree, _) = self.session.to_tree();
         let panes = ids.iter().map(|id| {
             let listed = self.list().find(|pane| pane.id == *id as usize);
-            listed.map_or_else(Pane::default, |pane| Pane::new(pane.cwd, pane.command))
+            listed.map_or_else(Pane::default, |pane| {
+                Pane::new(self.cwd(pane.id).as_deref(), pane.command)
+            })
         });
         let tabs = tree.tabs.iter().map(|tab| Tab {
             root: layout(&tab.root),

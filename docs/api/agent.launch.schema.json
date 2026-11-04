@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "agent.launch",
-  "description": "Opens a split or a tab running an [agents.<name>] profile from the user's config, sandboxed if the profile says so, and returns its number at once (ADR-0036). The caller names a profile, never a program, arguments or directory; an unknown name is refused. The pane starts in the directory `of`'s shell last reported by OSC 7, if any; a sandboxed profile with none, or one the sandbox's working-directory checks refuse, is refused, as is one whose sandbox tool is missing. Reach, focus and caps are as for pane.spawn, and the new pane joins the caller's children scope. Needs hello version 2 and a caller in a pane.",
+  "description": "Opens a split or a tab running an [agents.<name>] profile from the user's config, sandboxed if the profile says so, and returns its number at once (ADR-0036). The caller names a profile, never a program, arguments or directory; an unknown name is refused. The pane starts in the directory `of`'s shell last reported by OSC 7, or with none in that shell's own working directory from the system (ADR-0040); a launch with neither is refused, as is a sandboxed one whose directory the sandbox's working-directory checks refuse, as is one whose sandbox tool is missing. Reach, focus and caps are as for pane.spawn, and the new pane joins the caller's children scope. Needs hello version 2 and a caller in a pane.",
   "type": "object",
   "properties": {
     "params": {

@@ -99,9 +99,10 @@ run with no shell; it must not be empty or start with `-`. `sandbox = true` runs
 system's sandbox. `pinfold agent <name>` in a pane opens a split to its right running the
 profile; `--down` splits below and `--tab` opens a tab. It calls the API's `agent.launch`, which
 takes only a profile's name, never a program ([ADR-0036](adr/0036-launching-agent-profiles.md)).
-The agent starts in the directory the pane's shell last reported with OSC 7, if any. A
-sandboxed profile needs that directory, which must pass the checks below, and is refused
-without it. The core reads profiles once, at start.
+The agent starts in the directory the pane's shell last reported with OSC 7, or with none in
+the shell's own working directory, read from the system
+([ADR-0040](adr/0040-pane-directory-falls-back-to-its-shell.md)). With neither, the launch is
+refused. A sandboxed profile's directory must also pass the checks below. The core reads profiles once, at start.
 
 ```toml
 [agents.claude]
