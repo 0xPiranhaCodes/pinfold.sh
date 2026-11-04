@@ -439,29 +439,27 @@ mod tests {
             let until = Until::matching(&worst).unwrap();
             assert!(waits.park(&reactor, ticket, pane, until, later).is_ok());
         }
-        // One try of the newest MAX_TAIL bytes is the most a settle can run past the budget.
-        let regex = Regex::new(&worst).unwrap();
-        let start = Instant::now();
-        assert!(check(&regex, &"a".repeat(MAX_TAIL)).is_none());
-        let one = start.elapsed();
-        // Slack for a loaded test machine; with no budget a settle ran all 256 tries.
-        let bound = MATCH_BUDGET + 4 * one;
         let line = "a".repeat(MAX_TAPPED - 1) + "\n";
-        let (mut slowest, mut turns) = (Duration::ZERO, 0);
         for _ in 0..4 {
             waits.feed(pane, &line);
         }
+        // No try starts once the budget has ended, so a settle runs past it by at most one try
+        // of the newest MAX_TAIL bytes. Counted, not timed, as a shared runner can stall a try.
+        let parked = &mut waits.parked[0];
+        let backlog = parked.line.len();
+        assert!(backlog > 0);
+        assert!(!try_lines(parked, Instant::now()));
+        assert_eq!(parked.line.len(), backlog);
+        let mut turns = 0;
+        let start = Instant::now();
         loop {
-            let start = Instant::now();
-            assert_eq!(waits.settle(&reactor, start), []);
-            slowest = slowest.max(start.elapsed());
+            assert_eq!(waits.settle(&reactor, Instant::now()), []);
             turns += 1;
             if waits.deadline() > Some(Instant::now()) {
                 break;
             }
         }
-        eprintln!("one try {one:?}, slowest settle {slowest:?} of {turns}, bound {bound:?}");
-        assert!(slowest <= bound, "{slowest:?} > {bound:?}");
+        // With no budget one settle tried all 256 lines.
         assert!(turns > 1);
         // Normal lines still match once the backlog is tried.
         waits.feed(pane, &format!("{}x\n", "a".repeat(200)));
