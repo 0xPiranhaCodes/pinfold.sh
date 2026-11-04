@@ -1,13 +1,14 @@
-name: Release (dry run)
+name: Release
 
-# Dry run: builds artifacts and their SHA-256 files and keeps them on the run. Nothing is
-# published, and no step has write access. Signing, notarization, SBOM and publishing arrive
-# in M5 (ADR-0016).
+# Builds artifacts and their SHA-256 files and keeps them on the run. Pull requests stop at an
+# ad-hoc-signed dry run. A version tag also signs the macOS app with the Developer ID and
+# notarizes its .dmg, in the `release` environment the maintainer approves. Nothing is
+# published, and no step has write access. SBOM and the draft release arrive next (ADR-0034).
 on:
   push:
     tags: ["v*"]
   # Not started by hand (#108). Pull requests that touch packaging run the dry run instead;
-  # M5 must keep signing and publishing to tag pushes only.
+  # signing and publishing stay on tag pushes only.
   pull_request:
     paths: [".github/workflows/release.yml", "packaging/**"]
 
@@ -26,6 +27,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: cargo build --locked --release -p pinfold-cli --bin pinfold --bin pinfold-window
       - run: cargo build --locked --profile release-core -p pinfold-cli --bin pinfold-core
       - name: Package Linux tarball
@@ -47,6 +50,8 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - name: Build universal binaries
         run: |
@@ -59,10 +64,95 @@ jobs:
           lipo -create target/*-apple-darwin/release-core/pinfold-core -output universal/pinfold-core
           lipo -create target/*-apple-darwin/release/pinfold-window -output universal/pinfold-window
           sh packaging/macos/bundle.sh universal/pinfold universal/pinfold-core universal/pinfold-window universal
-          ditto -c -k --keepParent universal/PinFold.app universal/PinFold.app.zip
+          sh packaging/macos/dmg.sh universal/PinFold.app universal/PinFold-adhoc.dmg
           rm -rf universal/PinFold.app
-          (cd universal && shasum -a 256 PinFold.app.zip > PinFold.app.zip.sha256)
+          (cd universal && shasum -a 256 PinFold-adhoc.dmg > PinFold-adhoc.dmg.sha256)
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pinfold-macos-universal
           path: universal/
+
+  # Signs what the macos job built. It runs no build, so no build script ever sees the secrets.
+  macos-sign:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: macos
+    runs-on: macos-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: pinfold-macos-universal
+          path: universal
+      - name: Import the Developer ID certificate
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          echo "KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+          password=$(openssl rand -base64 32)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          (umask 077 && printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12")
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -f pkcs12 -P "$MACOS_CERT_PASSWORD" \
+            -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$password" "$keychain" > /dev/null
+          # shellcheck disable=SC2046 # one keychain path per line, none with spaces
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          # Sign by hash, and only with this team's Developer ID Application identity.
+          identity=$(security find-identity -v -p codesigning "$keychain" |
+            awk -v suffix="($APPLE_TEAM_ID)\"" '/"Developer ID Application: / && index($0, suffix) { print $2 }')
+          if [ "$(printf '%s' "$identity" | grep -c .)" != 1 ]; then
+            echo "expected one Developer ID Application identity for the team" >&2
+            exit 1
+          fi
+          echo "IDENTITY=$identity" >> "$GITHUB_ENV"
+      - name: Sign PinFold.app and PinFold.dmg
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          sh packaging/macos/bundle.sh universal/pinfold universal/pinfold-core universal/pinfold-window signed "$IDENTITY"
+          team=$(codesign -dv signed/PinFold.app 2>&1 | sed -n 's/^TeamIdentifier=//p')
+          if [ "$team" != "$APPLE_TEAM_ID" ]; then echo "PinFold.app is signed by another team" >&2; exit 1; fi
+          sh packaging/macos/dmg.sh signed/PinFold.app signed/PinFold.dmg "$IDENTITY"
+          rm -rf signed/PinFold.app
+      - name: Notarize PinFold.dmg
+        env:
+          ASC_KEY_ID: ${{ secrets.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ secrets.ASC_ISSUER_ID }}
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          key="$RUNNER_TEMP/AuthKey.p8"
+          (umask 077 && printf '%s\n' "$ASC_KEY_P8" > "$key")
+          chmod 600 "$key"
+          set -- --key "$key" --key-id "$ASC_KEY_ID" --issuer "$ASC_ISSUER_ID"
+          result=$(xcrun notarytool submit signed/PinFold.dmg "$@" --wait --output-format json) || true
+          status=$(printf '%s' "$result" | jq -r '.status // empty' 2> /dev/null) || true
+          id=$(printf '%s' "$result" | jq -r '.id // empty' 2> /dev/null) || true
+          echo "notarization ${id:-not submitted}: ${status:-no status}"
+          if [ "$status" != Accepted ]; then
+            printf '%s\n' "$result"
+            if [ -n "$id" ]; then xcrun notarytool log "$id" "$@"; fi
+            exit 1
+          fi
+      - name: Staple and check PinFold.dmg
+        run: |
+          xcrun stapler staple signed/PinFold.dmg
+          xcrun stapler validate signed/PinFold.dmg
+          spctl -a -t open --context context:primary-signature -v signed/PinFold.dmg
+          (cd signed && shasum -a 256 PinFold.dmg > PinFold.dmg.sha256)
+      - name: Remove the keychain and API key
+        if: always()
+        run: |
+          if [ -n "${KEYCHAIN:-}" ]; then security delete-keychain "$KEYCHAIN" || true; fi
+          rm -f "$RUNNER_TEMP/cert.p12" "$RUNNER_TEMP/AuthKey.p8"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pinfold-macos-dmg
+          path: signed/PinFold.dmg*
