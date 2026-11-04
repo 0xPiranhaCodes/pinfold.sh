@@ -25,11 +25,15 @@ use crate::tap::{MAX_TAPPED, keep_newest};
 
 /// Most waits parked at once. Past it a wait is refused.
 pub const MAX_WAITS: usize = 64;
-/// Most heap a compiled pattern may take. A pattern that needs more is refused, so 64 match
-/// waits hold at most a few megabytes.
-const COMPILED: usize = 64 * 1024;
-/// Most of the unfinished line a match tries, the newest, once per settle if it grew.
+/// Most heap a compiled pattern may take. A pattern that needs more is refused. Matching costs
+/// time per byte in proportion to this, so it bounds one try of [`MAX_TAIL`] bytes to about
+/// 5 ms on a release build, even for the worst pattern that fits (#195).
+const COMPILED: usize = 8 * 1024;
+/// Most of a line a match tries, the newest.
 const MAX_TAIL: usize = 4096;
+/// Time one settle may spend trying lines across every wait. Lines past it wait for the next
+/// turn, which comes at once, so one pane's output cannot stall the reactor for every pane.
+pub const MATCH_BUDGET: Duration = Duration::from_millis(4);
 
 /// What ends a wait, besides its pane closing or its deadline.
 #[derive(Clone, Debug)]
@@ -41,8 +45,8 @@ pub enum Until {
     /// The program writes anything.
     Output,
     /// A line printed after the wait began matches, as plain text without escapes. Each
-    /// finished line is tried once, keeping its newest 64 KiB, and the newest 4 KiB of the line
-    /// being printed once a settle if it grew.
+    /// finished line is tried once and the line being printed once a settle if it grew, each
+    /// on its newest 4 KiB. Under a flood of output a wait keeps the newest 64 KiB untried.
     Match(Regex),
     /// The program writes nothing for this long.
     Idle(Duration),
@@ -101,8 +105,8 @@ struct Parked<T> {
     /// The pane when the wait began, so only a later change ends it.
     from: Progress,
     deadline: Instant,
-    /// For a match, the line being printed, whether it grew since it was last tried, and a
-    /// line that matched.
+    /// For a match, the text not yet tried (finished lines, then the line being printed),
+    /// whether that last line grew since it was last tried, and a line that matched.
     line: String,
     grew: bool,
     matched: Option<String>,
@@ -113,11 +117,19 @@ struct Parked<T> {
 /// The parked waits, each with a ticket that says whom to answer.
 pub struct Waits<T> {
     parked: Vec<Parked<T>>,
+    /// The wait the next settle tries first, so each gets its turn at the budget.
+    first: usize,
+    /// Whether the last settle ran out of budget with lines left to try.
+    behind: bool,
 }
 
 impl<T> Default for Waits<T> {
     fn default() -> Self {
-        Self { parked: Vec::new() }
+        Self {
+            parked: Vec::new(),
+            first: 0,
+            behind: false,
+        }
     }
 }
 
@@ -159,9 +171,13 @@ impl<T> Waits<T> {
         self.parked.retain(|parked| keep(&parked.ticket));
     }
 
-    /// Returns the nearest deadline, if any wait is parked.
+    /// Returns the nearest deadline, if any wait is parked. It is now while lines wait to be
+    /// tried.
     #[must_use]
     pub fn deadline(&self) -> Option<Instant> {
+        if self.behind {
+            return Some(Instant::now());
+        }
         let due = |parked: &Parked<T>| match parked.until {
             Until::Idle(quiet) => parked.deadline.min(parked.quiet + quiet),
             _ => parked.deadline,
@@ -179,21 +195,41 @@ impl<T> Waits<T> {
             .any(|parked| parked.pane == pane)
     }
 
-    /// Hands the match waits on `pane` the text it printed, and tries each line it finished.
-    /// The unfinished line is tried at the next settle, which settles a match.
+    /// Hands the match waits on `pane` the text it printed. The next settle tries it.
     pub fn feed(&mut self, pane: usize, text: &str) {
         for parked in &mut self.parked {
-            if let (Until::Match(regex), None) = (&parked.until, &parked.matched)
+            if let (Until::Match(_), None) = (&parked.until, &parked.matched)
                 && parked.pane == pane
             {
                 parked.grew |= !text.is_empty() && !text.ends_with('\n');
-                parked.matched = finished(regex, &mut parked.line, text);
+                parked.line.push_str(text);
+                // Trimmed only past twice the cap, so a line fed a byte at a time is not copied
+                // each time.
+                if parked.line.len() > 2 * MAX_TAPPED {
+                    keep_newest(&mut parked.line, MAX_TAPPED);
+                }
             }
         }
     }
 
-    /// Removes and returns every wait that has ended by `now`, with how.
+    /// Tries the lines fed to match waits for up to [`MATCH_BUDGET`], then removes and returns
+    /// every wait that has ended by `now`, with how.
     pub fn settle(&mut self, reactor: &Reactor, now: Instant) -> Vec<(T, Outcome)> {
+        let end = Instant::now() + MATCH_BUDGET;
+        let count = self.parked.len();
+        self.first = if count == 0 { 0 } else { self.first % count };
+        self.behind = false;
+        for step in 0..count {
+            let index = (self.first + step) % count;
+            if let Some(parked) = self.parked.get_mut(index)
+                && !try_lines(parked, end)
+            {
+                // The waits after this one go first next time.
+                self.behind = true;
+                self.first = index + 1;
+                break;
+            }
+        }
         let mut settled = Vec::new();
         let mut index = 0;
         while let Some(parked) = self.parked.get_mut(index) {
@@ -206,27 +242,40 @@ impl<T> Waits<T> {
     }
 }
 
-/// Adds `text` to the unfinished `line` so far, and returns the first line it finishes that
-/// matches. Each byte is looked at a bounded number of times, however small the pieces.
-fn finished(regex: &Regex, line: &mut String, text: &str) -> Option<String> {
-    line.push_str(text);
-    let unfinished = text
-        .rfind('\n')
-        .map_or(0, |end| line.len() - text.len() + end + 1);
-    let mut lines = line[..unfinished].split_terminator('\n');
-    let found = lines.find_map(|each| check(regex, each));
-    line.drain(..unfinished);
-    // Trimmed only past twice the cap, so a line fed a byte at a time is not copied each time.
-    if line.len() > 2 * MAX_TAPPED {
-        keep_newest(line, MAX_TAPPED);
+/// Tries a match wait's finished lines in order, then its unfinished line if it grew, until one
+/// matches or `end` passes. Returns false if lines are left to try.
+fn try_lines<T>(parked: &mut Parked<T>, end: Instant) -> bool {
+    let Until::Match(regex) = &parked.until else {
+        return true;
+    };
+    let mut tried = 0;
+    let mut done = true;
+    while parked.matched.is_none() {
+        if Instant::now() >= end {
+            done = !parked.grew && !parked.line[tried..].contains('\n');
+            break;
+        }
+        match parked.line[tried..].find('\n') {
+            Some(at) => {
+                parked.matched = check(regex, &parked.line[tried..tried + at]);
+                tried += at + 1;
+            }
+            None => {
+                if std::mem::take(&mut parked.grew) {
+                    parked.matched = check(regex, &parked.line[tried..]);
+                }
+                break;
+            }
+        }
     }
-    found
+    parked.line.drain(..tried);
+    done
 }
 
-/// Returns `line` if it matches.
+/// Returns `line` if its newest [`MAX_TAIL`] bytes match.
 fn check(regex: &Regex, line: &str) -> Option<String> {
     // A terminal's line ends are `\r\n`, or `\r\r\n` from a program that wrote `\r\n`.
-    let line = line.trim_end_matches('\r');
+    let line = newest(line.trim_end_matches('\r'), MAX_TAIL);
     regex.is_match(line).then(|| line.to_owned())
 }
 
@@ -240,12 +289,6 @@ fn newest(text: &str, most: usize) -> &str {
 }
 
 fn outcome<T>(parked: &mut Parked<T>, now_at: Option<Progress>, now: Instant) -> Option<Outcome> {
-    if let Until::Match(regex) = &parked.until
-        && parked.matched.is_none()
-        && std::mem::take(&mut parked.grew)
-    {
-        parked.matched = check(regex, newest(&parked.line, MAX_TAIL));
-    }
     if let Some(line) = parked.matched.take() {
         return Some(Outcome::Matched(line));
     }
@@ -364,16 +407,69 @@ mod tests {
     #[test]
     fn a_pattern_too_large_is_refused_and_a_line_keeps_its_newest_bytes() {
         assert!(Until::matching(r"(?i)\w+ \d+$").is_ok());
-        let refused = Until::matching(r"\w{4000}").unwrap_err();
+        assert!(Until::matching(r"\w{100}x").is_ok());
+        let refused = Until::matching(r"\w{200}").unwrap_err();
         assert_eq!(refused, "not a valid pattern, or too large");
-        let regex = Regex::new("^b").unwrap();
-        let mut line = String::new();
-        let long = "a".repeat(2 * MAX_TAPPED + 1);
-        assert_eq!(finished(&regex, &mut line, &long), None);
-        assert_eq!(line.len(), MAX_TAPPED);
-        assert_eq!(finished(&regex, &mut line, "a\nb"), None);
-        assert_eq!(finished(&regex, &mut line, "\n"), Some("b".to_owned()));
-        assert!(line.is_empty());
+        let mut reactor = Reactor::new().unwrap();
+        let pane = reactor.spawn(shell("sleep 30"), 24, 80).unwrap();
+        let mut waits = Waits::default();
+        let later = Instant::now() + Duration::from_secs(30);
+        let until = Until::matching("^b").unwrap();
+        assert!(waits.park(&reactor, 0, pane, until, later).is_ok());
+        waits.feed(pane, &"a".repeat(2 * MAX_TAPPED + 1));
+        assert_eq!(waits.parked[0].line.len(), MAX_TAPPED);
+        waits.feed(pane, "a\nb");
+        let settled = waits.settle(&reactor, Instant::now());
+        assert_eq!(settled, [(0, Outcome::Matched("b".to_owned()))]);
+    }
+
+    /// #195: the worst pattern the limit takes, on the most waits, fed long lines.
+    #[test]
+    fn matching_long_lines_keeps_each_settle_within_the_budget() {
+        let mut reactor = Reactor::new().unwrap();
+        let pane = reactor.spawn(shell("sleep 30"), 24, 80).unwrap();
+        let mut waits = Waits::default();
+        let later = Instant::now() + Duration::from_secs(30);
+        let worst = (1..)
+            .map(|n| format!(r"\w{{{n}}}x"))
+            .take_while(|pattern| Until::matching(pattern).is_ok())
+            .last()
+            .unwrap();
+        for ticket in 0..MAX_WAITS {
+            let until = Until::matching(&worst).unwrap();
+            assert!(waits.park(&reactor, ticket, pane, until, later).is_ok());
+        }
+        // One try of the newest MAX_TAIL bytes is the most a settle can run past the budget.
+        let regex = Regex::new(&worst).unwrap();
+        let start = Instant::now();
+        assert!(check(&regex, &"a".repeat(MAX_TAIL)).is_none());
+        let one = start.elapsed();
+        // Slack for a loaded test machine; with no budget a settle ran all 256 tries.
+        let bound = MATCH_BUDGET + 4 * one;
+        let line = "a".repeat(MAX_TAPPED - 1) + "\n";
+        let (mut slowest, mut turns) = (Duration::ZERO, 0);
+        for _ in 0..4 {
+            waits.feed(pane, &line);
+        }
+        loop {
+            let start = Instant::now();
+            assert_eq!(waits.settle(&reactor, start), []);
+            slowest = slowest.max(start.elapsed());
+            turns += 1;
+            if waits.deadline() > Some(Instant::now()) {
+                break;
+            }
+        }
+        eprintln!("one try {one:?}, slowest settle {slowest:?} of {turns}, bound {bound:?}");
+        assert!(slowest <= bound, "{slowest:?} > {bound:?}");
+        assert!(turns > 1);
+        // Normal lines still match once the backlog is tried.
+        waits.feed(pane, &format!("{}x\n", "a".repeat(200)));
+        let mut settled = 0;
+        while settled < MAX_WAITS && start.elapsed() < Duration::from_secs(60) {
+            settled += waits.settle(&reactor, Instant::now()).len();
+        }
+        assert_eq!(settled, MAX_WAITS);
     }
 
     #[test]

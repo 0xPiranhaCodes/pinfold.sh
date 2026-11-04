@@ -81,7 +81,8 @@ the core took too long to answer; a refusal, such as "the core is busy", does no
 `pane.wait` waits on a pane in reach for at most 10 minutes, and the core parks at most 64
 waits. It waits for a command to exit, a prompt, any output, a later line that matches a regex
 of at most 1 KiB (`match`, with ASCII-only `\w`, `\d`, `\s` and case folding), or a quiet spell (`idle`); `match` and `idle` take only the
-caller's own pane. `events.subscribe` sends `event` notifications on its connection. Its
+caller's own pane. A `match` pattern that compiles past 8 KiB, such as `\w{200}`, is refused, and each line is
+tried on its newest 4 KiB. `events.subscribe` sends `event` notifications on its connection. Its
 `pane.output` events carry what the caller's own pane printed, up to 4 KiB each, and never
 another pane's, its children's included; a caller outside any pane that asks for them is
 refused. Streaming another pane's text would need redaction that holds state across reads, which
