@@ -11,6 +11,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Fixed
 
+- PinFold opens after an update whose window speaks another link version than the core still running from before it, instead of failing silently on every launch ([#196](https://github.com/0xPiranhaCodes/pinfold.sh/issues/196)). The core logs both versions and answers `window.open` with an `update` that names the panes running a program. If none is, the launcher ends that core, which saves the session, and a new core restores it and opens the window. If one is, it asks first, in the terminal or, from the Dock, in a dialog, and "Not now" keeps the old session running. `hello` version 2 returns the core's link version.
 - The sandbox test fails on CI when Linux has no root-owned `bwrap`, instead of passing without running, so a green Linux job shows that the real bubblewrap hid the private paths and kept the caller's identity ([#106](https://github.com/0xPiranhaCodes/pinfold.sh/issues/106)).
 
 - A pane's program, a window and a detached core start with no descriptor past stderr but those handed to them on purpose, so a pane shell can no longer inherit an API connection that another thread accepted at the same moment, which on macOS is inheritable until it is marked ([#187](https://github.com/0xPiranhaCodes/pinfold.sh/issues/187)). On macOS each pane start then marks up to 65,536 descriptors, which adds about 11 ms when the core's open-file limit is that high and none at the default of 256.

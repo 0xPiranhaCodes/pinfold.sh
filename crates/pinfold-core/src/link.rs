@@ -513,7 +513,12 @@ impl Window {
                     left = left.saturating_sub(count);
                     let mut input = buffer.get(..count).unwrap_or_default();
                     while let Some(request) =
-                        self.decoder.next_request(&mut input).map_err(|_| Ended)?
+                        self.decoder.next_request(&mut input).map_err(|error| {
+                            if let link::Error::Version { theirs, .. } = error {
+                                reactor.host.other_version = Some(theirs);
+                            }
+                            Ended
+                        })?
                     {
                         self.session.apply(request, reactor)?;
                     }
@@ -549,6 +554,8 @@ impl Window {
 pub(crate) struct Host {
     window: Option<Window>,
     dying: Vec<Child>,
+    /// The link version of the last window that spoke another one, as an upgrade's does.
+    other_version: Option<u16>,
 }
 
 impl Host {
@@ -641,11 +648,18 @@ impl Reactor {
         if !Path::new(command.get_program()).is_absolute() {
             return Err(io::Error::from(ErrorKind::InvalidInput));
         }
+        self.host.other_version = None;
         let (ours, theirs) = socket::pair()?;
         command.stdin(Stdio::null());
         let child = socket::spawn_with_link(command, theirs)?;
         self.attach_window(ours, Some(child))?;
         Ok(WindowOpen::Started)
+    }
+
+    /// Takes the link version of a window that ended because it speaks another one than
+    /// [`VERSION`]: one from a newer install, started by a core still running the old one.
+    pub fn take_other_version(&mut self) -> Option<u16> {
+        self.host.other_version.take()
     }
 
     /// Returns whether a window's link is open.
@@ -984,6 +998,8 @@ mod tests {
         let [low, high] = (VERSION + 1).to_le_bytes();
         peer.raw(&[3, 0, 0, 0, 0, low, high]);
         assert_link_ends_and_pty_lives(&mut reactor, pane);
+        assert_eq!(reactor.take_other_version(), Some(VERSION + 1));
+        assert_eq!(reactor.take_other_version(), None);
     }
 
     #[test]

@@ -166,6 +166,38 @@ pub fn peer_terminal(socket: BorrowedFd<'_>) -> io::Result<Option<Terminal>> {
     platform::peer_terminal(socket.as_raw_fd())
 }
 
+/// Sends SIGTERM to the process at the other end of a connected Unix socket, found as
+/// [`peer_terminal`] finds it. Where Linux has `SO_PEERPIDFD` the signal goes through that
+/// descriptor, so a reused pid cannot take it. Elsewhere the caller keeps the socket open, as
+/// that keeps a peer that holds its end from going.
+///
+/// # Errors
+///
+/// Returns an error if `socket` is not a connected Unix socket or the signal cannot be sent.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::os::fd::AsFd;
+/// use std::os::unix::net::UnixStream;
+///
+/// let core = UnixStream::connect("/tmp/pinfold-501/default.sock")?;
+/// pinfold_sys::terminate_peer(core.as_fd())?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn terminate_peer(socket: BorrowedFd<'_>) -> io::Result<()> {
+    platform::terminate_peer(socket.as_raw_fd())
+}
+
+/// `pid` if it names one process: kill takes 0 and below for groups or every process.
+fn one_process(pid: libc::pid_t) -> io::Result<libc::pid_t> {
+    if pid > 0 {
+        Ok(pid)
+    } else {
+        Err(io::Error::from(io::ErrorKind::NotFound))
+    }
+}
+
 /// Highest descriptor marked in a child where the system has no call to mark them all, which
 /// bounds the work there.
 // shortcut: a descriptor above this that is not close-on-exec would reach the child, walk
@@ -458,6 +490,32 @@ mod platform {
         Ok(unsafe { OwnedFd::from_raw_fd(pidfd) })
     }
 
+    pub fn terminate_peer(socket: RawFd) -> io::Result<()> {
+        let sent = match peer_pidfd(socket) {
+            // SAFETY: pidfd_send_signal takes integers and a null siginfo, and touches no memory.
+            Ok(pidfd) => unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    pidfd.as_raw_fd(),
+                    libc::SIGTERM,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0,
+                )
+            },
+            // An older kernel: the pid alone, as ADR-0020 allows.
+            Err(error) if error.raw_os_error() == Some(libc::ENOPROTOOPT) => {
+                let pid = crate::one_process(credentials(socket)?.pid)?;
+                // SAFETY: kill takes integers and touches no memory.
+                libc::c_long::from(unsafe { libc::kill(pid, libc::SIGTERM) })
+            }
+            Err(error) => return Err(error),
+        };
+        match sent {
+            0 => Ok(()),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
     /// Whether the process a pidfd pins has exited, which makes the pidfd readable.
     fn exited(pidfd: &OwnedFd) -> io::Result<bool> {
         let mut poll = libc::pollfd {
@@ -557,7 +615,7 @@ mod platform {
         }
     }
 
-    pub fn peer_terminal(socket: RawFd) -> io::Result<Option<Terminal>> {
+    fn peer_pid(socket: RawFd) -> io::Result<libc::pid_t> {
         let mut pid: libc::pid_t = 0;
         let mut length = size_of::<libc::pid_t>() as libc::socklen_t;
         // SAFETY: `pid` and `length` are valid for writes for the call, and `length` holds the
@@ -571,9 +629,23 @@ mod platform {
                 &raw mut length,
             )
         };
-        if result != 0 {
-            return Err(io::Error::last_os_error());
+        match result {
+            0 => Ok(pid),
+            _ => Err(io::Error::last_os_error()),
         }
+    }
+
+    pub fn terminate_peer(socket: RawFd) -> io::Result<()> {
+        let pid = crate::one_process(peer_pid(socket)?)?;
+        // SAFETY: kill takes integers and touches no memory.
+        match unsafe { libc::kill(pid, libc::SIGTERM) } {
+            0 => Ok(()),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
+    pub fn peer_terminal(socket: RawFd) -> io::Result<Option<Terminal>> {
+        let pid = peer_pid(socket)?;
         let mut info = MaybeUninit::<libc::proc_bsdinfo>::zeroed();
         let size = size_of::<libc::proc_bsdinfo>() as libc::c_int;
         // SAFETY: `info` is writable for `size` bytes, the struct PROC_PIDTBSDINFO selects.

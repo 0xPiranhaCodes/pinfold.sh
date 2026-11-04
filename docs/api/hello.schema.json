@@ -39,6 +39,11 @@
               "type": ["integer", "null"],
               "minimum": 0,
               "description": "The pane whose terminal and session the caller holds, or null outside a pane or when unidentified."
+            },
+            "link": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "The core's link version, which its window must speak. Cores before 0.1.0-beta.2 leave it out."
             }
           }
         }

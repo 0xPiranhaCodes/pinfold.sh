@@ -87,6 +87,8 @@ impl Session {
             .env("HOME", self.directory.join("state"))
             .env("SHELL", &script)
             .env(CLIENT, &self.directory)
+            // As a launcher starts one.
+            .stderr(control::start_log(&self.directory.join("run/pinfold"))?)
             .spawn()?;
         fs::write(self.directory.join("core"), core.id().to_string())?;
         Ok(core)
@@ -289,6 +291,57 @@ fn two_launchers_at_once_share_one_core_and_one_window() {
     // is ready, the session must answer and must still have only that window.
     assert!(session.launch().unwrap().status.success());
     assert_eq!(session.read("starts").lines().count(), 1);
+}
+
+/// A window script that notes each core that starts it, and speaks another link version the
+/// first time, as the window of a newer install does, and this one after.
+fn updated_window() -> Result<String> {
+    let hello = say_hello()?;
+    let [low, high] = (VERSION + 1).to_le_bytes();
+    let other = format!("printf '\\003\\000\\000\\000\\000\\{low:03o}\\{high:03o}' >&3");
+    Ok(format!(
+        "cd \"$PINFOLD_TEST_CLIENT\"\n{NOTE_CORE}\necho $PPID >> cores\n\
+         if [ -e updated ]; then {hello}; else : > updated; {other}; fi\n{STAY}"
+    ))
+}
+
+#[test]
+fn an_updated_window_restarts_a_core_at_a_prompt_and_opens() {
+    let session = Session::new("u", Some(&updated_window().unwrap())).unwrap();
+    let launched = session.launch().unwrap();
+    let error = String::from_utf8_lossy(&launched.stderr);
+    assert!(launched.status.success(), "{error}");
+    let next = VERSION + 1;
+    let said = format!("restarting its session, link version {VERSION} to {next}");
+    assert!(error.contains(&said), "{error}");
+    let cores = session.read("cores");
+    let cores: Vec<_> = cores.lines().collect();
+    assert!(cores.len() == 2 && cores[0] != cores[1], "{cores:?}");
+}
+
+#[test]
+fn an_updated_window_never_restarts_a_core_running_a_program_unasked() {
+    let session = Session::new("r", Some(&updated_window().unwrap())).unwrap();
+    let mut core = session
+        .start_core(
+            &[],
+            "sleep 60 &\necho $$ > \"$PINFOLD_TEST_CLIENT/pane\"\nwait",
+        )
+        .unwrap();
+    assert!(session.wait_for("pane"));
+    let error = launch_failure(&session).unwrap();
+    assert!(error.contains("PinFold was updated"), "{error}");
+    assert!(error.contains("pane 0: "), "{error}");
+    assert!(error.contains("Not now keeps them running"), "{error}");
+    assert!(core.try_wait().unwrap().is_none(), "the core was ended");
+    // The core says why, with both versions.
+    let next = VERSION + 1;
+    let logged = format!("the window is link version {next} and this core {VERSION}");
+    assert!(
+        session.read_log().contains(&logged),
+        "{}",
+        session.read_log()
+    );
 }
 
 #[test]
