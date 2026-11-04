@@ -9,7 +9,10 @@ Every pull request that touches `site/` runs `.github/scripts/check-site.py`, wh
 
 - a link or asset in an HTML or CSS file does not resolve to a file inside `site/`;
 - a `#fragment` names no `id` on its page;
-- a path starts with `/`, which breaks while the site lives under `/pinfold.sh/`;
+- a path starts with `/`, which breaks while the site lives under `/pinfold.sh/`. `404.html`
+  is the exception: Pages serves it at any missing path, where only a root-relative path
+  works, so it inlines its CSS and links home with `/`, which only works once the custom
+  domain is live;
 - anything but an `<a>` link or `<link rel="canonical">` points at another origin, so a page
   makes no third-party request.
 
