@@ -97,8 +97,8 @@ impl WorkingDirectory {
 /// can write to, under directories that only it or root can change. It must be strictly inside
 /// `$HOME`, and not a dot-directory of `$HOME` such as `~/.config` or inside one, `~/bin`,
 /// `~/Applications` or `~/Library` or inside them, inside a `.git` directory, an entry of
-/// `user_path` or above one, inside the prefix of a `bin` entry of `user_path` in `$HOME` such
-/// as `~/go`, or hold or sit inside a `hidden` one. `user_path` is the user's own `PATH`, from
+/// `user_path` or above one, inside the directory that holds an entry of `user_path` in `$HOME`,
+/// such as `~/go` for `~/go/bin`, or hold or sit inside a `hidden` one. `user_path` is the user's own `PATH`, from
 /// [`login_path`].
 ///
 /// # Errors
@@ -194,15 +194,13 @@ fn inside_home(
     if holds_path(&dir, user_path) {
         return refuse("is or holds a directory on your PATH");
     }
-    // A prefix such as ~/go or ~/miniconda3 holds the libraries its programs on PATH load.
+    // A prefix such as ~/go or ~/miniconda3, which holds a PATH entry, holds the libraries and
+    // config its programs load.
     let in_prefix = std::env::split_paths(user_path).any(|entry| {
         let entry = resolve(&entry);
-        let bin = entry
-            .file_name()
-            .is_some_and(|name| name == "bin" || name == "sbin");
         entry
             .parent()
-            .filter(|prefix| bin && prefix.starts_with(home) && *prefix != home)
+            .filter(|prefix| prefix.starts_with(home) && *prefix != home)
             .is_some_and(|prefix| dir.starts_with(prefix))
     });
     if in_prefix {
@@ -218,32 +216,38 @@ fn inside_home(
     Ok(WorkingDirectory(dir))
 }
 
-/// Starts the user's shell, as a pane's starts, to report the `PATH` [`login_path`] returns, so
-/// that seldom waits. Call it once at start, before any agent runs.
-pub fn read_login_path() {
+/// Starts the user's shell, as a pane's starts, to report the `PATH` [`login_path`] returns.
+/// Call it once at start, before any agent runs. `private` is where the shell writes, a
+/// directory of the core's that the sandbox hides, such as its state directory.
+pub fn read_login_path(private: &Path) {
     let mut login = LOGIN.lock().unwrap_or_else(PoisonError::into_inner);
     if login.is_none() {
-        *login = ask_shell().ok().map(Login::Asked);
+        *login = ask_shell(crate::shell::command(), private)
+            .ok()
+            .map(Login::Asked);
     }
 }
 
-/// Returns the `PATH` the user's shell sets, which [`working_directory`] checks, read once. Not
-/// the core's own: launchd starts an app with `/usr/bin:/bin:/usr/sbin:/sbin`, without
-/// Homebrew's or `~/go/bin`. An agent cannot change it, as it cannot write the shell's startup
-/// files.
+/// Returns the `PATH` the user's shell sets, read once, followed by the core's own, for
+/// [`working_directory`]. The core's alone is not enough: launchd starts an app with
+/// `/usr/bin:/bin:/usr/sbin:/sbin`, without Homebrew's or `~/go/bin`. An agent cannot change
+/// the shell's, as it cannot write the shell's startup files. It never waits for the shell, as
+/// the reactor calls it.
 ///
 /// # Errors
 ///
-/// Returns an error if the shell cannot start, takes over 10 s, or reports no `PATH`. The next
-/// call asks again.
-pub fn login_path() -> io::Result<OsString> {
+/// Returns an error of kind `WouldBlock` while the shell has not answered, and starts it if it
+/// is not running. Returns the reason if the shell cannot start, took over 10 s or reported no
+/// `PATH`, and asks it again for the next call.
+pub fn login_path(private: &Path) -> io::Result<OsString> {
     let mut login = LOGIN.lock().unwrap_or_else(PoisonError::into_inner);
-    let path = match login.take() {
-        Some(Login::Read(path)) => path,
-        Some(Login::Asked(asked)) => reported(asked)?,
-        None => reported(ask_shell()?)?,
-    };
-    *login = Some(Login::Read(path.clone()));
+    let ask = || ask_shell(crate::shell::command(), private);
+    let mut path = next_path(&mut login, &ask, LOGIN_WAIT)?;
+    // An empty one would be a relative entry, which refuses every directory.
+    if let Some(own) = std::env::var_os("PATH").filter(|own| !own.is_empty()) {
+        path.push(":");
+        path.push(own);
+    }
     Ok(path)
 }
 
@@ -257,22 +261,65 @@ enum Login {
 
 static LOGIN: Mutex<Option<Login>> = Mutex::new(None);
 
-/// How long the user's shell gets to report its `PATH`.
-const LOGIN_WAIT: Duration = Duration::from_secs(10);
+/// How long the user's shell gets to report its `PATH`, after which it is asked again.
+pub const LOGIN_WAIT: Duration = Duration::from_secs(10);
+
+/// [`login_path`]'s refusal while the user's shell has not reported its `PATH`, which
+/// `pinfold agent` waits out.
+pub const READING_PATH: &str =
+    "PinFold is still reading your shell's PATH; try again in a few seconds";
 
 /// The line before the `PATH`, as the shell's startup files may print too.
 const PATH_MARK: &str = "pinfold-path:";
 
-/// Starts the user's shell, interactive as in a pane, to print its `PATH` into an unnamed file,
-/// which a program it leaves running cannot hold open as it could a pipe.
-fn ask_shell() -> io::Result<Asked> {
-    use std::os::unix::fs::OpenOptionsExt;
+/// [`login_path`]'s steps, with `ask` starting a shell that gets `wait` to answer.
+fn next_path(
+    login: &mut Option<Login>,
+    ask: &dyn Fn() -> io::Result<Asked>,
+    wait: Duration,
+) -> io::Result<OsString> {
+    let reading = || io::Error::new(io::ErrorKind::WouldBlock, READING_PATH);
+    match login.take() {
+        Some(Login::Read(path)) => {
+            *login = Some(Login::Read(path.clone()));
+            Ok(path)
+        }
+        Some(Login::Asked(asked)) => match reported(asked, wait) {
+            Ok(Ok(path)) => {
+                *login = Some(Login::Read(path.clone()));
+                Ok(path)
+            }
+            Ok(Err(asked)) => {
+                *login = Some(Login::Asked(asked));
+                Err(reading())
+            }
+            Err(error) => {
+                *login = ask().ok().map(Login::Asked);
+                Err(error)
+            }
+        },
+        None => {
+            *login = Some(Login::Asked(ask()?));
+            Err(reading())
+        }
+    }
+}
+
+/// Starts `shell`, interactive as in a pane, to print its `PATH` into an unnamed file in
+/// `private`, which a program it leaves running cannot hold open as it could a pipe, and which
+/// no agent can open in the moment it has a name.
+fn ask_shell(mut shell: Command, private: &Path) -> io::Result<Asked> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
     use std::os::unix::process::CommandExt;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(private)?;
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_nanos();
-    let name = std::env::temp_dir().join(format!("pinfold-path-{}-{nanos}", std::process::id()));
+    let name = private.join(format!(".path-{}-{nanos}", std::process::id()));
     let file = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -280,36 +327,40 @@ fn ask_shell() -> io::Result<Asked> {
         .mode(0o600)
         .open(&name)?;
     fs::remove_file(&name)?;
-    let mut command = crate::shell::command();
-    command
+    shell
         .args(["-i", "-c", &format!("echo {PATH_MARK}; printenv PATH")])
         .stdin(Stdio::null())
         .stdout(file.try_clone()?)
         .stderr(Stdio::null())
         // Not in the core's group, so it never takes a terminal the core was started from.
         .process_group(0);
-    pinfold_sys::mark_strays(&mut command);
-    Ok((command.spawn()?, file, Instant::now()))
+    pinfold_sys::mark_strays(&mut shell);
+    Ok((shell.spawn()?, file, Instant::now()))
 }
 
-/// Waits for the shell from [`ask_shell`] and returns the `PATH` it printed.
-fn reported((mut child, mut file, asked): Asked) -> io::Result<OsString> {
+/// Looks once at the shell from [`ask_shell`]: the `PATH` it printed, or the shell back if it is
+/// still running within `wait`. One that outlives `wait` is killed and reaped.
+fn reported(
+    (mut child, mut file, asked): Asked,
+    wait: Duration,
+) -> io::Result<Result<OsString, Asked>> {
     use std::io::{Read, Seek};
-    while child.try_wait()?.is_none() {
-        if asked.elapsed() > LOGIN_WAIT {
-            let _ = child.kill();
-            child.wait()?;
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "your shell took over 10 s to report its PATH",
-            ));
+    if child.try_wait()?.is_none() {
+        if asked.elapsed() <= wait {
+            return Ok(Err((child, file, asked)));
         }
-        std::thread::sleep(Duration::from_millis(10));
+        let _ = child.kill();
+        child.wait()?;
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "your shell took over 10 s to report its PATH",
+        ));
     }
     let mut text = Vec::new();
     file.rewind()?;
     file.take(1 << 20).read_to_end(&mut text)?;
-    path_after_mark(&text)
+    let path = path_after_mark(&text);
+    path.map(Ok)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "your shell reported no PATH"))
 }
 
@@ -1318,6 +1369,7 @@ mod tests {
             "miniconda3/lib",
             "tools",
             "tools/scripts",
+            "tools/lib",
         ]
         .map(|name| home.join(name));
         for dir in projects.iter().chain(&refused).chain([&outside]) {
@@ -1369,14 +1421,91 @@ mod tests {
         assert_eq!(path_after_mark(b"/a/bin\n"), None);
     }
 
+    /// Calls `next` until the shell has answered, as a launch a few seconds later would.
+    fn answered(mut next: impl FnMut() -> io::Result<OsString>) -> io::Result<OsString> {
+        let start = Instant::now();
+        loop {
+            match next() {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    assert!(start.elapsed() < Duration::from_secs(20), "{error}");
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                done => return done,
+            }
+        }
+    }
+
     #[test]
     fn the_users_shell_reports_its_path() {
-        let path = login_path().unwrap();
+        let private = std::env::temp_dir().join(format!("pinfold-login-{}", std::process::id()));
+        let path = answered(|| login_path(&private)).unwrap();
         assert!(
             std::env::split_paths(&path).any(|entry| entry.ends_with("bin")),
             "{path:?}"
         );
-        assert_eq!(login_path().unwrap(), path);
+        assert_eq!(login_path(&private).unwrap(), path);
+        fs::remove_dir_all(&private).unwrap();
+    }
+
+    /// A shell that takes `seconds` to print `/slow/bin` as its `PATH`.
+    fn slow_shell(seconds: u32, private: &Path) -> io::Result<Asked> {
+        let mut shell = Command::new("/bin/sh");
+        let script = format!("sleep {seconds}; echo {PATH_MARK}; echo /slow/bin");
+        shell.args(["-c", &script, "sh"]);
+        ask_shell(shell, private)
+    }
+
+    #[test]
+    fn a_launch_never_waits_for_a_slow_shell() {
+        let private = std::env::temp_dir().join(format!("pinfold-slow-{}", std::process::id()));
+        let ask = || slow_shell(3, &private);
+        let mut login = None;
+        let start = Instant::now();
+        let first = next_path(&mut login, &ask, LOGIN_WAIT).unwrap_err();
+        let second = next_path(&mut login, &ask, LOGIN_WAIT).unwrap_err();
+        let waited = start.elapsed();
+        let path = answered(|| next_path(&mut login, &ask, LOGIN_WAIT));
+        let again = next_path(&mut login, &ask, LOGIN_WAIT);
+        fs::remove_dir_all(&private).unwrap();
+        assert!(waited < Duration::from_millis(500), "{waited:?}");
+        for error in [first, second] {
+            assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+            assert_eq!(error.to_string(), READING_PATH);
+        }
+        assert_eq!(path.unwrap(), "/slow/bin");
+        assert_eq!(again.unwrap(), "/slow/bin");
+    }
+
+    #[test]
+    fn a_shell_past_its_time_is_killed_reaped_and_asked_again() {
+        let private = std::env::temp_dir().join(format!("pinfold-late-{}", std::process::id()));
+        let ask = || slow_shell(30, &private);
+        let mut login = None;
+        let first = next_path(&mut login, &ask, Duration::ZERO).unwrap_err();
+        let Some(Login::Asked((child, ..))) = &login else {
+            panic!("no shell asked");
+        };
+        let late = child.id().to_string();
+        let start = Instant::now();
+        let error = next_path(&mut login, &ask, Duration::ZERO).unwrap_err();
+        let waited = start.elapsed();
+        // Reaped, not a zombie: its pid is gone.
+        let gone = !Command::new("/bin/sh")
+            .args(["-c", "kill -0 \"$0\"", &late])
+            .stderr(Stdio::null())
+            .status()
+            .unwrap()
+            .success();
+        let asked_again = matches!(login, Some(Login::Asked(_)));
+        if let Some(Login::Asked((mut child, ..))) = login.take() {
+            child.kill().unwrap();
+            child.wait().unwrap();
+        }
+        fs::remove_dir_all(&private).unwrap();
+        assert_eq!(first.kind(), io::ErrorKind::WouldBlock);
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
+        assert!(waited < Duration::from_millis(500), "{waited:?}");
+        assert!(gone && asked_again);
     }
 
     #[test]

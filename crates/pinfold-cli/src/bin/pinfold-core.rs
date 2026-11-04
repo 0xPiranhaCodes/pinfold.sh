@@ -210,7 +210,10 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                 // The sandbox needs a directory of the pane's, never one the core chose.
                 let refused = |error: io::Error| format!("the sandbox will not start: {error}");
                 let hidden = pinfold_config::private_dirs();
-                let path = sandbox::login_path().map_err(refused)?;
+                // Never waits: a shell still reading refuses this launch.
+                let state =
+                    pinfold_config::state_dir().ok_or("no state directory, as HOME is not set")?;
+                let path = sandbox::login_path(&state).map_err(refused)?;
                 let work = sandbox::working_directory(Path::new(&cwd), &hidden, &path);
                 let work = work.map_err(refused)?;
                 // Before the shadow is made, so a refused launch writes nothing.
@@ -728,8 +731,9 @@ fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result
     // Read once: the core takes no hot reload.
     let config = pinfold_cli::config();
     // Before any agent runs, and ready by the first sandboxed launch.
-    if config.agents.values().any(|agent| agent.sandbox) {
-        sandbox::read_login_path();
+    let state = pinfold_config::state_dir();
+    if let Some(state) = state.filter(|_| config.agents.values().any(|agent| agent.sandbox)) {
+        sandbox::read_login_path(&state);
     }
     if let Some(patterns) = config.api.protect.clone() {
         reactor.set_patterns(patterns);

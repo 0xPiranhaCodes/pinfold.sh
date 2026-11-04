@@ -13,11 +13,14 @@ use std::time::{Duration, Instant};
 
 use pinfold_api::{control, trust};
 use pinfold_config::workspace::{self, Layout, Split};
+use pinfold_core::sandbox;
 use serde_json::{Value, json};
 
 /// How long a core that was just started gets to answer.
 const START_WAIT: Duration = Duration::from_secs(5);
 const POLL: Duration = Duration::from_millis(20);
+/// How often `pinfold agent` asks again while the core reads the user's `PATH`.
+const AGENT_RETRY: Duration = Duration::from_millis(200);
 /// What follows a bad argument's one-line error.
 const HINT: &str = "Run 'pinfold --help' for usage.";
 
@@ -517,8 +520,22 @@ fn send(pane: &str, text: &str) -> Result<(), Box<dyn Error>> {
 /// the config's `[agents.<name>]` profile. It starts no core, as it needs a caller in a pane.
 fn agent(name: &str, place: &str) -> Result<(), Box<dyn Error>> {
     let params = json!({"profile": name, "place": place});
-    control::ask(&running()?, "agent.launch", &params)?;
-    Ok(())
+    // Past the core's own wait for the shell, which then asks it again.
+    let give_up = Instant::now() + sandbox::LOGIN_WAIT + Duration::from_secs(2);
+    loop {
+        match control::ask(&running()?, "agent.launch", &params) {
+            Err(error) if reading_path(&error) && Instant::now() < give_up => {
+                thread::sleep(AGENT_RETRY);
+            }
+            result => return result.map(drop).map_err(Into::into),
+        }
+    }
+}
+
+/// Whether the core refused a launch only because it has not yet read the user's `PATH`, which
+/// it does once, in the first seconds after it starts.
+fn reading_path(error: &control::Error) -> bool {
+    matches!(error, control::Error::Refused(message) if message.contains(sandbox::READING_PATH))
 }
 
 /// `pinfold ctl wait <pane> --until <what> [--pattern <regex>] [--idle-ms <n>] --timeout <s>`:
@@ -835,6 +852,15 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_asks_again_only_while_the_core_reads_the_path() {
+        let reading = format!("the sandbox will not start: {}", sandbox::READING_PATH);
+        assert!(reading_path(&control::Error::Refused(reading)));
+        let other = "the sandbox will not start: \"/opt\" is not inside your home folder";
+        assert!(!reading_path(&control::Error::Refused(other.to_owned())));
+        assert!(!reading_path(&control::Error::Running));
+    }
 
     #[test]
     fn a_request_holds_tabs_splits_and_cwds_and_lists_run_lines_without_sending_them() {
