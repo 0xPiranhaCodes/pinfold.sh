@@ -309,7 +309,25 @@ pub fn log_path(directory: &Path) -> PathBuf {
     directory.join(SESSION).with_extension("log")
 }
 
-/// Opens an empty log for a core that is about to start, which is all that bounds its size.
+/// Returns the last core's log in `directory`, which [`start_log`] keeps.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::Path;
+///
+/// let path = pinfold_api::control::previous_log_path(Path::new("/run/user/1000/pinfold"));
+/// assert_eq!(path, Path::new("/run/user/1000/pinfold/default.log.1"));
+/// ```
+#[must_use]
+pub fn previous_log_path(directory: &Path) -> PathBuf {
+    directory.join(SESSION).with_extension("log.1")
+}
+
+/// Opens an empty log for a core that is about to start. A log with something in it, such as
+/// the panic line of a core that crashed, moves to [`previous_log_path`] first, over the one
+/// there. An empty one does not, so a clean run keeps the crash before it. Two generations are
+/// all that bound the size.
 ///
 /// # Errors
 ///
@@ -327,7 +345,14 @@ pub fn log_path(directory: &Path) -> PathBuf {
 /// ```
 pub fn start_log(directory: &Path) -> Result<File, Error> {
     checked(directory)?;
-    Ok(pinfold_sys::open_log(&log_path(directory))?)
+    let path = log_path(directory);
+    // Not a symlink or FIFO, which `open_log` refuses. A rename moves the entry and follows
+    // nothing, and the moved file keeps its mode.
+    if fs::symlink_metadata(&path).is_ok_and(|found| found.is_file() && found.len() > 0) {
+        // A log that cannot move is emptied, as before, rather than left without a core.
+        let _ = fs::rename(&path, previous_log_path(directory));
+    }
+    Ok(pinfold_sys::open_log(&path)?)
 }
 
 /// Makes `directory` if it is missing, and refuses it unless only this user can reach it.
@@ -1404,6 +1429,20 @@ mod tests {
     const PATIENCE: Duration = Duration::from_secs(120);
 
     static NEXT: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn a_new_log_keeps_the_last_one_with_text_and_never_an_empty_one() {
+        let directory = fresh();
+        writeln!(start_log(&directory).unwrap(), "panicked at here").unwrap();
+        let _log = start_log(&directory).unwrap();
+        let read = |path: PathBuf| fs::read_to_string(path).unwrap();
+        assert_eq!(read(log_path(&directory)), "");
+        assert_eq!(read(previous_log_path(&directory)), "panicked at here\n");
+        let _log = start_log(&directory).unwrap();
+        assert_eq!(read(previous_log_path(&directory)), "panicked at here\n");
+        let mode = fs::metadata(previous_log_path(&directory)).unwrap().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
 
     /// A new path in a fresh private directory.
     fn fresh() -> PathBuf {
