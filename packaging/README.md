@@ -4,8 +4,8 @@ The release workflow is hand-written (ADR-0016). It builds Linux tarballs for x8
 and the universal macOS app, writes a `.sha256` file beside each archive, and keeps them as
 workflow artifacts. On a pull request that touches packaging it is a dry run: the app and its
 `PinFold-adhoc.dmg` are signed ad hoc and no secret is read. On a `v*` tag it also signs with
-the Developer ID and notarizes, as described in [Cutting the beta](#cutting-the-beta). It
-publishes nothing; creating and publishing a release is the maintainer's job.
+the Developer ID, notarizes, and creates a draft release, as described in
+[Cutting the beta](#cutting-the-beta). It never publishes; publishing is the maintainer's job.
 
 Each Linux tarball contains `pinfold`, `pinfold-core`, `pinfold-window`, `README.md`, both
 project license files and the bundled font's `OFL.txt`. The launcher and window use Cargo's
@@ -40,8 +40,9 @@ startup without it.
 ## Cutting the beta
 
 The maintainer pushes a `v*` tag. The `release` environment holds `MACOS_CERT_P12`,
-`MACOS_CERT_PASSWORD`, `APPLE_TEAM_ID`, `ASC_KEY_ID`, `ASC_ISSUER_ID` and `ASC_KEY_P8`, and only
-the `macos-sign` job can read them, after the maintainer approves it on the run's page.
+`MACOS_CERT_PASSWORD`, `APPLE_TEAM_ID`, `ASC_KEY_ID`, `ASC_ISSUER_ID` and `ASC_KEY_P8`. Two jobs
+use it, and each waits for the maintainer to approve it on the run's page: `macos-sign`, the
+only job that can read those secrets, and then `release`, the only job that can write.
 
 That job builds nothing. It takes the universal binaries from the `macos` job, imports the
 certificate into a keychain in the runner's temporary directory, signs each binary and then the
@@ -51,15 +52,29 @@ log, unless the answer is `Accepted`. It then staples the ticket, checks it, and
 `PinFold.dmg` and its `.sha256` file as the `pinfold-macos-dmg` artifact. The keychain and the
 API key file are removed even when a step fails.
 
-To check the `.dmg` on a Mac after downloading it:
+The `sbom` job writes `pinfold.cdx.json`, a CycloneDX SBOM of `pinfold-cli`, which builds all
+three binaries, with every target's dependencies, using `cargo-cyclonedx` 0.5.9. It also runs on
+pull requests.
+
+The `release` job builds nothing. It downloads `PinFold.dmg`, both Linux tarballs and the SBOM,
+checks each against the `.sha256` file from the job that made it, and writes `SHA256SUMS` over
+all of them. It attests each file's build provenance with `actions/attest-build-provenance`,
+then creates a draft release for the tag holding the files and `SHA256SUMS`. It never publishes
+the release and never marks it latest.
+
+To check the draft, download its assets and, on a Mac:
 
 ```sh
+sha256sum -c SHA256SUMS   # or shasum -a 256 -c SHA256SUMS
 spctl -a -t open --context context:primary-signature -v PinFold.dmg
 xcrun stapler validate PinFold.dmg
-shasum -a 256 -c PinFold.dmg.sha256
+for f in PinFold.dmg pinfold-linux-x86_64.tar.gz pinfold-linux-aarch64.tar.gz pinfold.cdx.json; do
+  gh attestation verify "$f" --repo 0xPiranhaCodes/pinfold.sh
+done
 ```
 
-`spctl` must say `accepted` and `source=Notarized Developer ID`.
+`spctl` must say `accepted` and `source=Notarized Developer ID`. Then read the draft's notes,
+mark it a pre-release if the tag is a beta, and publish it.
 
 ## Homebrew
 
@@ -67,7 +82,7 @@ shasum -a 256 -c PinFold.dmg.sha256
 `homebrew/pinfold.cask.rb` installs the signed and notarized macOS `.dmg`; do not publish the
 cask for an ad-hoc-signed app. Both files contain release-marked version and SHA-256 placeholders.
 For a release, replace the version with the tag without its leading `v`, copy each digest from
-the archive's `.sha256` file, and test the formula or cask against the release assets.
+the release's `SHA256SUMS`, and test the formula or cask against the release assets.
 
 The maintainer creates and owns the Homebrew tap. They copy the formula and cask into that tap
 after publishing the GitHub release.
