@@ -196,7 +196,7 @@ sandbox = true</pre>
       <div class="grid">
         <div>
           <h3>macOS beta <span class="muted">· coming soon</span></h3>
-          <p>A signed and notarized <code>PinFold.dmg</code>, one app for Apple silicon and Intel, will be on <a href="https://github.com/0xPiranhaCodes/pinfold.sh/releases">GitHub Releases</a>. There is no release yet. Linux follows in v0.1.</p>
+          <p>A signed and notarized <code>PinFold.dmg</code>, one app for Apple silicon and Intel, will be on <a href="https://github.com/0xPiranhaCodes/pinfold.sh/releases">GitHub Releases</a>. There is no release yet. The <a href="https://github.com/0xPiranhaCodes/pinfold.sh#install-the-beta">install guide</a> and the <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/docs/beta/known-issues.md">known issues</a> are ready; so far the app has been tried by hand only on Apple silicon. Linux follows in v0.1.</p>
         </div>
         <div>
           <h3>From source <span class="muted">· today</span></h3>
@@ -204,7 +204,7 @@ sandbox = true</pre>
 cd pinfold.sh
 cargo build --release -p pinfold-cli
 ./target/release/pinfold</pre>
-          <p class="muted"><code>rust-toolchain.toml</code> picks the toolchain.</p>
+          <p class="muted"><code>rust-toolchain.toml</code> picks the toolchain. A build from source lacks the hardened runtime, so another program running as you can read its memory; the signed app has it.</p>
         </div>
       </div>
       <h3>Docs and links</h3>
