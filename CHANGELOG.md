@@ -11,6 +11,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Fixed
 
+- A `pane.wait` match pattern on long lines can no longer stall the core for every pane. Matching shares a 4 ms budget per reactor turn across all waits and defers the rest, each line is tried on its newest 4 KiB, and a pattern may compile to at most 8 KiB instead of 64 KiB, so `\w{1000}x` is now refused. In the issue's reproduction, `pane.list` answered within 0.096 s instead of 2.1 s with 5 "the core is busy" refusals ([#195](https://github.com/0xPiranhaCodes/pinfold.sh/issues/195)).
 - The sandbox test fails on CI when Linux has no root-owned `bwrap`, instead of passing without running, so a green Linux job shows that the real bubblewrap hid the private paths and kept the caller's identity ([#106](https://github.com/0xPiranhaCodes/pinfold.sh/issues/106)).
 
 - A pane's program, a window and a detached core start with no descriptor past stderr but those handed to them on purpose, so a pane shell can no longer inherit an API connection that another thread accepted at the same moment, which on macOS is inheritable until it is marked ([#187](https://github.com/0xPiranhaCodes/pinfold.sh/issues/187)). On macOS each pane start then marks up to 65,536 descriptors, which adds about 11 ms when the core's open-file limit is that high and none at the default of 256.
