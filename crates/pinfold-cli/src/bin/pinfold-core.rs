@@ -201,15 +201,12 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
             let agent = agents
                 .get(&launch.profile)
                 .ok_or("no agent profile by that name in the config")?;
-            // Where `of`'s shell last said it was (OSC 7), which any program there can print.
-            let cwd = reactor
-                .list()
-                .find(|pane| pane.id == of)
-                .and_then(|pane| pane.cwd);
-            let cwd = cwd.filter(|cwd| Path::new(cwd).is_dir()).map(str::to_owned);
+            // Where `of` is: its last OSC 7, which any program there can print, or its shell's
+            // own directory. Never the core's, which a pane with neither would get.
+            let cwd = reactor.cwd(of).filter(|cwd| Path::new(cwd).is_dir());
+            let cwd = cwd.ok_or("the pane's directory is not known: its shell has none to read")?;
             let (command, cwd) = if agent.sandbox {
                 // The sandbox needs a directory of the pane's, never one the core chose.
-                let cwd = cwd.ok_or("a sandboxed agent needs its pane's directory from OSC 7")?;
                 let refused = |error: io::Error| format!("the sandbox will not start: {error}");
                 let hidden = pinfold_config::private_dirs();
                 let work = sandbox::working_directory(Path::new(&cwd), &hidden).map_err(refused)?;
@@ -239,7 +236,7 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                 let (program, args) = agent.command.split_first().ok_or("empty command")?;
                 let mut command = Command::new(program);
                 command.args(args);
-                (command, cwd)
+                (command, Some(cwd))
             };
             let way = way(launch.place);
             let pane = family.spawn_command(reactor, own, of, way, cwd.as_deref(), command)?;
