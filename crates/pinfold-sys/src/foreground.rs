@@ -3,6 +3,7 @@
 use std::io;
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, BorrowedFd};
+use std::path::PathBuf;
 
 /// Most processes read from one foreground group. A larger group is an error.
 pub const MAX_GROUP: usize = 256;
@@ -98,6 +99,24 @@ pub fn foreground(master: BorrowedFd<'_>) -> io::Result<Foreground> {
     })
 }
 
+/// Returns the working directory of process `pid`, as the system keeps it.
+///
+/// # Errors
+///
+/// Returns an error if the process has exited or this user may not read it.
+///
+/// # Examples
+///
+/// ```
+/// let cwd = pinfold_sys::foreground::cwd(std::process::id())?;
+/// assert_eq!(cwd, std::env::current_dir()?.canonicalize()?);
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn cwd(pid: u32) -> io::Result<PathBuf> {
+    let pid = libc::pid_t::try_from(pid).map_err(io::Error::other)?;
+    platform::cwd(pid)
+}
+
 fn process(pid: libc::pid_t) -> io::Result<Process> {
     // macOS refuses the arguments of a process while it starts or ends a program, for a
     // moment, so a few tries 1 ms apart tell that from one this user may not read.
@@ -191,6 +210,10 @@ mod platform {
         super::scan(group, pids.into_iter().map(stat))
     }
 
+    pub fn cwd(pid: libc::pid_t) -> io::Result<std::path::PathBuf> {
+        std::fs::read_link(format!("/proc/{pid}/cwd"))
+    }
+
     pub fn name_and_euid(pid: libc::pid_t) -> io::Result<(String, u32)> {
         let status = std::fs::read_to_string(format!("/proc/{pid}/status"))?;
         let field = |key: &str| {
@@ -234,6 +257,43 @@ mod platform {
         let count = usize::try_from(count).map_err(|_| io::Error::last_os_error())?;
         pids.truncate(count);
         Ok(pids)
+    }
+
+    pub fn cwd(pid: libc::pid_t) -> io::Result<std::path::PathBuf> {
+        use std::os::unix::ffi::OsStrExt;
+        let mut info = MaybeUninit::<libc::proc_vnodepathinfo>::zeroed();
+        let size = size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+        // SAFETY: `info` is writable for `size` bytes, the struct PROC_PIDVNODEPATHINFO selects.
+        let read = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDVNODEPATHINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if read != size {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: all-zero bytes are valid for this integer struct, and the call filled it.
+        let info = unsafe { info.assume_init() };
+        let path: Vec<u8> = info
+            .pvi_cdir
+            .vip_path
+            .as_flattened()
+            .iter()
+            .map(|&c| c as u8)
+            .collect();
+        let end = path
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(path.len());
+        // The kernel gives an empty path for a directory it cannot name, such as a deleted one.
+        let path = std::ffi::OsStr::from_bytes(&path[..end]);
+        (!path.is_empty())
+            .then(|| path.into())
+            .ok_or_else(|| io::Error::other("the working directory has no path"))
     }
 
     pub fn name_and_euid(pid: libc::pid_t) -> io::Result<(String, u32)> {
@@ -394,6 +454,18 @@ mod tests {
         found_when(&echo_off, |found| found.echo_off && named(found, "sleep"));
         let raw = pty("stty -echo -icanon; exec sleep 30");
         assert!(!found_when(&raw, |found| named(found, "sleep")).echo_off);
+    }
+
+    #[test]
+    fn a_process_has_the_directory_it_moved_to() {
+        let pty = pty("cd /; exec sleep 30");
+        let pid = pty.terminal().session;
+        let start = Instant::now();
+        while cwd(pid).ok() != Some(PathBuf::from("/")) {
+            assert!(start.elapsed() < Duration::from_secs(5), "{:?}", cwd(pid));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(cwd(u32::MAX).is_err());
     }
 
     #[test]

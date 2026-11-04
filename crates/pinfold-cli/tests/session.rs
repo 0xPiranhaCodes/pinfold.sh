@@ -1397,23 +1397,24 @@ fn ctl(session: &Session, arguments: &str, name: &str) -> Result<String> {
     Ok(session.read(name))
 }
 
-/// Saves the session once each of its `panes` has told the core its directory, and returns the
-/// snapshot.
+/// Saves the session until each of its `panes` has a directory, from OSC 7 or its shell, and
+/// returns the snapshot.
 fn save_with_cwds(session: &Session, panes: usize) -> Result<serde_json::Value> {
     let start = Instant::now();
     loop {
         // Until the core answers, ctl says why not, which is no JSON.
-        let said = ctl(session, "ctl list --json", "list")?;
-        let list: serde_json::Value = serde_json::from_str(&said).unwrap_or_default();
-        let listed = list["panes"].as_array().map_or(&[][..], Vec::as_slice);
+        let said = ctl(session, "ctl session save", "saved")?;
+        let saved: serde_json::Value = fs::read(said.trim())
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        let listed = saved["panes"].as_array().map_or(&[][..], Vec::as_slice);
         if listed.len() == panes && listed.iter().all(|pane| pane["cwd"].is_string()) {
-            break;
+            return Ok(saved);
         }
         assert!(start.elapsed() < PATIENCE, "{said}");
         thread::sleep(Duration::from_millis(50));
     }
-    let path = ctl(session, "ctl session save", "saved")?;
-    Ok(serde_json::from_slice(&fs::read(path.trim())?)?)
 }
 
 /// Not a test: the window of [`a_new_core_restores_the_layout_and_cwds_of_a_killed_one`],
@@ -1438,7 +1439,7 @@ fn a_new_core_restores_the_layout_and_cwds_of_a_killed_one() {
     let exe = env::current_exe().unwrap();
     let window = format!("exec '{}' --exact split_client_process", exe.display());
     let session = Session::new("r", Some(&window)).unwrap();
-    // Each pane works in a directory of its own, and says so with OSC 7. A restore keeps only a
+    // Each pane works in a directory of its own, and sends no OSC 7. A restore keeps only a
     // directory no one else can write, which Linux's sticky `/tmp` is not, so these live in the
     // target directory.
     let work =
@@ -1447,7 +1448,7 @@ fn a_new_core_restores_the_layout_and_cwds_of_a_killed_one() {
     fs::create_dir_all(&work).unwrap();
     let tell = r#"printf '\033]7;file://%s\033\\' "$(pwd -P)""#;
     let first = format!(
-        "d='{}/w'$$; mkdir \"$d\" && cd \"$d\"; {tell}; exec sleep 60",
+        "d='{}/w'$$; mkdir \"$d\" && cd \"$d\"; exec sleep 60",
         work.display()
     );
     let mut core = session
@@ -1789,13 +1790,18 @@ fn a_configured_protect_pattern_refuses_a_send_to_a_pane_that_runs_it() {
 fn an_agent_launches_by_profile_as_the_callers_child_and_an_unknown_one_is_refused() {
     let session = Session::new("ag", None).unwrap();
     fs::create_dir_all(session.directory.join("config/pinfold")).unwrap();
-    let mut toml = "[agents.sleepy]\ncommand = [\"sleep\", \"30\"]\n".to_owned();
+    let work = session.directory.join("state/work");
+    let pwd = format!(
+        "pwd -P > '{}/agent.cwd'; exec sleep 30",
+        session.directory.display()
+    );
+    let mut toml = format!("[agents.sleepy]\ncommand = [\"/bin/sh\", \"-c\", \"{pwd}\"]\n");
     let pinfold = format!("'{}'", session.directory.join("pinfold").display());
     let client = "\"$PINFOLD_TEST_CLIENT\"";
-    // The sandbox takes its directory from OSC 7, so the caller's shell reports one first: a
-    // private one under the core's HOME, as the sandbox refuses HOME and what is above it.
+    // The caller's shell moves to a private directory under the core's HOME, as the sandbox
+    // refuses HOME and what is above it, and sends no OSC 7, as the default macOS zsh does not.
     let mut shell = format!(
-        "mkdir -p -m 700 \"$HOME/work\"; printf '\\033]7;file://localhost%s\\007' \"$HOME/work\"; \
+        "mkdir -p -m 700 \"$HOME/work\"; cd \"$HOME/work\"; \
          {pinfold} agent sleepy 2> {client}/e; {pinfold} agent nope 2> {client}/nope; "
     );
     if cfg!(target_os = "macos") {
@@ -1826,10 +1832,14 @@ fn an_agent_launches_by_profile_as_the_callers_child_and_an_unknown_one_is_refus
     };
     assert_eq!(
         command(1),
-        Some("sleep".into()),
+        Some("/bin/sh".into()),
         "{list} {}",
         session.read("e")
     );
+    // The agent started in the caller's directory, which no OSC 7 told.
+    assert!(session.wait_for("agent.cwd"), "{}", session.read("e"));
+    let started = session.read("agent.cwd");
+    assert_eq!(Path::new(started.trim()), work.canonicalize().unwrap());
     if cfg!(target_os = "macos") {
         let boxed = session.read("boxed");
         assert_eq!(
