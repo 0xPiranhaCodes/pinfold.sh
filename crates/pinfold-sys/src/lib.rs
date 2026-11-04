@@ -211,8 +211,20 @@ static STRAYS_MARKED: AtomicBool = AtomicBool::new(false);
 /// Makes every descriptor past stderr close-on-exec in the child `command` starts, so it gets
 /// only those handed to it on purpose after this, or by [`inherit`]. Another thread can make a
 /// descriptor that is inheritable for a moment, such as a connection accepted on macOS, and a
-/// fork in that moment copies it. Every function here that starts a child calls this.
-pub(crate) fn mark_strays(command: &mut Command) {
+/// fork in that moment copies it. Every function here that starts a child calls this, and so
+/// must any other code in the core that starts one.
+///
+/// # Examples
+///
+/// ```
+/// use std::process::Command;
+///
+/// let mut command = Command::new("/usr/bin/true");
+/// pinfold_sys::mark_strays(&mut command);
+/// assert!(command.status()?.success());
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn mark_strays(command: &mut Command) {
     // SAFETY: sysconf reads a limit and touches no memory.
     let limit = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) }.clamp(0, MAX_CHECKED_FD) as RawFd;
     // SAFETY: the closure makes only async-signal-safe calls, on integers it owns, and writes

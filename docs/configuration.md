@@ -131,12 +131,22 @@ A sandboxed agent writes only to its working directory and temporary directories
 empty `/tmp` on Linux, and `/private/tmp` and your temporary directory on macOS. Everything else
 it can read but not change, so it cannot edit `~/.zshrc` or put programs on your `PATH`. The
 working directory is the pane's, as its shell reports it, and the agent does not start unless
-that directory is yours, writable by no other user or group, under directories only you or root
-can change, not `/`, your home directory or above it, not a dot-directory of your home such as
-`~/.config` or `~/.local/bin` or inside one, not in `~/Library` on macOS, not inside a `.git`
-directory, not a directory on your `PATH` or above one, and does not hold or sit inside a hidden
-directory. A relative `PATH` entry, such as `.` or an empty one, counts from the working
-directory, so it refuses every launch, and so does a `PATH` entry that is a dangling symlink.
+that directory is strictly inside your home folder, such as `~/src/app` or `~/Projects/app`.
+It must also be yours, writable by no other user or group, under directories only you or root
+can change, not a dot-directory of your home such as `~/.config` or `~/.local/bin` or inside
+one, not `~/bin`, `~/Applications` or, on macOS, `~/Library` or inside them, not inside a
+`.git` directory, not a directory on your `PATH` or above one, not inside the prefix of a `bin`
+directory on your `PATH`, such as `~/go` for `~/go/bin` or `~/miniconda3`, and must not hold or
+sit inside a hidden directory. A refusal says why; start the agent from a project directory
+inside your home folder instead. A relative `PATH` entry, such as `.` or an empty one, counts
+from the working directory, so it refuses every launch, and so does a `PATH` entry that is a
+dangling symlink.
+
+The `PATH` checked is your shell's: once, at start, the core runs `$SHELL -i -c` as a pane's
+shell starts, a login shell on macOS, and reads the `PATH` it prints, as an app started from
+the Dock has only `/usr/bin:/bin:/usr/sbin:/sbin`. If your shell does not answer within 10
+seconds, sandboxed launches are refused until it does. A `PATH` you change later in a pane,
+such as with direnv, is not checked.
 
 Git runs what a repository's hooks and config name outside the sandbox, so the agent cannot
 change them. On Linux the working directory's whole `.git` is read-only, and the agent commits

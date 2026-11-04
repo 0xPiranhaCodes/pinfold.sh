@@ -17,6 +17,9 @@ use std::time::{Duration, Instant};
 use pinfold_core::sandbox;
 use pinfold_sys::pty::Pty;
 
+/// The `PATH` launchd gives an app.
+const LAUNCHD_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+
 #[test]
 fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
     // Not under the temporary directory, which the agent may write to.
@@ -151,7 +154,7 @@ fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
     );
     let program = ["/bin/sh".to_owned(), "-c".to_owned(), script];
     let hidden = [ssh, state];
-    let work = sandbox::working_directory(&work, &hidden).unwrap();
+    let work = sandbox::working_directory(&work, &hidden, LAUNCHD_PATH.as_ref()).unwrap();
     // Where PinFold keeps it, in its data directory.
     let shadow = home.join("data/agents/test/shadow");
     let command = match sandbox::command(&program, &hidden, &work, &socket, Some(&shadow)) {
@@ -271,12 +274,13 @@ fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
 /// would take it for a person's terminal outside every pane.
 #[test]
 fn a_sandboxed_agent_cannot_open_a_new_terminal() {
-    let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+    // Under HOME, where a working directory must be, wherever the target directory is.
+    let work = PathBuf::from(std::env::var_os("HOME").unwrap())
         .join(format!("pinfold-terminal-{}", std::process::id()));
     fs::create_dir_all(&work).unwrap();
     let _removed = Removed(work.clone());
     fs::set_permissions(&work, fs::Permissions::from_mode(0o700)).unwrap();
-    let work = sandbox::working_directory(&work, &[]).unwrap();
+    let work = sandbox::working_directory(&work, &[], LAUNCHD_PATH.as_ref()).unwrap();
     let api = work.path().join("api.sock");
     // `script` opens a terminal and starts a session on it, as an agent would.
     let probe = "echo new=$(tty)";
@@ -341,7 +345,7 @@ fn planted_child() {
         .join(format!("pinfold-child-{}", std::process::id()));
     fs::create_dir_all(&work).unwrap();
     fs::set_permissions(&work, fs::Permissions::from_mode(0o700)).unwrap();
-    let work = sandbox::working_directory(&work, &[]).unwrap();
+    let work = sandbox::working_directory(&work, &[], LAUNCHD_PATH.as_ref()).unwrap();
     let api = work.path().join("api.sock");
     let result = sandbox::command(&["/bin/true".to_owned()], &[], &work, &api, None);
     fs::remove_dir(work.path()).unwrap();

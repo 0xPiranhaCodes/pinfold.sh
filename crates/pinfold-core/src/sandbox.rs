@@ -23,7 +23,9 @@ use std::io;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Where bubblewrap is looked for. Not `PATH`, where an agent could put its own `bwrap` for the
 /// next launch.
@@ -92,10 +94,12 @@ impl WorkingDirectory {
 
 /// Checks `path` as a sandboxed agent's writable directory. It comes from a pane's OSC 7 report,
 /// which any program can print, so it must resolve to a directory of this user's that no one else
-/// can write to, under directories that only it or root can change. It must not be `/`, `$HOME`
-/// or above it, a dot-directory of `$HOME` such as `~/.config` or inside one, `~/Library` or
-/// inside it, inside a `.git` directory, a `PATH` directory or above one, or hold or sit inside a
-/// `hidden` one.
+/// can write to, under directories that only it or root can change. It must be strictly inside
+/// `$HOME`, and not a dot-directory of `$HOME` such as `~/.config` or inside one, `~/bin`,
+/// `~/Applications` or `~/Library` or inside them, inside a `.git` directory, an entry of
+/// `user_path` or above one, inside the prefix of a `bin` entry of `user_path` in `$HOME` such
+/// as `~/go`, or hold or sit inside a `hidden` one. `user_path` is the user's own `PATH`, from
+/// [`login_path`].
 ///
 /// # Errors
 ///
@@ -112,19 +116,43 @@ impl WorkingDirectory {
 /// let home = std::env::var_os("HOME").unwrap();
 /// let project = Path::new(&home).join(format!("pinfold-project-{}", std::process::id()));
 /// std::fs::DirBuilder::new().mode(0o700).create(&project)?;
-/// assert!(working_directory(&project, &[]).is_ok());
-/// assert!(working_directory(&project, &[project.join(".ssh")]).is_err());
-/// assert!(working_directory(Path::new("/"), &[]).is_err());
+/// let path = "/usr/bin:/bin".as_ref();
+/// assert!(working_directory(&project, &[], path).is_ok());
+/// assert!(working_directory(&project, &[project.join(".ssh")], path).is_err());
+/// assert!(working_directory(Path::new("/"), &[], path).is_err());
 /// std::fs::remove_dir(&project)?;
 /// # Ok::<(), std::io::Error>(())
 /// ```
-pub fn working_directory(path: &Path, hidden: &[PathBuf]) -> io::Result<WorkingDirectory> {
-    let refuse = |why: &str| {
-        Err(io::Error::new(
-            io::ErrorKind::PermissionDenied,
-            format!("{path:?} {why}, so the sandboxed agent does not start"),
-        ))
+pub fn working_directory(
+    path: &Path,
+    hidden: &[PathBuf],
+    user_path: &OsStr,
+) -> io::Result<WorkingDirectory> {
+    let Some(home) = std::env::var_os("HOME") else {
+        return Err(refusal(path, "cannot be checked without HOME"));
     };
+    inside_home(path, hidden, user_path, &resolve(Path::new(&home)))
+}
+
+/// The error for a refused working directory, which says what to do instead.
+fn refusal(path: &Path, why: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::PermissionDenied,
+        format!(
+            "{path:?} {why}, so the sandboxed agent does not start. Start it from a project \
+             directory of yours inside your home folder"
+        ),
+    )
+}
+
+/// [`working_directory`] with `home` resolved.
+fn inside_home(
+    path: &Path,
+    hidden: &[PathBuf],
+    user_path: &OsStr,
+    home: &Path,
+) -> io::Result<WorkingDirectory> {
+    let refuse = |why: &str| Err(refusal(path, why));
     let dir = path.canonicalize()?;
     let meta = fs::metadata(&dir)?;
     if !meta.is_dir() {
@@ -136,21 +164,21 @@ pub fn working_directory(path: &Path, hidden: &[PathBuf]) -> io::Result<WorkingD
     if meta.mode() & 0o022 != 0 {
         return refuse("is writable by other users");
     }
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
-        return refuse("cannot be checked without HOME");
-    };
-    let home = resolve(&home);
-    if home.starts_with(&dir) {
-        return refuse("is the home directory or above it");
-    }
-    // What runs at login, from PATH or from git lives here, such as ~/.local/bin and ~/.config.
-    let first = dir
-        .strip_prefix(&home)
+    // Outside home are package managers' prefixes the user owns, such as /opt/homebrew.
+    let Some(first) = dir
+        .strip_prefix(home)
         .ok()
-        .and_then(|rest| rest.iter().next());
-    let library = cfg!(target_os = "macos") && first.is_some_and(|name| name == "Library");
-    if library || first.is_some_and(|name| name.as_encoded_bytes().starts_with(b".")) {
-        return refuse("is or is inside a dot-directory of home or ~/Library");
+        .and_then(|rest| rest.iter().next())
+    else {
+        return refuse("is not inside your home folder");
+    };
+    // What runs at login, from PATH or from git lives here, such as ~/.local/bin and ~/.config.
+    let library = cfg!(target_os = "macos") && first == "Library";
+    if library || first == "bin" || first == "Applications" {
+        return refuse("is or is inside ~/bin, ~/Applications or ~/Library");
+    }
+    if first.as_encoded_bytes().starts_with(b".") {
+        return refuse("is or is inside a dot-directory of home");
     }
     if dir.iter().any(|name| name == ".git") {
         return refuse("is inside a .git directory");
@@ -163,8 +191,22 @@ pub fn working_directory(path: &Path, hidden: &[PathBuf]) -> io::Result<WorkingD
             return refuse("is under a directory another user can change");
         }
     }
-    if std::env::var_os("PATH").is_some_and(|path| holds_path(&dir, &path)) {
-        return refuse("is or holds a PATH directory");
+    if holds_path(&dir, user_path) {
+        return refuse("is or holds a directory on your PATH");
+    }
+    // A prefix such as ~/go or ~/miniconda3 holds the libraries its programs on PATH load.
+    let in_prefix = std::env::split_paths(user_path).any(|entry| {
+        let entry = resolve(&entry);
+        let bin = entry
+            .file_name()
+            .is_some_and(|name| name == "bin" || name == "sbin");
+        entry
+            .parent()
+            .filter(|prefix| bin && prefix.starts_with(home) && *prefix != home)
+            .is_some_and(|prefix| dir.starts_with(prefix))
+    });
+    if in_prefix {
+        return refuse("is inside a package manager's directory on your PATH");
     }
     for hidden in hidden {
         let real = resolve(hidden);
@@ -174,6 +216,114 @@ pub fn working_directory(path: &Path, hidden: &[PathBuf]) -> io::Result<WorkingD
         }
     }
     Ok(WorkingDirectory(dir))
+}
+
+/// Starts the user's shell, as a pane's starts, to report the `PATH` [`login_path`] returns, so
+/// that seldom waits. Call it once at start, before any agent runs.
+pub fn read_login_path() {
+    let mut login = LOGIN.lock().unwrap_or_else(PoisonError::into_inner);
+    if login.is_none() {
+        *login = ask_shell().ok().map(Login::Asked);
+    }
+}
+
+/// Returns the `PATH` the user's shell sets, which [`working_directory`] checks, read once. Not
+/// the core's own: launchd starts an app with `/usr/bin:/bin:/usr/sbin:/sbin`, without
+/// Homebrew's or `~/go/bin`. An agent cannot change it, as it cannot write the shell's startup
+/// files.
+///
+/// # Errors
+///
+/// Returns an error if the shell cannot start, takes over 10 s, or reports no `PATH`. The next
+/// call asks again.
+pub fn login_path() -> io::Result<OsString> {
+    let mut login = LOGIN.lock().unwrap_or_else(PoisonError::into_inner);
+    let path = match login.take() {
+        Some(Login::Read(path)) => path,
+        Some(Login::Asked(asked)) => reported(asked)?,
+        None => reported(ask_shell()?)?,
+    };
+    *login = Some(Login::Read(path.clone()));
+    Ok(path)
+}
+
+/// The user's shell asked by [`ask_shell`], when, and the file it writes to.
+type Asked = (Child, fs::File, Instant);
+
+enum Login {
+    Asked(Asked),
+    Read(OsString),
+}
+
+static LOGIN: Mutex<Option<Login>> = Mutex::new(None);
+
+/// How long the user's shell gets to report its `PATH`.
+const LOGIN_WAIT: Duration = Duration::from_secs(10);
+
+/// The line before the `PATH`, as the shell's startup files may print too.
+const PATH_MARK: &str = "pinfold-path:";
+
+/// Starts the user's shell, interactive as in a pane, to print its `PATH` into an unnamed file,
+/// which a program it leaves running cannot hold open as it could a pipe.
+fn ask_shell() -> io::Result<Asked> {
+    use std::os::unix::fs::OpenOptionsExt;
+    use std::os::unix::process::CommandExt;
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let name = std::env::temp_dir().join(format!("pinfold-path-{}-{nanos}", std::process::id()));
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&name)?;
+    fs::remove_file(&name)?;
+    let mut command = crate::shell::command();
+    command
+        .args(["-i", "-c", &format!("echo {PATH_MARK}; printenv PATH")])
+        .stdin(Stdio::null())
+        .stdout(file.try_clone()?)
+        .stderr(Stdio::null())
+        // Not in the core's group, so it never takes a terminal the core was started from.
+        .process_group(0);
+    pinfold_sys::mark_strays(&mut command);
+    Ok((command.spawn()?, file, Instant::now()))
+}
+
+/// Waits for the shell from [`ask_shell`] and returns the `PATH` it printed.
+fn reported((mut child, mut file, asked): Asked) -> io::Result<OsString> {
+    use std::io::{Read, Seek};
+    while child.try_wait()?.is_none() {
+        if asked.elapsed() > LOGIN_WAIT {
+            let _ = child.kill();
+            child.wait()?;
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "your shell took over 10 s to report its PATH",
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut text = Vec::new();
+    file.rewind()?;
+    file.take(1 << 20).read_to_end(&mut text)?;
+    path_after_mark(&text)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "your shell reported no PATH"))
+}
+
+/// The line after the last [`PATH_MARK`] line in what the shell printed.
+fn path_after_mark(text: &[u8]) -> Option<OsString> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut lines = text.split(|&byte| byte == b'\n');
+    let mut path = None;
+    while let Some(line) = lines.next() {
+        if line == PATH_MARK.as_bytes() {
+            path = lines.next().filter(|path| !path.is_empty());
+        }
+    }
+    path.map(|path| OsStr::from_bytes(path).to_owned())
 }
 
 /// Whether `dir` is or holds an entry of `path`, as given or resolved, where a program the agent
@@ -229,7 +379,7 @@ fn resolve(path: &Path) -> PathBuf {
 /// let home = std::env::var_os("HOME").unwrap();
 /// let project = Path::new(&home).join(format!("pinfold-agent-{}", std::process::id()));
 /// std::fs::DirBuilder::new().mode(0o700).create(&project)?;
-/// let work = sandbox::working_directory(&project, &[])?;
+/// let work = sandbox::working_directory(&project, &[], "/usr/bin".as_ref())?;
 /// let program = ["/bin/echo".to_owned(), "hi".to_owned()];
 /// let api = std::env::temp_dir().join("pinfold/pinfold.sock");
 /// match sandbox::command(&program, &[], &work, &api, None) {
@@ -720,6 +870,9 @@ mod tests {
 
     use super::*;
 
+    /// The `PATH` launchd gives an app.
+    const LAUNCHD: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+
     fn strings(args: &[OsString]) -> Vec<&str> {
         args.iter().map(|arg| arg.to_str().unwrap()).collect()
     }
@@ -1119,22 +1272,22 @@ mod tests {
             fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
         }
         let real = dir.canonicalize().unwrap();
-        let work = working_directory(&dir, &[]);
+        let work = working_directory(&dir, &[], LAUNCHD.as_ref());
         let home = PathBuf::from(std::env::var_os("HOME").unwrap());
         let refused = [
-            working_directory(Path::new("/"), &[]),
-            working_directory(&home, &[]),
-            working_directory(home.parent().unwrap(), &[]),
-            working_directory(&dir, &[dir.join(".ssh")]),
-            working_directory(&inner, std::slice::from_ref(&dir)),
-            working_directory(&open, &[]),
-            working_directory(&under, &[]),
-            working_directory(&git, &[]),
-            working_directory(&dot, &[]),
-            working_directory(&dir.join("missing"), &[]),
+            working_directory(Path::new("/"), &[], LAUNCHD.as_ref()),
+            working_directory(&home, &[], LAUNCHD.as_ref()),
+            working_directory(home.parent().unwrap(), &[], LAUNCHD.as_ref()),
+            working_directory(&dir, &[dir.join(".ssh")], LAUNCHD.as_ref()),
+            working_directory(&inner, std::slice::from_ref(&dir), LAUNCHD.as_ref()),
+            working_directory(&open, &[], LAUNCHD.as_ref()),
+            working_directory(&under, &[], LAUNCHD.as_ref()),
+            working_directory(&git, &[], LAUNCHD.as_ref()),
+            working_directory(&dot, &[], LAUNCHD.as_ref()),
+            working_directory(&dir.join("missing"), &[], LAUNCHD.as_ref()),
         ];
-        let root = working_directory(Path::new("/usr/bin"), &[]);
-        let library = working_directory(&home.join("Library"), &[]);
+        let root = working_directory(Path::new("/usr/bin"), &[], LAUNCHD.as_ref());
+        let library = working_directory(&home.join("Library"), &[], LAUNCHD.as_ref());
         fs::remove_dir_all(&dir).unwrap();
         fs::remove_dir_all(&dot).unwrap();
         assert_eq!(work.unwrap().path(), real);
@@ -1150,9 +1303,86 @@ mod tests {
     }
 
     #[test]
+    fn a_working_directory_is_a_project_inside_home() {
+        // A home of its own inside the real one, so only the rules about home refuse.
+        let home = project("pinfold-home", 0o700).canonicalize().unwrap();
+        let temp = std::env::temp_dir().canonicalize().unwrap();
+        let outside = temp.join(format!("pinfold-outside-{}", std::process::id()));
+        let projects = ["src/app", "Projects/app", "code/app"].map(|name| home.join(name));
+        let refused = [
+            "Applications",
+            "bin",
+            "go",
+            "go/src/app",
+            "miniconda3",
+            "miniconda3/lib",
+            "tools",
+            "tools/scripts",
+        ]
+        .map(|name| home.join(name));
+        for dir in projects.iter().chain(&refused).chain([&outside]) {
+            fs::create_dir_all(dir).unwrap();
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let entries = ["go/bin", "miniconda3/bin", "tools/scripts"].map(|name| home.join(name));
+        let login = std::env::join_paths(entries.iter().chain([&PathBuf::from("/usr/bin")]));
+        let login = login.unwrap();
+        let check = |dir: &Path, path: &OsStr| inside_home(dir, &[], path, &home);
+        let accepted: Vec<_> = projects.iter().map(|dir| check(dir, &login)).collect();
+        let by_login: Vec<_> = refused.iter().map(|dir| check(dir, &login)).collect();
+        let by_launchd = [
+            &home.join("Applications"),
+            &home.join("bin"),
+            &home,
+            &outside,
+        ]
+        .map(|dir| check(dir, LAUNCHD.as_ref()));
+        let out = check(&outside, LAUNCHD.as_ref());
+        let brew = Path::new("/opt/homebrew");
+        let brew = brew
+            .is_dir()
+            .then(|| working_directory(brew, &[], LAUNCHD.as_ref()));
+        fs::remove_dir_all(&home).unwrap();
+        fs::remove_dir_all(&outside).unwrap();
+        for (work, dir) in accepted.into_iter().zip(&projects) {
+            assert_eq!(work.unwrap().path(), dir);
+        }
+        for refusal in by_login.into_iter().chain(by_launchd) {
+            assert!(refusal.is_err(), "{refusal:?}");
+        }
+        let error = out.unwrap_err().to_string();
+        assert!(error.contains("is not inside your home folder"), "{error}");
+        assert!(
+            error.contains("Start it from a project directory"),
+            "{error}"
+        );
+        if let Some(brew) = brew {
+            assert!(brew.is_err(), "{brew:?}");
+        }
+    }
+
+    #[test]
+    fn the_path_is_the_line_after_the_mark() {
+        let printed = b"motd\npinfold-path:\nfake\npinfold-path:\n/a/bin:/b\nbye\n";
+        assert_eq!(path_after_mark(printed), Some("/a/bin:/b".into()));
+        assert_eq!(path_after_mark(b"pinfold-path:\n"), None);
+        assert_eq!(path_after_mark(b"/a/bin\n"), None);
+    }
+
+    #[test]
+    fn the_users_shell_reports_its_path() {
+        let path = login_path().unwrap();
+        assert!(
+            std::env::split_paths(&path).any(|entry| entry.ends_with("bin")),
+            "{path:?}"
+        );
+        assert_eq!(login_path().unwrap(), path);
+    }
+
+    #[test]
     fn the_agent_gets_no_other_programs_sockets() {
         let dir = project("pinfold-env", 0o700);
-        let work = working_directory(&dir, &[]).unwrap();
+        let work = working_directory(&dir, &[], LAUNCHD.as_ref()).unwrap();
         let result = command(
             &["agent".to_owned()],
             &[],
