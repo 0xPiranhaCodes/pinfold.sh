@@ -742,12 +742,14 @@ fn result(line: &[u8]) -> Result<Value, Error> {
 
 /// Asks the core on `stream` for a window: a launcher's whole conversation. Refuses a peer that
 /// is not this user before saying anything to it, as a socket path alone proves nothing.
+/// Returns the core's result, which holds an `update` when the window binary is from another
+/// install than the running core, so no window opened.
 ///
 /// # Errors
 ///
 /// [`Error::WrongPeer`] for another user's socket, [`Error::Refused`] if the core says no, and
 /// [`Error::Io`] if it does not answer.
-pub fn open_window(stream: &UnixStream) -> Result<(), Error> {
+pub fn open_window(stream: &UnixStream) -> Result<Value, Error> {
     check_peer(stream.as_fd(), pinfold_sys::effective_uid())?;
     stream.set_read_timeout(Some(REPLY_WAIT))?;
     stream.set_write_timeout(Some(REPLY_WAIT))?;
@@ -757,8 +759,7 @@ pub fn open_window(stream: &UnixStream) -> Result<(), Error> {
     call(
         stream,
         &json!({"jsonrpc": "2.0", "id": 2, "method": "window.open"}),
-    )?;
-    Ok(())
+    )
 }
 
 /// Asks the core on `stream` for its panes and returns the `hello` and `pane.list` results:
@@ -2040,7 +2041,7 @@ mod tests {
             thread::spawn(move || control.serve(open));
             let stream = UnixStream::connect(socket_path(&directory)).unwrap();
             match open_window(&stream) {
-                Ok(()) => assert!(opened),
+                Ok(result) => assert!(opened && result == json!({})),
                 Err(error) => {
                     assert!(!opened);
                     let refused = "the core refused: no window can open: why";

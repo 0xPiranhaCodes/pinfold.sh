@@ -3,7 +3,8 @@
 //! up` opens a project's workspace through it.
 
 use std::error::Error;
-use std::io::{ErrorKind, Write};
+use std::io::{ErrorKind, IsTerminal, Write};
+use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
@@ -69,9 +70,104 @@ fn core(directory: &Path, arguments: &[&str]) -> Result<UnixStream, Box<dyn Erro
     Err(format!("no core answered at {}", path.display()).into())
 }
 
-fn launch() -> Result<(), Box<dyn Error>> {
-    control::open_window(&core(&control::runtime_dir(), &[])?)?;
+/// Asks the core for a window, and starts one with `arguments` if none answers. A core older
+/// than the window binary beside it answers with an `update` instead, once PinFold is installed
+/// again under it. This then ends that core, which saves the session, and a new core restores
+/// it and opens the window. If that would end a running program, it asks the person first.
+fn open(arguments: &[&str]) -> Result<(), Box<dyn Error>> {
+    let directory = control::runtime_dir();
+    let stream = core(&directory, arguments)?;
+    let opened = control::open_window(&stream)?;
+    let Some(update) = opened.get("update") else {
+        return Ok(());
+    };
+    let running = update["running"].as_array().map_or(&[][..], Vec::as_slice);
+    if !running.is_empty() {
+        let question = stranded(running);
+        if !agreed(&question)? {
+            return Err(question.into());
+        }
+    }
+    eprintln!(
+        "pinfold: PinFold was updated: restarting its session, link version {} to {}",
+        update["core"], update["window"]
+    );
+    restart(&directory, &stream)?;
+    let opened = control::open_window(&core(&directory, arguments)?)?;
+    if opened.get("update").is_some() {
+        return Err("the new core cannot open its window either: reinstall PinFold".into());
+    }
     Ok(())
+}
+
+/// What a restart would end and how to keep it, with each field through [`printable`].
+fn stranded(running: &[Value]) -> String {
+    let mut text = "PinFold was updated while its older session ran. A restart opens the new \
+        version and restores the session, but ends what runs in these panes:\n"
+        .to_owned();
+    for pane in running {
+        let field = |name: &str| printable(pane[name].as_str().unwrap_or("?"));
+        text += &match pane["title"].as_str() {
+            Some(_) => format!(
+                "  pane {}: {} in {}\n",
+                pane["pane"],
+                field("program"),
+                field("title")
+            ),
+            None => format!("  pane {}: {}\n", pane["pane"], field("program")),
+        };
+    }
+    text + "Not now keeps them running, and `pinfold ctl list` in a terminal shows them. \
+        Opening PinFold again offers the restart."
+}
+
+/// Whether the person agrees to restart after reading `question`: in the launcher's terminal,
+/// or else in a dialog when the system started it, as the Dock does. With neither, nobody can
+/// answer, so no.
+fn agreed(question: &str) -> Result<bool, Box<dyn Error>> {
+    let input = std::io::stdin();
+    if input.is_terminal() {
+        eprint!("{question}\nRestart now? [y/N] ");
+        let mut answer = String::new();
+        input.read_line(&mut answer)?;
+        return Ok(matches!(answer.trim(), "y" | "Y" | "yes"));
+    }
+    if !cfg!(target_os = "macos") || std::os::unix::process::parent_id() != 1 {
+        return Ok(false);
+    }
+    // The text is an argument, never part of the script, so a pane's field cannot run in it.
+    let script = [
+        "on run argv",
+        "display dialog (item 1 of argv) with title \"PinFold\" with icon caution \
+         buttons {\"Not now\", \"Restart now\"} default button \"Not now\"",
+        "button returned of result",
+        "end run",
+    ];
+    let mut command = Command::new("/usr/bin/osascript");
+    for line in script {
+        command.args(["-e", line]);
+    }
+    let output = command.arg(question).stdin(Stdio::null()).output()?;
+    Ok(output.status.success() && output.stdout.starts_with(b"Restart now"))
+}
+
+/// Ends the core on `stream`, the one that owns the socket, as only it answered there, and waits
+/// until the socket refuses: the core saves the session on SIGTERM, then exits.
+fn restart(directory: &Path, stream: &UnixStream) -> Result<(), Box<dyn Error>> {
+    pinfold_sys::terminate_peer(stream.as_fd())?;
+    let path = control::socket_path(directory);
+    let start = Instant::now();
+    while connect(&path)?.is_some() {
+        if start.elapsed() > START_WAIT {
+            return Err("the older core did not exit".into());
+        }
+        thread::sleep(POLL);
+    }
+    Ok(())
+}
+
+fn launch() -> Result<(), Box<dyn Error>> {
+    open(&[])
 }
 
 /// `pinfold up [dir]`: opens `dir`'s `.pinfold/layout.toml` in a window, or focuses its tabs if
@@ -86,7 +182,7 @@ fn up(dir: Option<&str>) -> Result<bool, Box<dyn Error>> {
     let (mut params, runs) = request(&root, &layout)?;
     let sha256 = trust::sha256(&bytes);
     // A core this starts opens only the workspace, beside a restored session if there is one.
-    control::open_window(&core(&control::runtime_dir(), &["--no-shell"])?)?;
+    open(&["--no-shell"])?;
     let asked = json!({"root": params["root"], "sha256": sha256});
     let mut trusted = true;
     if !runs.is_empty()
@@ -487,6 +583,18 @@ chain broken at sequence 8
         let text = table(&json!({"pane": null}), &list);
         assert!(text.contains("a?b") && text.contains("/x?]0;y?") && text.contains("s?h?"));
         assert!(text.lines().count() == 2);
+    }
+
+    #[test]
+    fn a_restart_names_each_running_pane_with_no_control_characters() {
+        let running = [
+            json!({"pane": 2, "title": "work\u{1b}[2J", "program": "vim"}),
+            json!({"pane": 5, "title": null, "program": "car\u{202e}go"}),
+        ];
+        let text = stranded(&running);
+        assert!(text.contains("  pane 2: vim in work?[2J\n"), "{text}");
+        assert!(text.contains("  pane 5: car?go\n"), "{text}");
+        assert!(text.contains("Not now keeps them running"), "{text}");
     }
 
     #[test]

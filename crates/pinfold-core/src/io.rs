@@ -6,7 +6,7 @@
 
 use std::io::{self, ErrorKind, Read, Write};
 use std::mem;
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -617,6 +617,27 @@ impl Reactor {
                 message,
             }
         })
+    }
+
+    /// What would end if the pane started again, as a restored session starts it: a program in
+    /// its foreground, by the name the system keeps, or its own program if the terminal cannot
+    /// be read. Nothing for one that has closed, or whose shell holds the foreground alone, as
+    /// at a prompt.
+    #[must_use]
+    pub fn would_end(&self, pane: usize) -> Option<String> {
+        let pane = self.pane(pane).filter(|pane| !pane.closed)?;
+        let Ok(found) = pinfold_sys::foreground::foreground(pane.pty.master().as_fd()) else {
+            return Some(pane.program.clone());
+        };
+        // The shell leads its session, so its group's id is the session's.
+        let alone = found.group == pane.pty.terminal().session && found.members.len() == 1;
+        // shortcut: a background job (`make &`) is not seen and ends with the restart; count the
+        // session's processes if someone loses one.
+        if alone && pane.program == (self.shell)().get_program().to_string_lossy() {
+            return None;
+        }
+        let name = found.members.into_iter().next().map(|member| member.name);
+        Some(name.unwrap_or_else(|| pane.program.clone()))
     }
 
     /// Returns where a pane is: its last OSC 7 directory, which output can fake (T4), or with
