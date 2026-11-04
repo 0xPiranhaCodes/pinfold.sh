@@ -41,8 +41,8 @@ fn connect(path: &Path) -> std::io::Result<Option<UnixStream>> {
 
 /// Connects to the core in `directory`, and starts the one beside this binary if none answers.
 /// Two launchers can both start one: the second core exits on the lock, and both connect to the
-/// first, so its exit status means nothing and only the socket decides. The second also empties
-/// the log, moments after the first core started, when there is next to nothing in it.
+/// first, so its exit status means nothing and only the socket decides. The second also starts
+/// the log again, moments after the first core started, when there is next to nothing in it.
 /// `arguments` go to a core this starts.
 fn core(directory: &Path, arguments: &[&str]) -> Result<UnixStream, Box<dyn Error>> {
     let path = &control::socket_path(directory);
@@ -417,9 +417,18 @@ fn main() -> ExitCode {
         Err(error) => {
             eprintln!("pinfold: {error}");
             // A core started from a terminal logs there, so this may be an older core's.
-            let log = control::log_path(&control::runtime_dir());
-            if (args.is_empty() || args[0] == "up") && log.exists() {
-                eprintln!("pinfold: see {}", log.display());
+            let directory = control::runtime_dir();
+            let logs = [
+                control::log_path(&directory),
+                control::previous_log_path(&directory),
+            ];
+            let logs: Vec<String> = logs
+                .iter()
+                .filter(|log| log.exists())
+                .map(|log| log.display().to_string())
+                .collect();
+            if (args.is_empty() || args[0] == "up") && !logs.is_empty() {
+                eprintln!("pinfold: see {}", logs.join(" and "));
             }
             ExitCode::FAILURE
         }

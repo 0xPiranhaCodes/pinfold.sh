@@ -312,7 +312,8 @@ so neither can the cursor. A copy stops at 2 MB, as any selection does.
 
 A core that `pinfold` starts, and each window it opens, writes problems to `default.log` in the
 runtime directory: `$XDG_RUNTIME_DIR/pinfold`, or `$TMPDIR/pinfold-<uid>` where that is unset, as
-on macOS. The file is private to you and starts empty each time a core starts, which is the only
-limit on its size. A failed `pinfold` names it. A core started some other way, as from a terminal,
+on macOS. The file is private to you and starts empty each time a core starts. The last core's
+log, if it holds anything, moves to `default.log.1` first, so a crashed core's panic line outlives
+the next launch. Those two files are the only limit on its size. A failed `pinfold` names both. A core started some other way, as from a terminal,
 writes to its own stderr instead. A config problem quotes the bad line of the file, and a panic
 prints only its place in the code.
