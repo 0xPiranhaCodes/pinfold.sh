@@ -11,6 +11,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Fixed
 
+- A pane whose shell sends no OSC 7, as the default macOS zsh does not, now has a directory: its shell's own, read from the system, while OSC 7 still wins when sent ([ADR-0040](docs/adr/0040-pane-directory-falls-back-to-its-shell.md)). `pinfold agent` starts there instead of in the core's directory, a sandboxed profile is no longer refused for want of OSC 7, and a launch from a pane with no known directory is refused ([#197](https://github.com/0xPiranhaCodes/pinfold.sh/issues/197)). A snapshot saves it, so restored panes open where they were instead of in `$HOME` ([#198](https://github.com/0xPiranhaCodes/pinfold.sh/issues/198)).
 - The sandbox test fails on CI when Linux has no root-owned `bwrap`, instead of passing without running, so a green Linux job shows that the real bubblewrap hid the private paths and kept the caller's identity ([#106](https://github.com/0xPiranhaCodes/pinfold.sh/issues/106)).
 
 - A pane's program, a window and a detached core start with no descriptor past stderr but those handed to them on purpose, so a pane shell can no longer inherit an API connection that another thread accepted at the same moment, which on macOS is inheritable until it is marked ([#187](https://github.com/0xPiranhaCodes/pinfold.sh/issues/187)). On macOS each pane start then marks up to 65,536 descriptors, which adds about 11 ms when the core's open-file limit is that high and none at the default of 256.
