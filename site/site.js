@@ -8,7 +8,7 @@ const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">":
 // The site shell. `pinfold --help` is the binary's own text, already in the page.
 const out = $("out");
 const input = $("cmd");
-const usage = out.textContent.split("\n").find((l) => l.startsWith("usage: pinfold"));
+const usage = out.textContent.slice(out.textContent.indexOf("PinFold: a memory-first")).trimEnd();
 const html = new Set(["states", "sudo"]);
 const cmds = {
   help: () => "commands: pinfold --help · keys · states · mem · install · about · clear",

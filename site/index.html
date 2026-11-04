@@ -172,7 +172,29 @@ $ pinfold  <span class="st-run">reopens the session</span></pre>
       <div class="repl-body">
         <pre class="repl-out" id="out" aria-live="polite"><span hidden data-js><span class="m">PinFold site shell. Type </span>help<span class="m"> and press Enter.</span>
 </span><span class="p">~/pinfold.sh ❯</span> pinfold --help
-usage: pinfold [up [dir] | agent &lt;name&gt; [--right | --down | --tab] | ctl list [--json] | ctl send &lt;pane&gt; &lt;text&gt; | ctl wait &lt;pane&gt; --until exit|prompt|output|match|idle [--pattern &lt;regex&gt;] [--idle-ms &lt;n&gt;] --timeout &lt;s&gt; | ctl grants [--json | revoke &lt;id&gt;] | ctl log [--json] [-n &lt;count&gt;] [--pane &lt;pane&gt;] | ctl log --verify &lt;file&gt; | ctl session save | mcp]
+PinFold: a memory-first terminal for agentic coding.
+
+Usage: pinfold [command]
+
+With no command, opens a PinFold window, and starts PinFold first if it is not running.
+
+Commands:
+  up [dir]          Open a project's .pinfold/layout.toml as tabs and panes
+  agent &lt;name&gt;      Open a pane running an agent profile from your config
+  ctl list          List the session's panes
+  ctl send          Type text into a pane
+  ctl wait          Wait until a pane's command exits, it prints or it goes quiet
+  ctl grants        List or revoke lasting cross-pane grants
+  ctl log           Print or verify the audit log of API calls
+  ctl session save  Save the session now and print the snapshot's path
+  mcp               Serve PinFold's tools to a coding agent over MCP
+  help [command]    Print this, or a command's help
+
+Options:
+  -h, --help        Print help. 'pinfold &lt;command&gt; --help' prints a command's help
+  -V, --version     Print the version
+
+Docs: https://github.com/0xPiranhaCodes/pinfold.sh#readme
 </pre>
         <form class="repl-line" id="repl" autocomplete="off" hidden data-js>
           <label for="cmd">~/pinfold.sh ❯</label>
