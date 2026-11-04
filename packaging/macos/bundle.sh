@@ -10,10 +10,23 @@ window=$3
 app=$4/PinFold.app
 identity=${5:--}
 version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+# Apple reads at most three integers in each key: CFBundleVersion is 1.2.(300+N) for 1.2.3-beta.N, 1.2.399 for 1.2.3.
+short=${version%%-*}
+case $version in
+  "$short") beta=99 ;;
+  "$short"-beta.99) beta= ;;
+  "$short"-beta.[1-9] | "$short"-beta.[1-9][0-9]) beta=${version#"$short"-beta.} ;;
+  *) beta= ;;
+esac
+if [ -z "$beta" ] || ! printf '%s\n' "$short" | grep -Eqx '(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'; then
+  echo "version $version is not MAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH-beta.N, N from 1 to 98" >&2
+  exit 1
+fi
+build=${short%.*}.$((${short##*.} * 100 + beta))
 
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-sed "s/@VERSION@/$version/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+sed -e "s/@VERSION@/$version/g" -e "s/@SHORT_VERSION@/$short/g" -e "s/@BUILD@/$build/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
 plutil -lint -s "$app/Contents/Info.plist"
 # install, not cp: binaries downloaded from another job's artifact lose their mode.
 install -m 0755 "$pinfold" "$core" "$window" "$app/Contents/MacOS/"

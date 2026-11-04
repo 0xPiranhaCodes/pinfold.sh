@@ -156,6 +156,8 @@ fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
     let shadow = home.join("data/agents/test/shadow");
     let command = match sandbox::command(&program, &hidden, &work, &socket, Some(&shadow)) {
         Err(error) if cfg!(target_os = "linux") && error.kind() == ErrorKind::NotFound => {
+            // CI must run the real bwrap (#106), so only a local machine may skip.
+            assert!(std::env::var_os("CI").is_none(), "{error}");
             eprintln!("skipped: no bwrap");
             return;
         }
