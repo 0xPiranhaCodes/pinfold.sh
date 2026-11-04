@@ -127,7 +127,8 @@ fn grants_list<T, C: pinfold_core::grants::Clock>(grants: &mut Grants<T, C>) -> 
 /// not. Spawns and closes reach only the caller's own pane and the panes it spawned, the `self`
 /// and `children` scopes. Pane contents go to the caller alone, never to a log. Only a person's
 /// terminal outside any pane opens a workspace, so a pane's program cannot. An agent
-/// launches only by its profile's name in `agents`, the user's config.
+/// launches only by its profile's name in `agents`, the user's config, and a sandboxed agent and
+/// the panes under it start only sandboxed agents in its working directory.
 fn immediate<T, C: pinfold_core::grants::Clock>(
     reactor: &mut Reactor,
     family: &mut Family,
@@ -205,11 +206,13 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
             // own directory. Never the core's, which a pane with neither would get.
             let cwd = reactor.cwd(of).filter(|cwd| Path::new(cwd).is_dir());
             let cwd = cwd.ok_or("the pane's directory is not known: its shell has none to read")?;
-            let (command, cwd) = if agent.sandbox {
+            let (command, work) = if agent.sandbox {
                 // The sandbox needs a directory of the pane's, never one the core chose.
                 let refused = |error: io::Error| format!("the sandbox will not start: {error}");
                 let hidden = pinfold_config::private_dirs();
                 let work = sandbox::working_directory(Path::new(&cwd), &hidden).map_err(refused)?;
+                // Before the shadow is made, so a refused launch writes nothing.
+                family.contain(reactor, own, Some(work.path()))?;
                 let api = control::socket_path(&control::runtime_dir());
                 // A missing sandbox tool is an error, so the agent never runs unsandboxed.
                 // The agent's own git directory, one per profile and working directory (ADR-0039).
@@ -227,19 +230,20 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                 if cfg!(target_os = "linux") {
                     log_abstract_socket_gap();
                 }
-                let cwd = work
-                    .path()
-                    .to_str()
-                    .ok_or("the pane's directory is not UTF-8")?;
-                (command.map_err(refused)?, Some(cwd.to_owned()))
+                (command.map_err(refused)?, Some(work))
             } else {
                 let (program, args) = agent.command.split_first().ok_or("empty command")?;
                 let mut command = Command::new(program);
                 command.args(args);
-                (command, Some(cwd))
+                (command, None)
             };
             let way = way(launch.place);
-            let pane = family.spawn_command(reactor, own, of, way, cwd.as_deref(), command)?;
+            let pane = match work {
+                Some(work) => {
+                    family.spawn_sandboxed(reactor, own, of, way, work.path(), command)?
+                }
+                None => family.spawn_command(reactor, own, of, way, Some(&cwd), command)?,
+            };
             Ok(json!({"pane": pane}))
         }
         Method::PaneClose { pane } => {

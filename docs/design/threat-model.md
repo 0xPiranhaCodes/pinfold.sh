@@ -194,7 +194,20 @@ MB per pane by default, because hostile output can defeat a line limit.
 bubblewrap or Landlock on Linux and `sandbox-exec` on macOS, or under the agent CLI's own
 sandbox mode. The sandbox hides `~/.ssh`, `~/.config/pinfold`, `~/.local/state/pinfold`
 and other users' panes. Sandboxed agents run inside their pane's session, so they keep
-their identity.
+their identity. Everything a sandboxed agent starts stays sandboxed: it, and every pane
+under it, may start only sandboxed agent profiles (`agent.launch`) in its own working
+directory, and `pane.spawn`, which runs the user's plain shell, is refused. The core
+records each sandboxed pane's working directory when it launches it, as OSC 7 from the
+agent cannot be trusted. Not a directory inside it: on Linux the agent could swap that
+for a symlink before bubblewrap binds it, but it cannot rename its own working directory or
+what is above it. `pane.send` without approval reaches only the caller's own pane
+and those it spawned, which are then sandboxed too. A send to any other pane needs the
+person's approval in the window, so a grant the person gives a sandboxed agent lets it type
+outside its sandbox. `workspace.open`, `session.save`, workspace trust and grant
+administration need a caller in a terminal outside every pane, which a sandboxed agent
+cannot be: the sandbox opens no other terminal (`sandbox-exec` denies them by name and
+bubblewrap gives a fresh `/dev`), and a caller with no terminal is unidentified. A restored session runs shells, never agents, and no agent
+runs in them.
 
 ## Hardening untrusted input
 
