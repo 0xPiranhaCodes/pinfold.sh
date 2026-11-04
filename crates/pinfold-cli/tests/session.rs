@@ -1491,6 +1491,9 @@ fn up_opens_a_workspace_as_shells_once_and_then_attaches_to_it() {
             .args(["-c", &script])
             .current_dir(&project)
             .env("XDG_RUNTIME_DIR", session.directory.join("run"))
+            // A state directory of its own, so the core it starts has no session to restore.
+            .env("XDG_STATE_HOME", session.directory.join("state"))
+            .env("HOME", session.directory.join("state"))
             .env("SHELL", &shell)
             .env(CLIENT, &session.directory);
         let _terminal = pinfold_sys::pty::Pty::spawn(command, 24, 80).unwrap();
@@ -1521,10 +1524,13 @@ fn up_opens_a_workspace_as_shells_once_and_then_attaches_to_it() {
     let said = in_terminal("up");
     let waits = "exit 0\n";
     assert_eq!(said, waits);
-    // The core's first shell, then a tab in each cwd.
+    // A fresh core with no session to restore opens only the layout's two tabs, a pane each.
     let opened = cwds();
-    assert_eq!(opened.len(), 3, "{opened:?}");
-    assert_eq!(opened[1..], [a.to_str().unwrap(), b.to_str().unwrap()]);
+    assert_eq!(opened, [a.to_str().unwrap(), b.to_str().unwrap()]);
+    let saved = in_terminal("ctl session save");
+    let snapshot: serde_json::Value =
+        serde_json::from_slice(&fs::read(saved.lines().next().unwrap()).unwrap()).unwrap();
+    assert_eq!(snapshot["tabs"].as_array().unwrap().len(), 2, "{snapshot}");
 
     // A second `pinfold up` attaches and opens nothing.
     assert_eq!(in_terminal("up"), waits);
@@ -1922,9 +1928,10 @@ run = "echo work''space-ran | tee -a \"$PINFOLD_TEST_CLIENT/ran\""
     let saved = fs::read_to_string(path.trim()).unwrap();
     let snapshot: serde_json::Value = serde_json::from_str(&saved).unwrap();
     let root = fs::canonicalize(&project).unwrap();
-    // The core's first shell, then the refused workspace's pane, then this one's.
+    // The refused workspace's pane, then this one's, and no shell of the core's own.
     assert_eq!(snapshot["workspaces"][1]["root"], root.to_str().unwrap());
-    assert_eq!(snapshot["workspaces"][1]["panes"], serde_json::json!([2]));
+    assert_eq!(snapshot["workspaces"][1]["panes"], serde_json::json!([1]));
+    assert_eq!(snapshot["panes"].as_array().unwrap().len(), 2, "{saved}");
     assert!(!saved.contains("space-ran"), "{saved}");
     let core = session.read("core");
     assert!(kill(&core).status().unwrap().success());
