@@ -17,8 +17,11 @@ sed "s/@VERSION@/$version/g" packaging/macos/Info.plist > "$app/Contents/Info.pl
 plutil -lint -s "$app/Contents/Info.plist"
 # install, not cp: binaries downloaded from another job's artifact lose their mode.
 install -m 0755 "$pinfold" "$core" "$window" "$app/Contents/MacOS/"
-cp packaging/macos/AppIcon.icns crates/pinfold-render/fonts/OFL.txt LICENSE-MIT LICENSE-APACHE \
+cp packaging/macos/AppIcon.icns packaging/macos/Credits.rtf crates/pinfold-render/fonts/OFL.txt LICENSE-MIT LICENSE-APACHE \
   "$app/Contents/Resources/"
+# The standard About panel shows Credits.rtf and the copyright only if both are there and parse.
+textutil -convert txt -stdout "$app/Contents/Resources/Credits.rtf" | grep -q 'pinfold agent'
+plutil -extract NSHumanReadableCopyright raw "$app/Contents/Info.plist" > /dev/null
 # The hardened runtime is what refuses a task port: PT_DENY_ATTACH does not (ADR-0020).
 # Notarization also needs it on every executable. An ad-hoc signature cannot be timestamped.
 timestamp=--timestamp
