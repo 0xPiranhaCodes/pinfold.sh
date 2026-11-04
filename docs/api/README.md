@@ -58,8 +58,9 @@ revoke <id>` revokes one.
 `workspace.trust_state` and `workspace.ask_trust` are accepted only from an identified terminal
 outside every pane, and take a canonical project directory and the SHA-256 of its layout file.
 Trust is one hash per directory, kept in `trust.json` (mode 0600) in the state directory, at most
-1,000 directories with the oldest dropped; a file that will not parse is moved to
-`trust.json.bad` and trusts nothing. `workspace.ask_trust` parks for up to 60 seconds on a prompt
+1,000 directories with the oldest dropped; a file that will not parse, or is a symlink, is moved
+to `trust.json.bad` and trusts nothing. A state directory that is a symlink, belongs to another
+user or is open to others trusts nothing and records nothing, and the core logs why. `workspace.ask_trust` parks for up to 60 seconds on a prompt
 in window chrome that shows the directory, whether its layout changed since it was trusted, and
 every `run` line, at most 64. `y` trusts and records the pair, and `n` or Esc refuses. A prompt
 too long for the window offers only refusal, and no API call can answer it. It runs nothing.

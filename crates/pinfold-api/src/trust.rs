@@ -3,17 +3,20 @@
 //! A same-user program can edit the file, as it can edit `~/.zshrc`, so trust guards against a
 //! cloned repository, not against code already running as you (ADR-0034, point 6). The file is
 //! read on each question, never held, and written whole through a temporary file and a rename.
+//! Its directory must pass [`control::checked`], so another user cannot swap the file, and the
+//! file is opened without following a symlink.
 //!
 //! ```
 //! use pinfold_api::trust::{self, State};
 //!
-//! let path = std::env::temp_dir().join(format!("pinfold-trust-doc-{}.json", std::process::id()));
+//! let dir = std::env::temp_dir().join(format!("pinfold-trust-doc-{}", std::process::id()));
+//! let path = dir.join("trust.json");
 //! let sha256 = "0".repeat(64);
 //! assert_eq!(trust::state(&path, "/home/me/project", &sha256), State::Unknown);
 //! trust::record(&path, "/home/me/project", &sha256)?;
 //! assert_eq!(trust::state(&path, "/home/me/project", &sha256), State::Trusted);
 //! assert_eq!(trust::state(&path, "/home/me/project", &"1".repeat(64)), State::Changed);
-//! # std::fs::remove_file(&path)?;
+//! # std::fs::remove_dir_all(&dir)?;
 //! # Ok::<(), std::io::Error>(())
 //! ```
 
@@ -23,6 +26,7 @@ use std::io::{self, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
 
+use crate::control;
 use serde_json::{Value, json};
 
 /// Most pairs kept; trusting one more drops the oldest.
@@ -54,8 +58,8 @@ pub fn sha256(bytes: &[u8]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
-/// Looks `dir` and `sha256` up in the store at `path`. A missing or unreadable store trusts
-/// nothing.
+/// Looks `dir` and `sha256` up in the store at `path`. A missing or unreadable store, or one in
+/// a directory that fails [`control::checked`], trusts nothing.
 #[must_use]
 pub fn state(path: &Path, dir: &str, sha256: &str) -> State {
     match load(path).iter().find(|(known, _)| known == dir) {
@@ -71,7 +75,8 @@ pub fn state(path: &Path, dir: &str, sha256: &str) -> State {
 ///
 /// # Errors
 ///
-/// When the directory or the file cannot be written, or the pair alone is too large to store.
+/// When the directory fails [`control::checked`], the directory or the file cannot be written,
+/// or the pair alone is too large to store.
 pub fn record(path: &Path, dir: &str, sha256: &str) -> io::Result<()> {
     let mut entries = load(path);
     entries.retain(|(known, _)| known != dir);
@@ -94,6 +99,7 @@ pub fn record(path: &Path, dir: &str, sha256: &str) -> io::Result<()> {
         .recursive(true)
         .mode(0o700)
         .create(parent)?;
+    control::checked(parent).map_err(io::Error::other)?;
     let temporary = path.with_extension("json.tmp");
     // A leftover temporary file, or a symlink planted there, is removed; `create_new` follows none.
     let _ = fs::remove_file(&temporary);
@@ -119,10 +125,20 @@ fn serialize(entries: &[(String, String)]) -> String {
 
 /// The pairs in the file, oldest first. A store that will not parse is moved aside to
 /// `trust.json.bad`, so it is not lost and not trusted, and the store starts empty. [`record`]
-/// never writes a directory twice, so a store that names one twice will not parse.
+/// never writes a directory twice, so a store that names one twice will not parse. A store in
+/// a directory that fails [`control::checked`] is left alone and trusts nothing.
 fn load(path: &Path) -> Vec<(String, String)> {
+    if control::checked(path.parent().unwrap_or(Path::new("."))).is_err() {
+        return Vec::new();
+    }
     let mut bytes = Vec::new();
-    let read = File::open(path).and_then(|file| file.take(MAX_BYTES + 1).read_to_end(&mut bytes));
+    // A symlink or anything but a regular file is moved aside below, like a corrupt store.
+    let read = pinfold_sys::open_no_follow(path).and_then(|file| {
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::other("the trust store is not a regular file"));
+        }
+        file.take(MAX_BYTES + 1).read_to_end(&mut bytes)
+    });
     match read {
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Vec::new(),
         Ok(_) => {
@@ -182,6 +198,14 @@ mod tests {
         directory.join("state/trust.json")
     }
 
+    fn private_parent(path: &Path) {
+        DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(path.parent().unwrap())
+            .unwrap();
+    }
+
     fn hash(digit: u32) -> String {
         char::from_digit(digit, 10).unwrap().to_string().repeat(64)
     }
@@ -236,6 +260,39 @@ mod tests {
     }
 
     #[test]
+    fn a_store_others_can_reach_trusts_nothing_and_is_left_alone() {
+        for mode in [0o770, 0o707, 0o777] {
+            let path = path();
+            record(&path, "/a", &hash(1)).unwrap();
+            let parent = path.parent().unwrap();
+            fs::set_permissions(parent, fs::Permissions::from_mode(mode)).unwrap();
+            assert_eq!(state(&path, "/a", &hash(1)), State::Unknown);
+            assert!(record(&path, "/b", &hash(1)).is_err());
+            assert!(path.exists() && !path.with_extension("json.bad").exists());
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).unwrap();
+            assert_eq!(state(&path, "/a", &hash(1)), State::Trusted);
+        }
+    }
+
+    #[test]
+    fn a_symlinked_store_or_directory_trusts_nothing() {
+        let real = path();
+        record(&real, "/a", &hash(1)).unwrap();
+        let path = path();
+        private_parent(&path);
+        std::os::unix::fs::symlink(&real, &path).unwrap();
+        assert_eq!(state(&path, "/a", &hash(1)), State::Unknown);
+        assert_eq!(state(&real, "/a", &hash(1)), State::Trusted);
+
+        let linked = path.parent().unwrap().parent().unwrap().join("linked");
+        std::os::unix::fs::symlink(real.parent().unwrap(), &linked).unwrap();
+        let path = linked.join("trust.json");
+        assert_eq!(state(&path, "/a", &hash(1)), State::Unknown);
+        assert!(record(&path, "/b", &hash(1)).is_err());
+        assert_eq!(state(&real, "/b", &hash(1)), State::Unknown);
+    }
+
+    #[test]
     fn a_corrupt_store_is_moved_aside_and_trusts_nothing() {
         for corrupt in [
             &b"{not json"[..],
@@ -245,7 +302,7 @@ mod tests {
             b"\xff\xfe",
         ] {
             let path = path();
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            private_parent(&path);
             fs::write(&path, corrupt).unwrap();
             assert_eq!(state(&path, "/a", &hash(1)), State::Unknown);
             assert!(!path.exists());
