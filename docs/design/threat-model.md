@@ -208,7 +208,9 @@ administration need a caller in a terminal outside every pane, which a sandboxed
 cannot be. A caller with no terminal is unidentified, and the sandbox cannot open a new
 terminal, whose session no pane would hold: on macOS `sandbox-exec` denies every
 `/dev/ttys*` by name, so `openpty` fails, and on Linux bubblewrap's private `/dev` has an
-empty `/dev/pts`, so `/dev/ptmx` leads nowhere. The agent keeps the terminal it was started
+empty `/dev/pts`, so `/dev/ptmx` leads nowhere, and the agent may make no user namespace of
+its own, where it could mount a new devpts (`--disable-userns`, so bubblewrap 0.8 or later;
+an older one refuses the flag and the agent does not start). The agent keeps the terminal it was started
 on. `a_sandboxed_agent_cannot_open_a_new_terminal` in `crates/pinfold-core/tests/sandbox.rs`
 checks both with the real tools. A restored session runs shells, never agents, and no
 agent runs in them.

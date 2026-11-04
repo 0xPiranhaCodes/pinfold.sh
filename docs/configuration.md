@@ -116,7 +116,9 @@ through a symlink. On macOS it is `/usr/bin/sandbox-exec`, which denies reads an
 writes there. On Linux it is bubblewrap, which puts an empty directory over each one, gives the
 agent its own `/dev` and `/proc`, and needs unprivileged user namespaces. `bwrap` is taken from
 `/usr/bin`, `/usr/local/bin` or `/bin`, never `PATH`, and only if root alone can change it and
-the directories above it.
+the directories above it. It must be bubblewrap 0.8 or later, which can stop the agent making
+user namespaces of its own (`--disable-userns`); with an older one the launch fails and names
+the version found.
 If the tool is missing or refuses, the agent does not start: it never runs unsandboxed. A
 directory that does not exist when the agent starts is not hidden on Linux.
 

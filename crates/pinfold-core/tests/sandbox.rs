@@ -290,6 +290,13 @@ fn a_sandboxed_agent_cannot_open_a_new_terminal() {
     plain.args(["-c", &script]);
     let output = read_until(&Pty::spawn(plain, 24, 80).unwrap(), "end=reached");
     assert!(output.contains("new=/dev/"), "{output}");
+    // On Linux the agent also tries a user namespace of its own, with a new devpts mounted there.
+    let nested = "unshare -Urm sh -c 'mount -t devpts -o newinstance,ptmxmode=0666 devpts \
+                  /dev/pts && script -qec \"echo new=\\$(tty)\" /dev/null'; ";
+    let script = match cfg!(target_os = "linux") {
+        true => format!("{nested}{script}"),
+        false => script,
+    };
     let program = ["/bin/sh".to_owned(), "-c".to_owned(), script];
     let command = match sandbox::command(&program, &[], &work, &api, None) {
         Err(error) if cfg!(target_os = "linux") && error.kind() == ErrorKind::NotFound => {
