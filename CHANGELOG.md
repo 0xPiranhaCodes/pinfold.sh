@@ -26,12 +26,14 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Changed
 
+- `packaging/macos/bundle.sh` takes an optional signing identity, signs the `pinfold` launcher and the app with the hardened runtime as well as the core and window, and checks the result. The release dry run keeps an ad-hoc-signed `PinFold-adhoc.dmg` built by the new `packaging/macos/dmg.sh` instead of a `.zip`.
 - `cargo xtask mem-gate` also reads each window with a full glyph cache, with 8 tabs and with its context menu open, and lists the Dock menu as not measured.
 - The release dry run can no longer be started by hand. It runs on version tags and on pull requests that change packaging or `release.yml`.
 - Refined window chrome with graphite tab surfaces, teal active labels, readable unfocused tabs, quieter search hints, and more space around the terminal.
 
 ### Added
 
+- A `v*` tag signs the macOS app with the Developer ID, the hardened runtime and a timestamp, and builds `PinFold.dmg`, notarized with `notarytool` and stapled, in a job that reads the signing secrets only from the maintainer-approved `release` environment and builds nothing ([#179](https://github.com/0xPiranhaCodes/pinfold.sh/issues/179), [#180](https://github.com/0xPiranhaCodes/pinfold.sh/issues/180)).
 - On Linux a sandboxed agent can commit: into a shadow git directory under `~/.local/share/pinfold/agents`, which borrows the repository's objects and whose hooks and config only the sandbox runs. `git fetch --no-tags <shadow> '+refs/heads/*:refs/remotes/agent-<profile>/*'` brings its commits into remote-tracking refs; the real `.git` stays read-only.
 - Right-click on an OSC 8 hyperlink adds Open Link and Copy Link to the menu. Open Link opens `http` and `https` links in the browser through `open` or `xdg-open`, never through a shell. Any other scheme, and web links with characters outside ASCII, ask first in a prompt PinFold draws, with the whole link shown and those characters escaped. Links over 2,048 bytes or that are not URIs are not offered. The window asks the core for the link under the cell, so the link is version 9.
 - On macOS, right-clicking the Dock icon offers New Tab, Split Right, Split Down, Detach and one item per tab with its agent state as glyph and word ([#114](https://github.com/0xPiranhaCodes/pinfold.sh/issues/114)).
