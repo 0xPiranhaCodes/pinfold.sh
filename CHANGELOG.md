@@ -38,6 +38,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Added
 
+- Beta docs: an install guide, system requirements, file locations and uninstall steps in the README, the manual Mac checks ADR-0031 requires before the beta in `docs/beta/manual-checks.md`, known issues for testers in `docs/beta/known-issues.md`, and a macOS beta bug form that asks for the version, macOS, chip and a log excerpt with secrets removed.
 - On macOS, PinFold > About PinFold shows how to get started: the keys for tabs and splits, `pinfold agent` and `pinfold up`, the agent state glyphs, where the config file and log are, links to the website, docs and issues, and the licenses. The text is `Credits.rtf` in the app's resources, and `bundle.sh` fails if it is missing or does not parse.
 - A `v*` tag creates a draft GitHub release holding `PinFold.dmg`, the Linux tarballs, a CycloneDX SBOM from `cargo-cyclonedx` and `SHA256SUMS` over all of them, with a Sigstore-backed build provenance attestation per file. Only that job can write, it builds nothing, and the maintainer publishes the draft ([#181](https://github.com/0xPiranhaCodes/pinfold.sh/issues/181)).
 - A `v*` tag signs the macOS app with the Developer ID, the hardened runtime and a timestamp, and builds `PinFold.dmg`, notarized with `notarytool` and stapled, in a job that reads the signing secrets only from the maintainer-approved `release` environment and builds nothing ([#179](https://github.com/0xPiranhaCodes/pinfold.sh/issues/179), [#180](https://github.com/0xPiranhaCodes/pinfold.sh/issues/180)).
