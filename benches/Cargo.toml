@@ -16,9 +16,9 @@ path = "scrollback.rs"
 
 [dependencies]
 alacritty_terminal = "=0.26.0"
-pinfold-core = { path = "../crates/pinfold-core", version = "0.0.0" }
-pinfold-proto = { path = "../crates/pinfold-proto", version = "0.0.0" }
-pinfold-sys = { path = "../crates/pinfold-sys", version = "0.0.0" }
+pinfold-core = { path = "../crates/pinfold-core", version = "0.1.0-beta.1" }
+pinfold-proto = { path = "../crates/pinfold-proto", version = "0.1.0-beta.1" }
+pinfold-sys = { path = "../crates/pinfold-sys", version = "0.1.0-beta.1" }
 
 [lints]
 workspace = true

@@ -29,6 +29,12 @@ open target/release/PinFold.app
 sh packaging/macos/dmg.sh target/release/PinFold.app target/release/PinFold.dmg
 ```
 
+The app's version comes from the workspace `Cargo.toml`. Apple reads at most three integers in
+`CFBundleShortVersionString` and `CFBundleVersion`, so for `0.1.0-beta.1` the first is `0.1.0`
+and the second `0.1.1`: `1.2.(300+N)` for `1.2.3-beta.N` and `1.2.399` for `1.2.3`, so each beta
+and then the release sorts above the last. The About panel shows the full version in its
+copyright line. `bundle.sh` refuses any other version form.
+
 `pinfold`, `pinfold-core` and `pinfold-window` must sit in one directory: the launcher and the
 core each find the next by looking beside themselves.
 
@@ -39,7 +45,8 @@ startup without it.
 
 ## Cutting the beta
 
-The maintainer pushes a `v*` tag. The `release` environment holds `MACOS_CERT_P12`,
+The maintainer pushes a `v*` tag equal to `v` and the workspace version, such as `v0.1.0-beta.1`;
+the `version` job fails the run before any build for any other tag. The `release` environment holds `MACOS_CERT_P12`,
 `MACOS_CERT_PASSWORD`, `APPLE_TEAM_ID`, `ASC_KEY_ID`, `ASC_ISSUER_ID` and `ASC_KEY_P8`. Two jobs
 use it, and each waits for the maintainer to approve it on the run's page: `macos-sign`, the
 only job that can read those secrets, and then `release`, the only job that can write.

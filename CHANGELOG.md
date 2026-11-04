@@ -28,6 +28,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Changed
 
+- The version is `0.1.0-beta.1`, for the macOS beta. `PinFold.app` carries `0.1.0` as its short version and `0.1.1` as its build version, since Apple reads at most three integers there, and shows `0.1.0-beta.1` in the About panel. A `v*` tag that is not `v` and the workspace version fails the release run before it builds anything.
 - `packaging/macos/bundle.sh` takes an optional signing identity, signs the `pinfold` launcher and the app with the hardened runtime as well as the core and window, and checks the result. The release dry run keeps an ad-hoc-signed `PinFold-adhoc.dmg` built by the new `packaging/macos/dmg.sh` instead of a `.zip`.
 - `cargo xtask mem-gate` also reads each window with a full glyph cache, with 8 tabs and with its context menu open, and lists the Dock menu as not measured.
 - The release dry run can no longer be started by hand. It runs on version tags and on pull requests that change packaging or `release.yml`.
