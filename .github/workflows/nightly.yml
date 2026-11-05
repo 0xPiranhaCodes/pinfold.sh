@@ -32,9 +32,18 @@ jobs:
       - run: cargo install cargo-fuzz --version 0.13.2 --locked
       - run: FUZZ_SECONDS=1800 cargo xtask fuzz-smoke
 
-  soak:
+  mem-gate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: sudo apt-get install -y libxkbcommon-x11-0 xvfb
       - run: xvfb-run -a -s "-screen 0 1920x1080x24" cargo xtask mem-gate
+
+  soak:
+    runs-on: ubuntu-latest
+    # An hour of soak, the build, and room for the driver's own two-minute grace.
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: sudo apt-get install -y libxkbcommon-x11-0 xvfb
+      - run: xvfb-run -a -s "-screen 0 1920x1080x24" cargo xtask soak --minutes 60
