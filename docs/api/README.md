@@ -131,7 +131,7 @@ sent. If the layout has any, `pinfold up` asks `workspace.trust_state`, and unle
 is trusted with the file's SHA-256 it asks `workspace.ask_trust`, so the window shows the
 prompt. It sends the hash with `workspace.open`, and the core reads the file again and types each
 `run` line, then a newline, into its pane's shell only if the store holds that directory and
-hash. Refused, the layout opens as shells, and `pinfold up` says how many lines did not run and
+hash. Each pane of such a run starts in the file's own directory for it, whatever cwd was sent. Refused, the layout opens as shells, and `pinfold up` says how many lines did not run and
 exits 1. A
 core that restores a session runs the lines of each workspace in it the same way, from the file
 and never from the snapshot.

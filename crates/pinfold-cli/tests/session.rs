@@ -27,6 +27,8 @@ const PANIC: &str = "PINFOLD_TEST_PANIC";
 const API: &str = "PINFOLD_TEST_API";
 /// Set in a pane that reports a status.
 const STATUS: &str = "PINFOLD_TEST_STATUS";
+/// Names the directory of a run, in the terminal that opens a workspace.
+const WORKSPACE: &str = "PINFOLD_TEST_WORKSPACE";
 const PATIENCE: Duration = Duration::from_secs(120);
 
 type Result<T = ()> = std::result::Result<T, Box<dyn Error>>;
@@ -2155,6 +2157,77 @@ run = "echo work''space-ran | tee -a \"$PINFOLD_TEST_CLIENT/ran\""
     .unwrap();
     restore("workspace-ran\nworkspace-ran\nprobe\nprobe\n");
     fs::remove_dir_all(&project).unwrap();
+}
+
+#[test]
+fn a_trusted_run_line_runs_in_its_layouts_directory_not_the_callers() {
+    let session = Session::new("wd", None).unwrap();
+    let project = session.directory.join("project");
+    fs::create_dir_all(project.join(".pinfold")).unwrap();
+    fs::create_dir_all(project.join("sub")).unwrap();
+    let root = fs::canonicalize(&project).unwrap();
+    let layout = "[[tabs]]\n[[tabs.panes]]\nrun = 'pwd -P > \"$PINFOLD_TEST_CLIENT/ran\"'\n";
+    fs::write(project.join(".pinfold/layout.toml"), layout).unwrap();
+    let sha256 = pinfold_api::trust::sha256(layout.as_bytes());
+    // Trusted as `pinfold up`'s prompt would record it, in the core's state directory.
+    let state = session
+        .directory
+        .join("state")
+        .join(if cfg!(target_os = "macos") {
+            "Library/Application Support/PinFold"
+        } else {
+            "pinfold"
+        });
+    let trusted =
+        pinfold_api::trust::record(&state.join("trust.json"), root.to_str().unwrap(), &sha256);
+    trusted.unwrap();
+    let mut core = session.start_core(&[], "exec /bin/sh").unwrap();
+
+    // The caller asks for the pane in `sub`, where the prompt never said the line would run.
+    let open = call(
+        2,
+        "workspace.open",
+        serde_json::json!({"root": root, "sha256": sha256,
+            "layout": {"tabs": [{"panes": [{"cwd": root.join("sub")}]}]}}),
+    );
+    let mut outside = Command::new(env::current_exe().unwrap());
+    outside
+        .args(["--exact", "workspace_open_process"])
+        .env("XDG_RUNTIME_DIR", session.directory.join("run"))
+        .env(WORKSPACE, &session.directory)
+        .env("PINFOLD_TEST_OPEN", open.to_string());
+    let _terminal = pinfold_sys::pty::Pty::spawn(outside, 24, 80).unwrap();
+    assert!(session.wait_for("opened"), "{}", session.read_log());
+    let opened = session.read("opened");
+    assert!(opened.contains("\"opened\":1"), "{opened}");
+    assert!(session.wait_for("ran"), "{}", session.read_log());
+    assert_eq!(session.read("ran"), format!("{}\n", root.display()));
+    core.kill().unwrap();
+    core.wait().unwrap();
+}
+
+/// Not a test: the terminal outside any pane of
+/// [`a_trusted_run_line_runs_in_its_layouts_directory_not_the_callers`]. It sends the request
+/// it is given and notes the answer.
+#[test]
+fn workspace_open_process() {
+    let (Some(directory), Ok(open)) = (env::var_os(WORKSPACE), env::var("PINFOLD_TEST_OPEN"))
+    else {
+        return;
+    };
+    let open: serde_json::Value = serde_json::from_str(&open).unwrap();
+    // The core may not be listening yet.
+    let start = Instant::now();
+    let mut lines = loop {
+        match api(std::slice::from_ref(&open)) {
+            Ok(lines) => break lines,
+            Err(error) if start.elapsed() > PATIENCE => panic!("{error}"),
+            Err(_) => thread::sleep(Duration::from_millis(20)),
+        }
+    };
+    next(&mut lines, || Ok(())).unwrap();
+    let opened = next(&mut lines, || Ok(())).unwrap();
+    fs::write(Path::new(&directory).join("opened"), opened.to_string()).unwrap();
 }
 
 fn probes(ran: &str) -> usize {
