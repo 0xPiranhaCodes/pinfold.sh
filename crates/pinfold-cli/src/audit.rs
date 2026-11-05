@@ -75,7 +75,7 @@ pub fn reply(log: &mut Log, reactor: &Reactor, request: Request, result: Result<
 /// `audit.read`.
 pub fn read(log: &Log, reactor: &Reactor, request: &Request) -> Result<Value, String> {
     // A terminal outside every pane is not proof of a person, as a pane's program can open one,
-    // but a read returns no pane text, so it is not asked in the window (ADR-0041).
+    // but a read returns no pane text, so it is not asked in the window (ADR-0042).
     let outside = request
         .caller()
         .is_some_and(|caller| reactor.pane_of(caller).is_none());

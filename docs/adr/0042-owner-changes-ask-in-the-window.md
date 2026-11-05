@@ -1,6 +1,6 @@
-# ADR-0041: Owner changes ask in the window, owner reads do not
+# ADR-0042: Owner changes ask in the window, owner reads do not
 
-- **Status:** Proposed
+- **Status:** Accepted, by the maintainer's decision of 2026-11-05
 - **Date:** 2026-11-05
 
 ## Context

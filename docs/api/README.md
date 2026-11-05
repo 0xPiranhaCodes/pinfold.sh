@@ -66,7 +66,7 @@ revokes one.
 A pane's program can start a terminal of its own, as `script -q /dev/null` does, whose session
 no pane holds, so the core cannot tell it from a person's terminal. The methods marked asked,
 `session.save`, `workspace.open` and `grants.revoke`, therefore park for up to 60 seconds on an
-owner prompt in window chrome that names the method and what it touches ([ADR-0041](../adr/0041-owner-changes-ask-in-the-window.md)).
+owner prompt in window chrome that names the method and what it touches ([ADR-0042](../adr/0042-owner-changes-ask-in-the-window.md)).
 `y` runs it once and `n` or Esc refuses it with "the owner action was denied in the window";
 there is no lasting grant, and with no window open it is refused. Reads of grants, the audit
 log and trust state are not asked: they return no pane text.
