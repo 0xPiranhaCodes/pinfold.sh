@@ -100,8 +100,10 @@ do the same. [docs/configuration.md](docs/configuration.md#keys) lists every key
 `pinfold --version` prints the version. The [API reference](docs/api/README.md) covers what
 agents can do and what asks you first.
 
-**Requirements:** macOS on Apple Silicon or Intel; the app is universal. No minimum version is
-enforced yet. The automated tests run on macOS 26.6 and the app has been run by hand on macOS 27
+**Requirements:** macOS 10.13.4 or later on Intel, or macOS 11 or later on Apple Silicon; the app
+is universal. 10.13.4 is the oldest macOS with every system call PinFold makes, and macOS refuses
+to open the app on anything older. The automated tests run only on macOS 26.6 and the app has been
+run by hand only on macOS 27, so older versions are untested
 ([#190](https://github.com/0xPiranhaCodes/pinfold.sh/issues/190)).
 
 **Where PinFold keeps things:**
