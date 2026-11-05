@@ -782,6 +782,23 @@ mod tests {
     }
 
     #[test]
+    fn a_flood_of_osc_9_and_777_notifications_is_dropped_whole() {
+        // Nothing handles notifications yet, so their limit is zero (T4). A feature that
+        // shows them has to add a real limit before this can change.
+        let mut engine = AlacrittyEngine::new(4, 20);
+        let one = b"\x1b]9;pwned\x07\x1b]777;notify;pwned;body\x1b\\";
+        assert!(feed(&mut engine, &one.repeat(10_000)).is_empty());
+        let long = [b"\x1b]9;".as_slice(), &[b'a'; 1_000_000], b"\x07"].concat();
+        assert!(feed(&mut engine, &long).is_empty());
+        assert_eq!(engine.shell_marks(), ShellMarks::default());
+        assert_eq!(clipboard_writes(&engine), 0);
+        assert!(engine.marks.text.capacity() <= MAX_SEQUENCE);
+        assert_eq!(engine.line_text(0), "");
+        feed(&mut engine, b"ok");
+        assert_eq!(engine.line_text(0), "ok");
+    }
+
+    #[test]
     fn the_engine_can_move_to_the_io_thread() {
         fn assert_send<T: Send>() {}
         assert_send::<AlacrittyEngine>();

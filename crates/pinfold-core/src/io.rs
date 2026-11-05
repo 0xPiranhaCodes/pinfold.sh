@@ -947,6 +947,31 @@ mod tests {
     }
 
     #[test]
+    fn spoofed_marks_stay_in_their_pane_and_never_say_needs_you() {
+        let mut reactor = Reactor::new().unwrap();
+        let quiet = reactor
+            .spawn(shell("echo ready; sleep 30"), 24, 80)
+            .unwrap();
+        // Every mark in every order, a thousand times, then a failed command (T4).
+        let flood = r"i=0; while [ $i -lt 1000 ]; do
+            printf '\033]133;D;1\007\033]133;A\007\033]133;C\007\033]133;D;0\007\033]133;B\007'
+            i=$((i+1)); done; printf '\033]133;D;2\007end'; sleep 30";
+        let spoofer = reactor.spawn(shell(flood), 24, 80).unwrap();
+        let done = |r: &Reactor| on_screen(r, quiet, "ready") && on_screen(r, spoofer, "end");
+        assert!(turn_until(&mut reactor, done));
+
+        assert_eq!(reactor.status(spoofer), Some((Status::Error, false, "")));
+        assert!(!reactor.take_alert(spoofer));
+        assert!(!on_screen(&reactor, spoofer, "133"));
+        assert_eq!(reactor.status(quiet), Some((Status::Idle, false, "")));
+        assert_eq!(
+            reactor.progress(quiet).unwrap().marks,
+            ShellMarks::default()
+        );
+        assert!(!reactor.take_alert(quiet));
+    }
+
+    #[test]
     fn an_endless_source_stops_at_the_budget() {
         let (mut engine, mut replies) = (AlacrittyEngine::new(4, 20), Vec::new());
         let mut buffer = vec![0; READ_BUDGET];
