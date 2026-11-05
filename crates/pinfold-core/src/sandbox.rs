@@ -929,10 +929,12 @@ mod tests {
     }
 
     /// A new directory in `$HOME`, where a working directory may be, with `mode`.
-    fn project(name: &str, mode: u32) -> PathBuf {
+    fn project(name: &str, mode: u32) -> tempfile::TempDir {
         let home = PathBuf::from(std::env::var_os("HOME").unwrap());
-        let dir = home.join(format!("{name}-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        let dir = tempfile::Builder::new()
+            .prefix(name)
+            .tempdir_in(home)
+            .unwrap();
         fs::set_permissions(&dir, fs::Permissions::from_mode(mode)).unwrap();
         dir
     }
@@ -1017,8 +1019,10 @@ mod tests {
     #[test]
     fn linux_covers_existing_paths_and_keeps_the_session() {
         let root = std::env::temp_dir();
-        let inner = root.join(format!("pinfold-nested-{}", std::process::id()));
-        let work = project("pinfold-git", 0o700);
+        let nested = tempfile::tempdir().unwrap();
+        let inner = nested.path().to_owned();
+        let project = project("pinfold-git", 0o700);
+        let work = project.path();
         for path in [inner.clone(), work.join(".git")] {
             fs::create_dir_all(path).unwrap();
         }
@@ -1037,14 +1041,12 @@ mod tests {
         let args = linux_args(
             &hidden,
             &["agent".to_owned()],
-            &work,
+            work,
             api,
             runtime,
             &found,
             7,
         );
-        fs::remove_dir(&inner).unwrap();
-        fs::remove_dir_all(&work).unwrap();
         let args = strings(&args);
         let shadow = "/nowhere/data/shadow";
         let tmpfs = [
@@ -1088,7 +1090,8 @@ mod tests {
 
     #[test]
     fn git_runs_nothing_the_agent_can_change() {
-        let work = project("pinfold-controls", 0o700);
+        let project = project("pinfold-controls", 0o700);
+        let work = project.path();
         let git = work.join(".git");
         let module = git.join("modules/libs/sub");
         let worktree = git.join("worktrees/wt");
@@ -1104,16 +1107,15 @@ mod tests {
         ] {
             fs::write(file, "").unwrap();
         }
-        let controls = git_controls(&work);
+        let controls = git_controls(work);
         fs::remove_dir_all(module.join("hooks")).unwrap();
-        let hookless = git_controls(&work);
-        std::os::unix::fs::symlink(&work, module.join("hooks")).unwrap();
-        let linked = git_controls(&work);
+        let hookless = git_controls(work);
+        std::os::unix::fs::symlink(work, module.join("hooks")).unwrap();
+        let linked = git_controls(work);
         fs::remove_dir_all(&git).unwrap();
-        let none = git_controls(&work);
+        let none = git_controls(work);
         fs::write(&git, "gitdir: /elsewhere\n").unwrap();
-        let gitfile = git_controls(&work);
-        fs::remove_dir_all(&work).unwrap();
+        let gitfile = git_controls(work);
         let Git { kept, controls, .. } = controls.unwrap();
         for dir in [
             &git,
@@ -1143,7 +1145,8 @@ mod tests {
 
     #[test]
     fn each_listed_submodule_keeps_its_git() {
-        let work = project("pinfold-submodules", 0o700);
+        let project = project("pinfold-submodules", 0o700);
+        let work = project.path();
         let vendor = work.join("vendor/.git");
         fs::create_dir_all(vendor.join("hooks")).unwrap();
         fs::create_dir_all(work.join("sub")).unwrap();
@@ -1160,9 +1163,7 @@ mod tests {
         ] {
             fs::write(path, text).unwrap();
         }
-        let found = git_controls(&work);
-        fs::remove_dir_all(&work).unwrap();
-        let found = found.unwrap();
+        let found = git_controls(work).unwrap();
         assert_eq!(found.modules, [work.join("sub/.git"), vendor.clone()]);
         assert!(found.kept.contains(&vendor));
         assert!(found.controls.contains(&vendor.join("hooks")));
@@ -1170,20 +1171,22 @@ mod tests {
 
     #[test]
     fn a_path_directory_or_one_above_it_is_refused() {
-        let work = project("pinfold-path", 0o700);
+        let project_dir = project("pinfold-path", 0o700);
+        let work = project_dir.path();
         let bin = work.join("bin");
         let link = work.join("link");
         fs::create_dir_all(&bin).unwrap();
         std::os::unix::fs::symlink(&bin, &link).unwrap();
         let real = work.canonicalize().unwrap();
         // Outside the working directory, leading to where the agent could make a directory.
-        let away = project("pinfold-path-away", 0o700);
+        let away_dir = project("pinfold-path-away", 0o700);
+        let away = away_dir.path();
         let dangling = away.join("bin");
         std::os::unix::fs::symlink(real.join("later"), &dangling).unwrap();
         let path = |entries: &[&Path]| std::env::join_paths(entries).unwrap();
         let other = Path::new("/usr/bin");
         let held = [
-            holds_path(&real, &path(&[other, &work])),
+            holds_path(&real, &path(&[other, work])),
             holds_path(&real, &path(&[&bin])),
             holds_path(&real.join("bin"), &path(&[&link])),
             holds_path(&real, &path(&[&work.join("missing/bin")])),
@@ -1194,11 +1197,9 @@ mod tests {
             holds_path(&real, &path(&[&dangling.join("sub")])),
         ];
         let free = [
-            holds_path(&real.join("bin"), &path(&[&work])),
-            holds_path(&real, &path(&[other, &away])),
+            holds_path(&real.join("bin"), &path(&[work])),
+            holds_path(&real, &path(&[other, away])),
         ];
-        fs::remove_dir_all(&work).unwrap();
-        fs::remove_dir_all(&away).unwrap();
         assert_eq!(held, [true; 9]);
         assert_eq!(free, [false; 2]);
     }
@@ -1206,7 +1207,8 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn a_shadow_starts_at_the_branch_and_is_then_left_alone() {
-        let temp = std::env::temp_dir().join(format!("pinfold-shadow-{}", std::process::id()));
+        let temp_dir = tempfile::tempdir().unwrap();
+        let temp = temp_dir.path();
         let git = temp.join("work/.git");
         fs::create_dir_all(git.join("objects")).unwrap();
         let (one, two) = ("1".repeat(40), "2".repeat(64));
@@ -1261,7 +1263,6 @@ mod tests {
             planted.join("refs/heads/main").exists(),
         ];
         let objects = temp.canonicalize().unwrap().join("work/.git/objects");
-        fs::remove_dir_all(&temp).unwrap();
         assert_eq!(leaked, [false, false]);
         assert_eq!(
             first,
@@ -1293,8 +1294,8 @@ mod tests {
         // Resolved, as some systems link /usr/bin/env to a multi-call binary.
         let system = fs::canonicalize("/usr/bin/env").unwrap();
         assert!(trusted(&system), "{system:?}");
-        let dir = std::env::temp_dir().join(format!("pinfold-planted-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
         let planted = dir.join("bwrap");
         fs::write(&planted, "").unwrap();
         let link = dir.join("link");
@@ -1302,17 +1303,18 @@ mod tests {
         // Each fails on its own, not for the user's directories above it.
         let (file, symlink) = (root_only(&planted), root_only(&link));
         let whole = (trusted(&planted), trusted(&link));
-        fs::remove_dir_all(&dir).unwrap();
         assert!(!file && !symlink);
         assert_eq!(whole, (false, false));
     }
 
     #[test]
     fn a_working_directory_must_be_a_private_project() {
-        let dir = project("pinfold-work", 0o700);
+        let project_dir = project("pinfold-work", 0o700);
+        let dir = project_dir.path();
         let (open, inner, git) = (dir.join("open"), dir.join("inner"), dir.join(".git/sub"));
         let under = open.join("under");
         let dot = project(".pinfold-dot", 0o700);
+        let dot = dot.path();
         for (path, mode) in [
             (&open, 0o777),
             (&under, 0o700),
@@ -1323,24 +1325,22 @@ mod tests {
             fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
         }
         let real = dir.canonicalize().unwrap();
-        let work = working_directory(&dir, &[], LAUNCHD.as_ref());
+        let work = working_directory(dir, &[], LAUNCHD.as_ref());
         let home = PathBuf::from(std::env::var_os("HOME").unwrap());
         let refused = [
             working_directory(Path::new("/"), &[], LAUNCHD.as_ref()),
             working_directory(&home, &[], LAUNCHD.as_ref()),
             working_directory(home.parent().unwrap(), &[], LAUNCHD.as_ref()),
-            working_directory(&dir, &[dir.join(".ssh")], LAUNCHD.as_ref()),
-            working_directory(&inner, std::slice::from_ref(&dir), LAUNCHD.as_ref()),
+            working_directory(dir, &[dir.join(".ssh")], LAUNCHD.as_ref()),
+            working_directory(&inner, &[dir.to_owned()], LAUNCHD.as_ref()),
             working_directory(&open, &[], LAUNCHD.as_ref()),
             working_directory(&under, &[], LAUNCHD.as_ref()),
             working_directory(&git, &[], LAUNCHD.as_ref()),
-            working_directory(&dot, &[], LAUNCHD.as_ref()),
+            working_directory(dot, &[], LAUNCHD.as_ref()),
             working_directory(&dir.join("missing"), &[], LAUNCHD.as_ref()),
         ];
         let root = working_directory(Path::new("/usr/bin"), &[], LAUNCHD.as_ref());
         let library = working_directory(&home.join("Library"), &[], LAUNCHD.as_ref());
-        fs::remove_dir_all(&dir).unwrap();
-        fs::remove_dir_all(&dot).unwrap();
         assert_eq!(work.unwrap().path(), real);
         for refusal in refused {
             assert!(refusal.is_err(), "{refusal:?}");
@@ -1356,9 +1356,10 @@ mod tests {
     #[test]
     fn a_working_directory_is_a_project_inside_home() {
         // A home of its own inside the real one, so only the rules about home refuse.
-        let home = project("pinfold-home", 0o700).canonicalize().unwrap();
-        let temp = std::env::temp_dir().canonicalize().unwrap();
-        let outside = temp.join(format!("pinfold-outside-{}", std::process::id()));
+        let home_dir = project("pinfold-home", 0o700);
+        let home = home_dir.path().canonicalize().unwrap();
+        let outside_dir = tempfile::tempdir().unwrap();
+        let outside = outside_dir.path().canonicalize().unwrap();
         let projects = ["src/app", "Projects/app", "code/app"].map(|name| home.join(name));
         let refused = [
             "Applications",
@@ -1394,8 +1395,6 @@ mod tests {
         let brew = brew
             .is_dir()
             .then(|| working_directory(brew, &[], LAUNCHD.as_ref()));
-        fs::remove_dir_all(&home).unwrap();
-        fs::remove_dir_all(&outside).unwrap();
         for (work, dir) in accepted.into_iter().zip(&projects) {
             assert_eq!(work.unwrap().path(), dir);
         }
@@ -1437,14 +1436,14 @@ mod tests {
 
     #[test]
     fn the_users_shell_reports_its_path() {
-        let private = std::env::temp_dir().join(format!("pinfold-login-{}", std::process::id()));
-        let path = answered(|| login_path(&private)).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let private = temp.path();
+        let path = answered(|| login_path(private)).unwrap();
         assert!(
             std::env::split_paths(&path).any(|entry| entry.ends_with("bin")),
             "{path:?}"
         );
-        assert_eq!(login_path(&private).unwrap(), path);
-        fs::remove_dir_all(&private).unwrap();
+        assert_eq!(login_path(private).unwrap(), path);
     }
 
     /// A shell that takes `seconds` to print `/slow/bin` as its `PATH`.
@@ -1457,8 +1456,8 @@ mod tests {
 
     #[test]
     fn a_launch_never_waits_for_a_slow_shell() {
-        let private = std::env::temp_dir().join(format!("pinfold-slow-{}", std::process::id()));
-        let ask = || slow_shell(3, &private);
+        let temp = tempfile::tempdir().unwrap();
+        let ask = || slow_shell(3, temp.path());
         let mut login = None;
         let start = Instant::now();
         let first = next_path(&mut login, &ask, LOGIN_WAIT).unwrap_err();
@@ -1466,7 +1465,6 @@ mod tests {
         let waited = start.elapsed();
         let path = answered(|| next_path(&mut login, &ask, LOGIN_WAIT));
         let again = next_path(&mut login, &ask, LOGIN_WAIT);
-        fs::remove_dir_all(&private).unwrap();
         assert!(waited < Duration::from_millis(500), "{waited:?}");
         for error in [first, second] {
             assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
@@ -1478,8 +1476,8 @@ mod tests {
 
     #[test]
     fn a_shell_past_its_time_is_killed_reaped_and_asked_again() {
-        let private = std::env::temp_dir().join(format!("pinfold-late-{}", std::process::id()));
-        let ask = || slow_shell(30, &private);
+        let temp = tempfile::tempdir().unwrap();
+        let ask = || slow_shell(30, temp.path());
         let mut login = None;
         let first = next_path(&mut login, &ask, Duration::ZERO).unwrap_err();
         let Some(Login::Asked((child, ..))) = &login else {
@@ -1501,7 +1499,6 @@ mod tests {
             child.kill().unwrap();
             child.wait().unwrap();
         }
-        fs::remove_dir_all(&private).unwrap();
         assert_eq!(first.kind(), io::ErrorKind::WouldBlock);
         assert_eq!(error.kind(), io::ErrorKind::TimedOut, "{error}");
         assert!(waited < Duration::from_millis(500), "{waited:?}");
@@ -1511,7 +1508,7 @@ mod tests {
     #[test]
     fn the_agent_gets_no_other_programs_sockets() {
         let dir = project("pinfold-env", 0o700);
-        let work = working_directory(&dir, &[], LAUNCHD.as_ref()).unwrap();
+        let work = working_directory(dir.path(), &[], LAUNCHD.as_ref()).unwrap();
         let result = command(
             &["agent".to_owned()],
             &[],
@@ -1519,7 +1516,6 @@ mod tests {
             Path::new("/nowhere/api.sock"),
             None,
         );
-        fs::remove_dir(&dir).unwrap();
         // Linux without bubblewrap refuses before it builds a command.
         if let Ok(command) = result {
             let removed: Vec<_> = command
