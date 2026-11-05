@@ -106,22 +106,43 @@ reproduce it with a script in this repository, leave it out.
 
 ## Testing expectations
 
-Every PR that changes behavior needs tests.
+Every PR that changes behavior needs tests. This list says what exists today; a layer
+we want but do not have links to its issue.
 
-- **Unit tests** sit next to the code. Cross-crate integration tests go in `tests/`.
-- **Snapshot tests** (`insta`) cover grid states, rendered cell output, tool panes
-  and API responses.
-- **Golden images** cover renderer output.
-- **Property tests** (`proptest`) cover parser input paths, the layout tree and the
-  scrollback compression round-trip.
-- **Fuzz targets** cover the VT input path, window link decoder, JSON-RPC decoder, markdown
-  renderer, unified-diff parser, paste sanitizer and config parser.
-- **Conformance** runs vttest and esctest against a tracked pass list.
-- **Recorded agent sessions** cover status detection.
-- **Approval-prompt UI tests** prove that only the keyboard can answer a prompt.
-- **Security tests** give each threat T1–T10 in the
-  [threat model](docs/design/threat-model.md) at least one test proving its control
-  works.
+- **Unit tests** sit next to the code. Tests that need a real core, window link or PTY
+  go in the crate's `tests/`, such as `crates/pinfold-cli/tests/session.rs`.
+- **Property tests** (`proptest`) cover the config parser (`crates/pinfold-config`), the
+  window link decoder (`crates/pinfold-proto/src/link.rs`), the layout tree
+  (`crates/pinfold-mux`) and the scrollback round-trip and reflow
+  (`crates/pinfold-core/tests/`).
+- **Fuzz targets** in `fuzz/fuzz_targets/` cover the VT input path (`vt_input`), the
+  window link decoder (`link`), the control socket's JSON-RPC requests (`api_request`,
+  `api_params`), the paste sanitizer (`paste`), session snapshots (`session_snapshot`) and
+  repository layouts (`workspace_layout`). The config parser, markdown renderer and
+  unified-diff parser have none yet
+  ([#235](https://github.com/0xPiranhaCodes/pinfold.sh/issues/235)).
+- **Snapshot tests** (`insta`) cover OSC 133 and OSC 7 parsing only
+  (`crates/pinfold-core/tests/shell_marks.rs`). Grid states, rendered cells, tool panes
+  and API responses are still to come
+  ([#233](https://github.com/0xPiranhaCodes/pinfold.sh/issues/233)).
+- **Approval-prompt tests** prove that only the window's keyboard answers a prompt:
+  `no_api_method_can_answer_an_approval_prompt` in `crates/pinfold-api/src/control.rs`,
+  the tests in `crates/pinfold-ui/src/approval.rs`, and
+  `only_the_window_answers_cross_pane_actions_and_ctl_revokes_grants` in
+  `crates/pinfold-cli/tests/session.rs`.
+- **Security tests**: the control table in the
+  [threat model](docs/design/threat-model.md#controls-and-their-tests) names the test for
+  each control of T1–T10, or says it is untested
+  ([#234](https://github.com/0xPiranhaCodes/pinfold.sh/issues/234)).
+
+Not built yet:
+
+- **Golden images** of renderer output
+  ([#232](https://github.com/0xPiranhaCodes/pinfold.sh/issues/232)).
+- **Conformance** runs of vttest and esctest against a tracked pass list. `tests/lib.rs`
+  is where the harness will go ([#231](https://github.com/0xPiranhaCodes/pinfold.sh/issues/231)).
+- **Recorded agent sessions** for status detection, which is tested with hand-written
+  bytes today ([#236](https://github.com/0xPiranhaCodes/pinfold.sh/issues/236)).
 
 ## Commits and pull requests
 
