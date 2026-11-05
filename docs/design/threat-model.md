@@ -9,8 +9,10 @@ finding B1 in [`architecture-review.md`](architecture-review.md) and by
 [ADR-0028](../adr/0028-windows-are-spawned-by-the-core.md). Bearer tokens, `PINFOLD_TOKEN` and the
 owner token no longer exist, whatever older text says.
 
-**Status: design.** None of these controls is implemented yet. The milestone table at
-the end says when each one lands.
+**Status: partly built.** The sections below are the design. Many of its controls are
+built, and [Controls and their tests](#controls-and-their-tests) says which, where, and
+which test covers each. Where a number in the design differs from the code, the code and
+that table are right.
 
 ## The honest summary
 
@@ -57,10 +59,50 @@ they make misuse visible. **Only a sandboxed agent is contained.**
 | T6  | Hostile files in the built-in tools                      | Escape bytes or Trojan Source bidi characters in a filename; a file that stalls the highlighter    | Control and bidi characters shown escaped; size and time caps                                                  |
 | T7  | Paste injection                                          | Pasted text containing `ESC[201~` ends bracketed paste early and runs the rest                     | Strip paste terminators and control characters; multi-line paste warning                                       |
 | T8  | Another local user or a sandboxed app reaches the socket | Shared host; Flatpak app with a socket portal                                                      | 0700 directory, 0600 socket, peer UID check, PTY-derived identity                                              |
-| T9  | Secrets leak at rest or over the network                 | Snapshot with scrollback copied off the disk; webhook carries output                               | Scrollback snapshots off by default and redacted; in-memory key for spill files; webhooks carry status only    |
+| T9  | Secrets leak at rest or over the network                 | Snapshot with scrollback copied off the disk; webhook carries output                               | Scrollback snapshots off by default and redacted; spill files, once they exist, under an in-memory key; webhooks carry status only |
 | T10 | Parser bugs or supply-chain compromise                   | Crafted output crashes the VT parser; a bad crate update                                           | `unsafe` only in `pinfold-sys`; fuzzing; `cargo-deny`, `cargo-vet`; signed releases; core isolated from the UI |
 
 Each threat needs at least one test proving its control works.
+
+## Controls and their tests
+
+What is built today. Tests are named by function; "untested" means no test fails if the
+control breaks ([#234](https://github.com/0xPiranhaCodes/pinfold.sh/issues/234)). Paths are
+under `crates/` unless they start with a top-level folder.
+
+| #   | Control                                     | Implemented in                                                                | Test                                                                                                                                    |
+| --- | ------------------------------------------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| T1  | PTY-derived identity                        | `pinfold-sys/src/lib.rs` (`peer_terminal`), `pinfold-core/src/io.rs`          | `a_caller_is_the_pane_whose_terminal_and_session_it_holds` (`pinfold-core/src/io.rs`)                                                   |
+| T1  | Scopes: `self` and `children`               | `pinfold-cli/src/bin/pinfold-core.rs` (`decide`), `pinfold-core/src/family.rs` | `a_pane_spawns_children_and_reaches_only_them`, `a_pane_can_send_to_itself_and_cross_pane_send_needs_a_window` (`pinfold-cli/tests/session.rs`) |
+| T1  | Approval prompt, 30-minute grants           | `pinfold-core/src/grants.rs`, `pinfold-ui/src/approval.rs`                     | `only_the_window_answers_cross_pane_actions_and_ctl_revokes_grants` (`session.rs`), `a_grant_covers_one_triple_and_expires_after_thirty_minutes` (`grants.rs`) |
+| T1  | Protected panes                             | `pinfold-core/src/protect.rs`, `pinfold-sys/src/foreground.rs`                 | `echo_off_patterns_and_marks_refuse_a_send` (`protect.rs`), `a_configured_protect_pattern_refuses_a_send_to_a_pane_that_runs_it` (`session.rs`) |
+| T1  | Sends split at newlines                     | `pinfold-core/src/protect.rs`                                                 | `a_second_line_never_lands_in_ssh` (`protect.rs`)                                                                                       |
+| T1  | `pane.send` limits: 4 KB, 20 per second     | `pinfold-api/src/control.rs` (`MAX_SEND`), `pinfold-core/src/io.rs`            | `a_send_over_4096_bytes_is_refused_whole` (`control.rs`), `sends_past_20_a_second_or_a_full_queue_are_refused` (`io.rs`)                |
+| T1  | Audit log, hash-chained                     | `pinfold-api/src/audit.rs`, `pinfold-cli/src/audit.rs`                         | `detects_changed_dropped_swapped_and_forged_lines` (`pinfold-api/src/audit.rs`), `sends_are_audited_by_size_and_only_a_terminal_outside_a_pane_reads_the_log` (`pinfold-cli/tests/audit.rs`) |
+| T2  | Cross-pane reads need approval and redact   | `pinfold-cli/src/bin/pinfold-core.rs` (`pane_action`), `pinfold-api/src/redact.rs` | `only_the_window_answers_cross_pane_actions_and_ctl_revokes_grants` (`session.rs`), `corpus_reports_detection_rates` (`pinfold-api/tests/redact_corpus.rs`) |
+| T3  | Only fixed-format replies                   | `pinfold-core/src/vt.rs`                                                      | `sequences_that_echo_strings_get_no_reply`, `replies_are_only_fixed_format_csi` (`vt.rs`)                                               |
+| T3  | OSC 52: no read, and writes are refused     | `pinfold-core/src/vt.rs`, `pinfold-ui/src/flash.rs`                            | `a_clipboard_write_is_counted_and_never_answered` (`vt.rs`), `only_a_copy_asked_for_can_reach_the_clipboard` (`pinfold-ui/src/link.rs`) |
+| T3  | OSC 8 targets shown, non-web schemes ask    | `pinfold-ui/src/hyperlink.rs`                                                 | `web_links_open_and_other_schemes_ask`, `the_prompt_shows_the_whole_uri_escaped` (`hyperlink.rs`)                                       |
+| T3  | Length caps on strings, titles, hyperlinks  | `pinfold-core/src/vt.rs`                                                      | `an_unending_osc_string_stops_at_the_limit` (`vt.rs`), `long_titles_are_cut_at_a_character`, `hyperlinks_stop_at_the_limit_and_return_when_they_scroll_away` (`pinfold-core/tests/escape_policy.rs`) |
+| T3  | Scrollback capped at 2 MB per pane          | `pinfold-core/src/scrollback.rs` (`BYTE_CAP`)                                 | `hostile_output_through_a_pane_stays_under_the_cap` (`vt.rs`)                                                                           |
+| T4  | API status outranks OSC 133 marks           | `pinfold-core/src/status.rs`, `pinfold-core/src/marks.rs`                      | `api_outranks_output_until_cleared`, `a_fake_error_from_output_does_not_silence_an_api_alert` (`status.rs`)                             |
+| T4  | Status alerts rate-limited                  | `pinfold-core/src/status.rs`                                                  | `flapping_needs_you_fifty_times_in_one_second_raises_one_alert` (`status.rs`)                                                           |
+| T4  | OSC 9 and 777 notifications                 | Not built: the core shows no notifications                                    | None needed yet                                                                                                                         |
+| T5  | Workspace trust prompt                      | `pinfold-api/src/trust.rs`, `pinfold-core/src/grants.rs`, `pinfold-config/src/workspace.rs` | `only_the_window_answers_a_trust_prompt_and_trusting_records_the_layout`, `up_runs_a_trusted_workspace_and_a_restore_runs_it_again_until_its_file_changes` (`session.rs`) |
+| T5  | Hardened git invocation                     | Not built: no built-in tool runs git yet (M4)                                 | None                                                                                                                                    |
+| T6  | Escaped filenames, size and time caps       | Not built: `pinfold-tools` is empty (M4)                                      | None                                                                                                                                    |
+| T7  | Paste sanitizer                             | `pinfold-core/src/paste.rs`                                                   | `a_paste_cannot_end_its_brackets`, `control_characters_are_stripped` (`paste.rs`); fuzz target `paste`                                  |
+| T7  | Multi-line paste warning                    | `pinfold-ui/src/paste.rs`                                                     | `any_line_end_asks_first`, `risky_commands_are_named` (`pinfold-ui/src/paste.rs`)                                                       |
+| T8  | 0700 directory, 0600 socket, no symlink     | `pinfold-api/src/control.rs`                                                  | `a_symlink_or_open_directory_is_refused` (`control.rs`)                                                                                 |
+| T8  | Peer UID check                              | `pinfold-api/src/control.rs` (`accept`, `check_peer`)                         | Launcher side: `a_launcher_says_nothing_to_another_users_socket` (`control.rs`). Core side: untested                                    |
+| T8  | Core hardening                              | `pinfold-sys/src/lib.rs`                                                      | `hardening_closes_the_core_and_leaves_its_panes_open` (`session.rs`); `tests/hardening/audit.sh` by hand                                 |
+| T9  | Snapshots hold no scrollback, redacted      | `pinfold-core/src/snapshot.rs`                                                | `the_file_is_0600_in_a_0700_directory_and_holds_no_secret`, `a_command_is_redacted_and_capped_and_a_long_cwd_dropped` (`snapshot.rs`)   |
+| T9  | Spill files and webhooks                    | Not built: cold scrollback stays in memory, and no webhook exists              | None needed yet                                                                                                                         |
+| T10 | `unsafe` only in `pinfold-sys`              | `Cargo.toml` (`unsafe_code = "forbid"`), `pinfold-sys/Cargo.toml`             | The compiler refuses `unsafe` elsewhere, in every build                                                                                 |
+| T10 | Fuzzing                                     | `fuzz/fuzz_targets/` (7 targets)                                              | `cargo xtask fuzz-smoke` in `.github/workflows/ci.yml`, 30 minutes each in `nightly.yml`                                                |
+| T10 | `cargo-deny`, `cargo-vet`                   | `deny.toml`, `supply-chain/`                                                  | `.github/workflows/ci.yml`                                                                                                              |
+| T10 | Signed releases                             | `packaging/macos/bundle.sh` (hardened runtime)                                | Untested                                                                                                                                |
+| T10 | Core isolated from the window               | `pinfold-cli/src/bin/pinfold-window.rs`, `pinfold-sys/src/socket.rs`          | `a_session_outlives_its_client_and_says_when_the_core_dies` (`session.rs`)                                                              |
 
 ## Trust boundaries
 
