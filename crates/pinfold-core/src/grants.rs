@@ -181,6 +181,24 @@ impl<T, C: Clock> Grants<T, C> {
         changed: bool,
         window_ready: bool,
     ) -> Decision<T> {
+        let action = ApprovalAction::Trust;
+        self.ask_alone(ticket, usize::from(changed), action, texts, window_ready)
+    }
+
+    /// Parks an owner prompt of its own for a caller outside every pane: `texts` is the method,
+    /// then what it touches. Like trust, only allowing once answers it.
+    pub fn ask_owner(&mut self, ticket: T, texts: Vec<String>, window_ready: bool) -> Decision<T> {
+        self.ask_alone(ticket, 0, ApprovalAction::Owner, texts, window_ready)
+    }
+
+    fn ask_alone(
+        &mut self,
+        ticket: T,
+        target: usize,
+        action: ApprovalAction,
+        texts: Vec<String>,
+        window_ready: bool,
+    ) -> Decision<T> {
         if let Some(refused) = self.full(window_ready) {
             return Decision::Refuse(ticket, refused);
         }
@@ -191,8 +209,8 @@ impl<T, C: Clock> Grants<T, C> {
             // Never matched by `decide`, so no other request joins this prompt.
             key: Key {
                 caller: 0,
-                target: usize::from(changed),
-                action: ApprovalAction::Trust,
+                target,
+                action,
             },
             deadline: now.checked_add(PROMPT_TIME).unwrap_or(now),
             tickets: vec![ticket],
@@ -228,8 +246,8 @@ impl<T, C: Clock> Grants<T, C> {
         };
         let pending = self.pending.swap_remove(index);
         let allowed = answer != ApprovalAnswer::Deny;
-        let trust = pending.key.action == ApprovalAction::Trust;
-        if answer == ApprovalAnswer::AllowForThirtyMinutes && !trust {
+        let action = pending.key.action;
+        if answer == ApprovalAnswer::AllowForThirtyMinutes && !action.is_once() {
             let now = self.clock.now();
             let expires = now.checked_add(GRANT_TIME).unwrap_or(now);
             self.grants.push(Grant {
@@ -238,10 +256,10 @@ impl<T, C: Clock> Grants<T, C> {
                 expires,
             });
         }
-        let reason = if trust {
-            "the workspace was not trusted"
-        } else {
-            "cross-pane action denied"
+        let reason = match action {
+            ApprovalAction::Trust => "the workspace was not trusted",
+            ApprovalAction::Owner => "the owner action was denied in the window",
+            ApprovalAction::Read | ApprovalAction::Send => "cross-pane action denied",
         };
         release(pending.tickets, allowed, reason)
     }
@@ -457,6 +475,30 @@ mod tests {
         assert_eq!(released[0].reason, "the workspace was not trusted");
         assert!(matches!(
             grants.ask_trust(3, Vec::new(), false, false),
+            Decision::Refuse(3, _)
+        ));
+    }
+
+    #[test]
+    fn an_owner_prompt_is_its_own_and_grants_nothing_lasting() {
+        let mut grants = Grants::default();
+        let texts = vec!["grants.revoke".to_owned()];
+        let Decision::Ask(first) = grants.ask_owner(1, texts.clone(), true) else {
+            panic!("not asked")
+        };
+        assert_eq!(first.action, ApprovalAction::Owner);
+        let Decision::Ask(second) = grants.ask_owner(2, texts, true) else {
+            panic!("not asked")
+        };
+        assert_ne!(first.id, second.id);
+        let released = grants.answer(first.id, ApprovalAnswer::AllowForThirtyMinutes);
+        assert!(released[0].allowed);
+        assert!(grants.list().is_empty());
+        let released = grants.answer(second.id, ApprovalAnswer::Deny);
+        assert!(!released[0].allowed);
+        assert!(released[0].reason.contains("denied in the window"));
+        assert!(matches!(
+            grants.ask_owner(3, Vec::new(), false),
             Decision::Refuse(3, _)
         ));
     }

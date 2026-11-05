@@ -132,11 +132,11 @@ pub struct Approval {
 }
 
 impl Approval {
-    /// Whether `other` is this prompt, possibly grown by more requests. Trust prompts never
-    /// grow, so each is its own.
+    /// Whether `other` is this prompt, possibly grown by more requests. Trust and owner prompts
+    /// never grow, so each is its own.
     #[must_use]
     pub fn same_batch(&self, other: &Self) -> bool {
-        if self.action == ApprovalAction::Trust || other.action == ApprovalAction::Trust {
+        if self.action.is_once() || other.action.is_once() {
             return self.id == other.id;
         }
         (self.caller, self.target, self.action) == (other.caller, other.target, other.action)
