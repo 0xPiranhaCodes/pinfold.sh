@@ -311,6 +311,8 @@ fn outcome<T>(parked: &mut Parked<T>, now_at: Option<Progress>, now: Instant) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::grants::{Clock, TestClock};
+    use std::cell::Cell;
     use std::process::Command;
     use std::time::Duration;
 
@@ -321,6 +323,7 @@ mod tests {
     }
 
     /// Turns the reactor until every wait settles, for up to ten seconds, in ticket order.
+    /// Wall clock, not [`TestClock`]: the pane is a real process.
     fn settled(reactor: &mut Reactor, waits: &mut Waits<u8>) -> Vec<(u8, Outcome)> {
         let (start, mut settled) = (Instant::now(), Vec::new());
         while waits.deadline().is_some() && start.elapsed() < Duration::from_secs(10) {
@@ -389,6 +392,7 @@ mod tests {
         let idle = Until::Idle(Duration::from_millis(300));
         assert!(waits.park(&reactor, 2, pane, idle, later).is_ok());
         assert!(waits.deadline() < Some(later));
+        // Wall clock: `park` starts the quiet time from `Instant::now()`, and the output is real.
         let start = Instant::now();
         assert!(reactor.write(pane, b"\n"));
         let ended = settled(&mut reactor, &mut waits);
@@ -464,6 +468,7 @@ mod tests {
         // Normal lines still match once the backlog is tried.
         let normal = "a".repeat(200) + "x";
         waits.feed(pane, &format!("{normal}\n"));
+        // Wall clock: `MATCH_BUDGET` bounds real matching time, so the backlog drains in real time.
         let (start, mut settled) = (Instant::now(), Vec::new());
         while settled.len() < MAX_WAITS && start.elapsed() < Duration::from_secs(60) {
             settled.extend(waits.settle(&reactor, Instant::now()));
@@ -508,11 +513,14 @@ mod tests {
         let mut reactor = Reactor::new().unwrap();
         let pane = reactor.spawn(shell("sleep 30"), 24, 80).unwrap();
         let mut waits = Waits::default();
-        let soon = Instant::now() + Duration::from_millis(200);
+        let clock = TestClock(Cell::new(Instant::now()));
+        let soon = clock.now() + Duration::from_millis(200);
         assert!(waits.park(&reactor, 0, pane, Until::Exit, soon).is_ok());
         assert_eq!(waits.deadline(), Some(soon));
-        assert_eq!(settled(&mut reactor, &mut waits), [(0, Outcome::Timeout)]);
-        assert!(Instant::now() >= soon);
+        clock.advance(Duration::from_millis(199));
+        assert_eq!(waits.settle(&reactor, clock.now()), []);
+        clock.advance(Duration::from_millis(1));
+        assert_eq!(waits.settle(&reactor, clock.now()), [(0, Outcome::Timeout)]);
         assert_eq!(waits.deadline(), None);
     }
 
