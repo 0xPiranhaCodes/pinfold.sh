@@ -46,6 +46,17 @@ still welcome if it adds a case not listed here. Report bugs with the
 - **Only OSC 8 hyperlinks get Open Link and Copy Link.** A plain `https://…` in output gets
   neither ([#171](https://github.com/0xPiranhaCodes/pinfold.sh/pull/171)).
 
+## Sandboxed agents
+
+- **The sandbox does not keep secrets from the agent.** A sandboxed agent profile cannot write
+  outside its working and temporary directories, open another terminal or type with TIOCSTI,
+  and it cannot read `~/.ssh` or PinFold's config and state. It can read every other file you
+  can, such as `~/.aws`, `~/.config/gh`, `~/.netrc`, `~/.kube` and browser profiles, gets your
+  environment variables but the agent sockets', can read and write the clipboard, and can reach
+  the network. Hiding the common credential stores and the clipboard is proposed for v0.1
+  ([ADR-0041](../adr/0041-sandbox-hides-writes-not-secrets.md),
+  [#216](https://github.com/0xPiranhaCodes/pinfold.sh/issues/216)).
+
 ## Not yet checked on an installed build
 
 The Dock menu ([#170](https://github.com/0xPiranhaCodes/pinfold.sh/pull/170)), Open Link and Copy

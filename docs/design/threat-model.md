@@ -23,7 +23,9 @@ session from another pane.
 **The API controls are guardrails, not a security boundary.** An unsandboxed agent runs
 as your user. It can read your files, edit your config, and use its own shell instead
 of the API. The controls here stop injected instructions that use Pinfold's API, and
-they make misuse visible. **Only a sandboxed agent is contained.**
+they make misuse visible. **Only a sandboxed agent is contained**, and in the beta only in
+what it writes and which terminals it reaches: it can still read your credentials and reach
+the network (see Sandbox below).
 
 ## What we protect
 
@@ -228,14 +230,26 @@ in a hash chain. The in-memory copy is the source of truth, because an agent run
 you can rewrite the file on disk. A hash chain cannot show that entries were cut from its
 tail, since a shortened chain is still valid.
 
-**Limits.** Requests over 1 MB are rejected. `pane.send` is capped at 4 KB per call and
+**Limits.** A request line over 32 KiB is rejected. `pane.send` is capped at 4 KB per call and
 20 calls per second per caller, and reads at 2 MB per call. Cold scrollback is capped at 2
 MB per pane by default, because hostile output can defeat a line limit.
 
 **Sandbox.** An agent profile may set `sandbox`, which launches the agent under
 bubblewrap or Landlock on Linux and `sandbox-exec` on macOS, or under the agent CLI's own
 sandbox mode. The sandbox hides `~/.ssh`, `~/.config/pinfold`, `~/.local/state/pinfold`
-and other users' panes. Sandboxed agents run inside their pane's session, so they keep
+and other users' panes.
+
+**What the sandbox does not hide.** In the beta the sandbox limits writes, terminals and
+TIOCSTI, and hides only the directories above. It does not keep your credentials, the macOS
+clipboard or the network from the agent ([ADR-0041](../adr/0041-sandbox-hides-writes-not-secrets.md)).
+The macOS profile starts from `(allow default)` and the Linux one from `--ro-bind / /`, so a
+sandboxed agent can read `~/.aws`, `~/.config/gh`, `~/.netrc`, `~/.kube`, browser profiles and
+any other file you can, outside the hidden directories. It inherits every environment variable
+but `SSH_AUTH_SOCK`, `GPG_AGENT_INFO` and `DBUS_SESSION_BUS_ADDRESS`, so a token in your
+environment reaches it. On macOS it can read and write the clipboard. Only Unix sockets are
+limited: it can connect anywhere over TCP or UDP, so it can send what it reads off the machine.
+Do not give a sandboxed agent a home folder whose credentials it must not see. Hiding the
+common credential stores and the clipboard is proposed for v0.1. Sandboxed agents run inside their pane's session, so they keep
 their identity. Everything a sandboxed agent starts stays sandboxed: it, and every pane
 under it, may start only sandboxed agent profiles (`agent.launch`) in its own working
 directory, and `pane.spawn`, which runs the user's plain shell, is refused. The core
