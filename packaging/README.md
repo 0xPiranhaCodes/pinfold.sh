@@ -29,6 +29,24 @@ open target/release/PinFold.app
 sh packaging/macos/dmg.sh target/release/PinFold.app target/release/PinFold.dmg
 ```
 
+The app runs on macOS 10.13.4 or later. The `macos` job builds with `MACOSX_DEPLOYMENT_TARGET`
+set to that, and `Info.plist`'s `LSMinimumSystemVersion` holds the same value, so macOS refuses
+to open the app on anything older instead of failing at launch; keep the two equal. rustc raises
+the Apple Silicon slice to 11.0, the first macOS for Apple Silicon. The value is the newest
+minimum among the system calls `pinfold-sys` makes:
+
+| API | Used in | macOS |
+| --- | --- | --- |
+| `ptsname_r`, marked in the SDK's `usr/include/_stdlib.h`; Apple has no page for it | `pinfold-sys/src/pty.rs` | 10.13.4 |
+| [`CAMetalLayer.maximumDrawableCount`](https://developer.apple.com/documentation/quartzcore/cametallayer/maximumdrawablecount) | `pinfold-sys/src/metal.rs` | 10.13.2 |
+| [`MTLCreateSystemDefaultDevice`](https://developer.apple.com/documentation/metal/mtlcreatesystemdefaultdevice()), [`MTLDevice`](https://developer.apple.com/documentation/metal/mtldevice), [`CAMetalLayer`](https://developer.apple.com/documentation/quartzcore/cametallayer) | `pinfold-sys/src/metal.rs` | 10.11 |
+| [`NSMenu`](https://developer.apple.com/documentation/appkit/nsmenu), [`NSWindow.standardWindowButton(_:)`](https://developer.apple.com/documentation/appkit/nswindow/standardwindowbutton(_:)) | `pinfold-sys/src/menu.rs`, `window.rs` | none given |
+
+The versions are the availability marks in the macOS 26.1 SDK's headers; the linked pages agree
+where they give one. `pinfold-render` reaches Metal only through `pinfold-sys`.
+[`MTLDevice.hasUnifiedMemory`](https://developer.apple.com/documentation/metal/mtldevice/hasunifiedmemory)
+(10.15) is called only in tests. A new call with a newer minimum must raise both values.
+
 The app's version comes from the workspace `Cargo.toml`. Apple reads at most three integers in
 `CFBundleShortVersionString` and `CFBundleVersion`, so for `0.1.0-beta.1` the first is `0.1.0`
 and the second `0.1.1`: `1.2.(300+N)` for `1.2.3-beta.N` and `1.2.399` for `1.2.3`, so each beta
@@ -50,6 +68,13 @@ the `version` job fails the run before any build for any other tag. The `release
 `MACOS_CERT_PASSWORD`, `APPLE_TEAM_ID`, `ASC_KEY_ID`, `ASC_ISSUER_ID` and `ASC_KEY_P8`. Two jobs
 use it, and each waits for the maintainer to approve it on the run's page: `macos-sign`, the
 only job that can read those secrets, and then `release`, the only job that can write.
+
+Neither starts unless CI passed on the tagged commit. The `ci` job finds the newest `push` run of
+the CI workflow for that commit and waits up to an hour while it is queued or running. It fails
+the release run if that CI run ends in anything but success, or if none finishes in time. Tag a
+commit on `main` whose CI is green or still running: CI runs on pushes only to `main`, so a commit
+elsewhere never passes. If CI failed on a flake, re-run it, then re-run the release run's failed
+jobs. On pull requests the job tests the check against a fake `gh` instead.
 
 That job builds nothing. It takes the universal binaries from the `macos` job, imports the
 certificate into a keychain in the runner's temporary directory, signs each binary and then the
