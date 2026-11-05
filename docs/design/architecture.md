@@ -27,6 +27,7 @@ Pinfold is a standalone terminal written in Rust, designed **memory-first**. It 
 | Growth over an 8-hour idle soak        | 0 MB                                      |
 | Release binary (stripped)              | < 8 MB                                    |
 | Cold start to first prompt             | < 80 ms                                   |
+| Keystroke to echo through the core     | p99 ≤ 16.7 ms (a 60 Hz frame), max ≤ 50 ms |
 
 Memory is measured as PSS on Linux, which splits shared libraries fairly between the processes that use them, and as phys_footprint on macOS, the figure Activity Monitor shows. Raw RSS is not used because it counts shared libraries in full. These targets are estimates until M0 measures them; macOS is higher because AppKit costs more for any window.
 

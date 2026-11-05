@@ -19,6 +19,7 @@ Commands:
   soak         Run a long session and check memory, echo latency and lost panes
                [--minutes <n>, default 60]
   fuzz-smoke   Run each fuzz target briefly
+  latency      Measure keystroke-to-echo latency through the core
   schema-gen   Generate API JSON Schemas (arrives in M3)
   release      Prepare a release (arrives in M5)
   help         Show this message
@@ -38,6 +39,7 @@ enum Task {
     MemGate,
     Soak,
     FuzzSmoke,
+    Latency,
     NotYet {
         name: String,
         milestone: &'static str,
@@ -51,6 +53,7 @@ fn parse(arg: Option<&str>) -> Task {
         Some("mem-gate") => Task::MemGate,
         Some("soak") => Task::Soak,
         Some("fuzz-smoke") => Task::FuzzSmoke,
+        Some("latency") => Task::Latency,
         Some(name @ "schema-gen") => Task::NotYet {
             name: name.into(),
             milestone: "M3",
@@ -398,6 +401,46 @@ fn soak_task(args: &[String]) -> ExitCode {
     }
 }
 
+/// Fsync delay of the slow-storage case, standing in for a slow disk.
+const SLOW_FSYNC_MS: &str = "100";
+
+/// Runs `benches/echo.rs` at rest, with every sync of the core delayed, and under API traffic,
+/// as a table of milliseconds against the budget in `docs/design/architecture.md`.
+fn latency_task() -> ExitCode {
+    let target = std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into());
+    if let Err(error) = build("release-core", "pinfold-core", &[]) {
+        eprintln!("latency: {error}");
+        return ExitCode::FAILURE;
+    }
+    let core = Path::new(&target).join("release-core/pinfold-core");
+    println!(
+        "| fsync delay ms | API traffic | session.save calls | samples | p50 ms | p99 ms | max ms | syncs | API reads/s | budget |"
+    );
+    println!("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
+    let mut met = true;
+    for case in [&[][..], &["--fsync-ms", SLOW_FSYNC_MS], &["--api"]] {
+        let status = Command::new("cargo")
+            .args(["run", "--locked", "--release", "--quiet"])
+            .args([
+                "--package",
+                "pinfold-benches",
+                "--bin",
+                "echo",
+                "--",
+                "--core",
+            ])
+            .arg(&core)
+            .args(case)
+            .status();
+        met &= status.is_ok_and(|status| status.success());
+    }
+    if met {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
 fn main() -> ExitCode {
     // A soak core runs this as its panes' shell.
     if let Some(directory) = std::env::var_os(soak::DIRECTORY) {
@@ -414,6 +457,7 @@ fn main() -> ExitCode {
         Task::MemGate => mem_gate_task(),
         Task::Soak => soak_task(&args[1..]),
         Task::FuzzSmoke => fuzz_smoke(),
+        Task::Latency => latency_task(),
         Task::NotYet { name, milestone } => {
             eprintln!("{name}: not implemented until {milestone}");
             ExitCode::FAILURE
@@ -432,6 +476,11 @@ mod tests {
     #[test]
     fn no_argument_shows_help() {
         assert_eq!(parse(None), Task::Help);
+    }
+
+    #[test]
+    fn latency_is_a_command() {
+        assert_eq!(parse(Some("latency")), Task::Latency);
     }
 
     #[test]

@@ -1095,6 +1095,8 @@ fn approval_window_process() {
     let mut link = Link::new(socket::take_link().unwrap()).unwrap();
     assert!(link.resize(24, 80));
     until(&mut link, |link| link.is_greeted()).unwrap();
+    // The tab's shell must not claim `first` before pane 0's has, or the roles swap.
+    until(&mut link, |_| directory.join("first").exists()).unwrap();
     assert!(link.send(Request::NewTab));
     let first = approval(&mut link, directory).unwrap();
     assert_eq!(
@@ -1164,7 +1166,7 @@ fn only_the_window_answers_cross_pane_actions_and_ctl_revokes_grants() {
     let id = session.read("prompt").trim().to_owned();
     let pinfold = session.directory.join("pinfold");
     let command = format!(
-        "'{}' ctl grants --json > \"$PINFOLD_TEST_CLIENT/grants\"; \
+        "'{}' ctl grants --json > \"$PINFOLD_TEST_CLIENT/grants\" 2> \"$PINFOLD_TEST_CLIENT/grants-error\"; \
          '{}' ctl grants revoke {id}; \
          '{}' ctl grants --json > \"$PINFOLD_TEST_CLIENT/after\"; \
          echo yes > \"$PINFOLD_TEST_CLIENT/revoked\"",
@@ -1179,7 +1181,8 @@ fn only_the_window_answers_cross_pane_actions_and_ctl_revokes_grants() {
         .env(CLIENT, &session.directory);
     let _terminal = pinfold_sys::pty::Pty::spawn(outside, 24, 80).unwrap();
     assert!(session.wait_for("revoked"), "{}", session.read_log());
-    let listed: serde_json::Value = serde_json::from_str(&session.read("grants")).unwrap();
+    let listed = serde_json::from_str::<serde_json::Value>(&session.read("grants"));
+    let listed = listed.unwrap_or_else(|_| panic!("ctl grants: {}", session.read("grants-error")));
     assert_eq!(listed["grants"][0]["id"].to_string(), id);
     let after: serde_json::Value = serde_json::from_str(&session.read("after")).unwrap();
     assert_eq!(after["grants"], serde_json::json!([]));
