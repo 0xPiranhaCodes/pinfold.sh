@@ -16,7 +16,7 @@ Usage: cargo xtask <command>
 
 Commands:
   mem-gate     Check every ADR-0021 memory budget
-  soak         Run a long session and check memory, echo latency and lost panes
+  soak         Run a long session and check memory, API round trips and lost panes
                [--minutes <n>, default 60]
   fuzz-smoke   Run each fuzz target briefly
   latency      Measure keystroke-to-echo latency through the core

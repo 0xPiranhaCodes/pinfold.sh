@@ -1,5 +1,6 @@
 //! A long session against a real core: pane churn, output floods, window reconnects and API
-//! calls, with the core's memory and keystroke-to-echo latency sampled throughout (#224).
+//! calls, with the core's memory and an API echo round trip sampled throughout (#224). The
+//! keystroke-to-echo budget in `docs/design/architecture.md` is `cargo xtask latency`'s to check.
 //!
 //! The driver runs in the core's first pane, so the API knows it as a caller with panes of its
 //! own, and every pane it spawns is its child, which it may send to, read and close.
@@ -24,8 +25,11 @@ const SECONDS: &str = "PINFOLD_SOAK_SECONDS";
 
 /// Most core growth after warm-up: four idle panes' budget, so one leaked pane per hour fails it.
 pub const GROWTH_LIMIT: u64 = 4 * crate::mem_gate::PANE_LIMIT;
-/// Most p99 keystroke-to-echo time per period: two frames at 60 Hz, as the core is one hop.
-pub const LATENCY_LIMIT: Duration = Duration::from_millis(33);
+/// Most p99 per period of a round trip from `pane.send` until `pane.read` shows the line. It is
+/// not `docs/design/architecture.md`'s keystroke budget (p99 16.7 ms): each poll is a new
+/// connection, `hello` and a read of the pane's whole history, on top of the echo itself. 33 ms
+/// is about four times the worst hour's p99 on ubuntu-latest (8.2 ms) and clears an M1's (25.2 ms).
+pub const ROUND_TRIP_LIMIT: Duration = Duration::from_millis(33);
 /// The first period lets scrollback reach its caps and the allocator settle.
 const PERIODS: usize = 10;
 /// The window is closed and reopened every this many rounds.
@@ -51,7 +55,7 @@ struct Period {
 fn verdict(periods: &[Period], lost: Option<String>) -> (bool, String) {
     let mut failures: Vec<String> = lost.into_iter().collect();
     let mut table = String::from(
-        "| Period | Rounds | Reconnects | Echo p50 ms | Echo p99 ms | Core MB |\n\
+        "| Period | Rounds | Reconnects | Round trip p50 ms | Round trip p99 ms | Core MB |\n\
          | --- | --- | --- | --- | --- | --- |\n",
     );
     for (index, period) in periods.iter().enumerate() {
@@ -60,9 +64,9 @@ fn verdict(periods: &[Period], lost: Option<String>) -> (bool, String) {
         let at =
             |q: usize| echoes.get((echoes.len() * q / 100).min(echoes.len().saturating_sub(1)));
         let ms = |d: Option<&Duration>| d.map_or(f64::NAN, |d| d.as_secs_f64() * 1e3);
-        if at(99).is_some_and(|p99| *p99 > LATENCY_LIMIT) {
+        if at(99).is_some_and(|p99| *p99 > ROUND_TRIP_LIMIT) {
             failures.push(format!(
-                "period {} echo p99 over {LATENCY_LIMIT:?}",
+                "period {} round trip p99 over {ROUND_TRIP_LIMIT:?}",
                 index + 1
             ));
         }
@@ -84,7 +88,7 @@ fn verdict(periods: &[Period], lost: Option<String>) -> (bool, String) {
             .unwrap_or(0);
         let growth = peak.saturating_sub(warm.footprint);
         table.push_str(&format!(
-            "\nGrowth after warm-up: {:.2} MB, limit {:.2} MB. Echo p99 limit {LATENCY_LIMIT:?}.\n",
+            "\nGrowth after warm-up: {:.2} MB, limit {:.2} MB. Round trip p99 limit {ROUND_TRIP_LIMIT:?}.\n",
             growth as f64 / 1e6,
             GROWTH_LIMIT as f64 / 1e6
         ));
@@ -118,7 +122,7 @@ fn send(pane: u64, text: &str) -> Result<Value, String> {
     call("pane.send", json!({"pane": pane, "text": text}))
 }
 
-/// Types a unique line into `pane` and times it until the screen shows it.
+/// Types a unique line into `pane` over the API and times it until `pane.read` shows it.
 fn echo(pane: u64, marker: &str) -> Result<Duration, String> {
     let start = Instant::now();
     send(pane, &format!(": {marker}\n"))?;
@@ -169,7 +173,7 @@ fn reconnect(core: u32) -> Result<(), String> {
     Err("the window did not reopen".to_owned())
 }
 
-/// One round: churn three panes, check none is lost, and time echoes.
+/// One round: churn three panes, check none is lost, and time API round trips.
 fn round(
     core: u32,
     number: u32,
@@ -364,7 +368,10 @@ mod tests {
     fn slow_echoes_fail() {
         let periods = [period(2, 3_000_000), period(50, 3_000_000)];
         let (passed, table) = verdict(&periods, None);
-        assert!(!passed && table.contains("period 2 echo p99"), "{table}");
+        assert!(
+            !passed && table.contains("period 2 round trip p99"),
+            "{table}"
+        );
     }
 
     #[test]
