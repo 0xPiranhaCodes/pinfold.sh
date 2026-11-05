@@ -37,7 +37,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 9;
+pub const VERSION: u16 = 10;
 
 /// Most rows or columns a screen can have, which the core clamps its panes to.
 pub const MAX_DIMENSION: u16 = 1024;
@@ -309,6 +309,10 @@ pub enum ApprovalAction {
     /// are every `run` line; `caller` is 0 and `target` is 1 when the directory was trusted with
     /// another layout. Only allowing once answers it.
     Trust,
+    /// Run a method only the owner may call, asked from a terminal outside every pane. The
+    /// first text names the method and the rest what it touches; `caller` and `target` are 0.
+    /// Only allowing once answers it.
+    Owner,
 }
 
 impl ApprovalAction {
@@ -319,7 +323,15 @@ impl ApprovalAction {
             Self::Read => "read",
             Self::Send => "send",
             Self::Trust => "trust",
+            Self::Owner => "owner",
         }
+    }
+
+    /// Whether only allowing once answers it, so it never becomes a lasting grant and never
+    /// batches with another prompt.
+    #[must_use]
+    pub const fn is_once(self) -> bool {
+        matches!(self, Self::Trust | Self::Owner)
     }
 }
 
@@ -1205,6 +1217,7 @@ impl Notice<'_> {
                         ApprovalAction::Read,
                         ApprovalAction::Send,
                         ApprovalAction::Trust,
+                        ApprovalAction::Owner,
                     ],
                 )?;
                 let count = body.u16()?;
@@ -1800,7 +1813,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 9, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 10, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -1953,11 +1966,11 @@ mod tests {
 
     #[test]
     fn another_version_is_an_error_that_stays() {
-        let wire = raw(HELLO, &10_u16.to_le_bytes());
+        let wire = raw(HELLO, &(VERSION + 1).to_le_bytes());
         let mut decoder = Decoder::default();
         let error = Error::Version {
             ours: VERSION,
-            theirs: 10,
+            theirs: VERSION + 1,
         };
         assert_eq!(decoder.next_request(&mut wire.as_slice()), Err(error));
         let mut good: &[u8] = &HELLO_WIRE;
@@ -2993,7 +3006,7 @@ mod tests {
             caller in any::<u32>(),
             target in any::<u32>(),
             action in prop::sample::select(
-                &[ApprovalAction::Read, ApprovalAction::Send, ApprovalAction::Trust][..]
+                &[ApprovalAction::Read, ApprovalAction::Send, ApprovalAction::Trust, ApprovalAction::Owner][..]
             ),
             owned in vec(".{0,32}", 0..4),
             chunk in chunks(),

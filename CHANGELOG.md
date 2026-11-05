@@ -47,6 +47,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Changed
 
+- The window and core speak link version 10, which adds an owner prompt: one-shot, like the trust prompt, it names an owner method and what it touches, `y` allows it once and `n` or Esc refuses, and it never becomes a lasting grant. A window and core of different versions restart as for any link update.
 - The version is `0.1.0-beta.1`, for the macOS beta. `PinFold.app` carries `0.1.0` as its short version and `0.1.1` as its build version, since Apple reads at most three integers there, and shows `0.1.0-beta.1` in the About panel. A `v*` tag that is not `v` and the workspace version fails the release run before it builds anything.
 - `packaging/macos/bundle.sh` takes an optional signing identity, signs the `pinfold` launcher and the app with the hardened runtime as well as the core and window, and checks the result. The release dry run keeps an ad-hoc-signed `PinFold-adhoc.dmg` built by the new `packaging/macos/dmg.sh` instead of a `.zip`.
 - `cargo xtask mem-gate` also reads each window with a full glyph cache, with 8 tabs and with its context menu open, and lists the Dock menu as not measured.

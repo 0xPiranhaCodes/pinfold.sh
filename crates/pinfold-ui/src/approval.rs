@@ -95,9 +95,9 @@ impl Queue {
                 .shown
                 .is_some_and(|shown| now.saturating_duration_since(shown) >= ARMED_AFTER);
         let answer = answer(key, armed, whole)?;
-        // Trust has no lasting grant to give; `a` there is not a key the legend offers.
-        if prompt.action == ApprovalAction::Trust && answer == ApprovalAnswer::AllowForThirtyMinutes
-        {
+        // Trust and owner prompts have no lasting grant to give; `a` there is not a key the
+        // legend offers.
+        if prompt.action.is_once() && answer == ApprovalAnswer::AllowForThirtyMinutes {
             return None;
         }
         let id = prompt.id;
@@ -124,6 +124,7 @@ fn lines(prompt: &Approval, queued: usize, columns: usize) -> Vec<String> {
         ApprovalAction::Read => "read",
         ApprovalAction::Send => "send to",
         ApprovalAction::Trust => return trust_lines(prompt, queued, columns),
+        ApprovalAction::Owner => return owner_lines(prompt, queued, columns),
     };
     let border = format!("{:─<columns$}", "── Pinfold approval ");
     let mut lines: Vec<String> = vec![border.chars().take(columns.max(1)).collect()];
@@ -176,6 +177,30 @@ fn trust_lines(prompt: &Approval, queued: usize, columns: usize) -> Vec<String> 
     lines
 }
 
+/// An owner prompt as rows: a border, the method, then what it touches, wrapped.
+fn owner_lines(prompt: &Approval, queued: usize, columns: usize) -> Vec<String> {
+    let border = format!("{:─<columns$}", "── Pinfold owner action ");
+    let mut lines: Vec<String> = vec![border.chars().take(columns.max(1)).collect()];
+    let (method, details) = prompt
+        .texts
+        .split_first()
+        .map_or(("", &[][..]), |(method, details)| {
+            (method.as_str(), details)
+        });
+    let mut head = format!(
+        " ◆ needs you  A terminal outside every pane asks to run {}",
+        visible(method)
+    );
+    if queued > 1 {
+        let _ = write!(head, " (1 of {queued})");
+    }
+    lines.extend(wrap(&head, columns));
+    for detail in details {
+        lines.extend(wrap(&visible(detail), columns));
+    }
+    lines
+}
+
 pub(crate) fn wrap(text: &str, columns: usize) -> Vec<String> {
     let characters: Vec<char> = text.chars().collect();
     characters
@@ -217,30 +242,22 @@ fn banner(frame: &mut Frame, prompt: &Approval, queued: usize) {
             };
         }
     }
-    let trust = prompt.action == ApprovalAction::Trust;
-    let legend = if whole && trust {
+    let (allow, deny) = match prompt.action {
+        ApprovalAction::Trust => ("y trust", "n/Esc don't trust"),
+        ApprovalAction::Owner => ("y allow once", "n/Esc deny"),
+        ApprovalAction::Read | ApprovalAction::Send => {
+            ("y allow once · a allow 30 min", "n/Esc deny")
+        }
+    };
+    let legend = if whole {
         (
-            format!(" y trust · n/Esc don't trust · the {shown} rows above are this prompt"),
-            TEXT,
-        )
-    } else if trust {
-        (
-            format!(
-                " ✕ too long to show whole; only n/Esc don't trust is offered · the {shown} rows above are this prompt"
-            ),
-            RED,
-        )
-    } else if whole {
-        (
-            format!(
-                " y allow once · a allow 30 min · n/Esc deny · the {shown} rows above are this prompt"
-            ),
+            format!(" {allow} · {deny} · the {shown} rows above are this prompt"),
             TEXT,
         )
     } else {
         (
             format!(
-                " ✕ too long to show whole; only n/Esc deny is offered · the {shown} rows above are this prompt"
+                " ✕ too long to show whole; only {deny} is offered · the {shown} rows above are this prompt"
             ),
             RED,
         )
@@ -468,6 +485,37 @@ mod tests {
         );
         // Trust prompts never merge, even from the same directory.
         assert!(!queue.is_empty());
+    }
+
+    #[test]
+    fn an_owner_prompt_names_the_method_and_offers_no_lasting_grant() {
+        let start = Instant::now();
+        let prompt = Approval {
+            id: 5,
+            caller: 0,
+            target: 0,
+            action: ApprovalAction::Owner,
+            texts: vec!["workspace.open".to_owned(), "/home/me/project\n".to_owned()],
+        };
+        let mut queue = Queue::default();
+        queue.focus(true);
+        let _ = queue.add(prompt);
+        let mut frame = frame(6, 80);
+        queue.draw(&mut frame, start);
+        let text = text(&frame);
+        assert!(text.contains("── Pinfold owner action"), "{text}");
+        assert!(
+            text.contains("A terminal outside every pane asks to run workspace.open"),
+            "{text}"
+        );
+        assert!(text.contains("/home/me/project⏎"), "{text}");
+        assert!(text.contains(" y allow once · n/Esc deny ·"), "{text}");
+        let later = start + ARMED_AFTER;
+        assert_eq!(queue.key(&Key::Character("a".into()), later, 6, 80), None);
+        assert_eq!(
+            queue.key(&Key::Character("y".into()), later, 6, 80),
+            Some((5, ApprovalAnswer::AllowOnce))
+        );
     }
 
     fn read(target: u32) -> Approval {

@@ -1580,8 +1580,11 @@ mod tests {
 
     #[test]
     fn a_second_open_starts_nothing_until_the_first_has_gone() {
-        let hello = r"printf '\003\000\000\000\000\011\000' >&3; exec cat <&3 >/dev/null";
-        let (binary, log) = window_script("second-open", hello);
+        let [low, high] = VERSION.to_le_bytes();
+        let hello = format!(
+            r"printf '\003\000\000\000\000\{low:03o}\{high:03o}' >&3; exec cat <&3 >/dev/null"
+        );
+        let (binary, log) = window_script("second-open", &hello);
         let mut reactor = Reactor::new().unwrap();
         assert_eq!(spawn_window(&mut reactor, &binary), WindowOpen::Started);
         let greeted = |r: &mut Reactor| r.host.window.as_ref().is_some_and(|w| w.session.greeted);
