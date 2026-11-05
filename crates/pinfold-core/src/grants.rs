@@ -31,6 +31,26 @@ impl Clock for SystemClock {
     }
 }
 
+/// A clock a test moves by hand, so a deadline passes without a wait.
+#[cfg(test)]
+pub(crate) struct TestClock(pub(crate) std::cell::Cell<Instant>);
+
+#[cfg(test)]
+impl Clock for TestClock {
+    fn now(&self) -> Instant {
+        self.0.get()
+    }
+}
+
+#[cfg(test)]
+impl TestClock {
+    pub(crate) fn advance(&self, duration: Duration) {
+        if let Some(now) = self.0.get().checked_add(duration) {
+            self.0.set(now);
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Key {
     caller: usize,
@@ -372,22 +392,6 @@ fn release<T>(tickets: Vec<T>, allowed: bool, reason: &'static str) -> Vec<Relea
 mod tests {
     use super::*;
     use std::cell::Cell;
-
-    struct TestClock(Cell<Instant>);
-
-    impl Clock for TestClock {
-        fn now(&self) -> Instant {
-            self.0.get()
-        }
-    }
-
-    impl TestClock {
-        fn advance(&self, duration: Duration) {
-            if let Some(now) = self.0.get().checked_add(duration) {
-                self.0.set(now);
-            }
-        }
-    }
 
     #[test]
     fn a_grant_covers_one_triple_and_expires_after_thirty_minutes() {
