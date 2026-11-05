@@ -30,7 +30,10 @@ reboot.
 2. **Security.** PinFold gives agents a programmable channel into your shells, so
    that channel is scoped, audited and gated by prompts that programs cannot fake.
    See the [threat model](docs/design/threat-model.md), including what these
-   controls do not do.
+   controls do not do. A sandboxed agent profile limits what the agent writes and
+   which terminals it reaches, but in the beta it can still read your credentials
+   outside `~/.ssh`, such as `~/.aws` or `~/.config/gh`, use the macOS clipboard and
+   reach the network ([ADR-0041](docs/adr/0041-sandbox-hides-writes-not-secrets.md)).
 3. **Crash isolation.** A small core process owns your PTYs. A crash in the window
    or the built-in tools never kills a running agent.
 
