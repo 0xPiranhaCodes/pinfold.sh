@@ -9,10 +9,12 @@ still welcome if it adds a case not listed here. Report bugs with the
 - **macOS only.** Linux builds and CI tests exist, but the beta is for macOS, and Linux desktop
   checks wait for v0.1 ([ADR-0031](../adr/0031-macos-beta-first.md),
   [#47](https://github.com/0xPiranhaCodes/pinfold.sh/issues/47)).
-- **No minimum macOS version is enforced yet.** The automated tests run on macOS 26.6 on Apple
-  Silicon and on Intel, and the app has been run by hand only on macOS 27 on Apple Silicon. Older
-  versions and the app on Intel are untested. If PinFold does not start on your Mac, report it
-  with your macOS version ([#190](https://github.com/0xPiranhaCodes/pinfold.sh/issues/190)).
+- **macOS 10.13.4 or later on Intel, macOS 11 or later on Apple Silicon.** That is the oldest
+  macOS with every system call PinFold makes, and macOS refuses to open the app on anything
+  older. But the automated tests run only on macOS 26.6 on Apple Silicon and on Intel, and the
+  app has been run by hand only on macOS 27 on Apple Silicon. Older versions and the app on Intel
+  are untested. If PinFold does not start on your Mac, report it with your macOS version
+  ([#190](https://github.com/0xPiranhaCodes/pinfold.sh/issues/190)).
 - **No update check.** To update, download the new `.dmg` and replace the app.
 - **An update can end running programs.** When the new window cannot speak to the session still
   running from the old version, the next launch restarts the session, which restores its tabs and

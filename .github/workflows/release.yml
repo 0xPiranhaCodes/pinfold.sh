@@ -33,6 +33,26 @@ jobs:
             exit 1
           fi
 
+  # Nothing is signed or drafted unless CI passed on the tagged commit. Pull requests test the
+  # check against a fake gh instead.
+  ci:
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 70
+    permissions:
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: sh .github/scripts/test-check-ci-passed.sh
+      - name: Require a green CI push run on the tagged commit
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: sh .github/scripts/check-ci-passed.sh "$GITHUB_SHA"
+
   linux:
     needs: version
     strategy:
@@ -67,6 +87,10 @@ jobs:
   macos:
     needs: version
     runs-on: macos-latest
+    env:
+      # The oldest macOS with ptsname_r (packaging/README.md); Info.plist's LSMinimumSystemVersion
+      # must match. rustc raises it to 11.0 for the Apple Silicon slice.
+      MACOSX_DEPLOYMENT_TARGET: "10.13.4"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -94,7 +118,7 @@ jobs:
   # Signs what the macos job built. It runs no build, so no build script ever sees the secrets.
   macos-sign:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: macos
+    needs: [ci, macos]
     runs-on: macos-latest
     environment: release
     steps:
@@ -201,7 +225,7 @@ jobs:
   # The only job that can write. It builds nothing and only downloads, checks, attests and drafts.
   release:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [linux, macos-sign, sbom]
+    needs: [ci, linux, macos-sign, sbom]
     runs-on: ubuntu-latest
     environment: release
     permissions:
