@@ -924,7 +924,18 @@ fn approval_api_process() {
     assert_eq!(next(&mut first, || Ok(())).unwrap()["result"]["pane"], 0);
 
     let mut tty = fs::OpenOptions::new().write(true).open("/dev/tty").unwrap();
-    std::io::Write::write_all(&mut tty, b"y a n Escape\n").unwrap();
+    std::io::Write::write_all(&mut tty, b"y a n Escape\nanswer-bytes-written\n").unwrap();
+    // Once the marker after them is on screen, the core has read those bytes too.
+    let start = Instant::now();
+    loop {
+        let read = ask("pane.read", serde_json::json!({"pane": 0})).unwrap();
+        let text = read["result"]["text"].as_str().unwrap_or_default();
+        if text.contains("answer-bytes-written") {
+            break;
+        }
+        assert!(start.elapsed() < PATIENCE, "no marker: {read}");
+        thread::sleep(Duration::from_millis(10));
+    }
     let socket = UnixStream::connect(control::socket_path(&control::runtime_dir())).unwrap();
     let api_answer = control::ask(
         &socket,
@@ -1048,7 +1059,7 @@ fn only_the_window_answers_cross_pane_actions_and_ctl_revokes_grants() {
         "#!/bin/sh\nif mkdir \"$PINFOLD_TEST_CLIENT/first\" 2>/dev/null; then \
          exec '{}' --exact approval_api_process; else echo yes > \"$PINFOLD_TEST_CLIENT/second\"; \
          echo 'password=hunter2'; \
-         read line; echo \"$line\" > \"$PINFOLD_TEST_CLIENT/received\"; exec sleep 30; fi\n",
+         while read -r line; do echo \"$line\" >> \"$PINFOLD_TEST_CLIENT/received\"; done; fi\n",
         exe.display()
     );
     fs::write(&shell, script).unwrap();
@@ -1089,7 +1100,8 @@ fn only_the_window_answers_cross_pane_actions_and_ctl_revokes_grants() {
     assert_eq!(after["grants"], serde_json::json!([]));
     assert!(session.wait_for("second-denied"), "{}", session.read_log());
     assert!(session.wait_for("redacted"), "{}", session.read_log());
-    assert!(session.read("received").contains("approved"));
+    // Every line the target read: the denied send never reached it.
+    assert_eq!(session.read("received"), "approved\n");
 }
 
 /// Names the directory of a run, in the pane that spawns others.
