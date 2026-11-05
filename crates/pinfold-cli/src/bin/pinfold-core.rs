@@ -40,6 +40,16 @@ const IDLE: Duration = Duration::from_secs(3600);
 /// asks for the window within its 5 s start wait, so past this one is never coming.
 const EMPTY_WAIT: Duration = Duration::from_secs(30);
 
+/// [`EMPTY_WAIT`], or in a debug build `PINFOLD_TEST_EMPTY_WAIT_MS`, so its test takes seconds.
+fn empty_wait() -> Duration {
+    let shorter = env::var("PINFOLD_TEST_EMPTY_WAIT_MS")
+        .ok()
+        .filter(|_| cfg!(debug_assertions));
+    shorter
+        .and_then(|ms| ms.parse().ok())
+        .map_or(EMPTY_WAIT, Duration::from_millis)
+}
+
 /// Returns the window binary beside this one. It is resolved once, so nothing later can name
 /// another program.
 fn window_binary() -> io::Result<PathBuf> {
@@ -821,7 +831,7 @@ fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result
     let mut window = reactor.has_window();
     // A core with no pane waits for its first window, as `pinfold up` asks for one next.
     let mut started = reactor.pane_count() > 0 || window;
-    let empty_until = Instant::now() + EMPTY_WAIT;
+    let empty_until = Instant::now() + empty_wait();
     loop {
         let now = Instant::now();
         let deadline = waits.deadline().into_iter().chain(grants.deadline()).min();
