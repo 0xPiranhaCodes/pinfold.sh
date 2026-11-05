@@ -32,12 +32,6 @@ still welcome if it adds a case not listed here. Report bugs with the
 
 ## Panes and sessions
 
-- **On macOS a descriptor numbered above 65,536 can reach a pane's program.** Every child starts
-  with only the descriptors meant for it, but the check stops at 65,536
-  ([#188](https://github.com/0xPiranhaCodes/pinfold.sh/pull/188)).
-- **A pane can take about 11 ms longer to start** when the core was started from a shell whose
-  `ulimit -n` is very high. Opened from the Dock or Finder, the limit is 256 and the cost is
-  within noise (#188).
 - **Restore brings back the layout, not the screen.** After a restart, panes get fresh shells
   with no scrollback ([ADR-0034](../adr/0034-m5-sessions-plan.md)).
 - **A shell pane does not remember what ran in it.** Only a pane started with its own program,

@@ -10,7 +10,7 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 #[cfg(feature = "clipboard")]
 pub mod clipboard;
@@ -199,10 +199,12 @@ fn one_process(pid: libc::pid_t) -> io::Result<libc::pid_t> {
 }
 
 /// Highest descriptor marked in a child where the system has no call to mark them all, which
-/// bounds the work there.
-// shortcut: a descriptor above this that is not close-on-exec would reach the child, walk
-// /dev/fd before the fork if the core ever holds that many.
-const MAX_CHECKED_FD: libc::c_long = 65_536;
+/// bounds the work there. [`mark_strays`] keeps the open-file limit at or below it, so no
+/// descriptor can be numbered past it. Launched from the Dock the limit is 256, well below.
+const MAX_CHECKED_FD: libc::rlim_t = 10_240;
+
+/// The soft open-file limit before [`mark_strays`] lowered it, for children to get back, or 0.
+static SOFT_LIMIT: AtomicU64 = AtomicU64::new(0);
 
 /// Set in a child once its strays are marked. Only children write it, each in its own copy of
 /// memory, so it reads false in every parent.
@@ -213,6 +215,10 @@ static STRAYS_MARKED: AtomicBool = AtomicBool::new(false);
 /// descriptor that is inheritable for a moment, such as a connection accepted on macOS, and a
 /// fork in that moment copies it. Every function here that starts a child calls this, and so
 /// must any other code in the core that starts one.
+///
+/// The child marks descriptors only up to a bound, so this also keeps this process's soft
+/// open-file limit at or below it, and marks close-on-exec any descriptor already open past it.
+/// The child gets the limit back as it was.
 ///
 /// # Examples
 ///
@@ -225,15 +231,22 @@ static STRAYS_MARKED: AtomicBool = AtomicBool::new(false);
 /// # Ok::<(), std::io::Error>(())
 /// ```
 pub fn mark_strays(command: &mut Command) {
+    let restore = cap_open_files();
     // SAFETY: sysconf reads a limit and touches no memory.
-    let limit = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) }.clamp(0, MAX_CHECKED_FD) as RawFd;
-    // SAFETY: the closure makes only async-signal-safe calls, on integers it owns, and writes
-    // only an atomic in the child's own memory.
+    let limit = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) }.clamp(0, MAX_CHECKED_FD as _) as RawFd;
+    // SAFETY: the closure makes only system calls that allocate nothing (fcntl, close_range and
+    // setrlimit), on values it owns, and writes only an atomic in the child's own memory.
     unsafe {
         command.pre_exec(move || {
             // Once, so a later closure cannot undo what an earlier one handed over.
             if STRAYS_MARKED.swap(true, Ordering::Relaxed) {
                 return Ok(());
+            }
+            if let Some(restore) = restore {
+                // A program that cannot have the limit back still starts, with the bound. First,
+                // as close_range returns early, and nothing here opens a descriptor.
+                // SAFETY: setrlimit is a system call stub that reads only `restore`.
+                libc::setrlimit(libc::RLIMIT_NOFILE, &restore);
             }
             #[cfg(target_os = "linux")]
             {
@@ -257,6 +270,47 @@ pub fn mark_strays(command: &mut Command) {
             }
             Ok(())
         });
+    }
+}
+
+/// Lowers this process's soft open-file limit to [`MAX_CHECKED_FD`] if it is above, so no new
+/// descriptor can be numbered past what a child marks, then marks those already past it. Returns
+/// the limit a child should get back, if it was lowered at any time.
+fn cap_open_files() -> Option<libc::rlimit> {
+    let mut now = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit writes only `now`.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut now) } != 0 {
+        return None;
+    }
+    if now.rlim_cur > MAX_CHECKED_FD {
+        let capped = libc::rlimit {
+            rlim_cur: MAX_CHECKED_FD,
+            rlim_max: now.rlim_max,
+        };
+        // SAFETY: setrlimit reads only `capped`. Lowering a soft limit is always allowed.
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &capped) } == 0 {
+            SOFT_LIMIT.store(now.rlim_cur, Ordering::Relaxed);
+            // Lowered first, so nothing can open past the bound while this walks.
+            for entry in std::fs::read_dir("/dev/fd").into_iter().flatten().flatten() {
+                match entry.file_name().to_str().map(str::parse::<RawFd>) {
+                    Some(Ok(fd)) if fd as libc::rlim_t >= MAX_CHECKED_FD => {
+                        // SAFETY: F_SETFD takes an integer flag and touches no memory.
+                        unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    match SOFT_LIMIT.load(Ordering::Relaxed) {
+        0 => None,
+        soft => Some(libc::rlimit {
+            rlim_cur: soft,
+            rlim_max: now.rlim_max,
+        }),
     }
 }
 

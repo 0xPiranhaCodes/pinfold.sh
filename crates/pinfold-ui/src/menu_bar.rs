@@ -40,6 +40,16 @@ fn enabled(command: Command, state: State) -> bool {
     }
 }
 
+/// The menu bar's item for `command`, under its shared label.
+#[cfg(target_os = "macos")]
+const fn run(command: Command, key: &'static str) -> pinfold_sys::menu::Item<Command> {
+    (
+        command.label(),
+        key,
+        pinfold_sys::menu::Action::Run(command),
+    )
+}
+
 #[cfg(target_os = "macos")]
 const MENUS: &[pinfold_sys::menu::Menu<Command>] = {
     use pinfold_sys::menu::Action::{About, FullScreen, Hide, Minimize, Run, Separator};
@@ -48,7 +58,7 @@ const MENUS: &[pinfold_sys::menu::Menu<Command>] = {
             "PinFold",
             &[
                 ("About PinFold", "", About),
-                ("Settings…", ",", Run(Command::OpenConfig)),
+                run(Command::OpenConfig, ","),
                 ("", "", Separator),
                 ("Hide PinFold", "h", Hide),
                 ("Quit PinFold", "q", Run(Command::Detach)),
@@ -57,33 +67,33 @@ const MENUS: &[pinfold_sys::menu::Menu<Command>] = {
         (
             "Shell",
             &[
-                ("New Tab", "t", Run(Command::NewTab)),
-                ("Split Right", "d", Run(Command::SplitRight)),
-                ("Split Down", "D", Run(Command::SplitDown)),
-                ("Close Pane", "w", Run(Command::ClosePane)),
+                run(Command::NewTab, "t"),
+                run(Command::SplitRight, "d"),
+                run(Command::SplitDown, "D"),
+                run(Command::ClosePane, "w"),
                 ("", "", Separator),
-                ("Detach", "", Run(Command::Detach)),
+                run(Command::Detach, ""),
             ],
         ),
         (
             "Edit",
             &[
-                ("Copy", "c", Run(Command::Copy)),
-                ("Paste", "v", Run(Command::Paste)),
-                ("Select All", "a", Run(Command::SelectAll)),
+                run(Command::Copy, "c"),
+                run(Command::Paste, "v"),
+                run(Command::SelectAll, "a"),
                 ("", "", Separator),
-                ("Find", "f", Run(Command::Find)),
+                run(Command::Find, "f"),
             ],
         ),
         (
             "View",
             &[
-                ("Zoom Pane", "", Run(Command::Zoom)),
+                run(Command::Zoom, ""),
                 ("", "", Separator),
                 // `=`, not `+`, so the key needs no Shift on most layouts.
-                ("Bigger", "=", Run(Command::FontBigger)),
-                ("Smaller", "-", Run(Command::FontSmaller)),
-                ("Actual Size", "0", Run(Command::FontReset)),
+                run(Command::FontBigger, "="),
+                run(Command::FontSmaller, "-"),
+                run(Command::FontReset, "0"),
                 ("", "", Separator),
                 ("Toggle Full Screen", "", FullScreen),
             ],
@@ -93,8 +103,8 @@ const MENUS: &[pinfold_sys::menu::Menu<Command>] = {
             &[
                 ("Minimize", "m", Minimize),
                 ("", "", Separator),
-                ("Next Tab", "}", Run(Command::NextTab)),
-                ("Previous Tab", "{", Run(Command::PreviousTab)),
+                run(Command::NextTab, "}"),
+                run(Command::PreviousTab, "{"),
                 ("", "", Separator),
                 ("Tab 1", "1", Run(Command::Tab(0))),
                 ("Tab 2", "2", Run(Command::Tab(1))),
@@ -107,7 +117,7 @@ const MENUS: &[pinfold_sys::menu::Menu<Command>] = {
                 ("Tab 9", "9", Run(Command::Tab(8))),
             ],
         ),
-        ("Help", &[("PinFold Help", "?", Run(Command::OpenDocs))]),
+        ("Help", &[run(Command::OpenDocs, "?")]),
     ]
 };
 

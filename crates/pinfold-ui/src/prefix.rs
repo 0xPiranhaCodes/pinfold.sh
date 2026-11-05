@@ -87,6 +87,40 @@ pub enum Command {
     OpenDocs,
 }
 
+impl Command {
+    /// The name the menu bar, the right-click menu and the Dock menu all show for it, or `""`
+    /// for the commands no menu names this way: a tab's item says its number, and focus and
+    /// resize are keys only.
+    ///
+    /// ```
+    /// use pinfold_ui::prefix::Command;
+    ///
+    /// assert_eq!(Command::SplitRight.label(), "Split Right");
+    /// ```
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NewTab => "New Tab",
+            Self::ClosePane => "Close Pane",
+            Self::NextTab => "Next Tab",
+            Self::PreviousTab => "Previous Tab",
+            Self::SplitRight => "Split Right",
+            Self::SplitDown => "Split Down",
+            Self::Zoom => "Zoom Pane",
+            Self::Detach => "Detach",
+            Self::Copy => "Copy",
+            Self::Paste => "Paste",
+            Self::SelectAll => "Select All",
+            Self::Find => "Find",
+            Self::FontBigger => "Bigger",
+            Self::FontSmaller => "Smaller",
+            Self::FontReset => "Actual Size",
+            Self::OpenConfig => "Settings…",
+            Self::OpenDocs => "PinFold Help",
+            Self::Tab(_) | Self::Focus(_) | Self::Resize(..) => "",
+        }
+    }
+}
+
 /// What to do with a key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
