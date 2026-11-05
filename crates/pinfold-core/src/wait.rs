@@ -429,7 +429,8 @@ mod tests {
         let mut reactor = Reactor::new().unwrap();
         let pane = reactor.spawn(shell("sleep 30"), 24, 80).unwrap();
         let mut waits = Waits::default();
-        let later = Instant::now() + Duration::from_secs(30);
+        // Far past any run, so a slow runner working through the backlog never times them out.
+        let later = Instant::now() + Duration::from_secs(3600);
         let worst = (1..)
             .map(|n| format!(r"\w{{{n}}}x"))
             .take_while(|pattern| Until::matching(pattern).is_ok())
@@ -451,7 +452,6 @@ mod tests {
         assert!(!try_lines(parked, Instant::now()));
         assert_eq!(parked.line.len(), backlog);
         let mut turns = 0;
-        let start = Instant::now();
         loop {
             assert_eq!(waits.settle(&reactor, Instant::now()), []);
             turns += 1;
@@ -462,12 +462,18 @@ mod tests {
         // With no budget one settle tried all 256 lines.
         assert!(turns > 1);
         // Normal lines still match once the backlog is tried.
-        waits.feed(pane, &format!("{}x\n", "a".repeat(200)));
-        let mut settled = 0;
-        while settled < MAX_WAITS && start.elapsed() < Duration::from_secs(60) {
-            settled += waits.settle(&reactor, Instant::now()).len();
+        let normal = "a".repeat(200) + "x";
+        waits.feed(pane, &format!("{normal}\n"));
+        let (start, mut settled) = (Instant::now(), Vec::new());
+        while settled.len() < MAX_WAITS && start.elapsed() < Duration::from_secs(60) {
+            settled.extend(waits.settle(&reactor, Instant::now()));
         }
-        assert_eq!(settled, MAX_WAITS);
+        assert_eq!(settled.len(), MAX_WAITS);
+        assert!(
+            settled
+                .iter()
+                .all(|(_, outcome)| *outcome == Outcome::Matched(normal.clone()))
+        );
     }
 
     #[test]
