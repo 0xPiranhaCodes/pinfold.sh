@@ -27,10 +27,10 @@ Every connection starts with `hello`:
 | `events.subscribe` | Version 2 and a terminal    | [`events.subscribe.schema.json`](events.subscribe.schema.json) |
 | `pane.status`      | Version 2 and its own pane  | [`pane.status.schema.json`](pane.status.schema.json)         |
 | `audit.read`       | Version 2, outside any pane | [`audit.read.schema.json`](audit.read.schema.json)           |
-| `session.save`     | Version 2, outside any pane | [`session.save.schema.json`](session.save.schema.json)       |
-| `workspace.open`   | Version 2, a terminal, no pane | [`workspace.open.schema.json`](workspace.open.schema.json) |
+| `session.save`     | Version 2, outside any pane, asked | [`session.save.schema.json`](session.save.schema.json) |
+| `workspace.open`   | Version 2, outside any pane, asked | [`workspace.open.schema.json`](workspace.open.schema.json) |
 | `grants.list`      | Version 2, outside panes    | [`grants.list.schema.json`](grants.list.schema.json)         |
-| `grants.revoke`    | Version 2, outside panes    | [`grants.revoke.schema.json`](grants.revoke.schema.json)     |
+| `grants.revoke`    | Version 2, outside panes, asked | [`grants.revoke.schema.json`](grants.revoke.schema.json) |
 | `workspace.trust_state` | Version 2, outside panes | [`workspace.trust_state.schema.json`](workspace.trust_state.schema.json) |
 | `workspace.ask_trust` | Version 2, outside panes | [`workspace.ask_trust.schema.json`](workspace.ask_trust.schema.json) |
 
@@ -60,9 +60,16 @@ call is refused. Cross-pane reads are redacted. Reads return at most 1,000,000 b
 newest. A send carries at most 4096 bytes, and a pane takes at most 20 sends a second.
 
 `grants.list` and `grants.revoke` are accepted only from an identified terminal outside every
-pane. Listing is read-only and revocation only removes authority, so neither raises another
-approval prompt. `pinfold ctl grants [--json]` lists lasting grants and `pinfold ctl grants
-revoke <id>` revokes one.
+pane. `pinfold ctl grants [--json]` lists lasting grants and `pinfold ctl grants revoke <id>`
+revokes one.
+
+A pane's program can start a terminal of its own, as `script -q /dev/null` does, whose session
+no pane holds, so the core cannot tell it from a person's terminal. The methods marked asked,
+`session.save`, `workspace.open` and `grants.revoke`, therefore park for up to 60 seconds on an
+owner prompt in window chrome that names the method and what it touches ([ADR-0042](../adr/0042-owner-changes-ask-in-the-window.md)).
+`y` runs it once and `n` or Esc refuses it with "the owner action was denied in the window";
+there is no lasting grant, and with no window open it is refused. Reads of grants, the audit
+log and trust state are not asked: they return no pane text.
 
 `workspace.trust_state` and `workspace.ask_trust` are accepted only from an identified terminal
 outside every pane, and take a canonical project directory and the SHA-256 of its layout file.
