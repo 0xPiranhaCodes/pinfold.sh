@@ -369,17 +369,35 @@ const SLOW_FSYNC_MS: &str = "100";
 /// as a table of milliseconds against the budget in `docs/design/architecture.md`.
 fn latency_task() -> ExitCode {
     let target = std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into());
-    if let Err(error) = build("release-core", "pinfold-core", &[]) {
-        eprintln!("latency: {error}");
-        return ExitCode::FAILURE;
+    for binary in ["pinfold-core", "pinfold"] {
+        if let Err(error) = build("release-core", binary, &[]) {
+            eprintln!("latency: {error}");
+            return ExitCode::FAILURE;
+        }
     }
     let core = Path::new(&target).join("release-core/pinfold-core");
+    let pinfold = Path::new(&target).join("release-core/pinfold");
+    let pinfold = pinfold.to_string_lossy();
+    // `session.save` every 5 s on slow storage, over the 60 s #250 measured it in.
+    let session_save = [
+        "--fsync-ms",
+        SLOW_FSYNC_MS,
+        "--session-save",
+        &pinfold,
+        "--seconds",
+        "60",
+    ];
     println!(
         "| fsync delay ms | API traffic | session.save calls | samples | p50 ms | p99 ms | max ms | syncs | API reads/s | budget |"
     );
     println!("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |");
     let mut met = true;
-    for case in [&[][..], &["--fsync-ms", SLOW_FSYNC_MS], &["--api"]] {
+    for case in [
+        &[][..],
+        &["--fsync-ms", SLOW_FSYNC_MS],
+        &["--api"],
+        &session_save,
+    ] {
         let status = Command::new("cargo")
             .args(["run", "--locked", "--release", "--quiet"])
             .args([

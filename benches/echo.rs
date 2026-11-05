@@ -8,8 +8,8 @@
 //! The pane echoes in raw mode, as a shell's line editor does, and moves to a new directory every
 //! second, so each save the core takes a minute after activity writes a new snapshot. With
 //! `--api` it also keeps three API connections reading itself as fast as the core answers. With
-//! `--session-save <pinfold>` it calls `pinfold ctl session save` every 5 s, which writes on the
-//! reactor's thread, and the window allows each prompt.
+//! `--session-save <pinfold>` it calls `pinfold ctl session save` every 5 s, which the save thread
+//! writes, and the window allows each prompt.
 //!
 //! On macOS the core loads `slow_fsync.c`, which counts every sync and delays it by `--fsync-ms`.
 
@@ -128,6 +128,7 @@ fn run(args: &[String]) -> Result<ExitCode> {
     }
     let mut child = command.spawn()?;
     let saves = Arc::new(AtomicU64::new(0));
+    let asked = session_save.is_some();
     if let Some(pinfold) = session_save {
         let (dir, saves) = (dir.clone(), Arc::clone(&saves));
         thread::spawn(move || save_sessions(&pinfold, &dir, &saves));
@@ -137,6 +138,14 @@ fn run(args: &[String]) -> Result<ExitCode> {
     let _ = child.wait();
     let saves = saves.load(Ordering::Relaxed);
     let result = samples.and_then(|samples| report(&dir, &samples, fsync_ms, api, saves));
+    // A case with no successful session.save measured nothing it was meant to.
+    let result = result.map(|met| {
+        if asked && saves == 0 {
+            ExitCode::FAILURE
+        } else {
+            met
+        }
+    });
     let _ = fs::remove_dir_all(&dir);
     result
 }

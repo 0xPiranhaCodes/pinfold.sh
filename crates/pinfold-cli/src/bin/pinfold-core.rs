@@ -1,6 +1,6 @@
 //! The `pinfold-core` binary.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -336,16 +336,9 @@ fn owner_action(
     reactor: &mut Reactor,
     grants: &mut Grants<Request>,
     workspaces: &mut Workspaces,
-    saver: Option<&mut Saver>,
     method: &Method,
 ) -> Result<Value, String> {
     match method {
-        Method::SessionSave => {
-            let saver = saver.ok_or("HOME is not set")?;
-            let path = saver.write_now(&saved(reactor, workspaces));
-            path.map(|path| json!({"path": path.to_string_lossy()}))
-                .map_err(|error| format!("cannot save the session: {error}"))
-        }
         Method::GrantsRevoke { id } => Ok(json!({"revoked": grants.revoke(*id)})),
         Method::WorkspaceOpen(open) => {
             let sha256 = open.sha256.as_deref();
@@ -467,16 +460,30 @@ fn way(place: Place) -> Option<SplitWay> {
     }
 }
 
+/// The saver, if `HOME` is set, and the `session.save` requests waiting on its writes.
+type Saving<'a> = Option<(&'a mut Saver, &'a mut VecDeque<Request>)>;
+
 fn answer_released(
     reactor: &mut Reactor,
     grants: &mut Grants<Request>,
     workspaces: &mut Workspaces,
     log: &mut Log,
-    mut saver: Option<&mut Saver>,
+    mut saving: Saving<'_>,
     released: Vec<Released<Request>>,
 ) {
     for released in released {
         let answer = match released.ticket.method() {
+            // Parked until the save thread's write ends, so a slow disk stalls no pane.
+            Method::SessionSave if released.allowed => match saving.as_mut() {
+                Some((saver, parked)) => match saver.ask(&saved(reactor, workspaces)) {
+                    Ok(()) => {
+                        parked.push_back(released.ticket);
+                        continue;
+                    }
+                    Err(error) => Err(format!("cannot save the session: {error}")),
+                },
+                None => Err("HOME is not set".to_owned()),
+            },
             Method::WorkspaceAskTrust(workspace, _) if released.allowed => {
                 trust_path().and_then(|path| {
                     trust::record(&path, &workspace.root, &workspace.sha256)
@@ -485,7 +492,7 @@ fn answer_released(
                 })
             }
             method if released.allowed && owner_prompt(method).is_some() => {
-                owner_action(reactor, grants, workspaces, saver.as_deref_mut(), method)
+                owner_action(reactor, grants, workspaces, method)
             }
             method if released.allowed => pane_action(reactor, method, true),
             _ => Err(released.reason.to_owned()),
@@ -726,6 +733,24 @@ fn saved(reactor: &Reactor, workspaces: &Workspaces) -> Snapshot {
     snapshot
 }
 
+/// Answers each parked `session.save` whose write has ended, in the order they were parked.
+fn answer_saved(
+    log: &mut Log,
+    reactor: &Reactor,
+    saver: &mut Saver,
+    parked: &mut VecDeque<Request>,
+) {
+    for answer in saver.answered() {
+        let Some(request) = parked.pop_front() else {
+            break;
+        };
+        let answer = answer
+            .map(|path| json!({"path": path.to_string_lossy()}))
+            .map_err(|error| format!("cannot save the session: {error}"));
+        audit::reply(log, reactor, request, answer);
+    }
+}
+
 /// Hands the session to the save thread, logging a failure by its kind alone, which names no
 /// path or pane. A failed save stops nothing.
 fn save(saver: &mut Saver, reactor: &Reactor, workspaces: &Workspaces) {
@@ -794,7 +819,8 @@ fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result
     let state = pinfold_config::state_dir();
     let mut saver = state
         .clone()
-        .map(|state| Saver::new(state, control::SESSION));
+        .map(|state| Saver::new(state, control::SESSION, Some(reactor.waker())));
+    let mut parked = VecDeque::new();
     let asked = listen(reactor.waker())?;
     let mut workspaces = Workspaces::default();
     if restore && state.is_some_and(|state| restore_session(&mut reactor, &mut workspaces, &state))
@@ -863,9 +889,12 @@ fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result
             &mut grants,
             &mut workspaces,
             &mut log,
-            saver.as_mut(),
+            saver.as_mut().map(|saver| (saver, &mut parked)),
             released,
         );
+        if let (Some(saver), false) = (saver.as_mut(), parked.is_empty()) {
+            answer_saved(&mut log, &reactor, saver, &mut parked);
+        }
         while let Ok(request) = asked.try_recv() {
             // Its peer has been told the core is busy, so acting now would surprise a retry.
             if *request.method() != Method::WindowOpen && request.is_late() {
@@ -975,6 +1004,9 @@ fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result
                     "pinfold-core: cannot save the session: {}",
                     error.kind()
                 );
+            }
+            if ending {
+                answer_saved(&mut log, &reactor, saver, &mut parked);
             }
         }
         window = reactor.has_window();
