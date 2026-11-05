@@ -136,8 +136,11 @@ into the core:
    session would be taken for that pane. The caller cannot choose which process gets its pid.
 3. **No terminal.** A caller with no controlling terminal is unidentified and gets no
    pane scopes. An MCP server must stay in its agent's session.
-4. **Outside a pane.** No token exists on disk. An owner-level action from outside a
-   pane needs a one-time confirmation drawn in the Pinfold window.
+4. **Outside a pane.** No token exists on disk. A pane's program can start a terminal of
+   its own, such as `script`'s, so a caller outside every pane may not be a person. A change
+   it asks for, `session.save`, `workspace.open` or `grants.revoke`, needs a one-time
+   confirmation drawn in the Pinfold window ([ADR-0041](../adr/0041-owner-changes-ask-in-the-window.md)).
+   Reads of grants, audit and trust state return no pane text and are not asked.
 
 5. **Window link.** A window can read and write every pane, so it never connects by name.
    The core makes a socketpair and starts the window itself, and that inherited descriptor

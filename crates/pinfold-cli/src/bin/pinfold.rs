@@ -56,9 +56,9 @@ pinfold up: open a project's workspace.
 Usage: pinfold up [dir]
 
 Reads <dir>/.pinfold/layout.toml and opens its tabs and panes in a PinFold window, starting
-PinFold if it is not running. If they are open already, it focuses them. The layout's run lines
-run only once you trust that version of the file: the window asks first. Refused, the panes
-open as plain shells and this exits 1.
+PinFold if it is not running. If they are open already, it focuses them. The window asks
+first. The layout's run lines run only once you trust that version of the file, which the
+window asks too. Refused, the panes open as plain shells and this exits 1.
 
 Arguments:
   [dir]  The project directory (default: the current directory)
@@ -181,7 +181,8 @@ Usage: pinfold ctl grants [--json]
        pinfold ctl grants revoke <id>
 
 Pressing a in an approval prompt lets one pane do one action on another for 30 minutes. Run
-this in a terminal outside PinFold's panes, such as Terminal.app.
+this in a terminal outside PinFold's panes, such as Terminal.app. Revoking asks in the PinFold
+window first.
 
 Options:
   --json       Print the API's grants.list result as JSON
@@ -221,7 +222,8 @@ pinfold ctl session save: save the session now.
 Usage: pinfold ctl session save
 
 Writes the session's snapshot, which PinFold restores when it starts, and prints its path. Run
-it in a terminal outside PinFold's panes, such as Terminal.app.
+it in a terminal outside PinFold's panes, such as Terminal.app. It asks in the PinFold window
+first.
 
 Example:
   pinfold ctl session save

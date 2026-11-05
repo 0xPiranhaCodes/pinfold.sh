@@ -125,8 +125,8 @@ fn grants_list<T, C: pinfold_core::grants::Clock>(grants: &mut Grants<T, C>) -> 
 /// unidentified and may not list panes (threat model, caller identity point 3). Any caller with
 /// a terminal may, in a pane or not, as a list shows no screen and little a same-user `ps` does
 /// not. Spawns and closes reach only the caller's own pane and the panes it spawned, the `self`
-/// and `children` scopes. Pane contents go to the caller alone, never to a log. Only a person's
-/// terminal outside any pane opens a workspace, so a pane's program cannot. An agent
+/// and `children` scopes. Pane contents go to the caller alone, never to a log. Owner methods
+/// that change something are asked in the window first, by [`decide`], and refused here. An agent
 /// launches only by its profile's name in `agents`, the user's config, and a sandboxed agent and
 /// the panes under it start only sandboxed agents in its working directory.
 fn immediate<T, C: pinfold_core::grants::Clock>(
@@ -134,7 +134,6 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
     family: &mut Family,
     agents: &BTreeMap<String, Agent>,
     grants: &mut Grants<T, C>,
-    workspaces: &mut Workspaces,
     request: &Request,
 ) -> Result<Value, String> {
     let identified = request.caller().is_some();
@@ -266,20 +265,11 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
             Ok(json!({"panes": panes.collect::<Vec<_>>()}))
         }
         Method::PaneList => Err("pane.list needs a caller in a terminal".to_owned()),
-        // Like audit.read: a guardrail against a pane's program, not proof of a person.
-        Method::SessionSave if identified && own.is_none() => {
-            let state = pinfold_config::state_dir().ok_or("HOME is not set")?;
-            let path = saved(reactor, workspaces).write(&state, control::SESSION);
-            path.map(|path| json!({"path": path.to_string_lossy()}))
-                .map_err(|error| format!("cannot save the session: {error}"))
-        }
+        // Asked in the window from a terminal outside every pane, and refused here from anywhere else.
         Method::SessionSave => {
             Err("session.save needs a caller in a terminal outside any pane".to_owned())
         }
         Method::GrantsList if identified && own.is_none() => Ok(grants_list(grants)),
-        Method::GrantsRevoke { id } if identified && own.is_none() => {
-            Ok(json!({"revoked": grants.revoke(*id)}))
-        }
         Method::GrantsList | Method::GrantsRevoke { .. } => {
             Err("grant administration needs a terminal outside every pane".to_owned())
         }
@@ -290,9 +280,63 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
         Method::WorkspaceTrustState(_) | Method::WorkspaceAskTrust(..) => {
             Err("workspace trust needs a terminal outside every pane".to_owned())
         }
-        // shortcut: the same guardrail as audit.read, not proof of a person; ask in the window
-        // once approval prompts cover it (#100).
-        Method::WorkspaceOpen(open) if identified && own.is_none() => {
+        Method::WorkspaceOpen(_) => {
+            Err("workspace.open needs a caller in a terminal outside any pane".to_owned())
+        }
+        // Never sent here: the loop opens windows, parks waits and keeps subscribers.
+        Method::WindowOpen
+        | Method::PaneWait(_)
+        | Method::EventsSubscribe(_)
+        | Method::PaneRead { .. }
+        | Method::PaneLastOutput { .. }
+        | Method::PaneSend { .. }
+        | Method::AuditRead { .. } => Err("not here".to_owned()),
+    }
+}
+
+/// What the window shows for a method that changes the session or its grants, which a terminal
+/// outside every pane runs only once the window allows it: a pane's program can start such a
+/// terminal with a new PTY. Reads of grants, audit and trust state are not asked.
+fn owner_prompt(method: &Method) -> Option<Vec<String>> {
+    let texts = match method {
+        Method::SessionSave => vec![
+            "session.save".to_owned(),
+            "Writes this session's layout over the saved one".to_owned(),
+        ],
+        Method::GrantsRevoke { id } => vec!["grants.revoke".to_owned(), format!("Grant {id}")],
+        Method::WorkspaceOpen(open) => {
+            let panes: usize = open.tabs.iter().map(Vec::len).sum();
+            let mut texts = vec![
+                "workspace.open".to_owned(),
+                open.root.clone(),
+                format!("{panes} pane(s) in {} tab(s)", open.tabs.len()),
+            ];
+            if open.sha256.is_some() {
+                texts.push("and its run lines, if the layout is trusted".to_owned());
+            }
+            texts
+        }
+        _ => return None,
+    };
+    Some(texts)
+}
+
+/// Runs a method of [`owner_prompt`]'s once the window allowed it.
+fn owner_action(
+    reactor: &mut Reactor,
+    grants: &mut Grants<Request>,
+    workspaces: &mut Workspaces,
+    method: &Method,
+) -> Result<Value, String> {
+    match method {
+        Method::SessionSave => {
+            let state = pinfold_config::state_dir().ok_or("HOME is not set")?;
+            let path = saved(reactor, workspaces).write(&state, control::SESSION);
+            path.map(|path| json!({"path": path.to_string_lossy()}))
+                .map_err(|error| format!("cannot save the session: {error}"))
+        }
+        Method::GrantsRevoke { id } => Ok(json!({"revoked": grants.revoke(*id)})),
+        Method::WorkspaceOpen(open) => {
             let sha256 = open.sha256.as_deref();
             let root = Path::new(&open.root);
             let count = open.tabs.iter().map(Vec::len).sum();
@@ -316,17 +360,7 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
             }
             Ok(json!({"opened": opened.len()}))
         }
-        Method::WorkspaceOpen(_) => {
-            Err("workspace.open needs a caller in a terminal outside any pane".to_owned())
-        }
-        // Never sent here: the loop opens windows, parks waits and keeps subscribers.
-        Method::WindowOpen
-        | Method::PaneWait(_)
-        | Method::EventsSubscribe(_)
-        | Method::PaneRead { .. }
-        | Method::PaneLastOutput { .. }
-        | Method::PaneSend { .. }
-        | Method::AuditRead { .. } => Err("not here".to_owned()),
+        _ => Err("not an owner action".to_owned()),
     }
 }
 
@@ -363,7 +397,13 @@ fn canonical(workspace: &Workspace) -> Result<String, String> {
 }
 
 /// Parks a trust prompt for a caller in a terminal outside every pane. It runs nothing.
-fn ask_trust(reactor: &mut Reactor, grants: &mut Grants<Request>, log: &mut Log, request: Request) {
+fn ask_trust(
+    reactor: &mut Reactor,
+    grants: &mut Grants<Request>,
+    workspaces: &mut Workspaces,
+    log: &mut Log,
+    request: Request,
+) {
     let Method::WorkspaceAskTrust(workspace, runs) = request.method() else {
         return;
     };
@@ -379,17 +419,29 @@ fn ask_trust(reactor: &mut Reactor, grants: &mut Grants<Request>, log: &mut Log,
     };
     let changed = trust::state(&path, &root, &workspace.sha256) == State::Changed;
     let texts = std::iter::once(root).chain(runs.iter().cloned()).collect();
-    match grants.ask_trust(request, texts, changed, reactor.is_window_ready()) {
+    let decision = grants.ask_trust(request, texts, changed, reactor.is_window_ready());
+    ask_alone(reactor, grants, workspaces, log, decision);
+}
+
+/// Draws a trust or owner prompt, which is never allowed before it is asked.
+fn ask_alone(
+    reactor: &mut Reactor,
+    grants: &mut Grants<Request>,
+    workspaces: &mut Workspaces,
+    log: &mut Log,
+    decision: Decision<Request>,
+) {
+    match decision {
         Decision::Ask(prompt) if reactor.ask_approval(&prompt) => {}
         Decision::Ask(prompt) => {
-            answer_released(reactor, log, grants.answer(prompt.id, ApprovalAnswer::Deny));
+            let released = grants.answer(prompt.id, ApprovalAnswer::Deny);
+            answer_released(reactor, grants, workspaces, log, released);
         }
         Decision::Refuse(request, reason) => {
             audit::reply(log, reactor, request, Err(reason.to_owned()));
         }
-        // A trust prompt is never allowed before it is asked.
         Decision::Allow(request) => {
-            audit::reply(log, reactor, request, Err("not asked".to_owned()))
+            audit::reply(log, reactor, request, Err("not asked".to_owned()));
         }
     }
 }
@@ -403,7 +455,13 @@ fn way(place: Place) -> Option<SplitWay> {
     }
 }
 
-fn answer_released(reactor: &mut Reactor, log: &mut Log, released: Vec<Released<Request>>) {
+fn answer_released(
+    reactor: &mut Reactor,
+    grants: &mut Grants<Request>,
+    workspaces: &mut Workspaces,
+    log: &mut Log,
+    released: Vec<Released<Request>>,
+) {
     for released in released {
         let answer = match released.ticket.method() {
             Method::WorkspaceAskTrust(workspace, _) if released.allowed => {
@@ -413,6 +471,9 @@ fn answer_released(reactor: &mut Reactor, log: &mut Log, released: Vec<Released<
                         .map_err(|error| format!("cannot write the trust store: {error}"))
                 })
             }
+            method if released.allowed && owner_prompt(method).is_some() => {
+                owner_action(reactor, grants, workspaces, method)
+            }
             method if released.allowed => pane_action(reactor, method, true),
             _ => Err(released.reason.to_owned()),
         };
@@ -420,8 +481,8 @@ fn answer_released(reactor: &mut Reactor, log: &mut Log, released: Vec<Released<
     }
 }
 
-/// Answers a request at once, or parks a read or send outside the caller's `self` and
-/// `children` scopes on a window approval.
+/// Answers a request at once, or parks on a window approval a read or send outside the caller's
+/// `self` and `children` scopes, or an owner method from a terminal outside every pane.
 fn decide(
     reactor: &mut Reactor,
     family: &mut Family,
@@ -432,8 +493,15 @@ fn decide(
     request: Request,
 ) {
     let own = request.caller().and_then(|caller| reactor.pane_of(caller));
+    if let Some(texts) = owner_prompt(request.method())
+        && request.caller().is_some()
+        && own.is_none()
+    {
+        let decision = grants.ask_owner(request, texts, reactor.is_window_ready());
+        return ask_alone(reactor, grants, workspaces, log, decision);
+    }
     let Some((target, action, text)) = cross_pane(request.method()) else {
-        let answer = immediate(reactor, family, agents, grants, workspaces, &request);
+        let answer = immediate(reactor, family, agents, grants, &request);
         return audit::reply(log, reactor, request, answer);
     };
     let Some(caller) = own else {
@@ -470,7 +538,8 @@ fn decide(
         Decision::Ask(prompt) if reactor.ask_approval(&prompt) => {}
         // Fail closed for this prompt alone, so one oversized batch cannot drop the others.
         Decision::Ask(prompt) => {
-            answer_released(reactor, log, grants.answer(prompt.id, ApprovalAnswer::Deny));
+            let released = grants.answer(prompt.id, ApprovalAnswer::Deny);
+            answer_released(reactor, grants, workspaces, log, released);
         }
     }
 }
@@ -767,13 +836,21 @@ fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result
         waits.retain(|request| !request.is_gone());
         grants.retain(|request| !request.is_gone());
         subscribers.retain(|(subscriber, _)| !subscriber.is_gone());
+        let mut released = Vec::new();
         while let Some((id, answer)) = reactor.take_approval_answer() {
-            answer_released(&mut reactor, &mut log, grants.answer(id, answer));
+            released.extend(grants.answer(id, answer));
         }
         if !reactor.has_window() && grants.deadline().is_some() {
-            answer_released(&mut reactor, &mut log, grants.window_closed());
+            released.extend(grants.window_closed());
         }
-        answer_released(&mut reactor, &mut log, grants.expire());
+        released.extend(grants.expire());
+        answer_released(
+            &mut reactor,
+            &mut grants,
+            &mut workspaces,
+            &mut log,
+            released,
+        );
         while let Ok(request) = asked.try_recv() {
             // Its peer has been told the core is busy, so acting now would surprise a retry.
             if *request.method() != Method::WindowOpen && request.is_late() {
@@ -818,7 +895,13 @@ fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result
                     audit::reply(&mut log, &reactor, request, read);
                 }
                 Method::WorkspaceAskTrust(..) => {
-                    ask_trust(&mut reactor, &mut grants, &mut log, request);
+                    ask_trust(
+                        &mut reactor,
+                        &mut grants,
+                        &mut workspaces,
+                        &mut log,
+                        request,
+                    );
                 }
                 _ => {
                     decide(

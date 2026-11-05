@@ -15,7 +15,7 @@ use std::{env, fs, thread};
 use pinfold_api::control;
 use pinfold_proto::link::{ApprovalAction, ApprovalAnswer, Request, SplitWay, VERSION};
 use pinfold_sys::socket;
-use pinfold_ui::link::{Disconnect, Link};
+use pinfold_ui::link::{Approval, Disconnect, Link};
 
 /// Names the directory of a run, in a process acting as the window.
 const CLIENT: &str = "PINFOLD_TEST_CLIENT";
@@ -177,6 +177,59 @@ fn until(link: &mut Link, mut done: impl FnMut(&mut Link) -> bool) -> Result {
         let _ = link.turn(Some(Duration::from_millis(20)));
     }
     Ok(())
+}
+
+/// Answers owner prompts as the file `owner-answers` says, a line each and `allow` past its end,
+/// noting each in `owner-asked` first, and returns the first other prompt, or `None` once the link
+/// ends or the clock runs out.
+fn approval(link: &mut Link, directory: &Path) -> Option<Approval> {
+    approval_until(link, directory, |_| false)
+}
+
+/// As [`approval`], returning `None` once `done` too.
+fn approval_until(
+    link: &mut Link,
+    directory: &Path,
+    mut done: impl FnMut(&mut Link) -> bool,
+) -> Option<Approval> {
+    let mut other = None;
+    let _ = until(link, |link| {
+        while let Some(prompt) = link.take_approval() {
+            if prompt.action != ApprovalAction::Owner {
+                other = Some(prompt);
+                return true;
+            }
+            let asked = directory.join("owner-asked");
+            let mut noted = fs::read_to_string(&asked).unwrap_or_default();
+            let answers = fs::read_to_string(directory.join("owner-answers")).unwrap_or_default();
+            let answer = match answers.lines().nth(noted.lines().count()) {
+                Some("deny") => ApprovalAnswer::Deny,
+                _ => ApprovalAnswer::AllowOnce,
+            };
+            let _ = writeln!(noted, "{}", prompt.texts.join(" | "));
+            assert!(fs::write(&asked, noted).is_ok());
+            let id = prompt.id;
+            assert!(link.send(Request::ApprovalAnswer { id, answer }));
+        }
+        done(link) || link.disconnected().is_some()
+    });
+    other
+}
+
+/// Not a test: a window that answers owner prompts with [`approval`] once it notes `window`.
+#[test]
+fn owner_window_process() {
+    let Some(directory) = env::var_os(CLIENT) else {
+        return;
+    };
+    let directory = Path::new(&directory);
+    let core = std::os::unix::process::parent_id().to_string();
+    fs::write(directory.join("core"), core).unwrap();
+    let mut link = Link::new(socket::take_link().unwrap()).unwrap();
+    assert!(link.resize(24, 80));
+    until(&mut link, |link| link.is_greeted()).unwrap();
+    fs::write(directory.join("window"), "yes").unwrap();
+    approval(&mut link, directory);
 }
 
 /// The first client types, then leaves when asked to the front. The second sees what is left.
@@ -997,13 +1050,7 @@ fn approval_window_process() {
     assert!(link.resize(24, 80));
     until(&mut link, |link| link.is_greeted()).unwrap();
     assert!(link.send(Request::NewTab));
-    let mut first = None;
-    until(&mut link, |link| {
-        first = link.take_approval();
-        first.is_some()
-    })
-    .unwrap();
-    let first = first.unwrap();
+    let first = approval(&mut link, directory).unwrap();
     assert_eq!(
         (first.caller, first.target, first.action),
         (0, 1, ApprovalAction::Send)
@@ -1019,13 +1066,8 @@ fn approval_window_process() {
         answer: ApprovalAnswer::AllowForThirtyMinutes,
     }));
 
-    let mut second = None;
-    until(&mut link, |link| {
-        second = link.take_approval();
-        second.is_some()
-    })
-    .unwrap();
-    let second = second.unwrap();
+    // The outside terminal's revoke is asked and allowed on the way.
+    let second = approval(&mut link, directory).unwrap();
     assert_eq!(second.texts, ["must-not-arrive\n"]);
     assert!(link.send(Request::ApprovalAnswer {
         id: second.id,
@@ -1033,13 +1075,7 @@ fn approval_window_process() {
     }));
     until(&mut link, |_| directory.join("second-denied").exists()).unwrap();
 
-    let mut read = None;
-    until(&mut link, |link| {
-        read = link.take_approval();
-        read.is_some()
-    })
-    .unwrap();
-    let read = read.unwrap();
+    let read = approval(&mut link, directory).unwrap();
     assert_eq!(read.action, ApprovalAction::Read);
     assert!(read.texts.is_empty());
     assert!(link.send(Request::ApprovalAnswer {
@@ -1098,10 +1134,106 @@ fn only_the_window_answers_cross_pane_actions_and_ctl_revokes_grants() {
     assert_eq!(listed["grants"][0]["id"].to_string(), id);
     let after: serde_json::Value = serde_json::from_str(&session.read("after")).unwrap();
     assert_eq!(after["grants"], serde_json::json!([]));
+    // Only the revoke asked: listing grants is a read.
+    let asked = session.read("owner-asked");
+    assert_eq!(asked, format!("grants.revoke | Grant {id}\n"));
     assert!(session.wait_for("second-denied"), "{}", session.read_log());
     assert!(session.wait_for("redacted"), "{}", session.read_log());
     // Every line the target read: the denied send never reached it.
     assert_eq!(session.read("received"), "approved\n");
+}
+
+/// Not a test: pane 0 starts a terminal of its own, as `script -q /dev/null` would, running
+/// [`owner_outside_process`], and keeps it until that is done.
+#[test]
+fn owner_pane_process() {
+    let Some(directory) = env::var_os(CLIENT) else {
+        return;
+    };
+    let directory = Path::new(&directory);
+    let mut outside = Command::new(env::current_exe().unwrap());
+    outside.args(["--exact", "owner_outside_process"]);
+    let _terminal = pinfold_sys::pty::Pty::spawn(outside, 24, 80).unwrap();
+    while !directory.join("outside").exists() {
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Not a test: in that new terminal, outside every pane, calls each owner method and notes the
+/// replies.
+#[test]
+fn owner_outside_process() {
+    let Some(directory) = env::var_os(CLIENT) else {
+        return;
+    };
+    let directory = Path::new(&directory);
+    while !directory.join("window").exists() {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let root = fs::canonicalize(directory).unwrap();
+    let open = serde_json::json!({"root": root, "layout": {"tabs": [{"panes": [{"cwd": root}]}]}});
+    let hello = next(&mut api(&[]).unwrap(), || Ok(())).unwrap();
+    let calls = [
+        ("session.save", serde_json::json!({})),
+        ("session.save", serde_json::json!({})),
+        ("grants.list", serde_json::json!({})),
+        ("grants.revoke", serde_json::json!({"id": 7})),
+        ("workspace.open", open),
+    ];
+    let asked = calls
+        .into_iter()
+        .map(|(method, params)| ask(method, params));
+    let said: Vec<_> = std::iter::once(hello)
+        .chain(asked.map(Result::unwrap))
+        .collect();
+    let noted = directory.join("outside.tmp");
+    fs::write(&noted, serde_json::to_string(&said).unwrap()).unwrap();
+    fs::rename(noted, directory.join("outside")).unwrap();
+}
+
+#[test]
+fn owner_methods_from_a_new_terminal_in_a_pane_wait_for_the_window() {
+    let exe = env::current_exe().unwrap();
+    let window = format!("exec '{}' --exact owner_window_process", exe.display());
+    let session = Session::new("owner", Some(&window)).unwrap();
+    let answers = "deny\nallow\nallow\ndeny\n";
+    fs::write(session.directory.join("owner-answers"), answers).unwrap();
+    let pane = format!("exec '{}' --exact owner_pane_process", exe.display());
+    let mut core = session
+        .start_core(&["--window", "1", "80x24"], &pane)
+        .unwrap();
+    assert!(session.wait_for("outside"), "{}", session.read_log());
+    let said: Vec<serde_json::Value> = serde_json::from_str(&session.read("outside")).unwrap();
+    let refused = |reply: &serde_json::Value| reply["error"]["message"].to_string();
+    // The new terminal is in no pane, so the core takes it for a person's.
+    assert_eq!(
+        said[0]["result"]["pane"],
+        serde_json::Value::Null,
+        "{said:?}"
+    );
+    assert!(
+        refused(&said[1]).contains("denied in the window"),
+        "{said:?}"
+    );
+    let path = said[2]["result"]["path"].as_str().unwrap_or_default();
+    assert!(Path::new(path).is_file(), "{said:?}");
+    // Reading grants is not asked.
+    assert_eq!(said[3]["result"], serde_json::json!({"grants": []}));
+    assert_eq!(said[4]["result"], serde_json::json!({"revoked": false}));
+    assert!(
+        refused(&said[5]).contains("denied in the window"),
+        "{said:?}"
+    );
+    let save = "session.save | Writes this session's layout over the saved one";
+    let root = fs::canonicalize(&session.directory).unwrap();
+    let open = format!(
+        "workspace.open | {} | 1 pane(s) in 1 tab(s)",
+        root.display()
+    );
+    let asked = [save, save, "grants.revoke | Grant 7", &open].map(|line| format!("{line}\n"));
+    assert_eq!(session.read("owner-asked"), asked.concat());
+    core.kill().unwrap();
+    core.wait().unwrap();
 }
 
 /// Names the directory of a run, in the pane that spawns others.
@@ -1414,15 +1546,20 @@ fn mcp_lists_tools_calls_the_core_as_its_pane_and_reports_a_refusal_as_a_tool_er
 #[test]
 fn ctl_session_save_writes_a_private_snapshot_only_from_outside_a_pane() {
     use std::os::unix::fs::PermissionsExt;
-    let session = Session::new("n", None).unwrap();
+    let exe = env::current_exe().unwrap();
+    let window = format!("exec '{}' --exact owner_window_process", exe.display());
+    let session = Session::new("n", Some(&window)).unwrap();
     let ctl = format!(
         "'{}' ctl session save",
         session.directory.join("pinfold").display()
     );
     let to = |name: &str| format!("> \"$PINFOLD_TEST_CLIENT/{name}\" 2>&1");
     let inside = format!("{ctl} {}; exec sleep 30", to("in"));
-    let mut core = session.start_core(&["--idle", "1"], &inside).unwrap();
+    let mut core = session
+        .start_core(&["--window", "1", "80x24"], &inside)
+        .unwrap();
     assert!(session.wait_for("in"), "{}", session.read_log());
+    assert!(session.wait_for("window"), "{}", session.read_log());
     let refused = session.read("in");
     assert!(refused.contains("outside any pane"), "{refused}");
 
@@ -1439,6 +1576,7 @@ fn ctl_session_save_writes_a_private_snapshot_only_from_outside_a_pane() {
     let path = PathBuf::from(said.trim());
     assert!(path.starts_with(&state), "{said}");
     assert!(path.ends_with("sessions/default.json"), "{said}");
+    assert!(session.read("owner-asked").starts_with("session.save | "));
     let mode = fs::metadata(&path).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
     let snapshot: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -1529,13 +1667,17 @@ fn save_with_cwds(session: &Session, panes: usize, under: &Path) -> Result<serde
 }
 
 /// Not a test: the window of [`a_new_core_restores_the_layout_and_cwds_of_a_killed_one`],
-/// which splits the focused pane and leaves.
+/// which splits the focused pane in its first core, then allows each save.
 #[test]
 fn split_client_process() {
-    if env::var_os(CLIENT).is_some() {
-        let mut link = Link::new(socket::take_link().unwrap()).unwrap();
-        assert!(link.resize(24, 80));
-        until(&mut link, |link| !link.screens().is_empty()).unwrap();
+    let Some(directory) = env::var_os(CLIENT) else {
+        return;
+    };
+    let directory = Path::new(&directory);
+    let mut link = Link::new(socket::take_link().unwrap()).unwrap();
+    assert!(link.resize(24, 80));
+    until(&mut link, |link| !link.screens().is_empty()).unwrap();
+    if fs::create_dir(directory.join("split")).is_ok() {
         let pane = link.focused();
         assert!(link.send(Request::Split {
             pane,
@@ -1543,6 +1685,8 @@ fn split_client_process() {
         }));
         until(&mut link, |link| link.screens().len() == 2).unwrap();
     }
+    fs::write(directory.join("window"), "yes").unwrap();
+    approval(&mut link, directory);
 }
 
 #[test]
@@ -1575,6 +1719,18 @@ fn a_new_core_restores_the_layout_and_cwds_of_a_killed_one() {
     // saved directory.
     let second = format!("pwd -P >> \"$PINFOLD_TEST_CLIENT/pwds\"; {tell}; exec sleep 60");
     let mut core = session.start_core(&[], &second).unwrap();
+    // A window to allow the saves, once the core answers, as a launcher would start its own.
+    let start = Instant::now();
+    while serde_json::from_str::<serde_json::Value>(
+        &ctl(&session, "ctl list --json", "list").unwrap(),
+    )
+    .is_err()
+    {
+        assert!(start.elapsed() < PATIENCE, "{}", session.read_log());
+        thread::sleep(Duration::from_millis(20));
+    }
+    let launched = session.launch().unwrap();
+    assert!(launched.status.success(), "{launched:?}");
     let restored = save_with_cwds(&session, 3, &work).unwrap();
     assert_eq!(restored["tabs"], saved["tabs"]);
     assert_eq!(restored["active"], saved["active"]);
@@ -1603,7 +1759,8 @@ fn a_new_core_restores_the_layout_and_cwds_of_a_killed_one() {
 
 #[test]
 fn up_opens_a_workspace_as_shells_once_and_then_attaches_to_it() {
-    let window = format!("{NOTE_CORE}\n{}\n{STAY}", say_hello().unwrap());
+    let exe = env::current_exe().unwrap();
+    let window = format!("exec '{}' --exact owner_window_process", exe.display());
     let session = Session::new("u", Some(&window)).unwrap();
     let project = session.directory.join("project");
     for directory in ["a", "b", ".pinfold"] {
@@ -2023,19 +2180,15 @@ fn up_trust_window_process() {
             "echo probe >> \"$PINFOLD_TEST_CLIENT/ran\"\n"
         ));
         until(&mut link, |_| probes() > before).unwrap();
+        // Then allows each `ctl session save` until the core goes.
+        approval(&mut link, directory);
         return;
     }
     for (project, answer) in [
         ("/denied", ApprovalAnswer::Deny),
         ("/up-", ApprovalAnswer::AllowOnce),
     ] {
-        let mut prompt = None;
-        until(&mut link, |link| {
-            prompt = link.take_approval();
-            prompt.is_some()
-        })
-        .unwrap();
-        let prompt = prompt.unwrap();
+        let prompt = approval(&mut link, directory).unwrap();
         assert_eq!(prompt.action, ApprovalAction::Trust);
         assert!(prompt.texts[0].contains(project), "{:?}", prompt.texts);
         assert!(prompt.texts[1].contains("space-ran"), "{:?}", prompt.texts);
@@ -2046,8 +2199,11 @@ fn up_trust_window_process() {
         }));
     }
     // The typed line shows `work''space-ran`; only its output shows this.
-    until(&mut link, |link| shows(link, "workspace-ran")).unwrap();
+    // Its `workspace.open`s are asked meanwhile, and allowed.
+    approval_until(&mut link, directory, |link| shows(link, "workspace-ran"));
+    assert!(shows(&link, "workspace-ran"));
     fs::write(directory.join("shown"), "yes").unwrap();
+    approval(&mut link, directory);
 }
 
 #[test]
@@ -2173,7 +2329,9 @@ run = "echo work''space-ran | tee -a \"$PINFOLD_TEST_CLIENT/ran\""
 
 #[test]
 fn a_trusted_run_line_runs_in_its_layouts_directory_not_the_callers() {
-    let session = Session::new("wd", None).unwrap();
+    let exe = env::current_exe().unwrap();
+    let window = format!("exec '{}' --exact owner_window_process", exe.display());
+    let session = Session::new("wd", Some(&window)).unwrap();
     let project = session.directory.join("project");
     fs::create_dir_all(project.join(".pinfold")).unwrap();
     fs::create_dir_all(project.join("sub")).unwrap();
@@ -2193,7 +2351,10 @@ fn a_trusted_run_line_runs_in_its_layouts_directory_not_the_callers() {
     let trusted =
         pinfold_api::trust::record(&state.join("trust.json"), root.to_str().unwrap(), &sha256);
     trusted.unwrap();
-    let mut core = session.start_core(&[], "exec /bin/sh").unwrap();
+    let mut core = session
+        .start_core(&["--window", "1", "80x24"], "exec /bin/sh")
+        .unwrap();
+    assert!(session.wait_for("window"), "{}", session.read_log());
 
     // The caller asks for the pane in `sub`, where the prompt never said the line would run.
     let open = call(

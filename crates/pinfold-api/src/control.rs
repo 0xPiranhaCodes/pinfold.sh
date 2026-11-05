@@ -519,7 +519,10 @@ impl Control {
                         Method::PaneRead { .. }
                         | Method::PaneLastOutput { .. }
                         | Method::PaneSend { .. }
-                        | Method::WorkspaceAskTrust(..) => APPROVAL_WAIT + OPEN_WAIT,
+                        | Method::WorkspaceAskTrust(..)
+                        | Method::SessionSave
+                        | Method::GrantsRevoke { .. }
+                        | Method::WorkspaceOpen(_) => APPROVAL_WAIT + OPEN_WAIT,
                         _ => OPEN_WAIT,
                     };
                     ask(Request {
