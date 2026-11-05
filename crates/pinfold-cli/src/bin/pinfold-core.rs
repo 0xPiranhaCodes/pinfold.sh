@@ -293,13 +293,23 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
         // shortcut: the same guardrail as audit.read, not proof of a person; ask in the window
         // once approval prompts cover it (#100).
         Method::WorkspaceOpen(open) if identified && own.is_none() => {
-            let pane = |(place, cwd): &(Place, String)| (way(*place), cwd.clone());
-            let tabs = open.tabs.iter();
-            let tabs: Vec<Vec<_>> = tabs.map(|tab| tab.iter().map(pane).collect()).collect();
             let sha256 = open.sha256.as_deref();
-            let opened = workspaces.open(reactor, &open.root, sha256, &tabs)?;
             let root = Path::new(&open.root);
-            let runs = sha256.and_then(|sha256| trusted_runs(root, sha256, opened.len()));
+            let count = open.tabs.iter().map(Vec::len).sum();
+            let runs = sha256.and_then(|sha256| trusted_runs(root, sha256, count));
+            // A trusted line runs where its file says, never where the caller said.
+            let mut cwds = runs.iter().flatten().map(|(cwd, _)| cwd.to_string_lossy());
+            let mut pane = |(place, cwd): &(Place, String)| {
+                let cwd = cwds
+                    .next()
+                    .map_or_else(|| cwd.clone(), |cwd| cwd.into_owned());
+                (way(*place), cwd)
+            };
+            let tabs = open.tabs.iter();
+            let tabs: Vec<Vec<_>> = tabs
+                .map(|tab| tab.iter().map(&mut pane).collect())
+                .collect();
+            let opened = workspaces.open(reactor, &open.root, sha256, &tabs)?;
             if let (Some(runs), false) = (runs, opened.is_empty()) {
                 let panes: Vec<_> = opened.iter().copied().map(Some).collect();
                 type_runs(reactor, &panes, &runs);
