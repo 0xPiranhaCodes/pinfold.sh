@@ -100,6 +100,10 @@ window only holds the rows on screen; the core's `Scrollback at its cap` row cov
 Xvfb through `pinfold`, kills the window and reattaches, kills the core and checks that the window
 says so, and starts a window under headless Weston. `crates/pinfold-cli/tests/session.rs` covers
 the same session without a display, using a client on the real link in place of the window.
+Its helper processes take their directory from `helper`, which notes a panic in `failed` there,
+and write what a test waits on with `note` (or the shell's `into`), which renames a finished file
+into place. `Session::wait_for` then fails at once with the helper's panic instead of after its
+120 s patience.
 
 Every number in the docs or a PR must come from committed code. If you cannot
 reproduce it with a script in this repository, leave it out.
