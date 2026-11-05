@@ -7,6 +7,7 @@ use std::process::{Command, ExitCode};
 use std::{fs, io};
 
 mod mem_gate;
+mod soak;
 
 use mem_gate::Side;
 
@@ -15,6 +16,8 @@ Usage: cargo xtask <command>
 
 Commands:
   mem-gate     Check every ADR-0021 memory budget
+  soak         Run a long session and check memory, echo latency and lost panes
+               [--minutes <n>, default 60]
   fuzz-smoke   Run each fuzz target briefly
   schema-gen   Generate API JSON Schemas (arrives in M3)
   release      Prepare a release (arrives in M5)
@@ -33,6 +36,7 @@ const FULL_CACHE: &str = "tests/window/full-cache.sh";
 enum Task {
     Help,
     MemGate,
+    Soak,
     FuzzSmoke,
     NotYet {
         name: String,
@@ -45,6 +49,7 @@ fn parse(arg: Option<&str>) -> Task {
     match arg {
         None | Some("help" | "--help" | "-h") => Task::Help,
         Some("mem-gate") => Task::MemGate,
+        Some("soak") => Task::Soak,
         Some("fuzz-smoke") => Task::FuzzSmoke,
         Some(name @ "schema-gen") => Task::NotYet {
             name: name.into(),
@@ -359,14 +364,55 @@ fn mem_gate_task() -> ExitCode {
     }
 }
 
+/// `--minutes <n>` after `soak`, or the hour #224 asks for.
+fn soak_minutes(args: &[String]) -> Option<u64> {
+    match args {
+        [] => Some(60),
+        [flag, minutes] if flag == "--minutes" => minutes.parse().ok().filter(|&m| m > 0),
+        _ => None,
+    }
+}
+
+fn soak_task(args: &[String]) -> ExitCode {
+    let Some(minutes) = soak_minutes(args) else {
+        eprintln!("usage: cargo xtask soak [--minutes <n>]");
+        return ExitCode::FAILURE;
+    };
+    let target = std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into());
+    let passed = build("release-core", "pinfold-core", &["--no-default-features"])
+        .and_then(|()| build("release", "pinfold-window", &[]))
+        .and_then(|()| beside_the_core(Path::new(&target)))
+        .and_then(|()| {
+            soak::run(
+                &Path::new(&target).join("release-core/pinfold-core"),
+                minutes,
+            )
+        });
+    match passed {
+        Ok(true) => ExitCode::SUCCESS,
+        Ok(false) => ExitCode::FAILURE,
+        Err(error) => {
+            eprintln!("soak: {error}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 fn main() -> ExitCode {
-    let arg = std::env::args().nth(1);
+    // A soak core runs this as its panes' shell.
+    if let Some(directory) = std::env::var_os(soak::DIRECTORY) {
+        eprintln!("soak: {}", soak::shell(directory));
+        return ExitCode::FAILURE;
+    }
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let arg = args.first().cloned();
     match parse(arg.as_deref()) {
         Task::Help => {
             println!("{HELP}");
             ExitCode::SUCCESS
         }
         Task::MemGate => mem_gate_task(),
+        Task::Soak => soak_task(&args[1..]),
         Task::FuzzSmoke => fuzz_smoke(),
         Task::NotYet { name, milestone } => {
             eprintln!("{name}: not implemented until {milestone}");
@@ -402,6 +448,15 @@ mod tests {
                 milestone: "M5"
             }
         );
+    }
+
+    #[test]
+    fn soak_takes_minutes_or_an_hour() {
+        let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+        assert_eq!(soak_minutes(&args(&[])), Some(60));
+        assert_eq!(soak_minutes(&args(&["--minutes", "10"])), Some(10));
+        assert_eq!(soak_minutes(&args(&["--minutes", "0"])), None);
+        assert_eq!(soak_minutes(&args(&["10"])), None);
     }
 
     #[test]

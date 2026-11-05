@@ -2610,7 +2610,9 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 name = "xtask"
 version = "0.1.0-beta.1"
 dependencies = [
+ "pinfold-api",
  "pinfold-sys",
+ "serde_json",
 ]
 
 [[package]]

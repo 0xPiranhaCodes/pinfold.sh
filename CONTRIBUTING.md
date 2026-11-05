@@ -96,6 +96,24 @@ its right-click menu to open in the middle of the grid. The Dock menu has no row
 it, and no script can right-click the Dock. A pane's scrollback has no row in the window, as the
 window only holds the rows on screen; the core's `Scrollback at its cap` row covers it.
 
+### The soak
+
+`cargo xtask soak --minutes 60` runs one core for an hour, as nightly does under Xvfb. It runs
+the xtask binary as the core's shell: the first pane drives the session through the API, and
+every pane it spawns is a plain `/bin/sh`. Each round of at least a second opens a tab, splits
+it twice and closes all three, checks with `pane.list` that no kept pane was lost, and times
+five echoes in a shell pane, from `pane.send` until `pane.read` shows the line. Each period gets
+a fresh echo pane, as `pane.read` reads the whole history and would slow with it. Two other panes
+print `seq 1 50000` every second for the whole run. Every fifth round kills the window,
+as a crash would, and opens a new one with `window.open`. Config, state, data and the socket
+live in a temporary directory, so your own session is never touched.
+
+The run is cut into ten periods, and the table gives each one's echo p50 and p99 and the core's
+memory at its end, read as the memory gate reads it. The first period is warm-up. It fails if
+the core grows by more than `GROWTH_LIMIT` (1 MB) past warm-up, if a period's echo p99 passes
+`LATENCY_LIMIT` (33 ms), if an echo takes over 2 s, or if a pane, the window or the core is
+lost. The limits and their reasons are in `xtask/src/soak.rs`.
+
 `tests/window/run.sh` drives the real processes in a container: it types into a shell under
 Xvfb through `pinfold`, kills the window and reattaches, kills the core and checks that the window
 says so, and starts a window under headless Weston. `crates/pinfold-cli/tests/session.rs` covers
