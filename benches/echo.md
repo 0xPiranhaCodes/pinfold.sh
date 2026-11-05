@@ -1,7 +1,7 @@
 # Keystroke-to-echo latency (issue #218)
 
-`cargo xtask latency` runs [`echo.rs`](echo.rs) three times against a `release-core` build of
-`pinfold-core`, 200 s each, and fails if a case misses the budget in
+`cargo xtask latency` runs [`echo.rs`](echo.rs) four times against a `release-core` build of
+`pinfold-core`, three cases of 200 s and a `session.save` case of 60 s, and fails if a case misses the budget in
 `docs/design/architecture.md`: p99 ≤ 16.7 ms, one 60 Hz frame, and no keystroke over 50 ms.
 
 ## What it measures
@@ -52,18 +52,33 @@ max at 12.98 ms. The API drain met the budget in both builds at about 65,000 rea
 it has no per-turn budget. The p99 is lower under API traffic than at rest; the probe does not
 show why.
 
-`session.save` still writes on the reactor's thread: the person asked and approved it, and the
-reply carries the path. It first drops any snapshot still waiting and waits out a write under
-way, so two writes never overlap. It therefore still stalls every pane on slow storage, and misses
-the budget. One 60 s run with a call every 5 s, on the same Mac on 2026-11-06:
+### `session.save` (issue #251)
 
-`cargo build --profile release-core -p pinfold-cli --bin pinfold-core --bin pinfold`, then
-`cargo run --release -p pinfold-benches --bin echo -- --core target/release-core/pinfold-core
---fsync-ms 100 --session-save target/release-core/pinfold --seconds 60`
+The fourth case calls `pinfold ctl session save` every 5 s for 60 s, with every sync delayed
+100 ms, and fails if no call succeeds. To run it alone: `cargo build --profile release-core -p
+pinfold-cli --bin pinfold-core --bin pinfold`, then `cargo run --release -p pinfold-benches --bin
+echo -- --core target/release-core/pinfold-core --fsync-ms 100 --session-save
+target/release-core/pinfold --seconds 60`.
+
+Before, from #250 on 2026-11-06: an approved `session.save` dropped any waiting snapshot, waited
+out a write under way and wrote on the reactor's thread, because its reply carries the path.
 
 | fsync delay ms | API traffic | session.save calls | samples | p50 ms | p99 ms | max ms | syncs | API reads/s | budget |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | 100 | no | 11 | 2103 | 0.24 | 6.18 | 239.08 | 24 | 0 | missed |
 
-Moving it to the save thread too would mean parking the request until the write ends, as
-`pane.wait` parks, and replying then; that is a change to the request path, left for its own PR. `cargo xtask latency` leaves this case out of its gate.
+After: the core parks the request, hands the snapshot to the save thread with `Saver::ask`, and
+replies with the path on the reactor's first turn after that write ends; the save thread wakes it.
+A newer snapshot handed over before the write starts takes its place and answers the request too.
+The whole `cargo xtask latency` table, on the same Mac on 2026-11-06:
+
+| fsync delay ms | API traffic | session.save calls | samples | p50 ms | p99 ms | max ms | syncs | API reads/s | budget |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 0 | no | 0 | 7455 | 0.32 | 2.31 | 22.85 | 8 | 0 | met |
+| 100 | no | 0 | 7439 | 0.32 | 2.40 | 19.40 | 7 | 0 | met |
+| 0 | yes | 0 | 7034 | 0.07 | 0.14 | 0.26 | 8 | 66034 | met |
+| 100 | no | 11 | 2238 | 0.33 | 2.58 | 10.98 | 24 | 0 | met |
+
+The max with `session.save` went from 239.08 ms to 10.98 ms. Two earlier runs of the same case
+gave max 9.71 ms and 12.12 ms. One run before the case checked its calls made no successful
+call, for a reason the run did not show, and still read `met`; the case now fails then.
