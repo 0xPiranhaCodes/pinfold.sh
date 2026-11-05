@@ -117,8 +117,11 @@ we want but do not have links to its issue.
   go in the crate's `tests/`, such as `crates/pinfold-cli/tests/session.rs`.
 - **Property tests** (`proptest`) cover the config parser (`crates/pinfold-config`), the
   window link decoder (`crates/pinfold-proto/src/link.rs`), the layout tree
-  (`crates/pinfold-mux`) and the scrollback round-trip and reflow
-  (`crates/pinfold-core/tests/`).
+  (`crates/pinfold-mux`), the VT engine on arbitrary bytes split across reads and resizes
+  (`crates/pinfold-core/src/vt.rs`), the core's window link under any commands
+  (`crates/pinfold-core/src/link.rs`), the scrollback encoding round-trip
+  (`crates/pinfold-core/src/scrollback.rs`) and the scrollback against a stock grid, and
+  reflow (`crates/pinfold-core/tests/`).
 - **Fuzz targets** in `fuzz/fuzz_targets/` cover the VT input path (`vt_input`), the
   window link decoder (`link`), the control socket's JSON-RPC requests (`api_request`,
   `api_params`), the paste sanitizer (`paste`), session snapshots (`session_snapshot`) and
