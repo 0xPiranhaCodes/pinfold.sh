@@ -453,7 +453,10 @@ mod tests {
     #[test]
     fn a_font_file_opens() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("fonts/JetBrainsMono-Regular.ttf");
-        assert!(Font::open(&path).is_ok());
+        let font = Font::open(&path).unwrap();
+        assert!(!font.is_bundled());
+        assert_eq!(font.glyph('H'), bundled().glyph('H'));
+        assert_ne!(font.glyph('H'), 0);
     }
 
     #[test]

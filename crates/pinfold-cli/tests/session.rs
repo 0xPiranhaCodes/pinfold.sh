@@ -218,6 +218,7 @@ fn approval_until(
 
 /// Not a test: a window that answers owner prompts with [`approval`] once it notes `window`.
 #[test]
+#[ignore = "run by the tests that need an owner window"]
 fn owner_window_process() {
     let Some(directory) = env::var_os(CLIENT) else {
         return;
@@ -270,6 +271,7 @@ fn client(directory: &Path) -> Result {
 
 /// Not a test: the core runs this binary as its window, through the script in a [`Session`].
 #[test]
+#[ignore = "run by a_session_outlives_its_client_and_says_when_the_core_dies"]
 fn client_process() {
     if let Some(directory) = env::var_os(CLIENT) {
         client(Path::new(&directory)).unwrap();
@@ -279,7 +281,7 @@ fn client_process() {
 #[test]
 fn a_session_outlives_its_client_and_says_when_the_core_dies() {
     let exe = env::current_exe().unwrap();
-    let window = format!("exec '{}' --exact client_process", exe.display());
+    let window = format!("exec '{}' --exact --ignored client_process", exe.display());
     let session = Session::new("a", Some(&window)).unwrap();
 
     assert!(session.launch().unwrap().status.success());
@@ -516,6 +518,7 @@ fn a_log_that_will_not_open_stops_nothing_and_a_symlink_is_not_followed() {
 
 /// Not a test: the panic of [`a_panic_prints_its_place_and_not_its_text`].
 #[test]
+#[ignore = "run by a_panic_prints_its_place_and_not_its_text"]
 fn panic_process() {
     if env::var_os(PANIC).is_some() {
         pinfold_cli::panics_name_no_text();
@@ -526,7 +529,7 @@ fn panic_process() {
 #[test]
 fn a_panic_prints_its_place_and_not_its_text() {
     let output = Command::new(env::current_exe().unwrap())
-        .args(["--exact", "panic_process", "--nocapture"])
+        .args(["--exact", "--ignored", "panic_process", "--nocapture"])
         .env(PANIC, "yes")
         .output()
         .unwrap();
@@ -637,6 +640,7 @@ fn hardening_closes_the_core_and_leaves_its_panes_open() {
 
 /// Not a test: [`hardening_twice_is_harmless`] runs this, so that this binary stays debuggable.
 #[test]
+#[ignore = "run by hardening_twice_is_harmless"]
 fn harden_process() {
     if env::var_os(HARDEN).is_some() {
         pinfold_sys::harden().unwrap();
@@ -727,6 +731,7 @@ fn a_pane_can_send_to_itself_and_cross_pane_send_needs_a_window() {
 /// Not a test: each pane of [`a_pane_reports_its_own_status_and_not_another_panes`]. It reports
 /// pane 0's status, lists the panes, and notes both answers in a file named for its own pane.
 #[test]
+#[ignore = "run by a_pane_reports_its_own_status_and_not_another_panes"]
 fn status_process() {
     let (Some(directory), Some(_)) = (env::var_os(CLIENT), env::var_os(STATUS)) else {
         return;
@@ -759,7 +764,7 @@ fn a_pane_reports_its_own_status_and_not_another_panes() {
     let session = Session::new("st", None).unwrap();
     let exe = env::current_exe().unwrap();
     let shell = format!(
-        "{STATUS}=1 '{}' --exact status_process; exec sleep 30",
+        "{STATUS}=1 '{}' --exact --ignored status_process; exec sleep 30",
         exe.display()
     );
     let mut core = session.start_core(&["--idle", "2"], &shell).unwrap();
@@ -805,7 +810,7 @@ fn a_pane_reports_its_own_status_and_not_another_panes() {
 #[test]
 fn hardening_twice_is_harmless() {
     let status = Command::new(env::current_exe().unwrap())
-        .args(["--exact", "harden_process"])
+        .args(["--exact", "--ignored", "harden_process"])
         .env(HARDEN, "1")
         .stdout(Stdio::null())
         .status()
@@ -1194,7 +1199,10 @@ fn owner_outside_process() {
 #[test]
 fn owner_methods_from_a_new_terminal_in_a_pane_wait_for_the_window() {
     let exe = env::current_exe().unwrap();
-    let window = format!("exec '{}' --exact owner_window_process", exe.display());
+    let window = format!(
+        "exec '{}' --exact --ignored owner_window_process",
+        exe.display()
+    );
     let session = Session::new("owner", Some(&window)).unwrap();
     let answers = "deny\nallow\nallow\ndeny\n";
     fs::write(session.directory.join("owner-answers"), answers).unwrap();
@@ -1547,7 +1555,10 @@ fn mcp_lists_tools_calls_the_core_as_its_pane_and_reports_a_refusal_as_a_tool_er
 fn ctl_session_save_writes_a_private_snapshot_only_from_outside_a_pane() {
     use std::os::unix::fs::PermissionsExt;
     let exe = env::current_exe().unwrap();
-    let window = format!("exec '{}' --exact owner_window_process", exe.display());
+    let window = format!(
+        "exec '{}' --exact --ignored owner_window_process",
+        exe.display()
+    );
     let session = Session::new("n", Some(&window)).unwrap();
     let ctl = format!(
         "'{}' ctl session save",
@@ -1669,6 +1680,7 @@ fn save_with_cwds(session: &Session, panes: usize, under: &Path) -> Result<serde
 /// Not a test: the window of [`a_new_core_restores_the_layout_and_cwds_of_a_killed_one`],
 /// which splits the focused pane in its first core, then allows each save.
 #[test]
+#[ignore = "run by a_new_core_restores_the_layout_and_cwds_of_a_killed_one"]
 fn split_client_process() {
     let Some(directory) = env::var_os(CLIENT) else {
         return;
@@ -1692,7 +1704,10 @@ fn split_client_process() {
 #[test]
 fn a_new_core_restores_the_layout_and_cwds_of_a_killed_one() {
     let exe = env::current_exe().unwrap();
-    let window = format!("exec '{}' --exact split_client_process", exe.display());
+    let window = format!(
+        "exec '{}' --exact --ignored split_client_process",
+        exe.display()
+    );
     let session = Session::new("r", Some(&window)).unwrap();
     // Each pane works in a directory of its own, and sends no OSC 7. A restore keeps only a
     // directory no one else can write, which Linux's sticky `/tmp` is not, so these live in the
@@ -1760,7 +1775,10 @@ fn a_new_core_restores_the_layout_and_cwds_of_a_killed_one() {
 #[test]
 fn up_opens_a_workspace_as_shells_once_and_then_attaches_to_it() {
     let exe = env::current_exe().unwrap();
-    let window = format!("exec '{}' --exact owner_window_process", exe.display());
+    let window = format!(
+        "exec '{}' --exact --ignored owner_window_process",
+        exe.display()
+    );
     let session = Session::new("u", Some(&window)).unwrap();
     let project = session.directory.join("project");
     for directory in ["a", "b", ".pinfold"] {
@@ -2330,7 +2348,10 @@ run = "echo work''space-ran | tee -a \"$PINFOLD_TEST_CLIENT/ran\""
 #[test]
 fn a_trusted_run_line_runs_in_its_layouts_directory_not_the_callers() {
     let exe = env::current_exe().unwrap();
-    let window = format!("exec '{}' --exact owner_window_process", exe.display());
+    let window = format!(
+        "exec '{}' --exact --ignored owner_window_process",
+        exe.display()
+    );
     let session = Session::new("wd", Some(&window)).unwrap();
     let project = session.directory.join("project");
     fs::create_dir_all(project.join(".pinfold")).unwrap();
