@@ -185,6 +185,9 @@ impl Dimensions for Size {
 
 /// Whether `reply` is a CSI sequence of numbers, with nothing a program could have chosen.
 ///
+/// Longest reply the engine sends back, so no input can make one grow.
+const MAX_REPLY: usize = 32;
+
 /// Replies are written into the shell's input, so one that echoed program text would run
 /// it (T3 in the threat model).
 fn is_fixed_format(reply: &str) -> bool {
@@ -196,7 +199,7 @@ fn is_fixed_format(reply: &str) -> bool {
     };
     let parameters = &body[..body.len() - end.len_utf8()];
     let parameters = parameters.strip_suffix('$').unwrap_or(parameters);
-    reply.len() <= 32
+    reply.len() <= MAX_REPLY
         && parameters
             .bytes()
             .all(|byte| matches!(byte, b'0'..=b'9' | b';' | b'?' | b'>'))
@@ -722,6 +725,8 @@ impl VtEngine for AlacrittyEngine {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     fn feed(engine: &mut AlacrittyEngine, bytes: &[u8]) -> Vec<u8> {
@@ -1200,5 +1205,81 @@ mod tests {
         feed(&mut engine, b"\x1bc");
         feed(&mut engine, b"ok");
         assert_eq!(engine.line_text(0), "ok");
+    }
+
+    /// Escape sequences that query, hold output, or open strings, so arbitrary bytes reach
+    /// the parser's states and not only plain text.
+    const PIECES: [&[u8]; 14] = [
+        b"\x1b[6n",
+        b"\x1b[5n",
+        b"\x1b[c",
+        b"\x1b[>c",
+        b"\x1bZ",
+        b"\x1b[?1$p",
+        b"\x1b[?u",
+        b"\x1b[18t",
+        b"\x1b[?2026h",
+        b"\x1b[?2026l",
+        b"\x1b]8;;https://a\x1b\\",
+        b"\x1b]52;c;?\x07",
+        b"\x1b]133;C\x07",
+        b"\x1bP$q\"p\x1b\\",
+    ];
+
+    fn stream() -> impl Strategy<Value = Vec<u8>> {
+        let piece = prop_oneof![
+            prop::sample::select(&PIECES[..]).prop_map(<[u8]>::to_vec),
+            prop::collection::vec(any::<u8>(), 0..64),
+        ];
+        prop::collection::vec(piece, 0..64).prop_map(|pieces| pieces.concat())
+    }
+
+    /// A size, sometimes past the clamp.
+    fn dimension() -> impl Strategy<Value = u16> {
+        prop_oneof![30 => 0..=120_u16, 1 => Just(u16::MAX)]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
+
+        #[test]
+        fn any_bytes_split_and_resized_keep_the_grid_and_replies_bounded(
+            bytes in stream(),
+            cuts in prop::collection::vec(
+                (any::<prop::sample::Index>(), proptest::option::of((dimension(), dimension()))),
+                0..16,
+            ),
+        ) {
+            let mut engine = AlacrittyEngine::new(24, 80);
+            let mut cuts: Vec<_> = cuts
+                .into_iter()
+                .map(|(at, size)| (at.index(bytes.len() + 1), size))
+                .collect();
+            cuts.sort_by_key(|(at, _)| *at);
+            cuts.push((bytes.len(), None));
+            let (mut start, mut replies, mut held) = (0, Vec::new(), (24, 80));
+            for (at, size) in cuts {
+                engine.feed(&bytes[start..at], &mut replies);
+                start = at;
+                prop_assert_eq!(engine.size(), held, "output changed the size");
+                if let Some((rows, columns)) = size {
+                    engine.resize(rows, columns);
+                    let clamped = Size::clamped(rows, columns);
+                    held = (clamped.rows, clamped.columns);
+                    prop_assert_eq!(engine.size(), held);
+                }
+            }
+            let mut frame = Frame::default();
+            engine.frame(&mut frame);
+            prop_assert_eq!((frame.rows, frame.columns), held);
+            prop_assert_eq!(frame.cells.len(), usize::from(held.0) * usize::from(held.1));
+            engine.end_sync(&mut replies);
+            // Every query takes at least two bytes, so at most one reply per byte.
+            prop_assert!(replies.len() <= MAX_REPLY * bytes.len());
+            let text = String::from_utf8(replies).map_err(|error| TestCaseError::fail(error.to_string()))?;
+            for reply in text.split_inclusive(|c: char| c.is_ascii_alphabetic()) {
+                prop_assert!(is_fixed_format(reply), "{reply:?}");
+            }
+        }
     }
 }
