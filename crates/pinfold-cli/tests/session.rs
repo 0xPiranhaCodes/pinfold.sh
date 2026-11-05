@@ -256,6 +256,7 @@ fn approval_until(
 
 /// Not a test: a window that answers owner prompts with [`approval`] once it notes `window`.
 #[test]
+#[ignore = "run by the tests that need an owner window"]
 fn owner_window_process() {
     let Some(directory) = helper(CLIENT) else {
         return;
@@ -308,6 +309,7 @@ fn client(directory: &Path) -> Result {
 
 /// Not a test: the core runs this binary as its window, through the script in a [`Session`].
 #[test]
+#[ignore = "run by a_session_outlives_its_client_and_says_when_the_core_dies"]
 fn client_process() {
     if let Some(directory) = helper(CLIENT) {
         client(Path::new(&directory)).unwrap();
@@ -317,7 +319,7 @@ fn client_process() {
 #[test]
 fn a_session_outlives_its_client_and_says_when_the_core_dies() {
     let exe = env::current_exe().unwrap();
-    let window = format!("exec '{}' --exact client_process", exe.display());
+    let window = format!("exec '{}' --exact --ignored client_process", exe.display());
     let session = Session::new("a", Some(&window)).unwrap();
 
     assert!(session.launch().unwrap().status.success());
@@ -554,6 +556,7 @@ fn a_log_that_will_not_open_stops_nothing_and_a_symlink_is_not_followed() {
 
 /// Not a test: the panic of [`a_panic_prints_its_place_and_not_its_text`].
 #[test]
+#[ignore = "run by a_panic_prints_its_place_and_not_its_text"]
 fn panic_process() {
     if env::var_os(PANIC).is_some() {
         pinfold_cli::panics_name_no_text();
@@ -564,7 +567,7 @@ fn panic_process() {
 #[test]
 fn a_panic_prints_its_place_and_not_its_text() {
     let output = Command::new(env::current_exe().unwrap())
-        .args(["--exact", "panic_process", "--nocapture"])
+        .args(["--exact", "--ignored", "panic_process", "--nocapture"])
         .env(PANIC, "yes")
         .output()
         .unwrap();
@@ -675,6 +678,7 @@ fn hardening_closes_the_core_and_leaves_its_panes_open() {
 
 /// Not a test: [`hardening_twice_is_harmless`] runs this, so that this binary stays debuggable.
 #[test]
+#[ignore = "run by hardening_twice_is_harmless"]
 fn harden_process() {
     if env::var_os(HARDEN).is_some() {
         pinfold_sys::harden().unwrap();
@@ -764,6 +768,7 @@ fn a_pane_can_send_to_itself_and_cross_pane_send_needs_a_window() {
 /// Not a test: each pane of [`a_pane_reports_its_own_status_and_not_another_panes`]. It reports
 /// pane 0's status, lists the panes, and notes both answers in a file named for its own pane.
 #[test]
+#[ignore = "run by a_pane_reports_its_own_status_and_not_another_panes"]
 fn status_process() {
     let Some(directory) = env::var_os(STATUS).and_then(|_| helper(CLIENT)) else {
         return;
@@ -796,7 +801,7 @@ fn a_pane_reports_its_own_status_and_not_another_panes() {
     let session = Session::new("st", None).unwrap();
     let exe = env::current_exe().unwrap();
     let shell = format!(
-        "{STATUS}=1 '{}' --exact status_process; exec sleep 30",
+        "{STATUS}=1 '{}' --exact --ignored status_process; exec sleep 30",
         exe.display()
     );
     let mut core = session.start_core(&["--idle", "2"], &shell).unwrap();
@@ -842,7 +847,7 @@ fn a_pane_reports_its_own_status_and_not_another_panes() {
 #[test]
 fn hardening_twice_is_harmless() {
     let status = Command::new(env::current_exe().unwrap())
-        .args(["--exact", "harden_process"])
+        .args(["--exact", "--ignored", "harden_process"])
         .env(HARDEN, "1")
         .stdout(Stdio::null())
         .status()
@@ -883,6 +888,7 @@ fn next(
 /// Not a test: the first pane of [`a_caller_waits_on_its_pane_and_hears_panes_open_and_close`].
 /// It subscribes, waits on itself, and notes what it hears.
 #[test]
+#[ignore = "run by a_caller_waits_on_its_pane_and_hears_panes_open_and_close"]
 fn api_process() {
     let Some(directory) = helper(API) else {
         return;
@@ -931,6 +937,7 @@ fn api_process() {
 /// Not a test: the window of [`a_caller_waits_on_its_pane_and_hears_panes_open_and_close`],
 /// which opens a tab once the first pane has subscribed.
 #[test]
+#[ignore = "run by a_caller_waits_on_its_pane_and_hears_panes_open_and_close"]
 fn tab_process() {
     let Some(directory) = helper(CLIENT) else {
         return;
@@ -952,12 +959,12 @@ fn tab_process() {
 #[test]
 fn a_caller_waits_on_its_pane_and_hears_panes_open_and_close() {
     let exe = env::current_exe().unwrap();
-    let window = format!("exec '{}' --exact tab_process", exe.display());
+    let window = format!("exec '{}' --exact --ignored tab_process", exe.display());
     let session = Session::new("w", Some(&window)).unwrap();
     // The first pane is the caller; the tab's pane ends a moment after it opens.
     let shell = session.directory.join("shell");
     let script = format!(
-        "#!/bin/sh\nif mkdir \"$PINFOLD_TEST_CLIENT/first\"; then exec '{}' --exact api_process; fi\nsleep 1\n",
+        "#!/bin/sh\nif mkdir \"$PINFOLD_TEST_CLIENT/first\"; then exec '{}' --exact --ignored api_process; fi\nsleep 1\n",
         exe.display()
     );
     fs::write(&shell, script).unwrap();
@@ -998,6 +1005,7 @@ fn a_caller_waits_on_its_pane_and_hears_panes_open_and_close() {
 /// Not a test: pane 0 asks to send twice. It prints answer-looking bytes and tries a JSON-RPC
 /// answer while the first call is parked, then waits for an outside terminal to revoke its grant.
 #[test]
+#[ignore = "run by only_the_window_answers_cross_pane_actions_and_ctl_revokes_grants"]
 fn approval_api_process() {
     let Some(directory) = helper(API) else {
         return;
@@ -1073,6 +1081,7 @@ fn approval_api_process() {
 
 /// Not a test: the trusted inherited link sees both prompts and answers them with key meanings.
 #[test]
+#[ignore = "run by only_the_window_answers_cross_pane_actions_and_ctl_revokes_grants"]
 fn approval_window_process() {
     let Some(directory) = helper(CLIENT) else {
         return;
@@ -1125,12 +1134,15 @@ fn approval_window_process() {
 #[test]
 fn only_the_window_answers_cross_pane_actions_and_ctl_revokes_grants() {
     let exe = env::current_exe().unwrap();
-    let window = format!("exec '{}' --exact approval_window_process", exe.display());
+    let window = format!(
+        "exec '{}' --exact --ignored approval_window_process",
+        exe.display()
+    );
     let session = Session::new("approval", Some(&window)).unwrap();
     let shell = session.directory.join("approval-shell");
     let script = format!(
         "#!/bin/sh\nif mkdir \"$PINFOLD_TEST_CLIENT/first\" 2>/dev/null; then \
-         exec '{}' --exact approval_api_process; else echo yes > \"$PINFOLD_TEST_CLIENT/second\"; \
+         exec '{}' --exact --ignored approval_api_process; else echo yes > \"$PINFOLD_TEST_CLIENT/second\"; \
          echo 'password=hunter2'; \
          while read -r line; do echo \"$line\" >> \"$PINFOLD_TEST_CLIENT/received\"; done; fi\n",
         exe.display()
@@ -1183,13 +1195,14 @@ fn only_the_window_answers_cross_pane_actions_and_ctl_revokes_grants() {
 /// Not a test: pane 0 starts a terminal of its own, as `script -q /dev/null` would, running
 /// [`owner_outside_process`], and keeps it until that is done.
 #[test]
+#[ignore = "run by owner_methods_from_a_new_terminal_in_a_pane_wait_for_the_window"]
 fn owner_pane_process() {
     let Some(directory) = helper(CLIENT) else {
         return;
     };
     let directory = Path::new(&directory);
     let mut outside = Command::new(env::current_exe().unwrap());
-    outside.args(["--exact", "owner_outside_process"]);
+    outside.args(["--exact", "--ignored", "owner_outside_process"]);
     let _terminal = pinfold_sys::pty::Pty::spawn(outside, 24, 80).unwrap();
     while !directory.join("outside").exists() {
         thread::sleep(Duration::from_millis(10));
@@ -1199,6 +1212,7 @@ fn owner_pane_process() {
 /// Not a test: in that new terminal, outside every pane, calls each owner method and notes the
 /// replies.
 #[test]
+#[ignore = "run by owner_pane_process"]
 fn owner_outside_process() {
     let Some(directory) = helper(CLIENT) else {
         return;
@@ -1231,11 +1245,17 @@ fn owner_outside_process() {
 #[test]
 fn owner_methods_from_a_new_terminal_in_a_pane_wait_for_the_window() {
     let exe = env::current_exe().unwrap();
-    let window = format!("exec '{}' --exact owner_window_process", exe.display());
+    let window = format!(
+        "exec '{}' --exact --ignored owner_window_process",
+        exe.display()
+    );
     let session = Session::new("owner", Some(&window)).unwrap();
     let answers = "deny\nallow\nallow\ndeny\n";
     fs::write(session.directory.join("owner-answers"), answers).unwrap();
-    let pane = format!("exec '{}' --exact owner_pane_process", exe.display());
+    let pane = format!(
+        "exec '{}' --exact --ignored owner_pane_process",
+        exe.display()
+    );
     let mut core = session
         .start_core(&["--window", "1", "80x24"], &pane)
         .unwrap();
@@ -1290,6 +1310,7 @@ fn ask(method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
 /// Not a test: the first pane of [`a_pane_spawns_children_and_reaches_only_them`]. It spawns,
 /// sends, reads and closes, and notes each reply.
 #[test]
+#[ignore = "run by a_pane_spawns_children_and_reaches_only_them"]
 fn spawn_process() {
     let Some(directory) = helper(SPAWN) else {
         return;
@@ -1344,7 +1365,7 @@ fn a_pane_spawns_children_and_reaches_only_them() {
     let exe = env::current_exe().unwrap();
     let shell = format!(
         "if mkdir \"$PINFOLD_TEST_CLIENT/first\"; then {SPAWN}=\"$PINFOLD_TEST_CLIENT\" exec '{}' \
-         --exact spawn_process; fi; exec cat",
+         --exact --ignored spawn_process; fi; exec cat",
         exe.display()
     );
     let mut core = session.start_core(&["--idle", "1"], &shell).unwrap();
@@ -1366,7 +1387,7 @@ fn a_pane_spawns_children_and_reaches_only_them() {
 
     let mut outside = Command::new(&exe);
     outside
-        .args(["--exact", "spawn_process"])
+        .args(["--exact", "--ignored", "spawn_process"])
         .env("XDG_RUNTIME_DIR", session.directory.join("run"))
         .env(SPAWN, &session.directory);
     let detached = pinfold_sys::spawn_detached(outside, Stdio::null());
@@ -1415,6 +1436,7 @@ const OUTPUT: &str = "PINFOLD_TEST_OUTPUT";
 /// Not a test: the first pane of [`output_events_and_match_waits_reach_only_the_callers_pane`].
 /// It subscribes to output, spawns a child, and notes what it hears from whom.
 #[test]
+#[ignore = "run by output_events_and_match_waits_reach_only_the_callers_pane"]
 fn output_process() {
     let Some(directory) = helper(OUTPUT) else {
         return;
@@ -1461,6 +1483,7 @@ fn output_process() {
 /// Not a test: a terminal outside any pane in
 /// [`output_events_and_match_waits_reach_only_the_callers_pane`], which asks for output.
 #[test]
+#[ignore = "run by output_events_and_match_waits_reach_only_the_callers_pane"]
 fn outside_output_process() {
     let Some(directory) = helper(OUTPUT) else {
         return;
@@ -1477,7 +1500,7 @@ fn output_events_and_match_waits_reach_only_the_callers_pane() {
     // The second pane is another of the person's, printing all along.
     let shell = format!(
         "if mkdir \"$PINFOLD_TEST_CLIENT/first\"; then {OUTPUT}=\"$PINFOLD_TEST_CLIENT\" exec '{}' \
-         --exact output_process; elif mkdir \"$PINFOLD_TEST_CLIENT/second\"; then \
+         --exact --ignored output_process; elif mkdir \"$PINFOLD_TEST_CLIENT/second\"; then \
          while :; do echo other password=hunter2; sleep 0.1; done; fi; exec cat",
         exe.display()
     );
@@ -1500,7 +1523,7 @@ fn output_events_and_match_waits_reach_only_the_callers_pane() {
     // A terminal that is no pane has no own pane to hear, so it is refused.
     let mut outside = Command::new(&exe);
     outside
-        .args(["--exact", "outside_output_process"])
+        .args(["--exact", "--ignored", "outside_output_process"])
         .env("XDG_RUNTIME_DIR", session.directory.join("run"))
         .env(OUTPUT, &session.directory);
     let _terminal = pinfold_sys::pty::Pty::spawn(outside, 24, 80).unwrap();
@@ -1584,7 +1607,10 @@ fn mcp_lists_tools_calls_the_core_as_its_pane_and_reports_a_refusal_as_a_tool_er
 fn ctl_session_save_writes_a_private_snapshot_only_from_outside_a_pane() {
     use std::os::unix::fs::PermissionsExt;
     let exe = env::current_exe().unwrap();
-    let window = format!("exec '{}' --exact owner_window_process", exe.display());
+    let window = format!(
+        "exec '{}' --exact --ignored owner_window_process",
+        exe.display()
+    );
     let session = Session::new("n", Some(&window)).unwrap();
     let ctl = format!(
         "'{}' ctl session save",
@@ -1706,6 +1732,7 @@ fn save_with_cwds(session: &Session, panes: usize, under: &Path) -> Result<serde
 /// Not a test: the window of [`a_new_core_restores_the_layout_and_cwds_of_a_killed_one`],
 /// which splits the focused pane in its first core, then allows each save.
 #[test]
+#[ignore = "run by a_new_core_restores_the_layout_and_cwds_of_a_killed_one"]
 fn split_client_process() {
     let Some(directory) = helper(CLIENT) else {
         return;
@@ -1729,7 +1756,10 @@ fn split_client_process() {
 #[test]
 fn a_new_core_restores_the_layout_and_cwds_of_a_killed_one() {
     let exe = env::current_exe().unwrap();
-    let window = format!("exec '{}' --exact split_client_process", exe.display());
+    let window = format!(
+        "exec '{}' --exact --ignored split_client_process",
+        exe.display()
+    );
     let session = Session::new("r", Some(&window)).unwrap();
     // Each pane works in a directory of its own, and sends no OSC 7. A restore keeps only a
     // directory no one else can write, which Linux's sticky `/tmp` is not, so these live in the
@@ -1797,7 +1827,10 @@ fn a_new_core_restores_the_layout_and_cwds_of_a_killed_one() {
 #[test]
 fn up_opens_a_workspace_as_shells_once_and_then_attaches_to_it() {
     let exe = env::current_exe().unwrap();
-    let window = format!("exec '{}' --exact owner_window_process", exe.display());
+    let window = format!(
+        "exec '{}' --exact --ignored owner_window_process",
+        exe.display()
+    );
     let session = Session::new("u", Some(&window)).unwrap();
     let project = session.directory.join("project");
     for directory in ["a", "b", ".pinfold"] {
@@ -1929,6 +1962,7 @@ const TRUST: &str = "PINFOLD_TEST_TRUST";
 
 /// Not a test: a terminal outside every pane asks for trust twice, and notes what it hears.
 #[test]
+#[ignore = "run by only_the_window_answers_a_trust_prompt_and_trusting_records_the_layout"]
 fn trust_api_process() {
     let Some(directory) = helper(TRUST) else {
         return;
@@ -1970,6 +2004,7 @@ fn trust_api_process() {
 /// Not a test: the window sees each trust prompt with the directory and every run line, then
 /// trusts the first and refuses the second, changed one.
 #[test]
+#[ignore = "run by only_the_window_answers_a_trust_prompt_and_trusting_records_the_layout"]
 fn trust_window_process() {
     let Some(directory) = helper(CLIENT) else {
         return;
@@ -2011,7 +2046,10 @@ fn trust_window_process() {
 #[test]
 fn only_the_window_answers_a_trust_prompt_and_trusting_records_the_layout() {
     let exe = env::current_exe().unwrap();
-    let window = format!("exec '{}' --exact trust_window_process", exe.display());
+    let window = format!(
+        "exec '{}' --exact --ignored trust_window_process",
+        exe.display()
+    );
     let session = Session::new("trust", Some(&window)).unwrap();
     fs::create_dir_all(session.directory.join("project")).unwrap();
     let (home, state) = (
@@ -2027,7 +2065,7 @@ fn only_the_window_answers_a_trust_prompt_and_trusting_records_the_layout() {
     assert!(launched.status.success(), "{launched:?}");
     let mut outside = Command::new(exe);
     outside
-        .args(["--exact", "trust_api_process"])
+        .args(["--exact", "--ignored", "trust_api_process"])
         .env("XDG_RUNTIME_DIR", session.directory.join("run"))
         .env(TRUST, &session.directory);
     let _terminal = pinfold_sys::pty::Pty::spawn(outside, 24, 80).unwrap();
@@ -2199,6 +2237,7 @@ fn a_sandboxed_agent_does_not_start_outside_home() {
 /// to see the run line's output in the pane. Once that is shown, a later window types a probe into the focused pane,
 /// which runs after any line a restore typed.
 #[test]
+#[ignore = "run by up_runs_a_trusted_workspace_and_a_restore_runs_it_again_until_its_file_changes"]
 fn up_trust_window_process() {
     let Some(directory) = helper(CLIENT) else {
         return;
@@ -2246,7 +2285,10 @@ fn up_trust_window_process() {
 #[test]
 fn up_runs_a_trusted_workspace_and_a_restore_runs_it_again_until_its_file_changes() {
     let exe = env::current_exe().unwrap();
-    let window = format!("exec '{}' --exact up_trust_window_process", exe.display());
+    let window = format!(
+        "exec '{}' --exact --ignored up_trust_window_process",
+        exe.display()
+    );
     let session = Session::new("ut", Some(&window)).unwrap();
     // A restore runs a line only in a directory no one else can write, which Linux's sticky
     // `/tmp` is not, so the project lives in the target directory.
@@ -2367,7 +2409,10 @@ run = "echo work''space-ran | tee -a \"$PINFOLD_TEST_CLIENT/ran\""
 #[test]
 fn a_trusted_run_line_runs_in_its_layouts_directory_not_the_callers() {
     let exe = env::current_exe().unwrap();
-    let window = format!("exec '{}' --exact owner_window_process", exe.display());
+    let window = format!(
+        "exec '{}' --exact --ignored owner_window_process",
+        exe.display()
+    );
     let session = Session::new("wd", Some(&window)).unwrap();
     let project = session.directory.join("project");
     fs::create_dir_all(project.join(".pinfold")).unwrap();
@@ -2402,7 +2447,7 @@ fn a_trusted_run_line_runs_in_its_layouts_directory_not_the_callers() {
     );
     let mut outside = Command::new(env::current_exe().unwrap());
     outside
-        .args(["--exact", "workspace_open_process"])
+        .args(["--exact", "--ignored", "workspace_open_process"])
         .env("XDG_RUNTIME_DIR", session.directory.join("run"))
         .env(WORKSPACE, &session.directory)
         .env("PINFOLD_TEST_OPEN", open.to_string());
@@ -2420,6 +2465,7 @@ fn a_trusted_run_line_runs_in_its_layouts_directory_not_the_callers() {
 /// [`a_trusted_run_line_runs_in_its_layouts_directory_not_the_callers`]. It sends the request
 /// it is given and notes the answer.
 #[test]
+#[ignore = "run by a_trusted_run_line_runs_in_its_layouts_directory_not_the_callers"]
 fn workspace_open_process() {
     let (Some(directory), Ok(open)) = (helper(WORKSPACE), env::var("PINFOLD_TEST_OPEN")) else {
         return;
@@ -2457,6 +2503,7 @@ fn sandbox_base(directory: &Path) -> PathBuf {
 /// unsandboxed profile, then a sandboxed one, the second, which does the same, and last moves
 /// its reported directory up and launches a third there.
 #[test]
+#[ignore = "run by a_sandboxed_agent_starts_nothing_outside_its_sandbox"]
 fn boxed_process() {
     if env::var_os(CLIENT).is_none() {
         return;
@@ -2552,7 +2599,7 @@ fn a_sandboxed_agent_starts_nothing_outside_its_sandbox() {
     let (wide, work) = (wide.canonicalize().unwrap(), work.canonicalize().unwrap());
     let exe = env::current_exe().unwrap();
     let toml = format!(
-        "[agents.boxed]\ncommand = [\"{}\", \"--exact\", \"boxed_process\"]\nsandbox = true\n\
+        "[agents.boxed]\ncommand = [\"{}\", \"--exact\", \"--ignored\", \"boxed_process\"]\nsandbox = true\n\
          [agents.plain]\ncommand = [\"/usr/bin/touch\", \"{}\"]\n",
         exe.display(),
         out.join("plain").display()

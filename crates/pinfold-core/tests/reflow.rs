@@ -245,7 +245,10 @@ proptest! {
         let before = history(&engine);
         for columns in widths {
             engine.resize(ROWS, columns);
-            let _ = history(&engine);
+            let fresh = pane(engine.size().1, &output);
+            let rows: Vec<_> = history(&engine).iter().map(|row| plain(row)).collect();
+            let fresh: Vec<_> = history(&fresh).iter().map(|row| plain(row)).collect();
+            prop_assert_eq!(rows, fresh, "at {} columns", columns);
         }
         engine.resize(ROWS, written);
         prop_assert_eq!(history(&engine), before);
