@@ -372,6 +372,7 @@ mod tests {
         assert_eq!(line_end("ab"), 2);
     }
 
+    /// Wall clock, not `TestClock`: the pane is a real process.
     fn turn_until(reactor: &mut Reactor, done: impl Fn(&mut Reactor) -> bool) -> bool {
         let start = Instant::now();
         while !done(reactor) && start.elapsed() < Duration::from_secs(10) {
@@ -485,13 +486,14 @@ mod tests {
 
     #[test]
     fn a_next_line_waits_for_the_shell_to_hold_the_foreground() {
-        let dir = std::env::temp_dir().join(format!("pinfold-protect-wait-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
         std::os::unix::fs::symlink("/bin/sleep", dir.join("sleep")).unwrap();
         let mut reactor = Reactor::new().unwrap();
-        let pane = reactor.spawn(interactive(&dir), 24, 80).unwrap();
+        let pane = reactor.spawn(interactive(dir), 24, 80).unwrap();
         at_prompt(&mut reactor, pane);
 
+        // Wall clock: `Reactor::turn` sends the next line at `Instant::now()`, after a real sleep.
         let start = Instant::now();
         let sent = reactor.send_lines(pane, "sleep 1\necho after\n", start);
         assert_eq!(sent, Ok(2));
@@ -505,8 +507,6 @@ mod tests {
         let ran = |reactor: &mut Reactor| reactor.read(pane, None).unwrap().contains("\nafter");
         assert!(turn_until(&mut reactor, ran));
         assert!(reactor.take_refused().is_empty());
-        drop(reactor);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     const FAKE_SSH: &str = "PINFOLD_TEST_FAKE_SSH";
@@ -526,14 +526,14 @@ mod tests {
     /// it landed.
     #[test]
     fn a_second_line_never_lands_in_ssh() {
-        let dir = std::env::temp_dir().join(format!("pinfold-protect-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path();
         let (this, ssh) = (std::env::current_exe().unwrap(), dir.join("ssh"));
         let linked = std::fs::hard_link(&this, &ssh);
         linked
             .or_else(|_| std::fs::copy(&this, &ssh).map(drop))
             .unwrap();
-        let mut command = interactive(&dir);
+        let mut command = interactive(dir);
         command.env(FAKE_SSH, "1");
         let mut reactor = Reactor::new().unwrap();
         let pane = reactor.spawn(command, 24, 80).unwrap();
@@ -552,7 +552,5 @@ mod tests {
             text.contains("ssh prod") && !text.contains("rm -rf"),
             "{text}"
         );
-        drop(reactor);
-        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

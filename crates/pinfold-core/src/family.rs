@@ -260,6 +260,7 @@ mod tests {
         (reactor, own)
     }
 
+    /// Wall clock, not `TestClock`: the pane is a real process.
     fn shows(reactor: &mut Reactor, pane: usize, text: &str) -> bool {
         let start = Instant::now();
         while start.elapsed() < Duration::from_secs(20) {
