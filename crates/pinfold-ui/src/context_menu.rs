@@ -17,16 +17,16 @@ const SELECTED: u32 = 0x0025_3c3b;
 const ACCENT: u32 = 0x005c_d6cb;
 const BORDER: u32 = 0x0090_9ba9;
 
-const ITEMS: [(&str, Command); 9] = [
-    ("Copy", Command::Copy),
-    ("Paste", Command::Paste),
-    ("Select All", Command::SelectAll),
-    ("Find", Command::Find),
-    ("Split Right", Command::SplitRight),
-    ("Split Down", Command::SplitDown),
-    ("New Tab", Command::NewTab),
-    ("Zoom", Command::Zoom),
-    ("Close Pane", Command::ClosePane),
+const ITEMS: [Command; 9] = [
+    Command::Copy,
+    Command::Paste,
+    Command::SelectAll,
+    Command::Find,
+    Command::SplitRight,
+    Command::SplitDown,
+    Command::NewTab,
+    Command::Zoom,
+    Command::ClosePane,
 ];
 const LINK_ITEMS: [&str; 2] = ["Open Link", "Copy Link"];
 /// The longest label, a space either side and the border.
@@ -100,14 +100,14 @@ impl Menu {
 
     fn label(&self, index: usize) -> &'static str {
         let label = match index.checked_sub(ITEMS.len()) {
-            None => ITEMS.get(index).map(|(label, _)| label),
-            Some(index) => LINK_ITEMS.get(index),
+            None => ITEMS.get(index).map(|command| command.label()),
+            Some(index) => LINK_ITEMS.get(index).copied(),
         };
-        label.copied().unwrap_or_default()
+        label.unwrap_or_default()
     }
 
     fn choose(&mut self, index: usize) -> Step {
-        if let Some(&(_, command)) = ITEMS.get(index) {
+        if let Some(&command) = ITEMS.get(index) {
             return Step::Chose(Choice::Run(command));
         }
         let choice = match (self.link.take(), index - ITEMS.len()) {
@@ -267,6 +267,16 @@ mod tests {
         let labels: Vec<_> = (0..menu.len()).map(|index| menu.label(index)).collect();
         assert!(!labels.contains(&"Open Link"));
         assert_eq!(labels.len(), 9);
+        assert_eq!(text(&rows[10], 3..18), "│ Zoom Pane   │");
+    }
+
+    #[test]
+    fn every_label_fits_the_width() {
+        let labels = ITEMS.map(Command::label).into_iter().chain(LINK_ITEMS);
+        for label in labels {
+            assert!(!label.is_empty());
+            assert!(label.chars().count() + 4 <= usize::from(WIDTH), "{label}");
+        }
     }
 
     #[test]

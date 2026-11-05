@@ -50,7 +50,7 @@ pub fn check(uri: &str) -> Option<Target> {
 
 /// The prompt's rows for a pane area `columns` wide.
 fn lines(uri: &str, columns: usize) -> Vec<String> {
-    let border = format!("{:─<columns$}", "── Pinfold link ");
+    let border = format!("{:─<columns$}", "── PinFold link ");
     let mut lines = vec![border.chars().take(columns.max(1)).collect()];
     let head = format!(" ◆ needs you  Open this link? {}", visible(uri));
     lines.extend(wrap(&head, columns));
@@ -158,7 +158,7 @@ mod tests {
     fn the_prompt_shows_the_whole_uri_escaped() {
         let rows = drawn("file:///a\u{202e}b", 4, 40);
         assert_eq!(rows.len(), 5, "the keys get a chrome row of their own");
-        assert_eq!(rows[1], format!("{:─<40}", "── Pinfold link "));
+        assert_eq!(rows[1], format!("{:─<40}", "── PinFold link "));
         assert_eq!(rows[2], " ◆ needs you  Open this link? file:///a<");
         assert_eq!(rows[3].trim_end(), "U+202E>b");
         assert!(rows[4].starts_with(" Enter opens · Esc cancels · the 3 rows"));
