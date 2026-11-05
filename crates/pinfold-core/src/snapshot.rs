@@ -8,6 +8,8 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{self, ErrorKind, Read, Write};
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use pinfold_api::control::{self, MAX_SEND};
@@ -332,6 +334,10 @@ impl Snapshot {
 
 /// Writes a session's snapshots when they change, and removes its file when it has no tab.
 ///
+/// Writes run on one save thread, started when there is something to write and gone once there
+/// is not (ADR-0007), so a slow disk never stalls the reactor. Only one write runs at a time, in
+/// [`Snapshot::write`]'s order, and a snapshot that was waiting gives way to a newer one.
+///
 /// ```
 /// use std::time::Instant;
 /// use pinfold_core::snapshot::{PERIOD, Saver, Snapshot};
@@ -343,26 +349,92 @@ impl Snapshot {
 /// assert_eq!(saver.wait(now), Some(PERIOD));
 /// // A snapshot with no tab removes the file, which is not there.
 /// assert!(saver.save(&Snapshot::default()).is_ok());
+/// assert!(saver.finish().is_ok());
 /// ```
 #[derive(Debug)]
 pub struct Saver {
-    state: PathBuf,
-    session: String,
-    /// A hash of the snapshot last written, so an unchanged one is not written again.
+    /// A hash of the snapshot last handed over, so an unchanged one is not written again.
     last: Option<u64>,
     /// When to take the next snapshot, set by activity only, so an idle core arms no timer.
     due: Option<Instant>,
+    shared: Arc<Shared>,
+}
+
+/// What the reactor and the save thread share.
+#[derive(Debug)]
+struct Shared {
+    state: PathBuf,
+    session: String,
+    queue: Mutex<Queue>,
+    /// Signalled when the save thread ends.
+    done: Condvar,
+}
+
+#[derive(Debug, Default)]
+struct Queue {
+    /// The newest snapshot not yet started, or `Some(None)` to remove the file.
+    next: Option<Option<Snapshot>>,
+    /// Whether the save thread is running.
+    running: bool,
+    /// The last write's failure, which the next call reports.
+    failed: Option<io::Error>,
+}
+
+/// The save thread's stack: it serializes a layout at most `MAX_PANES` deep.
+const SAVE_STACK: usize = 256 * 1024;
+
+impl Shared {
+    fn lock(&self) -> MutexGuard<'_, Queue> {
+        self.queue.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Takes snapshots until none waits, then ends.
+    fn work(&self) {
+        loop {
+            let next = {
+                let mut queue = self.lock();
+                let Some(next) = queue.next.take() else {
+                    queue.running = false;
+                    self.done.notify_all();
+                    return;
+                };
+                next
+            };
+            if let Err(error) = self.run(next) {
+                self.lock().failed = Some(error);
+            }
+        }
+    }
+
+    fn run(&self, snapshot: Option<Snapshot>) -> io::Result<()> {
+        if let Some(snapshot) = snapshot {
+            return snapshot.write(&self.state, &self.session).map(drop);
+        }
+        let path = self
+            .state
+            .join("sessions")
+            .join(format!("{}.json", self.session));
+        match fs::remove_file(path) {
+            Err(error) if error.kind() != ErrorKind::NotFound => Err(error),
+            _ => Ok(()),
+        }
+    }
 }
 
 impl Saver {
     /// Saves `sessions/<session>.json` in `state`.
     #[must_use]
     pub fn new(state: PathBuf, session: &str) -> Self {
-        Self {
+        let shared = Shared {
             state,
             session: session.to_owned(),
+            queue: Mutex::default(),
+            done: Condvar::new(),
+        };
+        Self {
             last: None,
             due: None,
+            shared: Arc::new(shared),
         }
     }
 
@@ -386,33 +458,86 @@ impl Saver {
         due
     }
 
-    /// Writes `snapshot` if it differs from the last one written and returns its path, or
-    /// removes the file if the snapshot has no tab, as the person ended the session.
+    /// Hands `snapshot` to the save thread if it differs from the last one, or has the file
+    /// removed if the snapshot has no tab, as the person ended the session. It returns at once.
     ///
     /// # Errors
     ///
-    /// Returns an error if [`Snapshot::write`] fails or the file cannot be removed.
-    pub fn save(&mut self, snapshot: &Snapshot) -> io::Result<Option<PathBuf>> {
-        if snapshot.tabs.is_empty() {
+    /// Returns an earlier write's failure, after which the next snapshot is written even if
+    /// unchanged, or an error if the save thread cannot start.
+    pub fn save(&mut self, snapshot: &Snapshot) -> io::Result<()> {
+        let mut queue = self.shared.lock();
+        let failed = queue.failed.take();
+        if failed.is_some() {
             self.last = None;
-            let path = self
-                .state
-                .join("sessions")
-                .join(format!("{}.json", self.session));
-            return match fs::remove_file(path) {
-                Err(error) if error.kind() != ErrorKind::NotFound => Err(error),
-                _ => Ok(None),
-            };
         }
-        let mut hasher = DefaultHasher::new();
-        serde_json::to_vec(snapshot)?.hash(&mut hasher);
-        let hash = hasher.finish();
-        if self.last == Some(hash) {
-            return Ok(None);
+        let next = if snapshot.tabs.is_empty() {
+            self.last = None;
+            None
+        } else {
+            let mut hasher = DefaultHasher::new();
+            serde_json::to_vec(snapshot)?.hash(&mut hasher);
+            let hash = Some(hasher.finish());
+            if self.last == hash {
+                return failed.map_or(Ok(()), Err);
+            }
+            self.last = hash;
+            Some(snapshot.clone())
+        };
+        queue.next = Some(next);
+        if !queue.running {
+            let shared = Arc::clone(&self.shared);
+            let started = thread::Builder::new()
+                .name("pinfold-save".to_owned())
+                .stack_size(SAVE_STACK)
+                .spawn(move || shared.work());
+            if let Err(error) = started {
+                queue.next = None;
+                self.last = None;
+                return Err(error);
+            }
+            queue.running = true;
         }
-        let path = snapshot.write(&self.state, &self.session)?;
-        self.last = Some(hash);
-        Ok(Some(path))
+        failed.map_or(Ok(()), Err)
+    }
+
+    /// Waits until the save thread has written all it was given, as the core does before it
+    /// exits.
+    ///
+    /// # Errors
+    ///
+    /// Returns the last write's failure.
+    pub fn finish(&mut self) -> io::Result<()> {
+        let queue = self.shared.lock();
+        let mut queue = self
+            .shared
+            .done
+            .wait_while(queue, |queue| queue.running)
+            .unwrap_or_else(PoisonError::into_inner);
+        let failed = queue.failed.take();
+        if failed.is_some() {
+            self.last = None;
+        }
+        failed.map_or(Ok(()), Err)
+    }
+
+    /// Writes `snapshot` now, on this thread, and returns its path, as `session.save` asks. A
+    /// snapshot still waiting is dropped as older, and a write under way is waited for.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if [`Snapshot::write`] fails.
+    pub fn write_now(&mut self, snapshot: &Snapshot) -> io::Result<PathBuf> {
+        let mut queue = self.shared.lock();
+        queue.next = None;
+        // Held through the write, so no save thread starts beside it.
+        let _queue = self
+            .shared
+            .done
+            .wait_while(queue, |queue| queue.running)
+            .unwrap_or_else(PoisonError::into_inner);
+        self.last = None;
+        snapshot.write(&self.shared.state, &self.shared.session)
     }
 }
 
@@ -568,15 +693,47 @@ mod tests {
     fn an_unchanged_snapshot_is_not_rewritten_and_no_tab_removes_it() {
         let state = std::env::temp_dir().join(format!("pinfold-saver-{}", std::process::id()));
         let _ = fs::remove_dir_all(&state);
+        let path = state.join("sessions/default.json");
         let mut saver = Saver::new(state.clone(), "default");
-        let path = saver.save(&sample()).unwrap().unwrap();
-        assert_eq!(saver.save(&sample()).unwrap(), None);
+        saver.save(&sample()).unwrap();
+        saver.finish().unwrap();
+        assert!(path.exists());
+        fs::remove_file(&path).unwrap();
+        saver.save(&sample()).unwrap();
+        saver.finish().unwrap();
+        assert!(!path.exists(), "an unchanged snapshot is not written again");
         let mut changed = sample();
         changed.panes[0].cwd = Some("/var".to_owned());
-        assert_eq!(saver.save(&changed).unwrap(), Some(path.clone()));
+        saver.save(&changed).unwrap();
+        saver.finish().unwrap();
         assert!(fs::read_to_string(&path).unwrap().contains("/var"));
-        assert_eq!(saver.save(&Snapshot::default()).unwrap(), None);
+        saver.save(&Snapshot::default()).unwrap();
+        saver.finish().unwrap();
         assert!(!path.exists());
+        fs::remove_dir_all(&state).unwrap();
+    }
+
+    #[test]
+    fn the_newest_snapshot_wins_and_write_now_waits_for_the_save_thread() {
+        let state = std::env::temp_dir().join(format!("pinfold-newest-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        let mut saver = Saver::new(state.clone(), "default");
+        let mut snapshot = sample();
+        for n in 0..50 {
+            snapshot.panes[0].cwd = Some(format!("/queued/{n}"));
+            saver.save(&snapshot).unwrap();
+        }
+        saver.finish().unwrap();
+        let path = state.join("sessions/default.json");
+        assert!(fs::read_to_string(&path).unwrap().contains("/queued/49"));
+        snapshot.panes[0].cwd = Some("/queued/last".to_owned());
+        saver.save(&snapshot).unwrap();
+        snapshot.panes[0].cwd = Some("/now".to_owned());
+        assert_eq!(saver.write_now(&snapshot).unwrap(), path);
+        saver.finish().unwrap();
+        assert!(fs::read_to_string(&path).unwrap().contains("/now"));
+        // The file the save thread renamed away from is never left behind.
+        assert!(!state.join("sessions/.default.json.tmp").exists());
         fs::remove_dir_all(&state).unwrap();
     }
 

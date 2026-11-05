@@ -336,12 +336,13 @@ fn owner_action(
     reactor: &mut Reactor,
     grants: &mut Grants<Request>,
     workspaces: &mut Workspaces,
+    saver: Option<&mut Saver>,
     method: &Method,
 ) -> Result<Value, String> {
     match method {
         Method::SessionSave => {
-            let state = pinfold_config::state_dir().ok_or("HOME is not set")?;
-            let path = saved(reactor, workspaces).write(&state, control::SESSION);
+            let saver = saver.ok_or("HOME is not set")?;
+            let path = saver.write_now(&saved(reactor, workspaces));
             path.map(|path| json!({"path": path.to_string_lossy()}))
                 .map_err(|error| format!("cannot save the session: {error}"))
         }
@@ -445,7 +446,8 @@ fn ask_alone(
         Decision::Ask(prompt) if reactor.ask_approval(&prompt) => {}
         Decision::Ask(prompt) => {
             let released = grants.answer(prompt.id, ApprovalAnswer::Deny);
-            answer_released(reactor, grants, workspaces, log, released);
+            // A denial writes no session.
+            answer_released(reactor, grants, workspaces, log, None, released);
         }
         Decision::Refuse(request, reason) => {
             audit::reply(log, reactor, request, Err(reason.to_owned()));
@@ -470,6 +472,7 @@ fn answer_released(
     grants: &mut Grants<Request>,
     workspaces: &mut Workspaces,
     log: &mut Log,
+    mut saver: Option<&mut Saver>,
     released: Vec<Released<Request>>,
 ) {
     for released in released {
@@ -482,7 +485,7 @@ fn answer_released(
                 })
             }
             method if released.allowed && owner_prompt(method).is_some() => {
-                owner_action(reactor, grants, workspaces, method)
+                owner_action(reactor, grants, workspaces, saver.as_deref_mut(), method)
             }
             method if released.allowed => pane_action(reactor, method, true),
             _ => Err(released.reason.to_owned()),
@@ -549,7 +552,8 @@ fn decide(
         // Fail closed for this prompt alone, so one oversized batch cannot drop the others.
         Decision::Ask(prompt) => {
             let released = grants.answer(prompt.id, ApprovalAnswer::Deny);
-            answer_released(reactor, grants, workspaces, log, released);
+            // A denial writes no session.
+            answer_released(reactor, grants, workspaces, log, None, released);
         }
     }
 }
@@ -722,8 +726,8 @@ fn saved(reactor: &Reactor, workspaces: &Workspaces) -> Snapshot {
     snapshot
 }
 
-/// Saves the session, logging a failure by its kind alone, which names no path or pane. A
-/// failed save stops nothing.
+/// Hands the session to the save thread, logging a failure by its kind alone, which names no
+/// path or pane. A failed save stops nothing.
 fn save(saver: &mut Saver, reactor: &Reactor, workspaces: &Workspaces) {
     if let Err(error) = saver.save(&saved(reactor, workspaces)) {
         let _ = writeln!(
@@ -859,6 +863,7 @@ fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result
             &mut grants,
             &mut workspaces,
             &mut log,
+            saver.as_mut(),
             released,
         );
         while let Ok(request) = asked.try_recv() {
@@ -963,6 +968,13 @@ fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result
             let closed = window && !reactor.has_window();
             if ending || closed || saver.is_due(now) {
                 save(saver, &reactor, &workspaces);
+            }
+            if ending && let Err(error) = saver.finish() {
+                let _ = writeln!(
+                    io::stderr(),
+                    "pinfold-core: cannot save the session: {}",
+                    error.kind()
+                );
             }
         }
         window = reactor.has_window();

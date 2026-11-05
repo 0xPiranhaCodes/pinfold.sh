@@ -1303,9 +1303,11 @@ name = "pinfold-benches"
 version = "0.1.0-beta.1"
 dependencies = [
  "alacritty_terminal",
+ "pinfold-api",
  "pinfold-core",
  "pinfold-proto",
  "pinfold-sys",
+ "pinfold-ui",
 ]
 
 [[package]]
