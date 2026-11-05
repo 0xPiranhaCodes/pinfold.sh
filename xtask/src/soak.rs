@@ -7,6 +7,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io;
+use std::os::unix::fs::DirBuilderExt;
 use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -283,8 +284,8 @@ pub fn shell(directory: OsString) -> io::Error {
 /// returns whether it passed. A core that exits early has lost the session.
 pub fn run(core: &Path, minutes: u64) -> io::Result<bool> {
     let directory = std::env::temp_dir().join(format!("pinfold-soak-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&directory);
-    fs::create_dir_all(&directory)?;
+    // Private and new, so no other user can plant the driver's directory or read its report.
+    fs::DirBuilder::new().mode(0o700).create(&directory)?;
     let mut command = Command::new(core);
     command
         .args(["--idle", "1"])
