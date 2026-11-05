@@ -1051,3 +1051,73 @@ fn main() -> ExitCode {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_reads_and_sends_of_a_pane_are_cross_pane() {
+        let read = Method::PaneRead {
+            pane: 3,
+            lines: None,
+        };
+        assert_eq!(cross_pane(&read), Some((3, ApprovalAction::Read, None)));
+        let last = Method::PaneLastOutput { pane: 3 };
+        assert_eq!(cross_pane(&last), Some((3, ApprovalAction::Read, None)));
+        let text = "ls\n".to_owned();
+        let send = Method::PaneSend {
+            pane: 3,
+            text: text.clone(),
+        };
+        assert_eq!(
+            cross_pane(&send),
+            Some((3, ApprovalAction::Send, Some(text)))
+        );
+        let status = Method::PaneStatus {
+            pane: 3,
+            state: "running".to_owned(),
+            message: String::new(),
+        };
+        for method in [Method::PaneList, Method::PaneClose { pane: 3 }, status] {
+            assert_eq!(cross_pane(&method), None, "{method:?}");
+        }
+    }
+
+    #[test]
+    fn owner_changes_ask_and_reads_do_not() {
+        assert_eq!(
+            owner_prompt(&Method::GrantsRevoke { id: 9 }),
+            Some(vec!["grants.revoke".to_owned(), "Grant 9".to_owned()])
+        );
+        assert!(owner_prompt(&Method::SessionSave).is_some());
+        let audit = Method::AuditRead {
+            count: 1,
+            pane: None,
+        };
+        for method in [Method::GrantsList, audit, Method::PaneList] {
+            assert_eq!(owner_prompt(&method), None, "{method:?}");
+        }
+    }
+
+    #[test]
+    fn events_say_what_opened_closed_or_changed_and_a_subscriber_gets_its_topics() {
+        let before: Seen = vec![(1, "running", "marks", None), (2, "idle", "marks", None)];
+        let after: Seen = vec![(1, "done", "reported", Some(0)), (3, "idle", "marks", None)];
+        let events = changes(&before, &after);
+        let status = json!({"event": "pane.status", "pane": 1, "status": "done",
+                            "source": "reported", "exit": 0});
+        let opened = json!({"event": "pane.opened", "pane": 3, "status": "idle",
+                            "source": "marks", "exit": null});
+        let closed = json!({"event": "pane.closed", "pane": 2});
+        assert_eq!(events, [closed, status, opened]);
+        assert!(changes(&after, &after).is_empty());
+
+        let topics = Topics {
+            opened: true,
+            ..Topics::default()
+        };
+        let wanted: Vec<_> = events.iter().filter(|event| wants(topics, event)).collect();
+        assert_eq!(wanted, [&events[2]]);
+    }
+}

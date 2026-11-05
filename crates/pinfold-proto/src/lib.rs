@@ -104,3 +104,23 @@ pub struct Frame {
     /// How many OSC 52 clipboard writes the program has asked for, wrapping.
     pub clipboard_writes: u32,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inverting_swaps_the_colours_and_keeps_the_style_on_the_text() {
+        let cell = Cell {
+            character: 'a',
+            foreground: 0x00ab_cdef | BOLD | ITALIC,
+            background: 0x0012_3456,
+        };
+        let mut inverted = cell;
+        inverted.invert();
+        assert_eq!(inverted.foreground, 0x0012_3456 | BOLD | ITALIC);
+        assert_eq!(inverted.background, 0x00ab_cdef);
+        inverted.invert();
+        assert_eq!(inverted, cell);
+    }
+}
