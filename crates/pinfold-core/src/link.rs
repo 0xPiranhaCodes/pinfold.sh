@@ -2126,13 +2126,14 @@ mod tests {
             sides().prop_map(|side| Request::MoveFocus { side }),
             (sides(), 1..=link::MAX_DIMENSION)
                 .prop_map(|(side, cells)| Request::MoveBorder { side, cells }),
-            (1..=link::MAX_DIMENSION, 1..=link::MAX_DIMENSION)
+            // Big enough to split a lot; full-size frames take most of a second each to send.
+            (1..=200_u16, 1..=200_u16)
                 .prop_map(|(rows, columns)| Request::Resize { rows, columns }),
         ]
     }
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(12))]
+        #![proptest_config(ProptestConfig::with_cases(128))]
 
         #[test]
         fn any_commands_leave_a_core_that_matches_its_session(
@@ -2142,10 +2143,18 @@ mod tests {
             reactor.shell = || Command::new("/bin/cat");
             reactor.open_tab(Command::new("/bin/cat"), 24, 80).unwrap();
             let mut peer = Peer::greet(&mut reactor);
-            for command in commands {
+            peer.send(Request::Resize { rows: 24, columns: 80 });
+            let at = link::Position { row: 0, column: 0 };
+            for (sent, command) in commands.into_iter().enumerate() {
                 peer.send(command);
-                reactor.turn(Some(Duration::ZERO)).unwrap();
-                peer.read();
+                // A link reply always comes, and only after the command before it was applied.
+                peer.send(Request::Link { pane: u32::MAX, at });
+                serve(&mut reactor, &mut peer, |reactor, peer| {
+                    let tabs = reactor.session.tabs().iter().map(pinfold_mux::Tab::focused);
+                    peer.linked.len() > sent
+                        && peer.tabs.iter().copied().eq(tabs)
+                        && usize::from(peer.active) == reactor.session.active()
+                });
             }
             prop_assert!(reactor.has_window());
             let held: Vec<usize> = reactor.numbers().collect();

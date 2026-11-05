@@ -807,6 +807,8 @@ impl HistorySink<Cell> for Scrollback {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
+
     use super::*;
 
     #[test]
@@ -1034,7 +1036,66 @@ mod tests {
         assert_eq!(store.index(store.end() - 1), Some(0));
     }
 
+    fn color() -> impl Strategy<Value = Color> {
+        prop_oneof![
+            prop::sample::select(&NAMED[..]).prop_map(Color::Named),
+            any::<u8>().prop_map(Color::Indexed),
+            any::<[u8; 3]>().prop_map(|[r, g, b]| Color::Spec(Rgb { r, g, b })),
+        ]
+    }
+
+    /// Any cell a grid can hold, with links and marks short enough to be kept.
+    fn cell() -> impl Strategy<Value = Cell> {
+        let link = ("[a-z]{0,8}", "[ -~]{0,32}");
+        let marks = prop::collection::vec(any::<char>(), 0..=MAX_ZEROWIDTH);
+        let marks = proptest::option::weighted(0.1, marks).prop_map(Option::unwrap_or_default);
+        let style = (any::<u16>(), proptest::option::of(color()));
+        let extra = (style, proptest::option::weighted(0.1, link), marks);
+        (any::<char>(), color(), color(), extra).prop_map(|(c, fg, bg, extra)| {
+            let ((flags, underline), link, marks) = extra;
+            let mut cell = Cell {
+                c,
+                fg,
+                bg,
+                flags: Flags::from_bits_truncate(flags),
+                ..Cell::default()
+            };
+            if underline.is_some() {
+                cell.set_underline_color(underline);
+            }
+            if let Some((id, uri)) = link {
+                cell.set_hyperlink(Some(Hyperlink::new(Some(id), uri)));
+            }
+            marks.into_iter().for_each(|mark| cell.push_zerowidth(mark));
+            cell
+        })
+    }
+
     proptest::proptest! {
+        #[test]
+        fn rows_decode_to_what_was_encoded(
+            rows in prop::collection::vec(prop::collection::vec(cell(), 1..12), 0..BLOCK_ROWS * 2),
+        ) {
+            let mut store = Scrollback::new();
+            for cells in &rows {
+                let mut row: Row<Cell> = Row::new(cells.len());
+                for (column, cell) in cells.iter().enumerate() {
+                    row[Column(column)] = cell.clone();
+                }
+                store.push(&row);
+            }
+            let default = Cell::default();
+            let expected: Vec<Vec<Cell>> = (rows.into_iter())
+                .map(|mut cells| {
+                    while cells.last() == Some(&default) {
+                        cells.pop();
+                    }
+                    cells
+                })
+                .collect();
+            prop_assert_eq!(store.rows(0, usize::MAX), expected);
+        }
+
         #[test]
         fn decoding_arbitrary_bytes_never_panics(
             count in 0..100_usize,
