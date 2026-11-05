@@ -127,6 +127,12 @@ impl Inbox {
             request.deliver(link);
         }
     }
+
+    /// Takes every request waiting, for a test to look at.
+    #[cfg(test)]
+    pub(crate) fn take(&self) -> Vec<Request> {
+        self.requests.try_iter().collect()
+    }
 }
 
 /// Makes the two ends.

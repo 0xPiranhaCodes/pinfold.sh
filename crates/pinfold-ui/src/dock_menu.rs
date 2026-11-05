@@ -41,6 +41,7 @@ fn items((labels, states): &Tabs) -> Vec<(String, Action<Command>)> {
 }
 
 /// The tabs the Dock menu shows.
+#[cfg_attr(test, derive(Default))]
 pub struct Dock {
     tabs: Rc<RefCell<Tabs>>,
 }

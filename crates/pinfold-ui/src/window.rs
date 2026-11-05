@@ -392,6 +392,70 @@ fn font_scale(measured: Option<(u32, u32)>, scale: f64) -> f32 {
 }
 
 impl App {
+    fn new(
+        config: Config,
+        size: Option<(u32, u32)>,
+        outbox: Outbox,
+        latest: Arc<Latest>,
+        waker: Arc<Waker>,
+        menu_bar: menu_bar::Bar,
+        #[cfg(target_os = "macos")] dock: dock_menu::Dock,
+    ) -> Self {
+        Self {
+            prefix: Prefix::new(config.keys.prefix),
+            config,
+            size,
+            outbox,
+            latest,
+            waker,
+            open: None,
+            panes: Vec::new(),
+            rects: Vec::new(),
+            focused: 0,
+            total: 0,
+            area: (0, 0),
+            modifiers: ModifiersState::empty(),
+            preedit: (String::new(), 0),
+            composed: Frame::default(),
+            labels: Vec::new(),
+            active: 0,
+            activity: 0,
+            states: Vec::new(),
+            status: None,
+            over_tab: None,
+            has_focus: true,
+            on_title: false,
+            minute: Instant::now(),
+            on_bar: false,
+            clicks: Clicks::default(),
+            ime_cursor: None,
+            pointer: (0, 0),
+            buttons: [false; 3],
+            wheel: 0.0,
+            clipboard: None,
+            prompt: None,
+            was_running: was_running::Strips::default(),
+            approvals: {
+                // Matches `has_focus` below; `Focused` events keep them in step.
+                let mut queue = approval::Queue::default();
+                queue.focus(true);
+                queue
+            },
+            menu: None,
+            asking: None,
+            flash: Flash::default(),
+            selecting: Selecting::default(),
+            bar: None,
+            vi: None,
+            ended: false,
+            menu_bar,
+            #[cfg(target_os = "macos")]
+            dock,
+            font_step: 0.0,
+            result: Ok(()),
+        }
+    }
+
     fn request(&self, request: Request) {
         if self.outbox.send(request) {
             let _ = self.waker.wake();
@@ -1038,6 +1102,24 @@ impl App {
         }
     }
 
+    /// Gives a key to the prompt on screen, and returns whether one was up to take it.
+    fn prompted(&mut self, key: &Key, state: ElementState, repeat: bool) -> bool {
+        // A held key repeating must not answer a prompt it did not see.
+        let fresh = state == ElementState::Pressed && !repeat;
+        if !self.approvals.is_empty() {
+            if fresh {
+                self.answer_approval(key);
+            }
+        } else if self.prompt.is_some() {
+            if fresh {
+                self.answer(key);
+            }
+        } else {
+            return false;
+        }
+        true
+    }
+
     fn answer_approval(&mut self, key: &Key) {
         let (rows, columns) = self.area;
         let Some((id, answer)) = self.approvals.key(key, Instant::now(), rows, columns) else {
@@ -1134,41 +1216,41 @@ impl App {
         self.redraw_soon();
     }
 
-    fn pressed(&mut self, button: MouseButton, state: ElementState, event_loop: &ActiveEventLoop) {
+    /// Takes a press or release, and returns the step for an open menu it clicked.
+    fn pressed(&mut self, button: MouseButton, state: ElementState) -> Option<menu::Step> {
         if !self.approvals.is_empty() {
             // A click cannot answer a prompt, and goes nowhere else while one is up.
-            return;
+            return None;
         }
         let number = match button {
             MouseButton::Left => 0,
             MouseButton::Middle => 1,
             MouseButton::Right => 2,
-            _ => return,
+            _ => return None,
         };
         let down = state == ElementState::Pressed;
         if let Some(menu) = self.menu.as_mut().filter(|_| down) {
-            let step = menu.click((!self.on_bar).then_some(self.pointer));
-            return self.menu_step(step, event_loop);
+            return Some(menu.click((!self.on_bar).then_some(self.pointer)));
         }
         if down && self.on_bar {
             if number == 0 {
                 self.bar_pressed();
             }
-            return;
+            return None;
         }
         if down {
             // Borders take no press, and the first press on a pane only focuses it.
             match self.hovered().map(|pane| pane.pane) {
-                None => return,
+                None => return None,
                 Some(pane) if pane != self.focused => {
                     self.core(proto::Request::Focus { pane });
-                    return;
+                    return None;
                 }
                 Some(_) => {}
             }
         }
         if number == 0 && self.select(down) {
-            return;
+            return None;
         }
         // With mouse reporting on, the program gets the press unless Shift is held.
         let mode = find(&self.panes, self.focused).map(|pane| pane.frame.mouse);
@@ -1184,11 +1266,12 @@ impl App {
                 self.core(proto::Request::Link { pane, at });
             }
             self.menu = Some(Menu::open(self.pointer, self.area, None));
-            return self.redraw_soon();
+            self.redraw_soon();
+            return None;
         }
         // The press may have been on the bar, so the program never saw it.
         if !down && !self.buttons[usize::from(number)] {
-            return;
+            return None;
         }
         self.buttons[usize::from(number)] = down;
         if let Some(pane) = find(&self.panes, self.focused) {
@@ -1199,6 +1282,7 @@ impl App {
             };
             self.report(event, pane);
         }
+        None
     }
 
     /// Moves or zooms the window from a left press on the top bar's title row, and takes a press
@@ -1283,7 +1367,9 @@ impl App {
             }
             Ime::Commit(text) => {
                 self.preedit.0.clear();
-                if !self.type_in_bar(&text) && self.prompt.is_none() && self.vi.is_none() {
+                // Like a click, text cannot answer a prompt and goes nowhere else while one is up.
+                let prompted = !self.approvals.is_empty() || self.prompt.is_some();
+                if !prompted && !self.type_in_bar(&text) && self.vi.is_none() {
                     self.request(Request::Input(self.focused, text.into_bytes()));
                 }
             }
@@ -1402,7 +1488,9 @@ impl ApplicationHandler<Notice> for App {
                 self.pointer_moved(position.x, position.y);
             }
             WindowEvent::MouseInput { state, button, .. } => {
-                self.pressed(button, state, event_loop)
+                if let Some(step) = self.pressed(button, state) {
+                    self.menu_step(step, event_loop);
+                }
             }
             WindowEvent::MouseWheel { delta, .. } => self.wheel(delta),
             WindowEvent::KeyboardInput { event, .. } if self.menu.is_some() => {
@@ -1411,19 +1499,11 @@ impl ApplicationHandler<Notice> for App {
                     self.menu_step(step, event_loop);
                 }
             }
-            WindowEvent::KeyboardInput { event, .. } if !self.approvals.is_empty() => {
-                if event.state == ElementState::Pressed && !event.repeat {
-                    self.answer_approval(&event.logical_key);
+            WindowEvent::KeyboardInput { event, .. } => {
+                let prompted = self.prompted(&event.logical_key, event.state, event.repeat);
+                if !prompted && event.state == ElementState::Pressed {
+                    self.key(&event, event_loop);
                 }
-            }
-            // A held key repeating must not answer a prompt it did not see.
-            WindowEvent::KeyboardInput { event, .. } if self.prompt.is_some() => {
-                if event.state == ElementState::Pressed && !event.repeat {
-                    self.answer(&event.logical_key);
-                }
-            }
-            WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {
-                self.key(&event, event_loop);
             }
             WindowEvent::RedrawRequested => {
                 if let Err(error) = self.redraw() {
@@ -1553,67 +1633,158 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
             let _ = proxy.send_event(Notice::Command(command));
         })
     };
-    let config = config();
-    let mut app = App {
-        prefix: Prefix::new(config.keys.prefix),
-        config,
+    let mut app = App::new(
+        config(),
         size,
         outbox,
         latest,
         waker,
-        open: None,
-        panes: Vec::new(),
-        rects: Vec::new(),
-        focused: 0,
-        total: 0,
-        area: (0, 0),
-        modifiers: ModifiersState::empty(),
-        preedit: (String::new(), 0),
-        composed: Frame::default(),
-        labels: Vec::new(),
-        active: 0,
-        activity: 0,
-        states: Vec::new(),
-        status: None,
-        over_tab: None,
-        has_focus: true,
-        on_title: false,
-        minute: Instant::now(),
-        on_bar: false,
-        clicks: Clicks::default(),
-        ime_cursor: None,
-        pointer: (0, 0),
-        buttons: [false; 3],
-        wheel: 0.0,
-        clipboard: None,
-        prompt: None,
-        was_running: was_running::Strips::default(),
-        approvals: {
-            // Matches `has_focus` below; `Focused` events keep them in step.
-            let mut queue = approval::Queue::default();
-            queue.focus(true);
-            queue
-        },
-        menu: None,
-        asking: None,
-        flash: Flash::default(),
-        selecting: Selecting::default(),
-        bar: None,
-        vi: None,
-        ended: false,
         menu_bar,
         #[cfg(target_os = "macos")]
         dock,
-        font_step: 0.0,
-        result: Ok(()),
-    };
+    );
     event_loop.run_app(&mut app)?;
     app.result
 }
 
 #[cfg(test)]
 mod tests {
+    use mio::{Poll, Token};
+    use pinfold_proto::link::{ApprovalAction, ApprovalAnswer};
+
     use super::*;
+
+    /// A window with one pane, 1, focused, and no event loop. The poll keeps the waker's queue.
+    fn app() -> (App, Inbox, Poll) {
+        let poll = Poll::new().unwrap();
+        let waker = Arc::new(Waker::new(poll.registry(), Token(0)).unwrap());
+        let (outbox, inbox) = outbox::channel();
+        let mut app = App::new(
+            Config::default(),
+            None,
+            outbox,
+            Arc::default(),
+            waker,
+            menu_bar::Bar::default(),
+            #[cfg(target_os = "macos")]
+            dock_menu::Dock::default(),
+        );
+        let mut screen = Screen::default();
+        (screen.pane, screen.rect) = (
+            1,
+            Rect {
+                x: 0,
+                y: 0,
+                columns: 80,
+                rows: 24,
+            },
+        );
+        app.panes.push(screen);
+        app.area = (24, 80);
+        app.focused = 1;
+        (app, inbox, poll)
+    }
+
+    fn approval(app: &mut App) {
+        let approval = Approval {
+            id: 7,
+            caller: 2,
+            target: 1,
+            action: ApprovalAction::Read,
+            texts: Vec::new(),
+        };
+        assert_eq!(app.approvals.add(approval), None);
+    }
+
+    #[test]
+    fn a_click_behind_an_approval_goes_nowhere() {
+        let (mut app, inbox, _poll) = app();
+        app.focused = 2;
+        approval(&mut app);
+        assert!(
+            app.pressed(MouseButton::Left, ElementState::Pressed)
+                .is_none()
+        );
+        assert!(inbox.take().is_empty());
+        // With no prompt up, the same press focuses the pane under it.
+        let (mut app, inbox, _poll) = self::app();
+        app.focused = 2;
+        assert!(
+            app.pressed(MouseButton::Left, ElementState::Pressed)
+                .is_none()
+        );
+        let sent = inbox.take();
+        assert!(
+            matches!(sent[..], [Request::Core(proto::Request::Focus { pane: 1 })]),
+            "{}",
+            sent.len()
+        );
+    }
+
+    #[test]
+    fn keys_go_to_an_approval_and_a_held_one_answers_nothing() {
+        let (mut app, inbox, _poll) = app();
+        assert!(!app.prompted(&Key::Named(NamedKey::Escape), ElementState::Pressed, false));
+        approval(&mut app);
+        let escape = Key::Named(NamedKey::Escape);
+        assert!(app.prompted(&escape, ElementState::Pressed, true));
+        assert!(app.prompted(&Key::Character("x".into()), ElementState::Pressed, false));
+        assert!(inbox.take().is_empty());
+        assert!(app.prompted(&escape, ElementState::Pressed, false));
+        let sent = inbox.take();
+        let deny = ApprovalAnswer::Deny;
+        assert!(
+            matches!(
+                sent[..],
+                [Request::Core(proto::Request::ApprovalAnswer { id: 7, answer })] if answer == deny
+            ),
+            "{}",
+            sent.len()
+        );
+        assert!(app.approvals.is_empty());
+    }
+
+    #[test]
+    fn keys_go_to_a_paste_prompt_and_enter_pastes_into_the_focused_pane() {
+        let (mut app, inbox, _poll) = app();
+        let text = "ls\nrm -rf ~\n".to_owned();
+        app.prompt = Some(Prompt::Confirm {
+            text,
+            lines: 2,
+            risk: None,
+        });
+        let enter = Key::Named(NamedKey::Enter);
+        assert!(app.prompted(&Key::Character("y".into()), ElementState::Pressed, false));
+        assert!(app.prompted(&enter, ElementState::Released, false));
+        assert!(inbox.take().is_empty());
+        assert!(app.prompted(&enter, ElementState::Pressed, false));
+        let sent = inbox.take();
+        assert!(
+            matches!(&sent[..], [Request::Paste(1, text)] if text == "ls\nrm -rf ~\n"),
+            "{}",
+            sent.len()
+        );
+        assert!(app.prompt.is_none());
+    }
+
+    #[test]
+    fn input_method_text_behind_a_prompt_goes_nowhere() {
+        let (mut app, inbox, _poll) = app();
+        approval(&mut app);
+        app.ime(Ime::Commit("y".into()));
+        app.approvals = approval::Queue::default();
+        app.prompt = Some(Prompt::TooLarge);
+        app.ime(Ime::Commit("y".into()));
+        assert!(inbox.take().is_empty());
+        app.prompt = None;
+        app.ime(Ime::Commit("é".into()));
+        let sent = inbox.take();
+        assert!(
+            matches!(&sent[..], [Request::Input(1, bytes)] if bytes == "é".as_bytes()),
+            "{}",
+            sent.len()
+        );
+    }
 
     #[test]
     #[allow(clippy::float_cmp)]
