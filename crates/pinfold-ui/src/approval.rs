@@ -126,7 +126,7 @@ fn lines(prompt: &Approval, queued: usize, columns: usize) -> Vec<String> {
         ApprovalAction::Trust => return trust_lines(prompt, queued, columns),
         ApprovalAction::Owner => return owner_lines(prompt, queued, columns),
     };
-    let border = format!("{:─<columns$}", "── Pinfold approval ");
+    let border = format!("{:─<columns$}", "── PinFold approval ");
     let mut lines: Vec<String> = vec![border.chars().take(columns.max(1)).collect()];
     let mut head = format!(
         " ◆ needs you  Pane {} asks to {action} pane {}",
@@ -153,7 +153,7 @@ fn lines(prompt: &Approval, queued: usize, columns: usize) -> Vec<String> {
 
 /// A trust prompt as rows: a border, the directory, then every `run` line in full, wrapped.
 fn trust_lines(prompt: &Approval, queued: usize, columns: usize) -> Vec<String> {
-    let border = format!("{:─<columns$}", "── Pinfold workspace trust ");
+    let border = format!("{:─<columns$}", "── PinFold workspace trust ");
     let mut lines: Vec<String> = vec![border.chars().take(columns.max(1)).collect()];
     let (root, runs) = prompt
         .texts
@@ -179,7 +179,7 @@ fn trust_lines(prompt: &Approval, queued: usize, columns: usize) -> Vec<String> 
 
 /// An owner prompt as rows: a border, the method, then what it touches, wrapped.
 fn owner_lines(prompt: &Approval, queued: usize, columns: usize) -> Vec<String> {
-    let border = format!("{:─<columns$}", "── Pinfold owner action ");
+    let border = format!("{:─<columns$}", "── PinFold owner action ");
     let mut lines: Vec<String> = vec![border.chars().take(columns.max(1)).collect()];
     let (method, details) = prompt
         .texts
@@ -447,7 +447,7 @@ mod tests {
         let mut frame = frame(8, 80);
         banner(&mut frame, &prompt, 1);
         let text = text(&frame);
-        assert!(text.contains("── Pinfold workspace trust"), "{text}");
+        assert!(text.contains("── PinFold workspace trust"), "{text}");
         assert!(
             text.contains("/home/me/project, changed since it was trusted"),
             "{text}"
@@ -503,7 +503,7 @@ mod tests {
         let mut frame = frame(6, 80);
         queue.draw(&mut frame, start);
         let text = text(&frame);
-        assert!(text.contains("── Pinfold owner action"), "{text}");
+        assert!(text.contains("── PinFold owner action"), "{text}");
         assert!(
             text.contains("A terminal outside every pane asks to run workspace.open"),
             "{text}"
@@ -539,7 +539,7 @@ mod tests {
         queue.draw(&mut frame, start);
         let shown = text(&frame);
         assert!(shown.contains("(1 of 2)"), "{shown}");
-        assert!(shown.contains("── Pinfold approval"), "{shown}");
+        assert!(shown.contains("── PinFold approval"), "{shown}");
         assert!(
             shown.contains("the 2 rows above are this prompt"),
             "{shown}"

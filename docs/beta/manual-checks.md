@@ -46,12 +46,12 @@ The steps from [#170](https://github.com/0xPiranhaCodes/pinfold.sh/pull/170):
 The steps from [#171](https://github.com/0xPiranhaCodes/pinfold.sh/pull/171). In a pane:
 
 1. Right-click plain text. Expected: Copy, Paste, Select All, Find, Split Right, Split Down, New
-   Tab, Zoom and Close Pane, with no link items. Arrows, Enter and Esc work the menu.
+   Tab, Zoom Pane and Close Pane, with no link items. Arrows, Enter and Esc work the menu.
 2. `printf '\e]8;;https://pinfold.sh\e\\pinfold site\e]8;;\e\\\n'`, then right-click
    `pinfold site`. Expected: Open Link and Copy Link are the last two items. Copy Link, then `⌘V`,
    pastes `https://pinfold.sh`. Open Link opens it in the browser with no prompt.
 3. `printf '\e]8;;x-man-page://ls\e\\man ls\e]8;;\e\\\n'`, then Open Link. Expected: a
-   `── Pinfold link ──` border and `◆ needs you  Open this link? x-man-page://ls` over muted pane
+   `── PinFold link ──` border and `◆ needs you  Open this link? x-man-page://ls` over muted pane
    text, with `Enter opens · Esc cancels` on the bottom row. Esc opens nothing; Enter opens the
    `ls` man page.
 4. `printf '\e]8;;file:///tmp/a\342\200\256b\e\\odd\e]8;;\e\\\n'`, whose `\342\200\256`
@@ -91,7 +91,7 @@ The steps from [#171](https://github.com/0xPiranhaCodes/pinfold.sh/pull/171). In
    run = "echo hello"
    ```
 
-2. `pinfold up`. Expected: a `── Pinfold workspace trust` border, `◆ needs you  Trust the layout
+2. `pinfold up`. Expected: a `── PinFold workspace trust` border, `◆ needs you  Trust the layout
    of <dir>`, the line `echo hello`, and `y trust · n/Esc don't trust`. Press `n`. Expected: the
    layout opens as a plain shell, and `pinfold up` exits 1 saying the line did not run.
 3. Close that tab, run `pinfold up` again and press `y`. Expected: `hello` prints.

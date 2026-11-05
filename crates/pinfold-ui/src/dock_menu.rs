@@ -11,11 +11,11 @@ use pinfold_sys::menu::Action;
 use crate::prefix::Command;
 use crate::top_bar::STATES;
 
-const FIXED: [(&str, Command); 4] = [
-    ("New Tab", Command::NewTab),
-    ("Split Right", Command::SplitRight),
-    ("Split Down", Command::SplitDown),
-    ("Detach", Command::Detach),
+const FIXED: [Command; 4] = [
+    Command::NewTab,
+    Command::SplitRight,
+    Command::SplitDown,
+    Command::Detach,
 ];
 
 /// Each tab's label, made safe to draw, and its state from `top_bar::tab_state`.
@@ -24,7 +24,7 @@ type Tabs = (Vec<String>, Vec<u8>);
 /// The Dock menu's items for `tabs`. A label holds no state glyph (`top_bar::label`), so a
 /// program cannot make its tab read as another state.
 fn items((labels, states): &Tabs) -> Vec<(String, Action<Command>)> {
-    let fixed = FIXED.map(|(title, command)| (title.to_owned(), Action::Run(command)));
+    let fixed = FIXED.map(|command| (command.label().to_owned(), Action::Run(command)));
     let tabs = labels
         .iter()
         .zip(states)
