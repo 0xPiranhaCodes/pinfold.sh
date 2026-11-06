@@ -157,7 +157,9 @@ we want but do not have links to its issue.
   a scroll region, the alternate screen, SGR attributes and wide characters
   (`crates/pinfold-core/tests/grid_snapshots.rs`, files in `tests/snapshots/`). Run
   `INSTA_UPDATE=always cargo test` to rewrite a changed snapshot, then review the diff.
-  Rendered cells, tool panes and API responses are still to come
+  The window's chrome as cells, from pane borders, the bar and its status line, an
+  approval prompt and the right-click menu, is in `crates/pinfold-ui/src/snapshots.rs`.
+  Tool panes and API responses are still to come
   ([#233](https://github.com/0xPiranhaCodes/pinfold.sh/issues/233)).
 - **Approval-prompt tests** prove that only the window's keyboard answers a prompt:
   `no_api_method_can_answer_an_approval_prompt` in `crates/pinfold-api/src/control.rs`,

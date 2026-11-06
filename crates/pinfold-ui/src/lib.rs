@@ -18,6 +18,8 @@ pub mod prefix;
 mod reload;
 mod search_bar;
 mod selection;
+#[cfg(test)]
+mod snapshots;
 mod top_bar;
 mod vi;
 mod was_running;

@@ -1,0 +1,18 @@
+---
+source: crates/pinfold-ui/src/snapshots.rs
+expression: cells(&frame)
+---
+|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
+|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
+|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
+|── PinFold approval ────────────────────────────────────────────────────────────|
+| ◆ needs you  Pane 2 asks to send to pane 0, 1 text(s):                         |
+|text 1 (11 bytes): cargo test⏎                                                  |
+| y allow once · a allow 30 min · n/Esc deny · the 3 rows above are this prompt  |
+0:0..80 fg 555a63 bg 121212
+1:0..80 fg 555a63 bg 121212
+2:0..80 fg 555a63 bg 121212
+3:0..80 fg f5b544 bg 12151a
+4:0..80 fg f5b544 bg 12151a
+5:0..80 fg e2e5ea bg 12151a
+6:0..80 fg e2e5ea bg 12151a

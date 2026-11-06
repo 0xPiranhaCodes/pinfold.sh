@@ -20,6 +20,8 @@ unicode-width = "0.2.3"
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", "wayland", "wayland-dlopen", "x11"] }
 
 [dev-dependencies]
+# Off by default, as in pinfold-core: coloured diffs pull in `console`.
+insta = { version = "1.49.0", default-features = false }
 pinfold-core = { path = "../pinfold-core", version = "0.1.0-beta.1" }
 
 [lints]
