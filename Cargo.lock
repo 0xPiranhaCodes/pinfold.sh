@@ -1314,6 +1314,7 @@ dependencies = [
 name = "pinfold-cli"
 version = "0.1.0-beta.1"
 dependencies = [
+ "insta",
  "pinfold-api",
  "pinfold-config",
  "pinfold-core",

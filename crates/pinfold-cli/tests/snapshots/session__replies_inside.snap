@@ -1,0 +1,140 @@
+---
+source: crates/pinfold-cli/tests/session.rs
+expression: said
+---
+[
+  {
+    "method": "hello",
+    "reply": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "result": {
+        "link": 10,
+        "methods": [
+          "window.open",
+          "pane.list",
+          "pane.read",
+          "pane.last_output",
+          "pane.send",
+          "pane.wait",
+          "pane.spawn",
+          "agent.launch",
+          "pane.close",
+          "events.subscribe",
+          "pane.status"
+        ],
+        "pane": 0,
+        "version": 2
+      }
+    }
+  },
+  {
+    "method": "window.open",
+    "reply": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {}
+    }
+  },
+  {
+    "method": "pane.list",
+    "reply": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {
+        "panes": [
+          {
+            "command": "[command]",
+            "cwd": null,
+            "id": 0,
+            "message": null,
+            "source": "marks",
+            "status": "idle",
+            "title": null
+          },
+          {
+            "command": "[command]",
+            "cwd": null,
+            "id": 1,
+            "message": null,
+            "source": "marks",
+            "status": "done",
+            "title": null
+          }
+        ]
+      }
+    }
+  },
+  {
+    "method": "pane.read",
+    "reply": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {
+        "text": "out"
+      }
+    }
+  },
+  {
+    "method": "pane.last_output",
+    "reply": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {
+        "text": "out"
+      }
+    }
+  },
+  {
+    "method": "pane.send",
+    "reply": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {}
+    }
+  },
+  {
+    "method": "pane.wait",
+    "reply": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {
+        "outcome": "timeout"
+      }
+    }
+  },
+  {
+    "method": "pane.status",
+    "reply": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {}
+    }
+  },
+  {
+    "method": "events.subscribe",
+    "reply": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {}
+    }
+  },
+  {
+    "method": "agent.launch",
+    "reply": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {
+        "pane": 2
+      }
+    }
+  },
+  {
+    "method": "pane.close",
+    "reply": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {}
+    }
+  }
+]

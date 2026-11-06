@@ -160,7 +160,10 @@ we want but do not have links to its issue.
   The window's chrome as cells, from pane borders, the bar and its status line, an
   approval prompt and the right-click menu, is in `crates/pinfold-ui/src/snapshots.rs`;
   the bar's snapshot is per system, so a change to it needs `@macos` and `@linux` rewritten.
-  Tool panes and API responses are still to come
+  `every_api_method_replies_as_its_snapshot` in `crates/pinfold-cli/tests/session.rs`
+  snapshots the JSON-RPC reply of each API method from a real core, from a pane and from
+  a terminal outside every pane, with times, hashes, paths and audit sequence numbers
+  replaced by their key names. Tool panes are still to come
   ([#233](https://github.com/0xPiranhaCodes/pinfold.sh/issues/233)).
 - **Approval-prompt tests** prove that only the window's keyboard answers a prompt:
   `no_api_method_can_answer_an_approval_prompt` in `crates/pinfold-api/src/control.rs`,

@@ -1,0 +1,141 @@
+---
+source: crates/pinfold-cli/tests/session.rs
+expression: said
+---
+[
+  {
+    "method": "hello",
+    "reply": {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "result": {
+        "link": 10,
+        "methods": [
+          "window.open",
+          "pane.list",
+          "events.subscribe",
+          "audit.read",
+          "session.save",
+          "grants.list",
+          "grants.revoke",
+          "workspace.open",
+          "workspace.trust_state",
+          "workspace.ask_trust"
+        ],
+        "pane": null,
+        "version": 2
+      }
+    }
+  },
+  {
+    "method": "pane.spawn",
+    "reply": {
+      "error": {
+        "code": -32004,
+        "message": "pane.spawn needs a caller in a pane"
+      },
+      "id": 2,
+      "jsonrpc": "2.0"
+    }
+  },
+  {
+    "method": "grants.list",
+    "reply": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {
+        "grants": []
+      }
+    }
+  },
+  {
+    "method": "grants.revoke",
+    "reply": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {
+        "revoked": false
+      }
+    }
+  },
+  {
+    "method": "session.save",
+    "reply": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {
+        "path": "[path]"
+      }
+    }
+  },
+  {
+    "method": "workspace.trust_state",
+    "reply": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {
+        "changed": false,
+        "trusted": false
+      }
+    }
+  },
+  {
+    "method": "workspace.ask_trust",
+    "reply": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {
+        "trusted": true
+      }
+    }
+  },
+  {
+    "method": "workspace.open",
+    "reply": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {
+        "opened": 1
+      }
+    }
+  },
+  {
+    "method": "audit.read",
+    "reply": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {
+        "broken_at": null,
+        "entries": [
+          {
+            "at_ms": "[at_ms]",
+            "caller": null,
+            "hash": "[hash]",
+            "method": "workspace.open",
+            "outcome": "ok",
+            "prev": "[prev]",
+            "reason": "allowed",
+            "scope": "outside",
+            "seq": "[seq]",
+            "target": null,
+            "terminal": true
+          },
+          {
+            "at_ms": "[at_ms]",
+            "caller": null,
+            "hash": "[hash]",
+            "method": "hello",
+            "outcome": "ok",
+            "prev": "[prev]",
+            "reason": "allowed",
+            "scope": "any",
+            "seq": "[seq]",
+            "target": null,
+            "terminal": true
+          }
+        ],
+        "verified": true
+      }
+    }
+  }
+]

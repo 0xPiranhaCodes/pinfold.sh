@@ -2677,3 +2677,171 @@ fn a_sandboxed_agent_starts_nothing_outside_its_sandbox() {
     }
     assert!(replies[2]["result"]["pane"].is_u64(), "{level1}");
 }
+
+/// Each key whose value changes from run to run or machine to machine. An audit entry's `seq`
+/// counts the polls before it.
+const VOLATILE: [&str; 8] = [
+    "at_ms", "command", "cwd", "hash", "path", "prev", "seq", "title",
+];
+
+/// `value` with each [`VOLATILE`] field's value replaced by its name in brackets, at any depth.
+fn redacted(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, field) in fields.iter_mut() {
+                if VOLATILE.contains(&key.as_str()) && !field.is_null() {
+                    *field = format!("[{key}]").into();
+                }
+                redacted(field);
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(redacted),
+        _ => {}
+    }
+}
+
+/// Asks each of `calls` once and notes the method beside each reply in `name`.
+fn replies(directory: &Path, name: &str, calls: Vec<(&str, serde_json::Value)>) -> Result {
+    let hello = next(&mut api(&[])?, || Ok(()))?;
+    let mut said = vec![serde_json::json!({"method": "hello", "reply": hello})];
+    for (method, params) in calls {
+        said.push(serde_json::json!({"method": method, "reply": ask(method, params)?}));
+    }
+    Ok(note(directory.join(name), serde_json::to_string(&said)?)?)
+}
+
+/// Not a test: the window of [`every_api_method_replies_as_its_snapshot`], which allows every
+/// prompt until the replies are noted.
+#[test]
+#[ignore = "run by every_api_method_replies_as_its_snapshot"]
+fn allow_window_process() {
+    let Some(directory) = helper(CLIENT) else {
+        return;
+    };
+    let directory = Path::new(&directory);
+    note(
+        directory.join("core"),
+        std::os::unix::process::parent_id().to_string(),
+    )
+    .unwrap();
+    let mut link = Link::new(socket::take_link().unwrap()).unwrap();
+    assert!(link.resize(24, 80));
+    until(&mut link, |link| link.is_greeted()).unwrap();
+    note(directory.join("window"), "yes").unwrap();
+    until(&mut link, |link| {
+        while let Some(prompt) = link.take_approval() {
+            let (id, answer) = (prompt.id, ApprovalAnswer::AllowOnce);
+            assert!(link.send(Request::ApprovalAnswer { id, answer }));
+        }
+        directory.join("outside").exists() || link.disconnected().is_some()
+    })
+    .unwrap();
+}
+
+/// Not a test: pane 0 of [`every_api_method_replies_as_its_snapshot`]. It calls each method a
+/// pane may, then starts a terminal of its own for [`replies_outside_process`].
+#[test]
+#[ignore = "run by every_api_method_replies_as_its_snapshot"]
+fn replies_pane_process() {
+    let Some(directory) = helper(CLIENT) else {
+        return;
+    };
+    let directory = Path::new(&directory);
+    while !directory.join("window").exists() {
+        thread::sleep(Duration::from_millis(10));
+    }
+    // Pane 1 prints `out` between OSC 133 marks once, so its reads never change.
+    let spawned = ask("pane.spawn", serde_json::json!({"where": "tab"})).unwrap();
+    assert_eq!(spawned["result"]["pane"], 1, "{spawned}");
+    let start = Instant::now();
+    while ask("pane.last_output", serde_json::json!({"pane": 1})).unwrap()["result"].is_null() {
+        assert!(start.elapsed() < PATIENCE, "pane 1 printed nothing");
+        thread::sleep(Duration::from_millis(10));
+    }
+    let calls = vec![
+        ("window.open", serde_json::json!({})),
+        ("pane.list", serde_json::json!({})),
+        ("pane.read", serde_json::json!({"pane": 1})),
+        ("pane.last_output", serde_json::json!({"pane": 1})),
+        ("pane.send", serde_json::json!({"pane": 1, "text": "x"})),
+        (
+            "pane.wait",
+            serde_json::json!({"pane": "self", "until": "prompt", "timeout_ms": 100}),
+        ),
+        (
+            "pane.status",
+            serde_json::json!({"pane": 0, "state": "running"}),
+        ),
+        (
+            "events.subscribe",
+            serde_json::json!({"events": ["pane.closed"]}),
+        ),
+        ("agent.launch", serde_json::json!({"profile": "plain"})),
+        ("pane.close", serde_json::json!({"pane": 2})),
+    ];
+    replies(directory, "inside", calls).unwrap();
+    let mut outside = Command::new(env::current_exe().unwrap());
+    outside.args(["--exact", "--ignored", "replies_outside_process"]);
+    let _terminal = pinfold_sys::pty::Pty::spawn(outside, 24, 80).unwrap();
+    while !directory.join("outside").exists() {
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// Not a test: in a terminal outside every pane, calls each owner method.
+#[test]
+#[ignore = "run by replies_pane_process"]
+fn replies_outside_process() {
+    let Some(directory) = helper(CLIENT) else {
+        return;
+    };
+    let root = fs::canonicalize(&directory).unwrap();
+    let workspace = serde_json::json!({"root": root, "sha256": "a".repeat(64)});
+    let mut trust = workspace.clone();
+    trust["runs"] = serde_json::json!(["make"]);
+    let layout = serde_json::json!({"tabs": [{"panes": [{"cwd": root}]}]});
+    let calls = vec![
+        ("pane.spawn", serde_json::json!({"where": "tab"})),
+        ("grants.list", serde_json::json!({})),
+        ("grants.revoke", serde_json::json!({"id": 7})),
+        ("session.save", serde_json::json!({})),
+        ("workspace.trust_state", workspace),
+        ("workspace.ask_trust", trust),
+        (
+            "workspace.open",
+            serde_json::json!({"root": root, "layout": layout}),
+        ),
+        ("audit.read", serde_json::json!({"count": 2})),
+    ];
+    replies(&directory, "outside", calls).unwrap();
+}
+
+#[test]
+fn every_api_method_replies_as_its_snapshot() {
+    let exe = env::current_exe().unwrap();
+    let window = format!(
+        "exec '{}' --exact --ignored allow_window_process",
+        exe.display()
+    );
+    let session = Session::new("rs", Some(&window)).unwrap();
+    fs::create_dir_all(session.directory.join("config/pinfold")).unwrap();
+    let toml = "[agents.plain]\ncommand = [\"/bin/sh\", \"-c\", \"exec sleep 30\"]\n";
+    fs::write(session.directory.join("config/pinfold/pinfold.toml"), toml).unwrap();
+    let shell = format!(
+        "if mkdir \"$PINFOLD_TEST_CLIENT/first\" 2> /dev/null; then exec '{}' --exact \
+         --ignored replies_pane_process; fi; printf '\\033]133;C\\007out\\n\\033]133;D;0\\007'; exec sleep 30",
+        exe.display()
+    );
+    let mut core = session
+        .start_core(&["--window", "1", "80x24"], &shell)
+        .unwrap();
+    assert!(session.wait_for("outside"), "{}", session.read_log());
+    core.kill().unwrap();
+    core.wait().unwrap();
+    for name in ["inside", "outside"] {
+        let mut said: serde_json::Value = serde_json::from_str(&session.read(name)).unwrap();
+        redacted(&mut said);
+        let said = serde_json::to_string_pretty(&said).unwrap();
+        insta::assert_snapshot!(format!("replies_{name}"), said);
+    }
+}
