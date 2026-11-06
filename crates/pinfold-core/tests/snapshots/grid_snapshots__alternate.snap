@@ -1,0 +1,9 @@
+---
+source: crates/pinfold-core/tests/grid_snapshots.rs
+expression: grid(&alternate)
+---
+cursor Some((1, 5))
+|          |
+|  alt     |
+|          |
+|          |

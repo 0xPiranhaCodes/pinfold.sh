@@ -1,0 +1,9 @@
+---
+source: crates/pinfold-core/tests/grid_snapshots.rs
+expression: "grid(\"a中b\\u{1f600}\\r\\n123456789中\".as_bytes())"
+---
+cursor Some((2, 2))
+|a中 b😀     |
+|123456789 |
+|中         |
+|          |
