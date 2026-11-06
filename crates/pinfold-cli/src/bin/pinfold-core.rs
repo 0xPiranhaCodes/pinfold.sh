@@ -517,7 +517,8 @@ fn decide(
         && request.caller().is_some()
         && own.is_none()
     {
-        let decision = grants.ask_owner(request, texts, reactor.is_window_ready());
+        // A window of link version 9 has no owner prompt, so this refuses as with no window.
+        let decision = grants.ask_owner(request, texts, reactor.can_ask(ApprovalAction::Owner));
         return ask_alone(reactor, grants, workspaces, log, decision);
     }
     let Some((target, action, text)) = cross_pane(request.method()) else {

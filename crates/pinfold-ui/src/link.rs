@@ -321,6 +321,8 @@ pub struct Link {
     readable: bool,
     /// Whether the decoder holds part of a message.
     partial: bool,
+    /// Whether [`Link::greet`] waits for the core's hello to answer it.
+    greeting: bool,
     ended: Option<Disconnect>,
     state: State,
 }
@@ -363,15 +365,30 @@ impl Link {
             buffer: vec![0; READ_BUDGET],
             readable: true,
             partial: false,
+            greeting: false,
             ended: None,
             state,
         })
     }
 
-    /// Sends the version check. The core tells a launcher a window has opened on this.
+    /// Sends the version check, at the lower of this version and the core's, once the core's
+    /// has come (ADR-0043). The core tells a launcher a window has opened on this.
     pub fn greet(&mut self) {
-        self.state.queue(Request::Hello { version: VERSION });
+        self.greeting = true;
+        self.answer();
         self.flush();
+    }
+
+    /// Puts the hello ahead of any request queued while it waited for the core's.
+    fn answer(&mut self) {
+        if let (true, Some(version)) = (self.greeting, self.decoder.version()) {
+            let mut hello = Vec::new();
+            let encoded = Request::Hello { version }.encode(&mut hello);
+            if encoded.is_ok() {
+                self.state.out.splice(..0, hello);
+            }
+            self.greeting = false;
+        }
     }
 
     /// Waits for the core for up to `timeout`, reads up to one budget and sends what it can.
@@ -416,8 +433,17 @@ impl Link {
                 Ok(count) => {
                     left -= count;
                     if let Err(error) = self.decode(count) {
+                        // The core logs a gap of two or more and offers a restart (#203).
+                        if let (Error::Version { .. }, Some(mut stream)) =
+                            (error, self.stream.as_ref())
+                        {
+                            let mut hello = Vec::new();
+                            let _ = Request::Hello { version: VERSION }.encode(&mut hello);
+                            let _ = stream.write(&hello);
+                        }
                         return self.end(error.into());
                     }
+                    self.answer();
                 }
                 Err(error) if error.kind() == ErrorKind::WouldBlock => {
                     self.readable = false;
@@ -465,6 +491,9 @@ impl Link {
 
     /// Writes what it can without blocking, and keeps the rest for the next turn.
     fn flush(&mut self) {
+        if self.greeting {
+            return;
+        }
         // The runtime ignores SIGPIPE, so a closed core shows up here as an error.
         while let (Some(mut stream), false) = (self.stream.as_ref(), self.state.out.is_empty()) {
             match stream.write(&self.state.out) {
@@ -644,7 +673,7 @@ mod tests {
 
     use pinfold_proto::Cell;
     use pinfold_proto::link::{
-        Direction, MAX_MESSAGE, MAX_PASTE, Position, encode_frame, encode_layout,
+        Direction, MAX_MESSAGE, MAX_PASTE, OLDEST, Position, encode_frame, encode_layout,
     };
 
     use super::*;
@@ -741,6 +770,15 @@ mod tests {
         &link.screens()[0]
     }
 
+    /// A link whose core has said hello, and the window's answer read.
+    fn answered() -> io::Result<(Link, Peer)> {
+        let (mut link, mut peer) = linked()?;
+        peer.notices(&[Notice::Hello { version: VERSION }])?;
+        turn_until(&mut link, |link| link.is_greeted());
+        peer.requests(1);
+        Ok((link, peer))
+    }
+
     fn linked() -> io::Result<(Link, Peer)> {
         let (ours, stream) = UnixStream::pair()?;
         stream.set_read_timeout(Some(PATIENCE))?;
@@ -786,12 +824,26 @@ mod tests {
     #[test]
     fn the_version_check_goes_first_each_way() {
         let (mut link, mut peer) = linked().unwrap();
-        let hello = Request::Hello { version: VERSION };
-        assert_eq!(peer.requests(1), [shown(hello)]);
+        assert!(link.send(Request::Quit));
         assert!(!link.is_greeted());
         peer.greet().unwrap();
         assert!(turn_until(&mut link, |link| link.is_greeted()));
+        let hello = Request::Hello { version: VERSION };
+        assert_eq!(peer.requests(2), [shown(hello), shown(Request::Quit)]);
         assert_eq!(link.disconnected(), None);
+    }
+
+    /// ADR-0043: the window answers a core one version apart at the lower version.
+    #[test]
+    fn a_core_one_version_apart_is_answered_at_the_lower() {
+        for (theirs, spoken) in [(OLDEST, OLDEST), (VERSION + 1, VERSION)] {
+            let (mut link, mut peer) = linked().unwrap();
+            peer.notices(&[Notice::Hello { version: theirs }]).unwrap();
+            assert!(turn_until(&mut link, |link| link.is_greeted()));
+            let hello = Request::Hello { version: spoken };
+            assert_eq!(peer.requests(1), [shown(hello)]);
+            assert_eq!(link.disconnected(), None);
+        }
     }
 
     #[test]
@@ -804,10 +856,12 @@ mod tests {
         assert_eq!(quiet.kind(), ErrorKind::WouldBlock);
         stream.set_nonblocking(false).unwrap();
         stream.set_read_timeout(Some(PATIENCE)).unwrap();
-        link.greet();
         let decoder = Decoder::default();
-        let hello = Request::Hello { version: VERSION };
         let mut peer = Peer { stream, decoder };
+        peer.greet().unwrap();
+        assert!(turn_until(&mut link, |link| link.is_greeted()));
+        link.greet();
+        let hello = Request::Hello { version: VERSION };
         assert_eq!(peer.requests(1), [shown(hello)]);
     }
 
@@ -867,8 +921,7 @@ mod tests {
 
     #[test]
     fn requests_reach_the_core_in_order() {
-        let (mut link, mut peer) = linked().unwrap();
-        peer.requests(1);
+        let (mut link, mut peer) = answered().unwrap();
         let (from, selection) = (Position::default(), Selection::default());
         let pane = PANE;
         let expected = [
@@ -906,8 +959,7 @@ mod tests {
 
     #[test]
     fn a_resize_is_clamped_and_an_oversized_paste_refused() {
-        let (mut link, mut peer) = linked().unwrap();
-        peer.requests(1);
+        let (mut link, mut peer) = answered().unwrap();
         assert!(!link.send(Request::Paste {
             pane: PANE,
             text: &"x".repeat(MAX_PASTE + 1),
@@ -922,7 +974,7 @@ mod tests {
 
     #[test]
     fn a_core_that_stops_reading_refuses_requests_whole_and_loses_none() {
-        let (mut link, mut peer) = linked().unwrap();
+        let (mut link, mut peer) = answered().unwrap();
         let text = "x".repeat(MAX_PASTE);
         let mut accepted = 0;
         let paste = Request::Paste {
@@ -934,11 +986,11 @@ mod tests {
             assert!(accepted < 16, "the queue has no limit");
         }
         assert!(accepted >= 2);
-        let reader = thread::spawn(move || peer.requests(accepted + 1));
+        let reader = thread::spawn(move || peer.requests(accepted));
         turn_until(&mut link, |_| reader.is_finished());
         let requests = reader.join().unwrap();
-        assert_eq!(requests.len(), accepted + 1);
-        assert!(requests[1..].iter().all(|paste| paste.len() > MAX_PASTE));
+        assert_eq!(requests.len(), accepted);
+        assert!(requests.iter().all(|paste| paste.len() > MAX_PASTE));
     }
 
     #[test]
@@ -972,13 +1024,16 @@ mod tests {
     #[test]
     fn a_bad_version_ends_the_link_and_closes_it() {
         let (mut link, mut peer) = linked().unwrap();
-        let theirs = VERSION + 1;
+        let theirs = VERSION + 2;
         peer.notices(&[Notice::Hello { version: theirs }]).unwrap();
         let error = Error::Version {
             ours: VERSION,
             theirs,
         };
         assert_eq!(ended(&mut link), Some(error.into()));
+        // It still says its own version, so the core can offer a restart (#203).
+        let hello = Request::Hello { version: VERSION };
+        assert_eq!(peer.requests(1), [shown(hello)]);
         assert!(peer.sees_close());
         assert!(!link.is_greeted());
     }
@@ -999,7 +1054,7 @@ mod tests {
     #[test]
     fn a_failed_write_does_not_hide_why_the_core_left() {
         let (mut link, mut peer) = linked().unwrap();
-        let theirs = VERSION + 1;
+        let theirs = VERSION + 2;
         peer.notices(&[Notice::Hello { version: theirs }]).unwrap();
         drop(peer);
         link.send(Request::Quit);
@@ -1029,11 +1084,11 @@ mod tests {
     #[test]
     fn changes_to_a_screen_of_another_size_ask_for_a_full_frame_once() {
         let (mut link, mut peer) = linked().unwrap();
-        peer.requests(1);
         peer.greet().unwrap();
         let first = screen('a');
         peer.frame(&first, 0, None).unwrap();
         assert!(turn_until(&mut link, take_dirty));
+        peer.requests(1);
 
         // A window that lost track: this one's screen was another size.
         link.screens_mut()[0].frame.rows = 3;

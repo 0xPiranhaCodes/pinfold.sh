@@ -4,10 +4,12 @@
 //! the type byte and the body. Fields are fixed-width and little-endian, and text or bytes run
 //! to the end of the body, so no field carries a length of its own.
 //!
-//! Both sides send [`Request::Hello`] or [`Notice::Hello`] as soon as the link opens, without
-//! waiting. [`Decoder`] takes that message first and returns [`Error::Version`] on a mismatch.
-//! The two binaries ship together, so nothing is negotiated: the side that sees the error closes
-//! the link, and the core keeps its PTYs.
+//! The core sends [`Notice::Hello`] as soon as the link opens. A window answers with
+//! [`Request::Hello`] at the lower of the two versions, so a window serves a core one version
+//! older than itself, as an update leaves running (ADR-0043). [`Decoder`] takes the hello first,
+//! returns [`Error::Version`] for a peer further apart, and remembers the version both speak:
+//! a message newer than that is [`Error::Newer`]. The side that sees an error closes the link,
+//! and the core keeps its PTYs.
 //!
 //! Any error means the stream can no longer be trusted, so a [`Decoder`] keeps returning it.
 //!
@@ -38,6 +40,9 @@ use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode};
 
 /// The protocol's version. Any change to the format below raises it.
 pub const VERSION: u16 = 10;
+
+/// The oldest version this side still speaks, one before [`VERSION`] (ADR-0043).
+pub const OLDEST: u16 = VERSION - 1;
 
 /// Most rows or columns a screen can have, which the core clamps its panes to.
 pub const MAX_DIMENSION: u16 = 1024;
@@ -233,6 +238,14 @@ pub enum Error {
     /// A second version check arrived.
     #[error("a second version check arrived")]
     RepeatedHello,
+    /// A message the version both sides speak does not have.
+    #[error("message type {kind} needs link version {since}")]
+    Newer {
+        /// The type byte.
+        kind: u8,
+        /// The first version that has it.
+        since: u16,
+    },
 }
 
 /// Longest query, in characters, which bounds the work per cell and what a search carries.
@@ -332,6 +345,15 @@ impl ApprovalAction {
     #[must_use]
     pub const fn is_once(self) -> bool {
         matches!(self, Self::Trust | Self::Owner)
+    }
+
+    /// The first link version that carries it.
+    #[must_use]
+    pub const fn since(self) -> u16 {
+        match self {
+            Self::Owner => 10,
+            Self::Read | Self::Send | Self::Trust => OLDEST,
+        }
     }
 }
 
@@ -1024,6 +1046,16 @@ impl Request<'_> {
 }
 
 impl Notice<'_> {
+    /// The first link version that carries this message, so the core sends it only to a window
+    /// that speaks that version (ADR-0043). No request changed since [`OLDEST`].
+    #[must_use]
+    pub fn since(&self) -> u16 {
+        match self {
+            Self::Approval(approval) => approval.action.since(),
+            _ => OLDEST,
+        }
+    }
+
     /// Appends this message to `out`. On an error `out` is as it was.
     ///
     /// # Errors
@@ -1384,7 +1416,8 @@ pub struct Decoder {
     buffer: Vec<u8>,
     /// Whether `buffer` holds a whole message, already handed out.
     whole: bool,
-    greeted: bool,
+    /// The version both sides speak, once the peer's hello has come.
+    version: Option<u16>,
     failed: Option<Error>,
 }
 
@@ -1398,7 +1431,8 @@ impl Decoder {
     ///
     /// Any error ends the link, and every later call returns it.
     pub fn next_request(&mut self, input: &mut &[u8]) -> Result<Option<Request<'_>>, Error> {
-        self.next(input, MAX_REQUEST, Request::decode)
+        // A window answers at the lower version, so never above the core's.
+        self.next(input, MAX_REQUEST, VERSION, Request::decode, |_| OLDEST)
     }
 
     /// Reads the next message the core sent, as [`Decoder::next_request`] does.
@@ -1407,20 +1441,38 @@ impl Decoder {
     ///
     /// Any error ends the link, and every later call returns it.
     pub fn next_notice(&mut self, input: &mut &[u8]) -> Result<Option<Notice<'_>>, Error> {
-        self.next(input, MAX_MESSAGE, Notice::decode)
+        self.next(
+            input,
+            MAX_MESSAGE,
+            VERSION + 1,
+            Notice::decode,
+            Notice::since,
+        )
+    }
+
+    /// The version both sides speak: the lower of the two, once the peer's hello has come.
+    #[must_use]
+    pub const fn version(&self) -> Option<u16> {
+        self.version
     }
 
     fn next<'a, M>(
         &'a mut self,
         input: &mut &[u8],
         limit: usize,
+        newest: u16,
         decode: fn(u8, &'a [u8]) -> Result<M, Error>,
+        since: fn(&M) -> u16,
     ) -> Result<Option<M>, Error> {
-        let decoded = match self.fill(input, limit) {
+        let decoded = match self.fill(input, limit, newest) {
             Ok(false) => return Ok(None),
             Ok(true) => {
                 let (kind, body) = message(&self.buffer);
-                decode(kind, body)
+                let version = self.version.unwrap_or(OLDEST);
+                decode(kind, body).and_then(|message| match since(&message) {
+                    since if since > version => Err(Error::Newer { kind, since }),
+                    _ => Ok(message),
+                })
             }
             Err(error) => Err(error),
         };
@@ -1431,8 +1483,9 @@ impl Decoder {
     }
 
     /// Takes bytes until `buffer` holds a whole message, and returns whether it does. The length
-    /// is checked before any of the body is stored, and the version check before anything else.
-    fn fill(&mut self, input: &mut &[u8], limit: usize) -> Result<bool, Error> {
+    /// is checked before any of the body is stored, and the version check before anything else:
+    /// a hello from [`OLDEST`] to `newest`.
+    fn fill(&mut self, input: &mut &[u8], limit: usize, newest: u16) -> Result<bool, Error> {
         if let Some(error) = self.failed {
             return Err(error);
         }
@@ -1458,20 +1511,20 @@ impl Decoder {
         }
         self.whole = true;
         let (kind, body) = message(&self.buffer);
-        match (kind == HELLO, self.greeted) {
+        match (kind == HELLO, self.version.is_some()) {
             (true, true) => return Err(Error::RepeatedHello),
             (false, false) => return Err(Error::NoHello { kind }),
             (true, false) => {
                 let mut body = Reader(body);
                 let theirs = body.u16()?;
                 body.end()?;
-                if theirs != VERSION {
+                if !(OLDEST..=newest).contains(&theirs) {
                     return Err(Error::Version {
                         ours: VERSION,
                         theirs,
                     });
                 }
-                self.greeted = true;
+                self.version = Some(theirs.min(VERSION));
             }
             (false, true) => {}
         }
@@ -1977,6 +2030,68 @@ mod tests {
         assert_eq!(decoder.next_request(&mut good), Err(error));
         assert_eq!(good, HELLO_WIRE, "a failed link takes no more bytes");
         assert_eq!(decoder.next_notice(&mut good), Err(error));
+    }
+
+    /// ADR-0043: a core takes a window one version older, a window a core one version either
+    /// way, and both speak the lower. Two apart is still [`Error::Version`].
+    #[test]
+    fn a_hello_one_version_apart_speaks_the_lower() {
+        let hello = |version: u16| raw(HELLO, &version.to_le_bytes());
+        let cases = [
+            (OLDEST, true, Some(OLDEST)),
+            (VERSION, true, Some(VERSION)),
+            (OLDEST, false, Some(OLDEST)),
+            (VERSION + 1, false, Some(VERSION)),
+            (VERSION + 1, true, None),
+            (OLDEST - 1, true, None),
+            (OLDEST - 1, false, None),
+            (VERSION + 2, false, None),
+        ];
+        for (theirs, core, spoken) in cases {
+            let mut decoder = Decoder::default();
+            let wire = hello(theirs);
+            let decoded = if core {
+                decoder.next_request(&mut wire.as_slice()).map(|_| ())
+            } else {
+                decoder.next_notice(&mut wire.as_slice()).map(|_| ())
+            };
+            let error = Error::Version {
+                ours: VERSION,
+                theirs,
+            };
+            assert_eq!(decoded, spoken.map(|_| ()).ok_or(error), "{theirs} {core}");
+            assert_eq!(decoder.version(), spoken, "{theirs} {core}");
+        }
+    }
+
+    #[test]
+    fn a_message_newer_than_the_spoken_version_ends_the_link() {
+        let approval = |action| {
+            let mut wire = raw(HELLO, &OLDEST.to_le_bytes());
+            Notice::Approval(Approval {
+                id: 1,
+                caller: 0,
+                target: 0,
+                action,
+                texts: vec!["session.save"],
+            })
+            .encode(&mut wire)
+            .unwrap();
+            let mut decoder = Decoder::default();
+            let mut input = wire.as_slice();
+            decoder.next_notice(&mut input).unwrap();
+            decoder
+                .next_notice(&mut input)
+                .map(|notice| notice.is_some())
+        };
+        assert_eq!(approval(ApprovalAction::Trust), Ok(true));
+        let since = ApprovalAction::Owner.since();
+        assert_eq!(since, 10);
+        let newer = Error::Newer {
+            kind: APPROVAL,
+            since,
+        };
+        assert_eq!(approval(ApprovalAction::Owner), Err(newer));
     }
 
     #[test]
