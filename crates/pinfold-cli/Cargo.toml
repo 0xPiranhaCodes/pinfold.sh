@@ -41,6 +41,8 @@ pinfold-sys = { path = "../pinfold-sys", version = "0.1.0-beta.1" }
 serde_json = "1.0.154"
 
 [dev-dependencies]
+# Off by default, as in pinfold-core: coloured diffs pull in `console`.
+insta = { version = "1.49.0", default-features = false }
 pinfold-ui = { path = "../pinfold-ui", version = "0.1.0-beta.1" }
 
 [lints]
