@@ -120,6 +120,12 @@ keystroke-to-echo budget in `docs/design/architecture.md`, which `cargo xtask la
 adds two API calls per poll and a read of the pane's history, and catches the core slowing over a
 long session rather than one keystroke's time.
 
+A weekly run soaks for 300 minutes, as long as a hosted runner allows. For longer, or on your own
+machine, `tests/window/soak.sh <minutes>` runs the soak on Linux in the window image, and with
+`HEAP=1` it attaches heaptrack to the core and prints its live heap through the run.
+[`benches/soak.md`](benches/soak.md) has an eight-hour run: the core's growth levels off, and
+its live heap does not grow.
+
 `tests/window/run.sh` drives the real processes in a container: it types into a shell under
 Xvfb through `pinfold`, kills the window and reattaches, kills the core and checks that the window
 says so, and starts a window under headless Weston. `crates/pinfold-cli/tests/session.rs` covers

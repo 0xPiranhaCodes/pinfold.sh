@@ -1,0 +1,20 @@
+name: Weekly
+
+on:
+  schedule:
+    - cron: "41 4 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # The nightly hour can't tell slow growth that levels off from a leak (#256). A hosted job
+  # stops at six hours, so this runs five; benches/soak.md has an eight-hour run.
+  long-soak:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: sudo apt-get install -y libxkbcommon-x11-0 xvfb
+      - run: xvfb-run -a -s "-screen 0 1920x1080x24" cargo xtask soak --minutes 300
