@@ -76,6 +76,10 @@ pub trait VtEngine {
     /// called for each frame and must not make a window drag read the store.
     fn view_rows(&self) -> Range<usize>;
 
+    /// Returns the numbers of the rows a copy reads: history, except on the alternate screen,
+    /// then the screen. Unlike [`Self::view_rows`] it reads history at the current width first.
+    fn copy_rows(&self) -> Range<usize>;
+
     /// Runs one bounded step of `search` over history and the screen, or only the screen on the
     /// alternate screen, which is all a person can see there.
     fn search(&self, search: &mut Search) -> SearchStep;
@@ -632,6 +636,11 @@ impl VtEngine for AlacrittyEngine {
         } else {
             held
         }
+    }
+
+    fn copy_rows(&self) -> Range<usize> {
+        self.sync();
+        self.held_rows()
     }
 
     fn search(&self, search: &mut Search) -> SearchStep {

@@ -451,28 +451,15 @@ impl Reactor {
 
     /// Returns a pane's history and screen as plain text, newest last, or with `lines` only the
     /// last that many lines, without line ends after the last text. Past [`MAX_READ`] bytes the
-    /// oldest text goes, cut at a character.
+    /// oldest text goes, cut at a character. With `lines` it copies only the rows near the end,
+    /// doubling them until they hold that many lines, so the cost follows `lines`, not history.
     #[must_use]
     pub fn read(&self, pane: usize, lines: Option<usize>) -> Option<String> {
-        let everything = Selection {
-            anchor: Position::default(),
-            focus: Position {
-                row: usize::MAX,
-                column: u16::MAX,
-            },
-        };
-        let mut text = newest_text(self.engine(pane)?, everything);
-        if let Some(lines) = lines {
-            let start = match lines.checked_sub(1) {
-                None => text.len(),
-                Some(skipped) => text
-                    .rmatch_indices('\n')
-                    .nth(skipped)
-                    .map_or(0, |(at, _)| at + 1),
-            };
-            text.drain(..start);
-        }
-        Some(text)
+        let engine = self.engine(pane)?;
+        Some(match lines {
+            None => newest_text(engine, rows_from(0)).0,
+            Some(lines) => newest_lines(engine, lines),
+        })
     }
 
     /// Returns the output of a pane's last command, from its OSC 133 marks, as plain text with
@@ -484,7 +471,7 @@ impl Reactor {
         if output.focus < output.anchor {
             return Some(String::new());
         }
-        Some(newest_text(engine, output))
+        Some(newest_text(engine, output).0)
     }
 
     /// Resizes a pane's terminal and tells its program.
@@ -726,16 +713,51 @@ impl Reactor {
     }
 }
 
+/// Everything from the start of `row` on.
+fn rows_from(row: usize) -> Selection {
+    Selection {
+        anchor: Position { row, column: 0 },
+        focus: Position {
+            row: usize::MAX,
+            column: u16::MAX,
+        },
+    }
+}
+
+/// The last `lines` lines of [`newest_text`] of everything, from the rows near the end.
+fn newest_lines(engine: &dyn VtEngine, lines: usize) -> String {
+    let held = engine.copy_rows();
+    let mut rows = lines.saturating_add(usize::from(engine.size().0));
+    loop {
+        let first = held.end.saturating_sub(rows);
+        let (mut text, cut) = newest_text(engine, rows_from(first));
+        // Each row's text stands alone, so rows from `first` on are the end of the whole text.
+        // Once they hold `lines` line ends, or more than a read returns, more rows change nothing.
+        let start = match lines.checked_sub(1) {
+            None => Some(text.len()),
+            Some(skipped) => text.rmatch_indices('\n').nth(skipped).map(|(at, _)| at + 1),
+        };
+        if start.is_some() || cut || first <= held.start {
+            text.drain(..start.unwrap_or(0));
+            return text;
+        }
+        rows = rows.saturating_mul(2);
+    }
+}
+
 /// Copies `selection` as plain text without line ends after it, keeping its newest
-/// [`MAX_READ`] bytes, cut at a character. The grid holds characters, so no escape is in it.
+/// [`MAX_READ`] bytes, cut at a character, and whether older text went. The grid holds characters,
+/// so no escape is in it.
 // shortcut: one call on the reactor's thread, bounded by the store's caps. Step it between
 // turns, as a window's copy is, if reads ever hold up PTYs.
-fn newest_text(engine: &dyn VtEngine, selection: Selection) -> String {
-    let keep_newest = |text: &mut String| {
+fn newest_text(engine: &dyn VtEngine, selection: Selection) -> (String, bool) {
+    let mut cut = false;
+    let mut keep_newest = |text: &mut String| {
         let mut from = text.len().saturating_sub(MAX_READ);
         while !text.is_char_boundary(from) {
             from += 1;
         }
+        cut |= from > 0;
         text.drain(..from);
     };
     let mut copy = Copying::unlimited(selection);
@@ -747,7 +769,7 @@ fn newest_text(engine: &dyn VtEngine, selection: Selection) -> String {
     }
     text.truncate(text.trim_end_matches('\n').len());
     keep_newest(&mut text);
-    text
+    (text, cut)
 }
 
 /// A closed pane is done, whatever was said before.
@@ -1172,13 +1194,83 @@ mod tests {
                 column: u16::MAX,
             },
         };
-        let text = newest_text(&engine, everything);
+        let (text, cut) = newest_text(&engine, everything);
+        assert!(cut);
         assert!(
             text.len() <= MAX_READ && text.len() > MAX_READ - 401,
             "{}",
             text.len()
         );
         assert!(text.ends_with(&format!("009999{}", "x".repeat(394))));
+    }
+
+    /// What a read with `lines` returned when it trimmed the whole history (before #257).
+    fn whole_then_trimmed(engine: &dyn VtEngine, lines: usize) -> String {
+        let (mut text, _) = newest_text(engine, rows_from(0));
+        let start = match lines.checked_sub(1) {
+            None => text.len(),
+            Some(skipped) => text
+                .rmatch_indices('\n')
+                .nth(skipped)
+                .map_or(0, |(at, _)| at + 1),
+        };
+        text.drain(..start);
+        text
+    }
+
+    #[test]
+    fn a_read_of_the_last_lines_matches_trimming_the_whole_history() {
+        // More lines than the store keeps: blank ones, wide characters, and every seventh
+        // wrapped over three rows, so a guess of one row a line falls short.
+        let mut long = AlacrittyEngine::new(24, 80);
+        for line in 0..20_000 {
+            let text = match line % 7 {
+                0 => format!("{line} {}", "w".repeat(200)),
+                3 => String::new(),
+                5 => format!("{line} 漢字"),
+                _ => format!("{line} line"),
+            };
+            long.feed(format!("{text}\r\n").as_bytes(), &mut Vec::new());
+        }
+        // A wrapped last line, and a screen mostly blank under it.
+        let mut short = AlacrittyEngine::new(24, 80);
+        short.feed(
+            format!("a\r\n\r\nb{}", "z".repeat(170)).as_bytes(),
+            &mut Vec::new(),
+        );
+        // Past MAX_READ, so the oldest text goes before the lines are counted.
+        let mut wide = AlacrittyEngine::new(24, 400);
+        for line in 0..10_000 {
+            wide.feed(
+                format!("{line:06}{}\r\n", "x".repeat(394)).as_bytes(),
+                &mut Vec::new(),
+            );
+        }
+        for engine in [&long, &short, &wide] {
+            let held = engine.copy_rows().len();
+            for lines in [
+                0,
+                1,
+                2,
+                3,
+                23,
+                24,
+                25,
+                100,
+                2_499,
+                2_500,
+                held,
+                held + 1,
+                usize::MAX,
+            ] {
+                assert_eq!(
+                    newest_lines(engine, lines),
+                    whole_then_trimmed(engine, lines),
+                    "{lines} of {held} rows"
+                );
+            }
+        }
+        assert_eq!(newest_lines(&short, 1), format!("b{}", "z".repeat(170)));
     }
 
     #[test]
