@@ -89,8 +89,21 @@ fn fuzz_smoke() -> ExitCode {
     let seconds = std::env::var("FUZZ_SECONDS").unwrap_or_else(|_| FUZZ_SMOKE_SECONDS.to_string());
     for target in targets {
         let time = format!("-max_total_time={seconds}");
+        // Naming a seed folder replaces cargo-fuzz's default corpus, so name that first.
+        let corpus = format!("fuzz/corpus/{target}");
+        let seeds = format!("fuzz/seeds/{target}");
+        let mut corpora = Vec::new();
+        if Path::new(&seeds).is_dir() {
+            if let Err(error) = fs::create_dir_all(&corpus) {
+                eprintln!("fuzz-smoke: cannot create {corpus}: {error}");
+                return ExitCode::FAILURE;
+            }
+            corpora = vec![corpus, seeds];
+        }
         let status = Command::new("cargo")
-            .args([FUZZ_TOOLCHAIN, "fuzz", "run", &target, "--"])
+            .args([FUZZ_TOOLCHAIN, "fuzz", "run", &target])
+            .args(&corpora)
+            .arg("--")
             .args(["-dict=fuzz/vt.dict", "-timeout=10", &time])
             .status();
         if !status.is_ok_and(|status| status.success()) {

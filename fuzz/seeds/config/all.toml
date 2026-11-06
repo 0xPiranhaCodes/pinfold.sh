@@ -1,0 +1,13 @@
+font_size = 14
+font_path = "/System/Library/Fonts/Menlo.ttc"
+macos_option_as_alt = true
+background_opacity = 0.85
+background_blur = true
+
+[keys]
+prefix = "C-b"
+[api]
+protect = ["kubectl exec", "docker exec", "psql", "aws ssm", "mysql -h prod-db"]
+[agents.claude]
+command = ["claude"]
+sandbox = true
