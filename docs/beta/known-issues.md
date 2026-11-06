@@ -16,10 +16,11 @@ still welcome if it adds a case not listed here. Report bugs with the
   are untested. If PinFold does not start on your Mac, report it with your macOS version
   ([#190](https://github.com/0xPiranhaCodes/pinfold.sh/issues/190)).
 - **No update check.** To update, download the new `.dmg` and replace the app.
-- **An update can end running programs.** When the new window cannot speak to the session still
-  running from the old version, the next launch restarts the session, which restores its tabs and
-  directories but not what ran in them. If a pane is running a program, PinFold asks first, and
-  "Not now" keeps it running.
+- **An update can end running programs.** A new window speaks to a session still running from
+  the version before it ([ADR-0043](../adr/0043-window-serves-the-previous-link-version.md)). When
+  the update skips one or more versions and the window cannot, the next launch restarts the
+  session, which restores its tabs and directories but not what ran in them. If a pane is running
+  a program, PinFold asks first, and "Not now" keeps it running.
 
 ## Memory
 

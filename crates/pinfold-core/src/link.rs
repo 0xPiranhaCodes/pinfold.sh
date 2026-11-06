@@ -24,8 +24,8 @@ use mio::unix::SourceFd;
 use mio::{Interest, Token};
 use pinfold_proto::Frame;
 use pinfold_proto::link::{
-    self, Approval, ApprovalAnswer, Decoder, Notice, Refusal, Request, VERSION, encode_frame,
-    encode_layout,
+    self, Approval, ApprovalAction, ApprovalAnswer, Decoder, Notice, Refusal, Request, VERSION,
+    encode_frame, encode_layout,
 };
 use pinfold_sys::socket;
 
@@ -675,6 +675,14 @@ impl Reactor {
         window.is_some_and(|window| window.session.greeted)
     }
 
+    /// Returns whether a ready window can show a prompt for `action`: one of an older link
+    /// version cannot show what came after it (ADR-0043).
+    #[must_use]
+    pub fn can_ask(&self, action: ApprovalAction) -> bool {
+        let window = self.host.window.as_ref().filter(|w| w.session.greeted);
+        window.and_then(|window| window.decoder.version()) >= Some(action.since())
+    }
+
     /// Returns the process id of a window this reactor started, while its link is open.
     #[must_use]
     pub fn window_pid(&self) -> Option<u32> {
@@ -685,6 +693,9 @@ impl Reactor {
     ///
     /// Returns false when no ready window can show it or its bounded queue is full.
     pub fn ask_approval(&mut self, prompt: &Prompt) -> bool {
+        if !self.can_ask(prompt.action) {
+            return false;
+        }
         let (Ok(caller), Ok(target)) = (u32::try_from(prompt.caller), u32::try_from(prompt.target))
         else {
             return false;
@@ -780,7 +791,9 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
-    use pinfold_proto::link::{MAX_INPUT, MAX_MESSAGE, MAX_PANES, MAX_TABS, Rect, Side, SplitWay};
+    use pinfold_proto::link::{
+        MAX_INPUT, MAX_MESSAGE, MAX_PANES, MAX_TABS, OLDEST, Rect, Side, SplitWay,
+    };
     use proptest::prelude::*;
 
     use super::*;
@@ -1000,6 +1013,38 @@ mod tests {
         assert_link_ends_and_pty_lives(&mut reactor, pane);
         assert_eq!(reactor.take_other_version(), Some(VERSION + 1));
         assert_eq!(reactor.take_other_version(), None);
+    }
+
+    /// ADR-0043: a window one link version older is served, and never sent an owner prompt,
+    /// which its version does not have.
+    #[test]
+    fn an_older_window_is_served_without_what_it_cannot_read() {
+        let mut reactor = Reactor::new().unwrap();
+        let pane = reactor
+            .open_tab(shell("echo hi; sleep 30"), 24, 80)
+            .unwrap();
+        let mut peer = Peer::attach(&mut reactor);
+        peer.send(Request::Hello { version: OLDEST });
+        peer.fit(&reactor, pane);
+        serve(&mut reactor, &mut peer, |r, p| p.matches(r, pane));
+        assert!(reactor.is_window_ready());
+        assert_eq!(reactor.take_other_version(), None);
+        assert!(reactor.can_ask(ApprovalAction::Trust));
+        assert!(!reactor.can_ask(ApprovalAction::Owner));
+        let owner = Prompt {
+            id: 1,
+            caller: 0,
+            target: 0,
+            action: ApprovalAction::Owner,
+            texts: vec!["session.save".to_owned()],
+        };
+        assert!(!reactor.ask_approval(&owner));
+        let trust = Prompt {
+            action: ApprovalAction::Trust,
+            ..owner
+        };
+        assert!(reactor.ask_approval(&trust));
+        assert!(reactor.is_window_ready(), "the link ended");
     }
 
     #[test]

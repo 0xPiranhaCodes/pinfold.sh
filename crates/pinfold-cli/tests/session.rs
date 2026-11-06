@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
 use pinfold_api::control;
-use pinfold_proto::link::{ApprovalAction, ApprovalAnswer, Request, SplitWay, VERSION};
+use pinfold_proto::link::{ApprovalAction, ApprovalAnswer, OLDEST, Request, SplitWay, VERSION};
 use pinfold_sys::socket;
 use pinfold_ui::link::{Approval, Disconnect, Link};
 
@@ -354,8 +354,13 @@ fn a_session_outlives_its_client_and_says_when_the_core_dies() {
 
 /// Shell that writes the link's hello to descriptor 3.
 fn say_hello() -> Result<String> {
+    say_version(VERSION)
+}
+
+/// Shell that writes a hello of `version` to descriptor 3.
+fn say_version(version: u16) -> Result<String> {
     let mut wire = Vec::new();
-    let hello = Request::Hello { version: VERSION };
+    let hello = Request::Hello { version };
     hello.encode(&mut wire)?;
     let octal: String = wire.iter().map(|byte| format!("\\{byte:03o}")).collect();
     Ok(format!("printf '{octal}' >&3"))
@@ -395,12 +400,14 @@ fn two_launchers_at_once_share_one_core_and_one_window() {
     assert_eq!(session.read("starts").lines().count(), 1);
 }
 
-/// A window script that notes each core that starts it, and speaks another link version the
-/// first time, as the window of a newer install does, and this one after.
-fn updated_window() -> Result<String> {
+/// Link version of a window two updates newer, which no longer speaks this core's (ADR-0043).
+const NEXT: u16 = VERSION + 2;
+
+/// A window script that notes each core that starts it, and speaks `other` the first time, as
+/// the window of a newer install does, and this core's version after.
+fn updated_window(other: u16) -> Result<String> {
     let hello = say_hello()?;
-    let [low, high] = (VERSION + 1).to_le_bytes();
-    let other = format!("printf '\\003\\000\\000\\000\\000\\{low:03o}\\{high:03o}' >&3");
+    let other = say_version(other)?;
     Ok(format!(
         "cd \"$PINFOLD_TEST_CLIENT\"\n{NOTE_CORE}\necho $PPID >> cores\n\
          if [ -e updated ]; then {hello}; else : > updated; {other}; fi\n{STAY}"
@@ -409,21 +416,33 @@ fn updated_window() -> Result<String> {
 
 #[test]
 fn an_updated_window_restarts_a_core_at_a_prompt_and_opens() {
-    let session = Session::new("u", Some(&updated_window().unwrap())).unwrap();
+    let session = Session::new("u", Some(&updated_window(NEXT).unwrap())).unwrap();
     let launched = session.launch().unwrap();
     let error = String::from_utf8_lossy(&launched.stderr);
     assert!(launched.status.success(), "{error}");
-    let next = VERSION + 1;
-    let said = format!("restarting its session, link version {VERSION} to {next}");
+    let said = format!("restarting its session, link version {VERSION} to {NEXT}");
     assert!(error.contains(&said), "{error}");
     let cores = session.read("cores");
     let cores: Vec<_> = cores.lines().collect();
     assert!(cores.len() == 2 && cores[0] != cores[1], "{cores:?}");
 }
 
+/// ADR-0043: a window one version apart answers at the older version, and the session keeps
+/// its core. A window of version N+1 answers this core at its version, so the stub speaks N-1.
+#[test]
+fn a_window_one_version_apart_keeps_the_core() {
+    let session = Session::new("o", Some(&updated_window(OLDEST).unwrap())).unwrap();
+    let launched = session.launch().unwrap();
+    let error = String::from_utf8_lossy(&launched.stderr);
+    assert!(launched.status.success(), "{error}");
+    assert!(!error.contains("restarting"), "{error}");
+    let cores = session.read("cores");
+    assert_eq!(cores.lines().count(), 1, "{cores}");
+}
+
 #[test]
 fn an_updated_window_never_restarts_a_core_running_a_program_unasked() {
-    let session = Session::new("r", Some(&updated_window().unwrap())).unwrap();
+    let session = Session::new("r", Some(&updated_window(NEXT).unwrap())).unwrap();
     let mut core = session
         .start_core(
             &[],
@@ -437,8 +456,7 @@ fn an_updated_window_never_restarts_a_core_running_a_program_unasked() {
     assert!(error.contains("Not now keeps them running"), "{error}");
     assert!(core.try_wait().unwrap().is_none(), "the core was ended");
     // The core says why, with both versions.
-    let next = VERSION + 1;
-    let logged = format!("the window is link version {next} and this core {VERSION}");
+    let logged = format!("the window is link version {NEXT} and this core {VERSION}");
     assert!(
         session.read_log().contains(&logged),
         "{}",

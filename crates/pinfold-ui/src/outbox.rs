@@ -161,9 +161,15 @@ mod tests {
     const PANE: u32 = 3;
     const PATIENCE: Duration = Duration::from_secs(20);
 
+    /// A link whose core has said hello, which the window answers on its next turn.
     fn linked() -> (Link, UnixStream) {
-        let (ours, core) = UnixStream::pair().unwrap();
+        let (ours, mut core) = UnixStream::pair().unwrap();
         core.set_read_timeout(Some(PATIENCE)).unwrap();
+        let mut wire = Vec::new();
+        Notice::Hello { version: VERSION }
+            .encode(&mut wire)
+            .unwrap();
+        std::io::Write::write_all(&mut core, &wire).unwrap();
         (Link::new(ours.into()).unwrap(), core)
     }
 
@@ -261,9 +267,6 @@ mod tests {
         let (mut link, mut core) = linked();
         let (outbox, inbox) = channel();
         let mut wire = Vec::new();
-        Notice::Hello { version: VERSION }
-            .encode(&mut wire)
-            .unwrap();
         encode_layout(&mut wire, 0, PANE + 1, 1, &[PANE + 1], &[]).unwrap();
         std::io::Write::write_all(&mut core, &wire).unwrap();
         let start = Instant::now();
