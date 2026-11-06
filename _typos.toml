@@ -1,5 +1,7 @@
 [files]
-extend-exclude = ["docs/design/ui/", "LICENSE-*", "vendor/", "tests/conformance/esctest-pass.txt"]
+extend-exclude = ["docs/design/ui/", "LICENSE-*", "vendor/", "tests/conformance/esctest-pass.txt",
+    # insta snapshots: hex colours such as 909ba9 are not words.
+    "*.snap"]
 
 [default.extend-words]
 ratatui = "ratatui"

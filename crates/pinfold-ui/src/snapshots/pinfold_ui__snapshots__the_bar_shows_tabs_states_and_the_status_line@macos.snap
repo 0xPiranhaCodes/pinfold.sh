@@ -1,0 +1,51 @@
+---
+source: crates/pinfold-ui/src/snapshots.rs
+expression: cells(&frame)
+---
+| agent  ◆ needs you · approve the diff?    Fri 06 Nov  09:41|
+| ● work ⌘1  logs ⌘2  ◆ agent ⌘3 +             |
+|                                                            |
+0:0..1 fg e2e5ea bg 121212
+0:1..6 fg 9ba5b3 bg 121212
+0:6..8 fg e2e5ea bg 121212
+0:8..19 fg f5b544 bg 121212 bold
+0:19..39 fg 9ba5b3 bg 121212
+0:39..43 fg e2e5ea bg 121212
+0:43..55 fg 9ba5b3 bg 121212
+0:55..60 fg e2e5ea bg 121212
+1:0..1 fg 1c2026 bg 121212 tall
+1:1..2 fg e2e5ea bg 1c2026
+1:2..3 fg 7aa7ff bg 1c2026
+1:3..4 fg e2e5ea bg 1c2026
+1:4..8 fg b0b8c4 bg 1c2026
+1:8..9 fg e2e5ea bg 1c2026
+1:9..10 fg 121212 bg 1c2026
+1:10..12 fg 909ba9 bg 121212
+1:12..13 fg 121212 bg 1c2026
+1:13..14 fg 1c2026 bg 121212 tall
+1:14..15 fg e2e5ea bg 121212
+1:15..16 fg 1c2026 bg 121212 tall
+1:16..17 fg e2e5ea bg 1c2026
+1:17..21 fg b0b8c4 bg 1c2026
+1:21..22 fg e2e5ea bg 1c2026
+1:22..23 fg 121212 bg 1c2026
+1:23..25 fg 909ba9 bg 121212
+1:25..26 fg 121212 bg 1c2026
+1:26..27 fg 1c2026 bg 121212 tall
+1:27..28 fg e2e5ea bg 121212
+1:28..29 fg 253c3b bg 121212 tall
+1:29..30 fg e2e5ea bg 253c3b
+1:30..31 fg f5b544 bg 253c3b
+1:31..32 fg e2e5ea bg 253c3b
+1:32..37 fg 5cd6cb bg 253c3b bold
+1:37..38 fg e2e5ea bg 253c3b
+1:38..39 fg 121212 bg 253c3b
+1:39..41 fg b0b8c4 bg 121212
+1:41..42 fg 121212 bg 253c3b
+1:42..43 fg 253c3b bg 121212 tall
+1:43..44 fg e2e5ea bg 121212
+1:44..45 fg 1c2026 bg 121212 tall
+1:45..46 fg b0b8c4 bg 1c2026
+1:46..47 fg 1c2026 bg 121212 tall
+1:47..60 fg e2e5ea bg 121212
+2:0..60 fg e2e5ea bg 121212

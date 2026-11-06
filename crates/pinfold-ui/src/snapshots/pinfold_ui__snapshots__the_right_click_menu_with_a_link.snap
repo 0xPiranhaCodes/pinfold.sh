@@ -1,0 +1,80 @@
+---
+source: crates/pinfold-ui/src/snapshots.rs
+expression: cells(&frame)
+---
+|xxxxxxxxxxxxxxxxxxxx|
+|xx┌─────────────┐xxx|
+|xx│ Copy        │xxx|
+|xx│ Paste       │xxx|
+|xx│ Select All  │xxx|
+|xx│ Find        │xxx|
+|xx│ Split Right │xxx|
+|xx│ Split Down  │xxx|
+|xx│ New Tab     │xxx|
+|xx│ Zoom Pane   │xxx|
+|xx│ Close Pane  │xxx|
+|xx│ Open Link   │xxx|
+|xx│ Copy Link   │xxx|
+|xx└─────────────┘xxx|
+0:0..20 fg e2e5ea bg 121212
+1:0..2 fg e2e5ea bg 121212
+1:2..17 fg 909ba9 bg 1c2026
+1:17..20 fg e2e5ea bg 121212
+2:0..2 fg e2e5ea bg 121212
+2:2..3 fg 909ba9 bg 1c2026
+2:3..16 fg 5cd6cb bg 253c3b
+2:16..17 fg 909ba9 bg 1c2026
+2:17..20 fg e2e5ea bg 121212
+3:0..2 fg e2e5ea bg 121212
+3:2..3 fg 909ba9 bg 1c2026
+3:3..16 fg e2e5ea bg 1c2026
+3:16..17 fg 909ba9 bg 1c2026
+3:17..20 fg e2e5ea bg 121212
+4:0..2 fg e2e5ea bg 121212
+4:2..3 fg 909ba9 bg 1c2026
+4:3..16 fg e2e5ea bg 1c2026
+4:16..17 fg 909ba9 bg 1c2026
+4:17..20 fg e2e5ea bg 121212
+5:0..2 fg e2e5ea bg 121212
+5:2..3 fg 909ba9 bg 1c2026
+5:3..16 fg e2e5ea bg 1c2026
+5:16..17 fg 909ba9 bg 1c2026
+5:17..20 fg e2e5ea bg 121212
+6:0..2 fg e2e5ea bg 121212
+6:2..3 fg 909ba9 bg 1c2026
+6:3..16 fg e2e5ea bg 1c2026
+6:16..17 fg 909ba9 bg 1c2026
+6:17..20 fg e2e5ea bg 121212
+7:0..2 fg e2e5ea bg 121212
+7:2..3 fg 909ba9 bg 1c2026
+7:3..16 fg e2e5ea bg 1c2026
+7:16..17 fg 909ba9 bg 1c2026
+7:17..20 fg e2e5ea bg 121212
+8:0..2 fg e2e5ea bg 121212
+8:2..3 fg 909ba9 bg 1c2026
+8:3..16 fg e2e5ea bg 1c2026
+8:16..17 fg 909ba9 bg 1c2026
+8:17..20 fg e2e5ea bg 121212
+9:0..2 fg e2e5ea bg 121212
+9:2..3 fg 909ba9 bg 1c2026
+9:3..16 fg e2e5ea bg 1c2026
+9:16..17 fg 909ba9 bg 1c2026
+9:17..20 fg e2e5ea bg 121212
+10:0..2 fg e2e5ea bg 121212
+10:2..3 fg 909ba9 bg 1c2026
+10:3..16 fg e2e5ea bg 1c2026
+10:16..17 fg 909ba9 bg 1c2026
+10:17..20 fg e2e5ea bg 121212
+11:0..2 fg e2e5ea bg 121212
+11:2..3 fg 909ba9 bg 1c2026
+11:3..16 fg e2e5ea bg 1c2026
+11:16..17 fg 909ba9 bg 1c2026
+11:17..20 fg e2e5ea bg 121212
+12:0..2 fg e2e5ea bg 121212
+12:2..3 fg 909ba9 bg 1c2026
+12:3..16 fg e2e5ea bg 1c2026
+12:16..17 fg 909ba9 bg 1c2026
+12:17..20 fg e2e5ea bg 121212
+13:0..2 fg e2e5ea bg 121212
+13:2..17 fg 909ba9 bg 1c2026
+13:17..20 fg e2e5ea bg 121212
