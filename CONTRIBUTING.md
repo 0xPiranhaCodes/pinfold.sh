@@ -158,7 +158,8 @@ we want but do not have links to its issue.
   (`crates/pinfold-core/tests/grid_snapshots.rs`, files in `tests/snapshots/`). Run
   `INSTA_UPDATE=always cargo test` to rewrite a changed snapshot, then review the diff.
   The window's chrome as cells, from pane borders, the bar and its status line, an
-  approval prompt and the right-click menu, is in `crates/pinfold-ui/src/snapshots.rs`.
+  approval prompt and the right-click menu, is in `crates/pinfold-ui/src/snapshots.rs`;
+  the bar's snapshot is per system, so a change to it needs `@macos` and `@linux` rewritten.
   Tool panes and API responses are still to come
   ([#233](https://github.com/0xPiranhaCodes/pinfold.sh/issues/233)).
 - **Approval-prompt tests** prove that only the window's keyboard answers a prompt:

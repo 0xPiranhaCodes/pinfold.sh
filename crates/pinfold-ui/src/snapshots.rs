@@ -108,7 +108,10 @@ fn the_bar_shows_tabs_states_and_the_status_line() {
         inset: 1,
     };
     top_bar::draw(&mut frame, &bar);
-    insta::assert_snapshot!(cells(&frame));
+    // A tab's key hint is `⌘1` on macOS and `1` elsewhere, so each system has its own snapshot.
+    insta::with_settings!({snapshot_suffix => std::env::consts::OS}, {
+        insta::assert_snapshot!(cells(&frame));
+    });
 }
 
 #[test]
