@@ -255,6 +255,24 @@ fn a_closed_key_block_above_the_cut_leaves_the_rest_alone() {
 }
 
 #[test]
+fn an_end_line_without_its_begin_redacts_what_came_before_it() {
+    let label: String = ["OPENSSH", "PRIVATE", "KEY"].join(" ");
+    // As when a read's byte cap took the BEGIN line.
+    let text: String = format!("cut-tail\n-----END {label}-----\n$ ls");
+    assert_eq!(
+        redact_last_lines(&text, usize::MAX),
+        "«redacted:private-key»\n$ ls"
+    );
+    assert_eq!(redact_last_lines(&text, 2), "«redacted:private-key»\n$ ls");
+    assert_eq!(redact_last_lines(&text, 1), "$ ls");
+    let certificate: &str = "-----END CERTIFICATE-----\nok";
+    assert!(matches!(
+        redact_last_lines(certificate, 2),
+        Cow::Borrowed(_)
+    ));
+}
+
+#[test]
 fn key_value_pairs_keep_the_key_and_separator() {
     let input = "PASSWORD=one passwd:two secret = three token:\"four\" api_key='five'";
     let expected = "PASSWORD=«redacted:password» passwd:«redacted:password» secret = «redacted:password» token:\"«redacted:password»\" api_key='«redacted:password»'";

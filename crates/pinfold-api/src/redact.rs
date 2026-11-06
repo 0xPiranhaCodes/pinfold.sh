@@ -96,7 +96,8 @@ pub fn redact(text: &str) -> Cow<'_, str> {
 
 /// Redacts the last `lines` lines of `text`, using the lines above them only as context, so a
 /// read cut inside a private-key block still hides the rest of the block. Callers pass up to
-/// [`KEY_CONTEXT`] lines more than they return.
+/// [`KEY_CONTEXT`] lines more than they return. A private-key END line with no BEGIN before it
+/// in `text` means the block began before it, so everything up to that line is redacted too.
 ///
 /// ```
 /// use pinfold_api::redact_last_lines;
@@ -119,7 +120,10 @@ pub fn redact_last_lines(text: &str, lines: usize) -> Cow<'_, str> {
     let mut index: usize = 0;
     let end_marker: Vec<u8> = loop {
         if index >= above.len() {
-            return redact(tail);
+            return match orphan_end(tail.as_bytes()) {
+                Some(end) => Cow::Owned(after_key(&tail[end..])),
+                None => redact(tail),
+            };
         }
         match private_key_end_marker(above, index) {
             Some(marker) => match find_bytes(above, index, &marker) {
@@ -129,13 +133,40 @@ pub fn redact_last_lines(text: &str, lines: usize) -> Cow<'_, str> {
             None => index += 1,
         }
     };
-    let rest: &str = &tail[key_end(tail.as_bytes(), 0, &end_marker)..];
-    let mut redacted: String = String::with_capacity(tail.len());
+    Cow::Owned(after_key(&tail[key_end(tail.as_bytes(), 0, &end_marker)..]))
+}
+
+/// A private-key marker followed by `rest` redacted.
+fn after_key(rest: &str) -> String {
+    let mut redacted: String = String::with_capacity(rest.len() + 24);
     redacted.push_str("«redacted:");
     redacted.push_str(Kind::PrivateKey.as_str());
     redacted.push('»');
     redacted.push_str(&redact(rest));
-    Cow::Owned(redacted)
+    redacted
+}
+
+/// Where a private-key END line ends when it comes before any BEGIN, as when a read lost the
+/// BEGIN to its byte cap: the text from the start through it is taken as the key, failing closed.
+fn orphan_end(bytes: &[u8]) -> Option<usize> {
+    const END: &[u8] = b"-----END ";
+    let mut index: usize = 0;
+    while index < bytes.len() {
+        if private_key_end_marker(bytes, index).is_some() {
+            return None;
+        }
+        if bytes[index..].starts_with(END) {
+            let label_start: usize = index + END.len();
+            let label_end: usize = (label_start..bytes.len().min(label_start + 64))
+                .find(|&at| matches!(bytes[at], b'-' | b'\n'))
+                .unwrap_or(label_start);
+            if contains_ignore_case(&bytes[label_start..label_end], b"PRIVATE KEY") {
+                return Some(key_end(bytes, index, &bytes[index..label_end]));
+            }
+        }
+        index += 1;
+    }
+    None
 }
 
 /// Lines above a cut read for [`redact_last_lines`]. The longest common key is RSA 8192 in
