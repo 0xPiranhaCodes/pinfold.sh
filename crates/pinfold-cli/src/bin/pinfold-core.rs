@@ -13,9 +13,9 @@ use pinfold_api::Log;
 use pinfold_api::control::{
     self, Control, Method, Request, Subscriber, Topics, Until, Wait, Workspace,
 };
-use pinfold_api::redact;
 use pinfold_api::spawn::Place;
 use pinfold_api::trust::{self, State};
+use pinfold_api::{KEY_CONTEXT, redact, redact_last_lines};
 use pinfold_cli::audit;
 use pinfold_cli::output;
 use pinfold_config::Agent;
@@ -91,6 +91,13 @@ fn pane_action(reactor: &mut Reactor, method: &Method, cross_pane: bool) -> Resu
         }
     };
     match method {
+        // Lines above the cut tell redaction whether it falls inside a key block.
+        Method::PaneRead { pane, lines } if cross_pane => {
+            let text = reactor
+                .read(*pane, lines.map(|lines| lines.saturating_add(KEY_CONTEXT)))
+                .ok_or("no such pane")?;
+            Ok(json!({"text": redact_last_lines(&text, lines.unwrap_or(usize::MAX))}))
+        }
         Method::PaneRead { pane, lines } => {
             let text = reactor.read(*pane, *lines).ok_or("no such pane")?;
             Ok(json!({"text": clean(text)}))
