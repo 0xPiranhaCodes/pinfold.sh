@@ -91,6 +91,15 @@ jobs:
       - run: cargo install cargo-fuzz --version 0.13.2 --locked
       - run: cargo xtask fuzz-smoke
 
+  esctest:
+    runs-on: ubuntu-latest
+    # A full run takes about 2 minutes, most of it waiting on queries the engine leaves
+    # unanswered.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: tests/conformance/esctest.sh
+
   mem-gate:
     strategy:
       fail-fast: false
