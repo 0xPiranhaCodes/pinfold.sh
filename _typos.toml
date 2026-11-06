@@ -1,5 +1,5 @@
 [files]
-extend-exclude = ["docs/design/ui/", "LICENSE-*", "vendor/"]
+extend-exclude = ["docs/design/ui/", "LICENSE-*", "vendor/", "tests/conformance/esctest-pass.txt"]
 
 [default.extend-words]
 ratatui = "ratatui"

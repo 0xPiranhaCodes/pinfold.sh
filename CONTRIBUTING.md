@@ -163,13 +163,22 @@ we want but do not have links to its issue.
   [threat model](docs/design/threat-model.md#controls-and-their-tests) names the test for
   each control of T1–T10, or says it is untested
   ([#234](https://github.com/0xPiranhaCodes/pinfold.sh/issues/234)).
+- **Conformance**: `tests/conformance/esctest.sh` runs esctest2 against the VT engine
+  and compares the tests that pass with `tests/conformance/esctest-pass.txt`. A listed
+  test that fails exits 1; a newly passing one is printed, and `--update` rewrites the
+  list. It needs `git` and `python3`, fetches esctest2 (GPL-2.0, run as a separate
+  program, never vendored) at a pinned commit into `target/esctest/`, and takes about
+  2 minutes. The log is `target/esctest/esctest.log`. To rerun some tests, run
+  `target/debug/esctest-driver python3 target/esctest/esctest2-*/esctest/esctest.py
+  --include REGEX --no-print-logs --logfile FILE`. CI runs it on Linux, and the list comes from Linux.
+  `esctest-driver` answers esctest's DECRQCRA screen reads from the engine's grid,
+  characters only. vttest is not run: it draws screens for a person to judge and has no
+  pass or fail output to script.
 
 Not built yet:
 
 - **Golden images** of renderer output
   ([#232](https://github.com/0xPiranhaCodes/pinfold.sh/issues/232)).
-- **Conformance** runs of vttest and esctest against a tracked pass list. `tests/lib.rs`
-  is where the harness will go ([#231](https://github.com/0xPiranhaCodes/pinfold.sh/issues/231)).
 - **Recorded agent sessions** for status detection, which is tested with hand-written
   bytes today ([#236](https://github.com/0xPiranhaCodes/pinfold.sh/issues/236)).
 

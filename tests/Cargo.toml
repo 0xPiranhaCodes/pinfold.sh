@@ -10,5 +10,14 @@ publish.workspace = true
 [lib]
 path = "lib.rs"
 
+[[bin]]
+name = "esctest-driver"
+path = "conformance/driver.rs"
+
+[dependencies]
+pinfold-core = { path = "../crates/pinfold-core", version = "0.1.0-beta.1" }
+pinfold-proto = { path = "../crates/pinfold-proto", version = "0.1.0-beta.1" }
+pinfold-sys = { path = "../crates/pinfold-sys", version = "0.1.0-beta.1" }
+
 [lints]
 workspace = true

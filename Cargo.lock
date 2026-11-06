@@ -1403,6 +1403,11 @@ dependencies = [
 [[package]]
 name = "pinfold-tests"
 version = "0.1.0-beta.1"
+dependencies = [
+ "pinfold-core",
+ "pinfold-proto",
+ "pinfold-sys",
+]
 
 [[package]]
 name = "pinfold-tools"
