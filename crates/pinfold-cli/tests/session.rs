@@ -1086,14 +1086,17 @@ fn approval_api_process() {
     );
     note(directory.join("second-denied"), "yes").unwrap();
 
+    // Eight lines cut inside the key block, whether or not the echo of "approved" is in.
     let read = serde_json::json!({"jsonrpc": "2.0", "id": 2, "method": "pane.read",
-        "params": {"pane": 1}});
+        "params": {"pane": 1, "lines": 8}});
     let mut reading = api(&[read]).unwrap();
     let _ = next(&mut reading, || Ok(())).unwrap();
     let read = next(&mut reading, || Ok(())).unwrap();
     let text = read["result"]["text"].as_str().unwrap();
     assert!(text.contains("«redacted:password»"), "{text}");
     assert!(!text.contains("hunter2"), "{text}");
+    assert!(text.starts_with("«redacted:private-key»\n"), "{text}");
+    assert!(!text.contains("cut-key-row"), "{text}");
     note(directory.join("redacted"), "yes").unwrap();
 }
 
@@ -1163,7 +1166,9 @@ fn only_the_window_answers_cross_pane_actions_and_ctl_revokes_grants() {
     let script = format!(
         "#!/bin/sh\nif mkdir \"$PINFOLD_TEST_CLIENT/first\" 2>/dev/null; then \
          exec '{}' --exact --ignored approval_api_process; else echo yes > \"$PINFOLD_TEST_CLIENT/second\"; \
-         echo 'password=hunter2'; \
+         echo '-----BEGIN OPENSSH PRIVATE KEY-----'; \
+         for row in 0 1 2 3 4 5 6 7 8 9; do echo cut-key-row-$row; done; \
+         echo '-----END OPENSSH PRIVATE KEY-----'; echo 'password=hunter2'; \
          while read -r line; do echo \"$line\" >> \"$PINFOLD_TEST_CLIENT/received\"; done; fi\n",
         exe.display()
     );

@@ -94,6 +94,54 @@ pub fn redact(text: &str) -> Cow<'_, str> {
     }
 }
 
+/// Redacts the last `lines` lines of `text`, using the lines above them only as context, so a
+/// read cut inside a private-key block still hides the rest of the block. Callers pass up to
+/// [`KEY_CONTEXT`] lines more than they return.
+///
+/// ```
+/// use pinfold_api::redact_last_lines;
+///
+/// let text = "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\nBBBB\n-----END OPENSSH PRIVATE KEY-----\n$ ls";
+/// assert_eq!(redact_last_lines(text, 3), "«redacted:private-key»\n$ ls");
+/// assert_eq!(redact_last_lines(text, 1), "$ ls");
+/// ```
+pub fn redact_last_lines(text: &str, lines: usize) -> Cow<'_, str> {
+    let cut: usize = match lines.checked_sub(1) {
+        None => text.len(),
+        Some(skipped) => text
+            .rmatch_indices('\n')
+            .nth(skipped)
+            .map_or(0, |(at, _)| at + 1),
+    };
+    let (above, tail) = text.split_at(cut);
+    let above: &[u8] = above.as_bytes();
+    // Walk the key blocks above as `redact` would, to find one still open at the cut.
+    let mut index: usize = 0;
+    let end_marker: Vec<u8> = loop {
+        if index >= above.len() {
+            return redact(tail);
+        }
+        match private_key_end_marker(above, index) {
+            Some(marker) => match find_bytes(above, index, &marker) {
+                Some(at) => index = at + marker.len(),
+                None => break marker,
+            },
+            None => index += 1,
+        }
+    };
+    let rest: &str = &tail[key_end(tail.as_bytes(), 0, &end_marker)..];
+    let mut redacted: String = String::with_capacity(tail.len());
+    redacted.push_str("«redacted:");
+    redacted.push_str(Kind::PrivateKey.as_str());
+    redacted.push('»');
+    redacted.push_str(&redact(rest));
+    Cow::Owned(redacted)
+}
+
+/// Lines above a cut read for [`redact_last_lines`]. The longest common key is RSA 8192 in
+/// PKCS#8, 100 lines from BEGIN to END, so this reaches its BEGIN from any cut inside it.
+pub const KEY_CONTEXT: usize = 128;
+
 fn match_at(bytes: &[u8], index: usize) -> Option<(usize, usize, Kind)> {
     private_key_at(bytes, index)
         .map(|end| (index, end, Kind::PrivateKey))
@@ -142,6 +190,13 @@ fn is_uri_scheme(byte: u8) -> bool {
 }
 
 fn private_key_at(bytes: &[u8], index: usize) -> Option<usize> {
+    let end_marker: Vec<u8> = private_key_end_marker(bytes, index)?;
+    // Without its END line, the rest of the text is the key.
+    Some(key_end(bytes, index, &end_marker))
+}
+
+/// The END line that closes a private-key BEGIN line at `index`.
+fn private_key_end_marker(bytes: &[u8], index: usize) -> Option<Vec<u8>> {
     const BEGIN: &[u8] = b"-----BEGIN ";
     if !bytes.get(index..)?.starts_with(BEGIN) {
         return None;
@@ -156,16 +211,19 @@ fn private_key_at(bytes: &[u8], index: usize) -> Option<usize> {
     }
     let mut end_marker: Vec<u8> = b"-----END ".to_vec();
     end_marker.extend_from_slice(label);
-    // Without its END line, the rest of the text is the key.
-    let found: Option<usize> = find_bytes(bytes, label_end, &end_marker);
-    Some(found.map_or(bytes.len(), |at| {
+    Some(end_marker)
+}
+
+/// Where a key block searched from `start` ends: after its END line, or at the end of the text.
+fn key_end(bytes: &[u8], start: usize, end_marker: &[u8]) -> usize {
+    find_bytes(bytes, start, end_marker).map_or(bytes.len(), |at| {
         let after: usize = at + end_marker.len();
         after
             + bytes[after..]
                 .iter()
                 .take_while(|&&byte| byte == b'-')
                 .count()
-    }))
+    })
 }
 
 fn contains_ignore_case(haystack: &[u8], needle: &[u8]) -> bool {

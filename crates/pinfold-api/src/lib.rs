@@ -8,4 +8,4 @@ pub mod trust;
 pub mod workspace;
 
 pub use audit::{Broken, Entry, Error, Log, Outcome, Record, verify_file};
-pub use redact::{Kind, redact};
+pub use redact::{KEY_CONTEXT, Kind, redact, redact_last_lines};
