@@ -392,6 +392,8 @@ pub struct Control {
     _lock: File,
     /// [`IDLE`], shorter in tests.
     idle: Duration,
+    /// The only peer UID served: the core's own, another in tests.
+    user: u32,
 }
 
 impl Control {
@@ -433,6 +435,7 @@ impl Control {
             listener,
             _lock: lock,
             idle: IDLE,
+            user: pinfold_sys::effective_uid(),
         })
     }
 
@@ -555,9 +558,7 @@ impl Control {
             let Some(slot) = peers.iter().position(Option::is_none) else {
                 continue;
             };
-            let ours = pinfold_sys::peer_uid(stream.as_fd())
-                .is_ok_and(|uid| uid == pinfold_sys::effective_uid());
-            if !ours {
+            if check_peer(stream.as_fd(), self.user).is_err() {
                 continue;
             }
             // Unreadable is unidentified.
@@ -2103,6 +2104,24 @@ mod tests {
         ));
         drop(ours);
         assert_eq!(theirs.read(&mut [0; 8]).unwrap(), 0);
+    }
+
+    #[test]
+    fn the_core_closes_another_users_connection_unread() {
+        let directory = fresh();
+        let mut control = Control::bind(&directory).unwrap();
+        control.user = pinfold_sys::effective_uid().wrapping_add(1);
+        thread::spawn(move || control.serve(serving(Ok(json!({})))));
+        let mut stream = UnixStream::connect(socket_path(&directory)).unwrap();
+        let _ = stream.write_all(HELLO);
+        let _ = stream.write_all(b"\n");
+        stream.set_read_timeout(Some(PATIENCE)).unwrap();
+        // Linux reports a close that left the hello unread as a reset.
+        match stream.read(&mut [0; 8]) {
+            Ok(0) => {}
+            Err(error) if error.kind() == io::ErrorKind::ConnectionReset => {}
+            other => panic!("the core answered another user: {other:?}"),
+        }
     }
 
     #[test]
