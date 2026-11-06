@@ -1,0 +1,9 @@
+---
+source: crates/pinfold-core/tests/grid_snapshots.rs
+expression: grid(&back)
+---
+cursor Some((0, 4))
+|main      |
+|          |
+|          |
+|          |

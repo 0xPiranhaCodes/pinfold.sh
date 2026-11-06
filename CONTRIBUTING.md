@@ -152,9 +152,12 @@ we want but do not have links to its issue.
   repository layouts (`workspace_layout`) and the user config parser (`config`). The
   markdown renderer and unified-diff parser have none yet
   ([#235](https://github.com/0xPiranhaCodes/pinfold.sh/issues/235)).
-- **Snapshot tests** (`insta`) cover OSC 133 and OSC 7 parsing only
-  (`crates/pinfold-core/tests/shell_marks.rs`). Grid states, rendered cells, tool panes
-  and API responses are still to come
+- **Snapshot tests** (`insta`) cover OSC 133 and OSC 7 parsing
+  (`crates/pinfold-core/tests/shell_marks.rs`) and the VT grid after plain text, wrapping,
+  a scroll region, the alternate screen, SGR attributes and wide characters
+  (`crates/pinfold-core/tests/grid_snapshots.rs`, files in `tests/snapshots/`). Run
+  `INSTA_UPDATE=always cargo test` to rewrite a changed snapshot, then review the diff.
+  Rendered cells, tool panes and API responses are still to come
   ([#233](https://github.com/0xPiranhaCodes/pinfold.sh/issues/233)).
 - **Approval-prompt tests** prove that only the window's keyboard answers a prompt:
   `no_api_method_can_answer_an_approval_prompt` in `crates/pinfold-api/src/control.rs`,

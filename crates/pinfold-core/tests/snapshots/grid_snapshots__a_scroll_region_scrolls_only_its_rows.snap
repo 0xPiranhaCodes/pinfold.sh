@@ -1,0 +1,9 @@
+---
+source: crates/pinfold-core/tests/grid_snapshots.rs
+expression: "grid(b\"top\\r\\na\\r\\nb\\r\\nfoot\\x1b[2;3r\\x1b[3;1Hc\\r\\nd\\r\\ne\")"
+---
+cursor Some((2, 1))
+|top       |
+|d         |
+|e         |
+|foot      |
