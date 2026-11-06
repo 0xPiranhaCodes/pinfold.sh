@@ -18,5 +18,8 @@ back to the bytes it came from, or if an applied frame's cells do not fit its si
 fails on a panic, an out-of-memory or a hang, or if a snapshot that passed its check does not
 rebuild into a session.
 
+`config` parses any bytes as the user config file. It fails on a panic, an out-of-memory or
+a hang. Its seeds in `seeds/config/` are the examples in `docs/configuration.md`.
+
 `vt.dict` holds the escape sequences a mutator rarely writes by chance. It uses libFuzzer's
 format, which only knows the escapes `\\`, `\"` and `\xNN`.

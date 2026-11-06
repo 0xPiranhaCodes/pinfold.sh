@@ -60,6 +60,8 @@ cargo +nightly-2026-10-15 fuzz run vt_input -- -dict=fuzz/vt.dict -max_total_tim
 
 `cargo xtask fuzz-smoke` runs every target for 30 seconds, which is what CI does on each
 PR. Nightly runs it for 30 minutes with `FUZZ_SECONDS=1800`. Any crash is a release blocker.
+A target with a folder in `fuzz/seeds/` starts from those committed inputs as well as
+`fuzz/corpus/`.
 
 ### The memory gate
 
@@ -146,9 +148,9 @@ we want but do not have links to its issue.
   reflow (`crates/pinfold-core/tests/`).
 - **Fuzz targets** in `fuzz/fuzz_targets/` cover the VT input path (`vt_input`), the
   window link decoder (`link`), the control socket's JSON-RPC requests (`api_request`,
-  `api_params`), the paste sanitizer (`paste`), session snapshots (`session_snapshot`) and
-  repository layouts (`workspace_layout`). The config parser, markdown renderer and
-  unified-diff parser have none yet
+  `api_params`), the paste sanitizer (`paste`), session snapshots (`session_snapshot`),
+  repository layouts (`workspace_layout`) and the user config parser (`config`). The
+  markdown renderer and unified-diff parser have none yet
   ([#235](https://github.com/0xPiranhaCodes/pinfold.sh/issues/235)).
 - **Snapshot tests** (`insta`) cover OSC 133 and OSC 7 parsing only
   (`crates/pinfold-core/tests/shell_marks.rs`). Grid states, rendered cells, tool panes

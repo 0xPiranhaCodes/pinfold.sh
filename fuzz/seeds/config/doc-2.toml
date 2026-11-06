@@ -1,0 +1,2 @@
+[api]
+protect = ["kubectl exec", "docker exec", "psql", "aws ssm", "mysql -h prod-db"]
