@@ -15,6 +15,10 @@ name = "scrollback"
 path = "scrollback.rs"
 
 [[bin]]
+name = "read"
+path = "read.rs"
+
+[[bin]]
 name = "echo"
 path = "echo.rs"
 

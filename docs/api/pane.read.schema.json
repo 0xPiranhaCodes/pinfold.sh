@@ -9,7 +9,7 @@
       "required": ["pane"],
       "properties": {
         "pane": { "type": "integer", "minimum": 0, "description": "The target pane. A pane outside the self and children scopes raises a keyboard-only window prompt." },
-        "lines": { "type": ["integer", "null"], "minimum": 0, "description": "Only the last this many lines. Wrapped rows join into one line." }
+        "lines": { "type": ["integer", "null"], "minimum": 0, "description": "Only the last this many lines. Wrapped rows join into one line. The core copies only the rows near the end that hold them, so a short read costs the same however long the history is." }
       }
     },
     "result": {
