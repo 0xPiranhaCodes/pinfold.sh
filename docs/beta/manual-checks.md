@@ -9,7 +9,13 @@ one was there. Record each run in the [results](#results) table.
 ## 1. Install and first launch
 
 1. Open `PinFold.dmg`. Expected: a window with `PinFold.app` and an `Applications` link.
-2. Drag `PinFold.app` onto `Applications`, then eject the disk image.
+2. Double-click `PinFold.app` on the disk image. Expected: a dialog says PinFold cannot run from a
+   disk image or another read-only place and to drag it to Applications, and no `pinfold-core`
+   runs (`pgrep -fl pinfold-core` in Terminal.app prints nothing from `/Volumes`)
+   ([#279](https://github.com/0xPiranhaCodes/pinfold.sh/issues/279)).
+   Drag `PinFold.app` onto `Applications`, then eject the disk image. Note in the results whether
+   the first drag moved the icon. `bash tests/macos/dmg-eject.sh PinFold.dmg [old.dmg]` runs the
+   rest of #279's matrix without dragging.
 3. Open PinFold from Applications. Expected: macOS asks whether to open an app downloaded from
    the Internet, and names no unidentified developer and no damage. Choose Open. A PinFold window
    opens with one shell.

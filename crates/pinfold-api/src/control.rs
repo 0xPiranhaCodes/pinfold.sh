@@ -101,6 +101,10 @@ pub const FIRST_OPEN_WAIT: Duration = Duration::from_secs(10);
 const MAX_REPLY: u64 = MAX_OUTPUT as u64;
 /// Longest a client waits for an answer, including a cross-pane approval prompt.
 const REPLY_WAIT: Duration = Duration::from_secs(APPROVAL_WAIT.as_secs() + OPEN_WAIT.as_secs());
+/// Longest a launcher waits for `hello` and then `window.open`, which the core answers within
+/// [`FIRST_OPEN_WAIT`]. Past it the core is hung, as one is whose disk image was ejected (#279).
+const OPEN_REPLY_WAIT: Duration =
+    Duration::from_secs(FIRST_OPEN_WAIT.as_secs() + OPEN_WAIT.as_secs());
 
 const PARSE_ERROR: i64 = -32700;
 const NOT_A_REQUEST: i64 = -32600;
@@ -777,11 +781,11 @@ fn result(line: &[u8]) -> Result<Value, Error> {
 /// # Errors
 ///
 /// [`Error::WrongPeer`] for another user's socket, [`Error::Refused`] if the core says no, and
-/// [`Error::Io`] if it does not answer.
+/// [`Error::Io`] if it does not answer within 12 seconds.
 pub fn open_window(stream: &UnixStream) -> Result<Value, Error> {
     check_peer(stream.as_fd(), pinfold_sys::effective_uid())?;
-    stream.set_read_timeout(Some(REPLY_WAIT))?;
-    stream.set_write_timeout(Some(REPLY_WAIT))?;
+    stream.set_read_timeout(Some(OPEN_REPLY_WAIT))?;
+    stream.set_write_timeout(Some(OPEN_REPLY_WAIT))?;
     let hello = json!({"version": OLDEST});
     let hello = json!({"jsonrpc": "2.0", "id": 1, "method": "hello", "params": hello});
     call(stream, &hello)?;
