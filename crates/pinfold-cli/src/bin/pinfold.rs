@@ -6,6 +6,7 @@ use std::error::Error;
 use std::io::{ErrorKind, IsTerminal, Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::thread;
@@ -400,12 +401,20 @@ fn core(directory: &Path, arguments: &[&str]) -> Result<UnixStream, Box<dyn Erro
     let log = control::start_log(directory).map_or_else(|_| Stdio::null(), Stdio::from);
     let mut command = Command::new(&binary);
     command.args(arguments);
-    pinfold_sys::spawn_detached(command, log)
+    let mut started = pinfold_sys::spawn_detached(command, log)
         .map_err(|error| format!("cannot start {}: {error}", binary.display()))?;
     let start = Instant::now();
     while start.elapsed() < START_WAIT {
         if let Some(stream) = connect(path)? {
             return Ok(stream);
+        }
+        // A core killed before it answered, as macOS's Gatekeeper may kill an unsigned build at
+        // exec (#288), is not waited for. One that exits, as a second core does on the lock, is.
+        if let Some(status) = started
+            .try_wait()?
+            .filter(|status| status.signal().is_some())
+        {
+            return Err(format!("the core was killed before it answered: {status}").into());
         }
         thread::sleep(POLL);
     }
