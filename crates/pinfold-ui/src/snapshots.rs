@@ -49,7 +49,7 @@ fn describe(cell: Cell) -> String {
     text
 }
 
-fn pane(character: char, rows: u16, columns: u16) -> Frame {
+pub(crate) fn pane(character: char, rows: u16, columns: u16) -> Frame {
     let cell = Cell {
         character,
         foreground: 0x00e2_e5ea,
@@ -63,8 +63,8 @@ fn pane(character: char, rows: u16, columns: u16) -> Frame {
     }
 }
 
-#[test]
-fn borders_between_three_panes_with_the_focused_one_accented() {
+/// Three panes, the focused one accented.
+pub(crate) fn borders() -> Frame {
     let rect = |x, y, columns, rows| Rect {
         x,
         y,
@@ -78,11 +78,16 @@ fn borders_between_three_panes_with_the_focused_one_accented() {
         blit(&mut grid, &pane(character, rect.rows, rect.columns), *rect);
     }
     dividers(&mut grid, &rects, Some(rects[2]));
-    insta::assert_snapshot!(cells(&grid));
+    grid
 }
 
 #[test]
-fn the_bar_shows_tabs_states_and_the_status_line() {
+fn borders_between_three_panes_with_the_focused_one_accented() {
+    insta::assert_snapshot!(cells(&borders()));
+}
+
+/// Tabs in three states and a status line.
+pub(crate) fn bar() -> Frame {
     let tabs = ["work", "logs", "agent"];
     // Running, idle and needs you, as `tab_state` numbers them.
     let states = [1, 4, 0];
@@ -108,14 +113,20 @@ fn the_bar_shows_tabs_states_and_the_status_line() {
         inset: 1,
     };
     top_bar::draw(&mut frame, &bar);
+    frame
+}
+
+#[test]
+fn the_bar_shows_tabs_states_and_the_status_line() {
+    let frame = bar();
     // A tab's key hint is `⌘1` on macOS and `1` elsewhere, so each system has its own snapshot.
     insta::with_settings!({snapshot_suffix => std::env::consts::OS}, {
         insta::assert_snapshot!(cells(&frame));
     });
 }
 
-#[test]
-fn an_approval_prompt_names_both_panes_and_the_exact_send() {
+/// A prompt to approve one pane sending to another.
+pub(crate) fn approval() -> Frame {
     let mut queue = Queue::default();
     let send = Approval {
         id: 7,
@@ -127,7 +138,12 @@ fn an_approval_prompt_names_both_panes_and_the_exact_send() {
     assert_eq!(queue.add(send), None);
     let mut frame = pane('x', 6, 80);
     queue.draw(&mut frame, Instant::now());
-    insta::assert_snapshot!(cells(&frame));
+    frame
+}
+
+#[test]
+fn an_approval_prompt_names_both_panes_and_the_exact_send() {
+    insta::assert_snapshot!(cells(&approval()));
 }
 
 #[test]

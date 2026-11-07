@@ -5,3 +5,4 @@ extend-exclude = ["docs/design/ui/", "LICENSE-*", "vendor/", "tests/conformance/
 
 [default.extend-words]
 ratatui = "ratatui"
+flate = "flate"

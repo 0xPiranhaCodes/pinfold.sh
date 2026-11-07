@@ -260,6 +260,21 @@ impl From<Font> for Fonts {
 }
 
 impl Fonts {
+    /// Only `primary`, with no fallbacks, so text draws the same on every machine. A
+    /// character it lacks draws nothing.
+    ///
+    /// ```
+    /// use pinfold_render::font::{Font, Fonts};
+    /// use pinfold_render::paint::Painter;
+    ///
+    /// let painter = Painter::new(Fonts::alone(Font::bundled().unwrap()), 26.0);
+    /// assert!(painter.cell_size().0 > 0);
+    /// ```
+    #[must_use]
+    pub fn alone(primary: Font) -> Self {
+        Self::with_fallbacks(primary, &[])
+    }
+
     pub(crate) fn with_fallbacks(primary: Font, untried: &'static [&'static str]) -> Self {
         Self {
             primary,

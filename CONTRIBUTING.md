@@ -171,6 +171,17 @@ we want but do not have links to its issue.
   a terminal outside every pane, with times, hashes, paths and audit sequence numbers
   replaced by their key names. Tool panes are still to come
   ([#233](https://github.com/0xPiranhaCodes/pinfold.sh/issues/233)).
+- **Golden images** of renderer output are in `crates/pinfold-ui/src/golden.rs`: plain text,
+  wide characters and the cursor on one, bold, italic, inverse and colours, pane borders, the
+  bar, and an approval prompt, drawn by the CPU renderer's painter at 26 pixels (13 points at
+  2x) with the bundled font alone, so no installed font changes them; it has no CJK, so wide
+  characters draw as its missing-glyph box. Each is compared with its PNG in `src/golden/`,
+  and a channel may differ by 2, as only the system's `powf`, in the sRGB tables, can differ
+  by platform; with none they matched exactly on all three CI test runners. A failure writes
+  `NAME.actual.png` and `NAME.diff.png`, with differing pixels red, beside the reference. Run
+  `PINFOLD_UPDATE_GOLDEN=1 cargo test -p pinfold-ui golden` to rewrite them, then look at the
+  images. The bar has one per system, as for its snapshot; take `@linux` from a Linux run. The
+  renderer draws no underline and only a block cursor, so there are no images of those yet.
 - **Approval-prompt tests** prove that only the window's keyboard answers a prompt:
   `no_api_method_can_answer_an_approval_prompt` in `crates/pinfold-api/src/control.rs`,
   the tests in `crates/pinfold-ui/src/approval.rs`, and
@@ -194,8 +205,6 @@ we want but do not have links to its issue.
 
 Not built yet:
 
-- **Golden images** of renderer output
-  ([#232](https://github.com/0xPiranhaCodes/pinfold.sh/issues/232)).
 - **Recorded agent sessions** for status detection, which is tested with hand-written
   bytes today ([#236](https://github.com/0xPiranhaCodes/pinfold.sh/issues/236)).
 

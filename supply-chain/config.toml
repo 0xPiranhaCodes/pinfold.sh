@@ -4,6 +4,10 @@
 [cargo-vet]
 version = "0.10"
 
+[[exemptions.adler2]]
+version = "2.0.1"
+criteria = "safe-to-run"
+
 [[exemptions.ahash]]
 version = "0.8.12"
 criteria = "safe-to-deploy"
@@ -164,6 +168,10 @@ criteria = "safe-to-deploy"
 version = "0.3.1"
 criteria = "safe-to-run"
 
+[[exemptions.crc32fast]]
+version = "1.5.4"
+criteria = "safe-to-run"
+
 [[exemptions.crossbeam-utils]]
 version = "0.8.23"
 criteria = "safe-to-deploy"
@@ -224,9 +232,17 @@ criteria = "safe-to-deploy"
 version = "2.5.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.fdeflate]]
+version = "0.3.7"
+criteria = "safe-to-run"
+
 [[exemptions.find-msvc-tools]]
 version = "0.1.15"
 criteria = "safe-to-deploy"
+
+[[exemptions.flate2]]
+version = "1.1.11"
+criteria = "safe-to-run"
 
 [[exemptions.fnv]]
 version = "1.0.7"
@@ -371,6 +387,14 @@ criteria = "safe-to-deploy"
 [[exemptions.memmap2]]
 version = "0.9.12"
 criteria = "safe-to-deploy"
+
+[[exemptions.miniz_oxide]]
+version = "0.8.9"
+criteria = "safe-to-run"
+
+[[exemptions.miniz_oxide]]
+version = "0.9.1"
+criteria = "safe-to-run"
 
 [[exemptions.mio]]
 version = "1.2.4"
@@ -552,6 +576,10 @@ criteria = "safe-to-deploy"
 version = "0.2.3"
 criteria = "safe-to-deploy"
 
+[[exemptions.png]]
+version = "0.18.1"
+criteria = "safe-to-run"
+
 [[exemptions.polling]]
 version = "3.11.0"
 criteria = "safe-to-deploy"
@@ -707,6 +735,10 @@ criteria = "safe-to-deploy"
 [[exemptions.signal-hook-registry]]
 version = "1.4.8"
 criteria = "safe-to-deploy"
+
+[[exemptions.simd-adler32]]
+version = "0.3.10"
+criteria = "safe-to-run"
 
 [[exemptions.simd_cesu8]]
 version = "1.2.0"
@@ -1035,6 +1067,10 @@ criteria = "safe-to-deploy"
 [[exemptions.zerocopy-derive]]
 version = "0.8.63"
 criteria = "safe-to-deploy"
+
+[[exemptions.zlib-rs]]
+version = "0.6.8"
+criteria = "safe-to-run"
 
 [[exemptions.zmij]]
 version = "1.0.23"
