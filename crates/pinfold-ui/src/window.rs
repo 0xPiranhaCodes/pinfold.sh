@@ -40,6 +40,7 @@ use crate::dock_menu;
 use crate::flash::{self, Flash};
 use crate::hyperlink::{self, Target};
 use crate::link::{self, Approval, Link, Screen, Tab};
+use crate::notify;
 use crate::outbox::{self, Inbox, Outbox, Request};
 use crate::paste::Prompt;
 use crate::prefix::{self, Command, Prefix};
@@ -375,6 +376,7 @@ struct App {
     menu_bar: menu_bar::Bar,
     #[cfg(target_os = "macos")]
     dock: dock_menu::Dock,
+    notifier: notify::Notifier,
     /// Points added to the config's font size by Bigger and Smaller, until the next save.
     font_step: f32,
     result: Result<(), Error>,
@@ -392,6 +394,11 @@ fn font_scale(measured: Option<(u32, u32)>, scale: f64) -> f32 {
 }
 
 impl App {
+    // Linux has no Dock, so one fewer.
+    #[cfg_attr(
+        target_os = "macos",
+        expect(clippy::too_many_arguments, reason = "the parts the event loop builds")
+    )]
     fn new(
         config: Config,
         size: Option<(u32, u32)>,
@@ -400,6 +407,7 @@ impl App {
         waker: Arc<Waker>,
         menu_bar: menu_bar::Bar,
         #[cfg(target_os = "macos")] dock: dock_menu::Dock,
+        notifier: notify::Notifier,
     ) -> Self {
         Self {
             prefix: Prefix::new(config.keys.prefix),
@@ -451,6 +459,7 @@ impl App {
             menu_bar,
             #[cfg(target_os = "macos")]
             dock,
+            notifier,
             font_step: 0.0,
             result: Ok(()),
         }
@@ -576,9 +585,18 @@ impl App {
         }
         self.active = shown.active;
         let tabs = shown.tabs.iter().enumerate();
-        self.states.clear();
+        let old = std::mem::take(&mut self.states);
         self.states
             .extend(tabs.map(|(index, tab)| top_bar::tab_state(tab.status, shown.alerts, index)));
+        let tabs = notify::Tabs {
+            old: &old,
+            new: &self.states,
+            labels: &self.labels,
+            active: self.active,
+            focused: self.has_focus,
+        };
+        let pane = |index: usize| shown.tabs.get(index).map_or(u32::MAX, |tab| tab.pane);
+        self.notifier.changed(tabs, pane, Instant::now());
         self.activity = shown.activity | top_bar::marked(&self.states);
         #[cfg(target_os = "macos")]
         self.dock.update(&self.labels, &self.states);
@@ -1633,6 +1651,10 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
             let _ = proxy.send_event(Notice::Command(command));
         })
     };
+    let proxy = event_loop.create_proxy();
+    let notifier = notify::Notifier::new(move |tab| {
+        let _ = proxy.send_event(Notice::Command(Command::Tab(tab)));
+    });
     let mut app = App::new(
         config(),
         size,
@@ -1642,6 +1664,7 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
         menu_bar,
         #[cfg(target_os = "macos")]
         dock,
+        notifier,
     );
     event_loop.run_app(&mut app)?;
     app.result
@@ -1668,6 +1691,7 @@ mod tests {
             menu_bar::Bar::default(),
             #[cfg(target_os = "macos")]
             dock_menu::Dock::default(),
+            notify::Notifier::new(|_| ()),
         );
         let mut screen = Screen::default();
         (screen.pane, screen.rect) = (

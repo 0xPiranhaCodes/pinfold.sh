@@ -77,7 +77,7 @@ pub const STATES: [(char, &str, u32); 5] = [
     ('✕', "error", 0x00ff_8a8a),
     ('○', "idle", 0x009a_a1ac),
 ];
-const NEEDS_YOU: u8 = 0;
+pub(crate) const NEEDS_YOU: u8 = 0;
 const IDLE: u8 = 4;
 /// Widest message in cells, so it cannot crowd out the clock for long.
 const MAX_MESSAGE: usize = 48;
