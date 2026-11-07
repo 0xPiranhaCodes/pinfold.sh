@@ -2,13 +2,15 @@
 
 #![allow(unsafe_code, reason = "this crate is the FFI boundary")]
 
+use std::ffi::CString;
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, BorrowedFd, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -186,7 +188,108 @@ pub fn peer_terminal(socket: BorrowedFd<'_>) -> io::Result<Option<Terminal>> {
 /// # Ok::<(), std::io::Error>(())
 /// ```
 pub fn terminate_peer(socket: BorrowedFd<'_>) -> io::Result<()> {
-    platform::terminate_peer(socket.as_raw_fd())
+    platform::signal_peer(socket.as_raw_fd(), libc::SIGTERM)
+}
+
+/// Sends SIGKILL to the process at the other end of a connected Unix socket, as
+/// [`terminate_peer`] sends SIGTERM: for a peer too hung to handle that, such as a core whose
+/// program was on a disk image that was ejected under it.
+///
+/// # Errors
+///
+/// Returns an error if `socket` is not a connected Unix socket or the signal cannot be sent.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::os::fd::AsFd;
+/// use std::os::unix::net::UnixStream;
+///
+/// let core = UnixStream::connect("/tmp/pinfold-501/default.sock")?;
+/// pinfold_sys::kill_peer(core.as_fd())?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn kill_peer(socket: BorrowedFd<'_>) -> io::Result<()> {
+    platform::signal_peer(socket.as_raw_fd(), libc::SIGKILL)
+}
+
+/// Returns the path of the program running at the other end of a connected Unix socket, found
+/// as [`peer_terminal`] finds the process. On macOS a program whose file has gone, as when its
+/// disk image was ejected, gives an error. On Linux it gives the path with ` (deleted)` added.
+///
+/// # Errors
+///
+/// Returns an error if `socket` is not a connected Unix socket or the path cannot be read.
+///
+/// # Examples
+///
+/// ```
+/// use std::os::fd::AsFd;
+/// use std::os::unix::net::{UnixListener, UnixStream};
+///
+/// let path = std::env::temp_dir().join(format!("pinfold-exe-{}", std::process::id()));
+/// let listener = UnixListener::bind(&path)?;
+/// let ours = UnixStream::connect(&path)?;
+/// let program = pinfold_sys::peer_executable(ours.as_fd())?;
+/// assert_eq!(program.canonicalize()?, std::env::current_exe()?.canonicalize()?);
+/// # drop(listener);
+/// std::fs::remove_file(&path)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn peer_executable(socket: BorrowedFd<'_>) -> io::Result<PathBuf> {
+    platform::peer_executable(socket.as_raw_fd())
+}
+
+/// Returns the kernel's name for the process at the other end of a connected Unix socket: its
+/// program's file name, cut to 15 bytes, which stays known after the file has gone.
+///
+/// # Errors
+///
+/// Returns an error if `socket` is not a connected Unix socket or the peer has gone.
+///
+/// # Examples
+///
+/// ```
+/// use std::os::fd::AsFd;
+/// use std::os::unix::net::{UnixListener, UnixStream};
+///
+/// let path = std::env::temp_dir().join(format!("pinfold-name-{}", std::process::id()));
+/// let listener = UnixListener::bind(&path)?;
+/// let ours = UnixStream::connect(&path)?;
+/// let program = std::env::current_exe()?;
+/// let name = program.file_name().unwrap().to_string_lossy();
+/// assert!(name.starts_with(&pinfold_sys::peer_name(ours.as_fd())?));
+/// # drop(listener);
+/// std::fs::remove_file(&path)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn peer_name(socket: BorrowedFd<'_>) -> io::Result<String> {
+    platform::peer_name(socket.as_raw_fd())
+}
+
+/// Whether `path` is on a file system mounted read-only, as a disk image and macOS's App
+/// Translocation mount of a quarantined app both are.
+///
+/// # Errors
+///
+/// Returns an error if `path` does not exist or holds a NUL byte.
+///
+/// # Examples
+///
+/// ```
+/// assert!(!pinfold_sys::read_only(&std::env::temp_dir())?);
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn read_only(path: &Path) -> io::Result<bool> {
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(io::Error::other)?;
+    let mut found = MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: `path` is a NUL-terminated string and `found` is valid for writes of a statvfs.
+    if unsafe { libc::statvfs(path.as_ptr(), found.as_mut_ptr()) } != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: statvfs succeeded, so it wrote a whole statvfs.
+    let found = unsafe { found.assume_init() };
+    Ok(found.f_flag & libc::ST_RDONLY != 0)
 }
 
 /// `pid` if it names one process: kill takes 0 and below for groups or every process.
@@ -556,14 +659,23 @@ mod platform {
         Ok(unsafe { OwnedFd::from_raw_fd(pidfd) })
     }
 
-    pub fn terminate_peer(socket: RawFd) -> io::Result<()> {
+    pub fn peer_executable(socket: RawFd) -> io::Result<std::path::PathBuf> {
+        std::fs::read_link(format!("/proc/{}/exe", credentials(socket)?.pid))
+    }
+
+    pub fn peer_name(socket: RawFd) -> io::Result<String> {
+        let name = std::fs::read_to_string(format!("/proc/{}/comm", credentials(socket)?.pid))?;
+        Ok(name.trim_end_matches('\n').to_owned())
+    }
+
+    pub fn signal_peer(socket: RawFd, signal: libc::c_int) -> io::Result<()> {
         let sent = match peer_pidfd(socket) {
             // SAFETY: pidfd_send_signal takes integers and a null siginfo, and touches no memory.
             Ok(pidfd) => unsafe {
                 libc::syscall(
                     libc::SYS_pidfd_send_signal,
                     pidfd.as_raw_fd(),
-                    libc::SIGTERM,
+                    signal,
                     std::ptr::null::<libc::siginfo_t>(),
                     0,
                 )
@@ -572,7 +684,7 @@ mod platform {
             Err(error) if error.raw_os_error() == Some(libc::ENOPROTOOPT) => {
                 let pid = crate::one_process(credentials(socket)?.pid)?;
                 // SAFETY: kill takes integers and touches no memory.
-                libc::c_long::from(unsafe { libc::kill(pid, libc::SIGTERM) })
+                libc::c_long::from(unsafe { libc::kill(pid, signal) })
             }
             Err(error) => return Err(error),
         };
@@ -701,13 +813,55 @@ mod platform {
         }
     }
 
-    pub fn terminate_peer(socket: RawFd) -> io::Result<()> {
+    pub fn signal_peer(socket: RawFd, signal: libc::c_int) -> io::Result<()> {
         let pid = crate::one_process(peer_pid(socket)?)?;
         // SAFETY: kill takes integers and touches no memory.
-        match unsafe { libc::kill(pid, libc::SIGTERM) } {
+        match unsafe { libc::kill(pid, signal) } {
             0 => Ok(()),
             _ => Err(io::Error::last_os_error()),
         }
+    }
+
+    pub fn peer_executable(socket: RawFd) -> io::Result<std::path::PathBuf> {
+        use std::os::unix::ffi::OsStringExt;
+        let pid = peer_pid(socket)?;
+        let mut path = vec![0_u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+        let size = u32::try_from(path.len()).map_err(io::Error::other)?;
+        // SAFETY: `path` is writable for `size` bytes.
+        let length = unsafe { libc::proc_pidpath(pid, path.as_mut_ptr().cast(), size) };
+        let length = usize::try_from(length).map_err(io::Error::other)?;
+        if length == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        path.truncate(length);
+        Ok(std::ffi::OsString::from_vec(path).into())
+    }
+
+    pub fn peer_name(socket: RawFd) -> io::Result<String> {
+        let pid = peer_pid(socket)?;
+        let mut info = MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+        let size = size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        // SAFETY: `info` is writable for `size` bytes, the struct PROC_PIDTBSDINFO selects.
+        let read = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if read != size {
+            return Err(io::Error::from(io::ErrorKind::NotFound));
+        }
+        // SAFETY: all-zero bytes are valid for this integer struct, and the call filled it.
+        let name = unsafe { info.assume_init() }.pbi_comm;
+        let bytes: Vec<u8> = name
+            .iter()
+            .take_while(|&&c| c != 0)
+            .map(|&c| c as u8)
+            .collect();
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
 
     pub fn peer_terminal(socket: RawFd) -> io::Result<Option<Terminal>> {
@@ -756,6 +910,13 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_sealed_system_volume_is_read_only() {
+        assert!(read_only(Path::new("/System")).unwrap());
+        assert!(read_only(Path::new("/no/such/path")).is_err());
+    }
 
     #[test]
     fn local_time_is_a_real_time_of_day() {
