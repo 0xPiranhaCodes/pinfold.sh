@@ -22,6 +22,24 @@ still welcome if it adds a case not listed here. Report bugs with the
   session, which restores its tabs and directories but not what ran in them. If a pane is running
   a program, PinFold asks first, and "Not now" keeps it running.
 
+## Install
+
+- **In `0.1.0-beta.1`, opening PinFold from the disk image breaks it once the image is ejected**
+  ([#279](https://github.com/0xPiranhaCodes/pinfold.sh/issues/279)). Its session keeps running
+  from the image, a copy in Applications uses that session, and after the eject the session
+  hangs, so opening PinFold makes the Dock icon bounce and no window opens. To recover in beta.1,
+  run `pkill -9 pinfold-core` in Terminal.app, then open PinFold from Applications: it restores
+  the session as last saved, which is at most a minute old. From `0.1.0-beta.2`, PinFold refuses
+  to run from the disk image or a quarantined download and says to move it to Applications. A
+  launch that finds an older session hung ends it and restores it after about 17 seconds, and one
+  that finds a session running from another copy asks before restarting it.
+- **Dragging PinFold to Applications before opening it may not move the icon** (#279). This is not
+  reproduced yet, as no script can drag in Finder. If it happens, note your macOS version, whether
+  Finder showed "Verifying PinFold.dmg" and whether it worked after waiting a few seconds, and add
+  it to #279.
+- **The disk image has no icon layout yet.** It holds PinFold and an Applications link in Finder's
+  default view.
+
 ## Memory
 
 - **The window's headroom is small.** Every memory budget passes, but on an M1 Pro with a Retina

@@ -3,10 +3,10 @@
 //! up` opens a project's workspace through it.
 
 use std::error::Error;
-use std::io::{ErrorKind, IsTerminal, Write};
+use std::io::{ErrorKind, IsTerminal, Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -307,19 +307,73 @@ fn connect(path: &Path) -> std::io::Result<Option<UnixStream>> {
     }
 }
 
+/// Which install runs a core, against this one's.
+#[derive(Debug, PartialEq)]
+enum Install {
+    /// This one, or one whose program cannot be found, which is served as before: an ejected
+    /// disk image's core is hung, and [`open`] ends it when it does not answer.
+    Ours,
+    /// Another copy of PinFold, still there, such as one on a disk image still mounted.
+    Other(PathBuf),
+}
+
+/// Which install `theirs`, the program running a core, is, against `ours`, this one's core.
+fn install(theirs: std::io::Result<PathBuf>, ours: &Path) -> Install {
+    match theirs.and_then(|theirs| theirs.canonicalize()) {
+        Ok(theirs) if theirs != ours => Install::Other(theirs),
+        _ => Install::Ours,
+    }
+}
+
+/// The app bundle that holds `binary`, or `binary` outside one, as in a build from source.
+fn bundle(binary: &Path) -> &Path {
+    let app = binary
+        .ancestors()
+        .find(|path| path.extension() == Some("app".as_ref()));
+    app.unwrap_or(binary)
+}
+
 /// Connects to the core in `directory`, and starts the one beside this binary if none answers.
 /// Two launchers can both start one: the second core exits on the lock, and both connect to the
 /// first, so its exit status means nothing and only the socket decides. The second also starts
 /// the log again, moments after the first core started, when there is next to nothing in it.
-/// `arguments` go to a core this starts.
+/// `arguments` go to a core this starts. A core from another copy of PinFold is restarted from
+/// this one if the person agrees. On macOS, this refuses to run from a read-only volume, such as
+/// a disk image or App Translocation's mount, as a core there breaks when it goes (#279).
 fn core(directory: &Path, arguments: &[&str]) -> Result<UnixStream, Box<dyn Error>> {
     let path = &control::socket_path(directory);
-    if let Some(stream) = connect(path)? {
-        return Ok(stream);
-    }
     let binary = std::env::current_exe()?
         .canonicalize()?
         .with_file_name("pinfold-core");
+    if cfg!(target_os = "macos") && matches!(pinfold_sys::read_only(&binary), Ok(true)) {
+        let text = format!(
+            "PinFold cannot run from {}, a disk image or another read-only place. Drag \
+             PinFold to the Applications folder, eject the disk image, and open PinFold from \
+             Applications.",
+            bundle(&binary).display()
+        );
+        if by_system() {
+            dialog(&text, "{\"OK\"} default button \"OK\"")?;
+        }
+        return Err(text.into());
+    }
+    if let Some(stream) = connect(path)? {
+        let Install::Other(theirs) = install(pinfold_sys::peer_executable(stream.as_fd()), &binary)
+        else {
+            return Ok(stream);
+        };
+        let question = format!(
+            "PinFold's session is running from {}, not from this copy at {}. A restart opens \
+             this copy and restores the session, but ends what runs in its panes. Not now \
+             keeps using the running copy.",
+            bundle(&theirs).display(),
+            bundle(&binary).display()
+        );
+        if !agreed(&question)? {
+            return Ok(stream);
+        }
+        restart(directory, &stream)?;
+    }
     // Windows inherit this and panes do not, as a pane's stderr is its terminal. A log that will
     // not open is no reason to go without a core.
     let log = control::start_log(directory).map_or_else(|_| Stdio::null(), Stdio::from);
@@ -343,8 +397,19 @@ fn core(directory: &Path, arguments: &[&str]) -> Result<UnixStream, Box<dyn Erro
 /// it and opens the window. If that would end a running program, it asks the person first.
 fn open(arguments: &[&str]) -> Result<(), Box<dyn Error>> {
     let directory = control::runtime_dir();
-    let stream = core(&directory, arguments)?;
-    let opened = control::open_window(&stream)?;
+    let mut stream = core(&directory, arguments)?;
+    let opened = match control::open_window(&stream) {
+        Err(error) if hung(&error) => {
+            eprintln!(
+                "pinfold: the running core did not answer, as when its disk image is ejected: \
+                 ending it and restoring its session as last saved"
+            );
+            restart(&directory, &stream)?;
+            stream = core(&directory, arguments)?;
+            control::open_window(&stream)?
+        }
+        result => result?,
+    };
     let Some(update) = opened.get("update") else {
         return Ok(());
     };
@@ -388,6 +453,12 @@ fn stranded(running: &[Value]) -> String {
         Opening PinFold again offers the restart."
 }
 
+/// Whether `error` is a core that did not answer in time, rather than one that said no.
+fn hung(error: &control::Error) -> bool {
+    matches!(error, control::Error::Io(error)
+        if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut))
+}
+
 /// Whether the person agrees to restart after reading `question`: in the launcher's terminal,
 /// or else in a dialog when the system started it, as the Dock does. With neither, nobody can
 /// answer, so no.
@@ -399,38 +470,89 @@ fn agreed(question: &str) -> Result<bool, Box<dyn Error>> {
         input.read_line(&mut answer)?;
         return Ok(matches!(answer.trim(), "y" | "Y" | "yes"));
     }
-    if !cfg!(target_os = "macos") || std::os::unix::process::parent_id() != 1 {
+    if !by_system() {
         return Ok(false);
     }
+    let buttons = "{\"Not now\", \"Restart now\"} default button \"Not now\"";
+    Ok(dialog(question, buttons)?.starts_with(b"Restart now"))
+}
+
+/// Whether the system started this, as the Dock and Finder do on macOS, so only a dialog can
+/// reach the person.
+fn by_system() -> bool {
+    cfg!(target_os = "macos") && std::os::unix::process::parent_id() == 1
+}
+
+/// Shows `text` in a dialog with `buttons`, AppleScript for them and the default, and returns
+/// the button pressed, or nothing if the dialog was closed.
+fn dialog(text: &str, buttons: &str) -> std::io::Result<Vec<u8>> {
     // The text is an argument, never part of the script, so a pane's field cannot run in it.
-    let script = [
-        "on run argv",
-        "display dialog (item 1 of argv) with title \"PinFold\" with icon caution \
-         buttons {\"Not now\", \"Restart now\"} default button \"Not now\"",
-        "button returned of result",
-        "end run",
-    ];
+    let show = format!(
+        "display dialog (item 1 of argv) with title \"PinFold\" with icon caution buttons \
+         {buttons}"
+    );
+    let script = ["on run argv", &show, "button returned of result", "end run"];
     let mut command = Command::new("/usr/bin/osascript");
     for line in script {
         command.args(["-e", line]);
     }
-    let output = command.arg(question).stdin(Stdio::null()).output()?;
-    Ok(output.status.success() && output.stdout.starts_with(b"Restart now"))
+    let output = command.arg(text).stdin(Stdio::null()).output()?;
+    Ok(if output.status.success() {
+        output.stdout
+    } else {
+        Vec::new()
+    })
 }
 
 /// Ends the core on `stream`, the one that owns the socket, as only it answered there, and waits
-/// until the socket refuses: the core saves the session on SIGTERM, then exits.
+/// until the socket refuses: the core saves the session on SIGTERM, then exits. One too hung for
+/// that, as on an ejected disk image, gets SIGKILL and leaves the session it saved last.
 fn restart(directory: &Path, stream: &UnixStream) -> Result<(), Box<dyn Error>> {
-    pinfold_sys::terminate_peer(stream.as_fd())?;
     let path = control::socket_path(directory);
-    let start = Instant::now();
-    while connect(&path)?.is_some() {
-        if start.elapsed() > START_WAIT {
-            return Err("the older core did not exit".into());
-        }
-        thread::sleep(POLL);
+    let socket = stream.as_fd();
+    // Only a process proved PinFold's own is signalled: this user's, at the socket, and
+    // pinfold-core by name, which is all an ejected core still has, as its path is gone.
+    let user = pinfold_sys::peer_uid(socket)?;
+    let name = pinfold_sys::peer_name(socket)?;
+    if !own_core(user, pinfold_sys::effective_uid(), &name) {
+        return Err(format!("the process at {} is not a PinFold core", path.display()).into());
     }
-    Ok(())
+    pinfold_sys::terminate_peer(socket)?;
+    if ended(&path, stream)? {
+        return Ok(());
+    }
+    pinfold_sys::kill_peer(socket)?;
+    if ended(&path, stream)? {
+        return Ok(());
+    }
+    Err("the older core did not exit".into())
+}
+
+/// Whether a socket's peer, run by `user` and named `name`, is a core this launcher may end.
+fn own_core(user: u32, ours: u32, name: &str) -> bool {
+    user == ours && name == "pinfold-core"
+}
+
+/// Whether the core on `stream` has gone within [`START_WAIT`]: that connection closed and the
+/// socket at `path` refuses. Refusal alone is not enough, as a hung core's full backlog refuses.
+fn ended(path: &Path, stream: &UnixStream) -> std::io::Result<bool> {
+    stream.set_read_timeout(Some(POLL))?;
+    let start = Instant::now();
+    let mut closed = false;
+    while start.elapsed() < START_WAIT {
+        if !closed {
+            closed = match (&mut &*stream).read(&mut [0; 256]) {
+                Ok(0) => true,
+                Ok(_) => false,
+                Err(error) => !matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut),
+            };
+        } else if connect(path)?.is_none() {
+            return Ok(true);
+        } else {
+            thread::sleep(POLL);
+        }
+    }
+    Ok(false)
 }
 
 fn launch() -> Result<(), Box<dyn Error>> {
@@ -854,6 +976,56 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_another_copy_that_is_still_there_is_another_install() {
+        let dir = std::env::temp_dir().join(format!("pinfold-install-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("Other.app/Contents/MacOS")).unwrap();
+        let ours = std::env::current_exe().unwrap().canonicalize().unwrap();
+        let theirs = dir.join("Other.app/Contents/MacOS/pinfold-core");
+        std::fs::write(&theirs, b"").unwrap();
+        let theirs = theirs.canonicalize().unwrap();
+
+        assert_eq!(install(Ok(ours.clone()), &ours), Install::Ours);
+        assert_eq!(
+            install(Ok(theirs.clone()), &ours),
+            Install::Other(theirs.clone())
+        );
+        // An ejected image's core: macOS gives no path, Linux one that no longer exists.
+        let gone = std::io::Error::other("proc_pidpath found no path");
+        assert_eq!(install(Err(gone), &ours), Install::Ours);
+        assert_eq!(
+            install(Ok(dir.join("pinfold-core (deleted)")), &ours),
+            Install::Ours
+        );
+
+        assert_eq!(
+            bundle(&theirs),
+            dir.join("Other.app").canonicalize().unwrap()
+        );
+        assert_eq!(
+            bundle(Path::new("/target/debug/pinfold-core")),
+            Path::new("/target/debug/pinfold-core")
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_this_users_pinfold_core_is_ended() {
+        assert!(own_core(501, 501, "pinfold-core"));
+        assert!(!own_core(0, 501, "pinfold-core"));
+        assert!(!own_core(501, 501, "pinfold-window"));
+        assert!(!own_core(501, 501, "zsh"));
+    }
+
+    #[test]
+    fn only_a_core_that_does_not_answer_is_hung() {
+        let late = |kind: ErrorKind| control::Error::Io(kind.into());
+        assert!(hung(&late(ErrorKind::WouldBlock)));
+        assert!(hung(&late(ErrorKind::TimedOut)));
+        assert!(!hung(&late(ErrorKind::ConnectionReset)));
+        assert!(!hung(&control::Error::Refused("no".to_owned())));
+    }
 
     #[test]
     fn agent_asks_again_only_while_the_core_reads_the_path() {
