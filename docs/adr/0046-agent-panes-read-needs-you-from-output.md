@@ -1,4 +1,4 @@
-# ADR-0045: Agent panes read "needs you" from their CLI's output
+# ADR-0046: Agent panes read "needs you" from their CLI's output
 
 - **Status:** Accepted
 - **Date:** 2026-11-07

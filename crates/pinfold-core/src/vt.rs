@@ -111,7 +111,7 @@ pub trait VtEngine {
     fn shell_marks(&self) -> ShellMarks;
 
     /// Returns what an agent CLI last signalled through OSC 7501 and OSC 9. Output can fake
-    /// all of it, so only a pane launched from an agent profile reads it (ADR-0045).
+    /// all of it, so only a pane launched from an agent profile reads it (ADR-0046).
     fn agent_marks(&self) -> AgentMarks;
 
     /// Returns the last valid OSC 7 directory, which is a hint that output can fake.

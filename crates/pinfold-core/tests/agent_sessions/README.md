@@ -37,7 +37,7 @@ you is not among them: at the permission prompts the pane says running, as OSC 1
 never say needs you (threat model T4). That is the spoof test: the same bytes in a plain pane
 never say needs you.
 
-In an agent profile's pane (ADR-0045) codex reads as `idle, running, idle, running,
+In an agent profile's pane (ADR-0046) codex reads as `idle, running, idle, running,
 needs-you, running, done, idle, running, done, running, error`: its OSC 7501 states outrank the
 shell's marks, `blocked` is needs you at the approval prompt, and `clear` on exit hands back
 to the shell until its `D` mark. Claude Code sends no state, only spinner titles, which are

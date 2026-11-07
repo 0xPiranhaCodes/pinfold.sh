@@ -333,7 +333,7 @@ impl Reactor {
                 pane.closed |= pumped == Pumped::Closed;
                 if fed {
                     // Shell marks never say "needs you", so only an error can alert there, and
-                    // nothing draws those yet. An agent profile's CLI can (ADR-0045).
+                    // nothing draws those yet. An agent profile's CLI can (ADR-0046).
                     let now = Instant::now();
                     let _ = pane.status.observe_shell(pane.engine.shell_marks(), now);
                     let alert = pane.status.observe_agent(pane.engine.agent_marks(), now);
@@ -452,7 +452,7 @@ impl Reactor {
     }
 
     /// Lets a pane's own output say what its agent CLI is doing, through OSC 7501 states and
-    /// OSC 9 notifications, for a pane launched from an agent profile (ADR-0045). A "needs you"
+    /// OSC 9 notifications, for a pane launched from an agent profile (ADR-0046). A "needs you"
     /// from them alerts as a report does, and is still labelled as from output.
     pub fn read_agent_signals(&mut self, pane: usize) {
         if let Some(pane) = pane_mut(&mut self.panes, pane) {

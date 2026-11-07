@@ -108,7 +108,7 @@ A profile's pane reads its CLI's own state from output: OSC 7501 `state=blocked`
 sends it at its approval prompt) or an OSC 9 notification shows ◆ needs you, labelled from
 output, and `working`, `done`, `idle` and `clear` move it on. Typing into the pane clears a
 needs you. A plain shell pane never reads them, so a program there cannot fake needs you
-([ADR-0045](adr/0045-agent-panes-read-needs-you-from-output.md)).
+([ADR-0046](adr/0046-agent-panes-read-needs-you-from-output.md)).
 
 ```toml
 [agents.claude]

@@ -36,7 +36,7 @@ fn chunks(data: &[u8]) -> Vec<(Duration, &[u8])> {
 }
 
 /// The statuses a pane shows while it replays the recording, without repeats. Only an agent
-/// profile's pane reads the CLI's own signals (ADR-0045).
+/// profile's pane reads the CLI's own signals (ADR-0046).
 fn replay(data: &[u8], agent: bool) -> Vec<&'static str> {
     let mut engine = AlacrittyEngine::new(ROWS, COLUMNS);
     let mut tracker = Tracker::default();

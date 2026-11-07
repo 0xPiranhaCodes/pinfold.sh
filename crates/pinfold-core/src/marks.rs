@@ -87,7 +87,7 @@ pub enum AgentSignal {
 }
 
 /// What an agent CLI in the pane last signalled through output. Any program can print these,
-/// so only a pane launched from an agent profile reads them (ADR-0045).
+/// so only a pane launched from an agent profile reads them (ADR-0046).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct AgentMarks {
     /// The latest signal, if one has arrived.

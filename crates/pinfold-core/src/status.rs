@@ -6,7 +6,7 @@
 //!
 //! In a pane launched from an agent profile, the agent CLI's own OSC 7501 states and OSC 9
 //! notifications outrank its shell's marks, and they alone can say "needs you" from output
-//! (ADR-0045). A plain shell pane never reads them.
+//! (ADR-0046). A plain shell pane never reads them.
 
 use std::time::{Duration, Instant};
 
@@ -307,7 +307,7 @@ impl Tracker {
     }
 
     /// Makes [`Tracker::observe_agent`] count, for a pane launched from an agent profile
-    /// (ADR-0045). Without it a pane keeps to its shell marks, whatever its output prints.
+    /// (ADR-0046). Without it a pane keeps to its shell marks, whatever its output prints.
     pub fn read_agent_signals(&mut self) {
         self.agent = true;
     }
