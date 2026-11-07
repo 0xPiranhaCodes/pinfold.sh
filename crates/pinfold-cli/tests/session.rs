@@ -417,7 +417,14 @@ fn updated_window(other: u16) -> Result<String> {
 #[test]
 fn an_updated_window_restarts_a_core_at_a_prompt_and_opens() {
     let session = Session::new("u", Some(&updated_window(NEXT).unwrap())).unwrap();
-    let launched = session.launch().unwrap();
+    // A login `/bin/sh` runs the profile, whose `path_helper` on macOS a restart would end, so
+    // the window could ask before the prompt. This shell is at its prompt from the start.
+    let shell = session.directory.join("shell");
+    let ask = "case $1 in -i) exec /bin/sh \"$@\";; esac";
+    fs::write(&shell, format!("#!/bin/sh\n{ask}\nexec /bin/sh\n")).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
+    let launched = session.launcher(shell.to_str().unwrap()).output().unwrap();
     let error = String::from_utf8_lossy(&launched.stderr);
     assert!(launched.status.success(), "{error}");
     let said = format!("restarting its session, link version {VERSION} to {NEXT}");
