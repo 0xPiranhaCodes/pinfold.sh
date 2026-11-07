@@ -108,6 +108,9 @@ done
 `spctl` must say `accepted` and `source=Notarized Developer ID`. Then read the draft's notes,
 mark it a pre-release if the tag is a beta, and publish it.
 
+GitHub's `/releases/latest` skips pre-releases, so until a release that is not a pre-release
+exists, each new beta must update the tag in the download links in `README.md` and `site/`.
+
 ## Homebrew
 
 `homebrew/pinfold.rb` installs the Linux tarball for the host architecture.
