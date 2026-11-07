@@ -301,7 +301,8 @@ impl Tracker {
     /// Observes the latest OSC 133 marks and updates the output-derived fallback.
     ///
     /// A changed `finished` counter wins over the phase because shells normally emit
-    /// command-finished and prompt marks together.
+    /// command-finished and prompt marks together. Done or error then stays shown at the
+    /// prompt until the next command runs.
     ///
     /// ```
     /// use pinfold_core::marks::{ShellMarks, ShellPhase};
@@ -322,6 +323,12 @@ impl Tracker {
             };
         } else {
             self.output_status = match marks.phase {
+                // The prompt after a finish arrives in a later read, and keeps its result shown.
+                ShellPhase::Prompt | ShellPhase::Input
+                    if matches!(self.output_status, Status::Done | Status::Error) =>
+                {
+                    self.output_status
+                }
                 ShellPhase::Prompt | ShellPhase::Input => Status::Idle,
                 ShellPhase::Running => Status::Running,
                 ShellPhase::Unknown | ShellPhase::Finished => self.output_status,
@@ -396,6 +403,28 @@ mod tests {
             })
         );
         assert_eq!(tracker.status(), Status::Error);
+    }
+
+    #[test]
+    fn a_finish_stays_shown_at_the_next_prompt_until_a_command_runs() {
+        let now = Instant::now();
+        let mut tracker = Tracker::default();
+
+        // Shells send `D` and `A` together and `B` in a later read, as recorded sessions show.
+        tracker.observe_shell(marks(ShellPhase::Running, 0, None), now);
+        tracker.observe_shell(marks(ShellPhase::Prompt, 1, Some(0)), now);
+        tracker.observe_shell(marks(ShellPhase::Input, 1, Some(0)), now);
+        assert_eq!(tracker.status(), Status::Done);
+        tracker.observe_shell(marks(ShellPhase::Running, 1, Some(0)), now);
+        assert_eq!(tracker.status(), Status::Running);
+        tracker.observe_shell(marks(ShellPhase::Prompt, 2, Some(1)), now);
+        tracker.observe_shell(marks(ShellPhase::Input, 2, Some(1)), now);
+        assert_eq!(tracker.status(), Status::Error);
+        // A finish without a status was never shown as done or failed.
+        tracker.observe_shell(marks(ShellPhase::Running, 2, Some(1)), now);
+        tracker.observe_shell(marks(ShellPhase::Prompt, 3, None), now);
+        tracker.observe_shell(marks(ShellPhase::Input, 3, None), now);
+        assert_eq!(tracker.status(), Status::Idle);
     }
 
     #[test]
