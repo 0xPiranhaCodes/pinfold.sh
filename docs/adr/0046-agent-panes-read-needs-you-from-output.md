@@ -51,12 +51,16 @@ The maintainer decided on 2026-11-07:
    alert interval stays at one per pane per 10 s, with output and API alerts counted apart; the
    window adds one notification per tab per 60 s and one per 10 s across all tabs. Clicking a
    notification goes to its tab where the platform tells the window.
-6. **The smallest platform mechanism.** On macOS the window uses `NSUserNotificationCenter` from
-   the `objc2-foundation` binding it already links. It is deprecated, but on macOS 27.0.1 it
-   delivers from an ad hoc signed bundle, and it needs no entitlement. Outside a bundle, such as
-   a `cargo` build, it has no default center, and the window asks for Dock attention with
-   `NSApplication.requestUserAttention`. Linux has a TODO behind the same interface, and the
-   tab mark alone until then. No GUI toolkit, C library or new crate is added.
+6. **The smallest platform mechanism.** On macOS the Dock icon bounces once
+   (`NSApplication.requestUserAttention`, informational), which works in any build and needs no
+   entitlement or permission; AppKit skips it while PinFold is the active app, when the tab's
+   mark shows instead. A banner from `NSUserNotificationCenter`, in the `objc2-foundation`
+   binding the window already links, comes as well where it can, and a click on it goes to the
+   tab. It is deprecated, and on macOS 27.0.1 an ad hoc signed bundle's first notification only
+   brings up the system's "Notifications may include alerts" request: the notification reports
+   `isPresented` false and nothing shows until the person allows it. Outside a bundle, such as a
+   `cargo` build, there is no center. Linux has a TODO behind the same interface, and the tab
+   mark alone until then. No GUI toolkit, C library or new crate is added.
 
 ## Consequences
 
@@ -67,7 +71,8 @@ window-wide limits bound that, the label says where it came from, and the text a
 is PinFold's. A program in a plain shell pane still cannot; the same recorded bytes there never
 show needs you.
 
-`NSUserNotificationCenter` may stop delivering in a later macOS. Moving to
-`UNUserNotificationCenter` would add `objc2-user-notifications` and needs the signed bundle,
-so revisit then, or if users want banners from `cargo` builds. Revisit the opt-in if agents
+Banners need the person to allow PinFold's notifications, and `NSUserNotificationCenter` may
+stop delivering in a later macOS; the Dock bounce does not depend on either. Moving banners to
+`UNUserNotificationCenter` would add `objc2-user-notifications` and needs the signed bundle, so
+revisit if banners matter more than the bounce. Revisit the opt-in if agents
 start in plain shell panes often enough that the hooks are not enough.

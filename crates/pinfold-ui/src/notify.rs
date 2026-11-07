@@ -1,4 +1,4 @@
-//! Notifications that a tab needs you (ADR-0045). The text is PinFold's, "`<tab>` needs you",
+//! Notifications that a tab needs you (ADR-0046). The text is PinFold's, "`<tab>` needs you",
 //! never what a program printed, and they are rate-limited per tab and across all of them.
 
 use std::time::{Duration, Instant};
@@ -60,7 +60,7 @@ impl Notifier {
     /// Sets up the platform's notifications. `clicked` gets the index of the tab whose
     /// notification was clicked.
     // shortcut: Linux has no notifications yet, only the tab's mark; a freedesktop one needs a
-    // D-Bus client crate, so add one when Linux users ask (ADR-0045).
+    // D-Bus client crate, so add one when Linux users ask (ADR-0046).
     pub fn new(clicked: impl Fn(usize) + 'static) -> Self {
         #[cfg(not(target_os = "macos"))]
         drop(clicked);

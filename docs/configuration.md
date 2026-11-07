@@ -108,9 +108,11 @@ A profile's pane reads its CLI's own state from output: OSC 7501 `state=blocked`
 sends it at its approval prompt) or an OSC 9 notification shows ◆ needs you, labelled from
 output, and `working`, `done`, `idle` and `clear` move it on. Typing into the pane clears a
 needs you. When a tab comes to need you while it is hidden or the window is in the background,
-macOS shows a notification, "<tab> needs you", never the program's own text; clicking it goes
-to the tab. At most one comes per tab a minute and one every 10 seconds in all. A build outside
-an app bundle, such as `cargo run`, bounces the Dock icon instead, and Linux marks the tab only. A plain shell pane never reads them, so a program there cannot fake needs you
+macOS bounces PinFold's Dock icon once. Once you allow PinFold's notifications in System
+Settings, a banner says "<tab> needs you", never the program's own text, and clicking it goes
+to the tab; macOS asks the first time and shows nothing until you allow it, and a build outside
+an app bundle, such as `cargo run`, has no banners. At most one comes per tab a minute and one
+every 10 seconds in all. Linux marks the tab only. A plain shell pane never reads them, so a program there cannot fake needs you
 ([ADR-0046](adr/0046-agent-panes-read-needs-you-from-output.md)).
 
 ```toml

@@ -1,8 +1,10 @@
-//! macOS notifications that a tab needs you (ADR-0045).
+//! macOS notifications that a tab needs you (ADR-0046).
 //!
-//! `NSUserNotificationCenter` is deprecated, but it is in the Foundation binding the window
-//! already links and needs no entitlement. It has no default center outside an app bundle, such
-//! as in a `cargo` build, so then the Dock icon asks for attention instead.
+//! The Dock icon bounces once for each, which works in any build and needs no permission. A
+//! banner from `NSUserNotificationCenter`, in the Foundation binding the window already links,
+//! comes as well where it can: the API is deprecated, it has no center outside an app bundle,
+//! and on macOS 27.0.1 a signed bundle's first one only asks the person to allow notifications,
+//! presenting nothing until they do.
 
 #![allow(deprecated)]
 
@@ -50,7 +52,7 @@ define_class!(
     }
 );
 
-/// Raises notifications, or Dock attention where the app has no notification center.
+/// Asks for Dock attention, and raises a banner where the app has a notification center.
 pub struct Notifier {
     mtm: MainThreadMarker,
     center: Option<(Retained<NSUserNotificationCenter>, Retained<Delegate>)>,
@@ -82,12 +84,12 @@ impl Notifier {
         Some(Self { mtm, center })
     }
 
-    /// Shows `title`, which replaces an earlier notification with the same `number`. Without a
-    /// center it bounces the Dock icon once, which shows no text.
+    /// Bounces the Dock icon once, which AppKit skips while the app is active, and delivers
+    /// `title` as a banner that replaces an earlier one with the same `number`.
     pub fn notify(&self, title: &str, number: usize) {
+        let app = NSApplication::sharedApplication(self.mtm);
+        app.requestUserAttention(NSRequestUserAttentionType::InformationalRequest);
         let Some((center, _)) = &self.center else {
-            let app = NSApplication::sharedApplication(self.mtm);
-            app.requestUserAttention(NSRequestUserAttentionType::InformationalRequest);
             return;
         };
         let note = NSUserNotification::new();
