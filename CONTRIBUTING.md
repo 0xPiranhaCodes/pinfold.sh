@@ -182,6 +182,14 @@ we want but do not have links to its issue.
   `PINFOLD_UPDATE_GOLDEN=1 cargo test -p pinfold-ui golden` to rewrite them, then look at the
   images. The bar has one per system, as for its snapshot; take `@linux` from a Linux run. The
   renderer draws no underline and only a block cursor, so there are no images of those yet.
+- **Recorded agent sessions** of Claude Code and Codex CLI are in
+  `crates/pinfold-core/tests/agent_sessions/`, raw PTY output with timing from a zsh that
+  sends OSC 133 marks. `tests/agent_sessions.rs` replays each through the VT engine and
+  status engine, one read at a time, and compares the statuses shown with `NAME.states`; it
+  also fails on a fixture over 200 KB or one holding a home path, email address, `sk-` key,
+  or the host or user name. To re-record, run `./record.sh` there (or `./record.sh codex`
+  for one) with the CLIs installed and logged in, update the table in its `README.md`, and
+  read the new `.rec` before committing it. Each run costs a few cents of model use.
 - **Approval-prompt tests** prove that only the window's keyboard answers a prompt:
   `no_api_method_can_answer_an_approval_prompt` in `crates/pinfold-api/src/control.rs`,
   the tests in `crates/pinfold-ui/src/approval.rs`, and
@@ -202,11 +210,6 @@ we want but do not have links to its issue.
   `esctest-driver` answers esctest's DECRQCRA screen reads from the engine's grid,
   characters only. vttest is not run: it draws screens for a person to judge and has no
   pass or fail output to script.
-
-Not built yet:
-
-- **Recorded agent sessions** for status detection, which is tested with hand-written
-  bytes today ([#236](https://github.com/0xPiranhaCodes/pinfold.sh/issues/236)).
 
 ## Commits and pull requests
 

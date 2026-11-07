@@ -1,7 +1,9 @@
 [files]
 extend-exclude = ["docs/design/ui/", "LICENSE-*", "vendor/", "tests/conformance/esctest-pass.txt",
     # insta snapshots: hex colours such as 909ba9 are not words.
-    "*.snap"]
+    "*.snap",
+    # Recorded agent sessions: raw PTY output.
+    "*.rec"]
 
 [default.extend-words]
 ratatui = "ratatui"
