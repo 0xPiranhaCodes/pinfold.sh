@@ -184,6 +184,8 @@ environment.
 
 - Whether a build without the hardened runtime, such as Homebrew building from source, should
   refuse to run a session or warn about it. Only the core and window of `PinFold.app` have it.
+  [ADR-0044](../adr/0044-cores-without-the-hardened-runtime-warn.md), Proposed, shows that a core
+  can read its own flag and proposes a warning and a status-bar marker; the maintainer decides.
 - How sandboxed agents block TIOCSTI while staying in their pane's session, tested with
   real bubblewrap and `sandbox-exec`.
 
