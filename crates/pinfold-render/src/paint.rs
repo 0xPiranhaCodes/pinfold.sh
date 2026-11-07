@@ -121,8 +121,8 @@ pub struct Painter {
 impl Painter {
     /// Creates a painter. `size` is in physical pixels, and is clamped to a sane range.
     #[must_use]
-    pub fn new(font: Font, size: f32) -> Self {
-        Self::with_limit(font, size, CACHE_LIMIT)
+    pub fn new(fonts: impl Into<Fonts>, size: f32) -> Self {
+        Self::with_limit(fonts, size, CACHE_LIMIT)
     }
 
     fn with_limit(fonts: impl Into<Fonts>, size: f32, limit: usize) -> Self {

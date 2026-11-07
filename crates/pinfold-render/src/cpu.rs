@@ -48,8 +48,20 @@ pub trait Renderer {
     fn draw(&mut self, frame: &Frame) -> Result<(), RenderError>;
 }
 
-/// Copies a frame's cells into `cells`, with the cursor's cell inverted.
-pub(crate) fn cells_with_cursor(frame: &Frame, cells: &mut Vec<Cell>) {
+/// Copies a frame's cells into `cells`, with the cursor's cell inverted, as every renderer
+/// draws them.
+///
+/// ```
+/// use pinfold_proto::{Cell, Frame};
+/// use pinfold_render::cpu::cells_with_cursor;
+///
+/// let cell = Cell { character: 'a', foreground: 1, background: 2 };
+/// let frame = Frame { rows: 1, columns: 1, cells: vec![cell], cursor: Some((0, 0)), ..Frame::default() };
+/// let mut cells = Vec::new();
+/// cells_with_cursor(&frame, &mut cells);
+/// assert_eq!((cells[0].foreground, cells[0].background), (2, 1));
+/// ```
+pub fn cells_with_cursor(frame: &Frame, cells: &mut Vec<Cell>) {
     cells.clear();
     cells.extend_from_slice(&frame.cells);
     if let Some((row, column)) = frame.cursor {
