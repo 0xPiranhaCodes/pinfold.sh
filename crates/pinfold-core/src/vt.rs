@@ -14,7 +14,7 @@ use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, Processor};
 use pinfold_proto::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode};
 
-use crate::marks::{Marks, ShellMarks, ShellPhase, WorkingDirectory};
+use crate::marks::{AgentMarks, Marks, ShellMarks, ShellPhase, WorkingDirectory};
 use crate::scrollback::Scrollback;
 use crate::search::{self, CopyStep, Copying, Position, Search, SearchStep, Selection};
 
@@ -109,6 +109,10 @@ pub trait VtEngine {
 
     /// Returns what the shell last reported through OSC 133. Output can fake all of it.
     fn shell_marks(&self) -> ShellMarks;
+
+    /// Returns what an agent CLI last signalled through OSC 7501 and OSC 9. Output can fake
+    /// all of it, so only a pane launched from an agent profile reads it (ADR-0046).
+    fn agent_marks(&self) -> AgentMarks;
 
     /// Returns the last valid OSC 7 directory, which is a hint that output can fake.
     fn cwd(&self) -> Option<&WorkingDirectory>;
@@ -708,6 +712,10 @@ impl VtEngine for AlacrittyEngine {
         self.marks.shell
     }
 
+    fn agent_marks(&self) -> AgentMarks {
+        self.marks.agent
+    }
+
     fn cwd(&self) -> Option<&WorkingDirectory> {
         self.marks.cwd.as_ref()
     }
@@ -737,6 +745,7 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+    use crate::marks::AgentSignal;
 
     fn feed(engine: &mut AlacrittyEngine, bytes: &[u8]) -> Vec<u8> {
         let mut replies = Vec::new();
@@ -796,20 +805,59 @@ mod tests {
     }
 
     #[test]
-    fn a_flood_of_osc_9_and_777_notifications_is_dropped_whole() {
-        // Nothing handles notifications yet, so their limit is zero (T4). A feature that
-        // shows them has to add a real limit before this can change.
+    fn a_flood_of_osc_9_and_777_notifications_only_moves_a_counter() {
+        // Their text goes nowhere, and only an agent profile's pane reads the count (T4).
         let mut engine = AlacrittyEngine::new(4, 20);
         let one = b"\x1b]9;pwned\x07\x1b]777;notify;pwned;body\x1b\\";
         assert!(feed(&mut engine, &one.repeat(10_000)).is_empty());
         let long = [b"\x1b]9;".as_slice(), &[b'a'; 1_000_000], b"\x07"].concat();
         assert!(feed(&mut engine, &long).is_empty());
+        let marks = engine.agent_marks();
+        assert_eq!(marks.latest, Some(AgentSignal::Notified));
+        assert_eq!(
+            marks.signals, 10_000,
+            "one cut off at the limit is not counted"
+        );
         assert_eq!(engine.shell_marks(), ShellMarks::default());
         assert_eq!(clipboard_writes(&engine), 0);
         assert!(engine.marks.text.capacity() <= MAX_SEQUENCE);
         assert_eq!(engine.line_text(0), "");
         feed(&mut engine, b"ok");
         assert_eq!(engine.line_text(0), "ok");
+    }
+
+    #[test]
+    fn agent_states_are_read_and_progress_and_queries_are_not() {
+        let mut engine = AlacrittyEngine::new(4, 20);
+        feed(
+            &mut engine,
+            b"\x1b]7501;?\x07\x1b]9;4;1;50\x07\x1b]7501;state=bogus\x07",
+        );
+        assert_eq!(engine.agent_marks(), AgentMarks::default());
+        let states = [
+            (
+                &b"blocked:app=codex:kind=permission"[..],
+                AgentSignal::Blocked,
+            ),
+            (b"working:app=codex", AgentSignal::Working),
+            (b"done", AgentSignal::Done),
+            (b"idle", AgentSignal::Idle),
+            (b"clear", AgentSignal::Clear),
+        ];
+        for (count, (state, signal)) in (1..).zip(states) {
+            feed(
+                &mut engine,
+                &[b"\x1b]7501;state=", state, b"\x1b\\"].concat(),
+            );
+            assert_eq!(
+                engine.agent_marks(),
+                AgentMarks {
+                    latest: Some(signal),
+                    signals: count
+                }
+            );
+        }
+        assert_eq!(engine.line_text(0), "");
     }
 
     #[test]

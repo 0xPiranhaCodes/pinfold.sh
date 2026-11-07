@@ -1,8 +1,9 @@
 //! Recorded sessions of real agent CLIs, replayed through the VT engine and status engine.
 //!
 //! Each `agent_sessions/NAME.rec` holds the PTY output of a shell running an agent, as
-//! `DELAY_MS LENGTH\n` and LENGTH raw bytes per read. `NAME.states` lists the statuses the
-//! pane shows, in order. `agent_sessions/README.md` says how each was recorded.
+//! `DELAY_MS LENGTH\n` and LENGTH raw bytes per read. `NAME.states` lists the statuses a plain
+//! shell pane shows, in order, and `NAME.agent.states` those a pane launched from an agent
+//! profile shows. `agent_sessions/README.md` says how each was recorded.
 
 use std::fs;
 use std::path::Path;
@@ -34,16 +35,21 @@ fn chunks(data: &[u8]) -> Vec<(Duration, &[u8])> {
     chunks
 }
 
-/// The statuses a pane shows while it replays the recording, without repeats.
-fn replay(data: &[u8]) -> Vec<&'static str> {
+/// The statuses a pane shows while it replays the recording, without repeats. Only an agent
+/// profile's pane reads the CLI's own signals (ADR-0046).
+fn replay(data: &[u8], agent: bool) -> Vec<&'static str> {
     let mut engine = AlacrittyEngine::new(ROWS, COLUMNS);
     let mut tracker = Tracker::default();
+    if agent {
+        tracker.read_agent_signals();
+    }
     let mut now = Instant::now();
     let mut shown = vec![tracker.status().name()];
     for (delay, chunk) in chunks(data) {
         now += delay;
         engine.feed(chunk, &mut Vec::new());
         tracker.observe_shell(engine.shell_marks(), now);
+        tracker.observe_agent(engine.agent_marks(), now);
         let status = tracker.status().name();
         if shown.last() != Some(&status) {
             shown.push(status);
@@ -89,12 +95,14 @@ fn recorded_agent_sessions_show_the_expected_statuses() {
         let data = fs::read(&path).unwrap();
         assert!(data.len() < 200_000, "{name} is {} bytes", data.len());
         assert_scrubbed(&name, &data);
-        let expected = fs::read_to_string(path.with_extension("states")).unwrap();
-        assert_eq!(
-            replay(&data),
-            expected.lines().collect::<Vec<_>>(),
-            "{name}"
-        );
+        for (agent, extension) in [(false, "states"), (true, "agent.states")] {
+            let expected = fs::read_to_string(path.with_extension(extension)).unwrap();
+            assert_eq!(
+                replay(&data, agent),
+                expected.lines().collect::<Vec<_>>(),
+                "{name} in an agent pane: {agent}"
+            );
+        }
         replayed += 1;
     }
     assert!(

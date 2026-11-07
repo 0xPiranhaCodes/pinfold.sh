@@ -104,6 +104,12 @@ the shell's own working directory, read from the system
 ([ADR-0040](adr/0040-pane-directory-falls-back-to-its-shell.md)). With neither, the launch is
 refused. A sandboxed profile's directory must also pass the checks below. The core reads profiles once, at start.
 
+A profile's pane reads its CLI's own state from output: OSC 7501 `state=blocked` (codex-cli
+sends it at its approval prompt) or an OSC 9 notification shows ◆ needs you, labelled from
+output, and `working`, `done`, `idle` and `clear` move it on. Typing into the pane clears a
+needs you. A plain shell pane never reads them, so a program there cannot fake needs you
+([ADR-0046](adr/0046-agent-panes-read-needs-you-from-output.md)).
+
 ```toml
 [agents.claude]
 command = ["claude"]

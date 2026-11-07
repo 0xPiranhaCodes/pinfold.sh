@@ -332,10 +332,12 @@ impl Reactor {
                 pane.readable = pumped == Pumped::Budget;
                 pane.closed |= pumped == Pumped::Closed;
                 if fed {
-                    // Marks never say "needs you", so only an error can alert here, and
-                    // nothing draws those yet.
-                    let marks = pane.engine.shell_marks();
-                    let _ = pane.status.observe_shell(marks, Instant::now());
+                    // Shell marks never say "needs you", so only an error can alert there, and
+                    // nothing draws those yet. An agent profile's CLI can (ADR-0046).
+                    let now = Instant::now();
+                    let _ = pane.status.observe_shell(pane.engine.shell_marks(), now);
+                    let alert = pane.status.observe_agent(pane.engine.agent_marks(), now);
+                    pane.alerted |= alert.is_some_and(|alert| alert.status() == Status::NeedsYou);
                 }
             }
             if pane
@@ -447,6 +449,23 @@ impl Reactor {
         let alert = pane.status.report(status, now);
         pane.alerted |= alert.is_some_and(|alert| alert.status() == Status::NeedsYou);
         Ok(())
+    }
+
+    /// Lets a pane's own output say what its agent CLI is doing, through OSC 7501 states and
+    /// OSC 9 notifications, for a pane launched from an agent profile (ADR-0046). A "needs you"
+    /// from them alerts as a report does, and is still labelled as from output.
+    pub fn read_agent_signals(&mut self, pane: usize) {
+        if let Some(pane) = pane_mut(&mut self.panes, pane) {
+            pane.status.read_agent_signals();
+        }
+    }
+
+    /// Tells a pane's status that the person typed into it, which clears a "needs you" its
+    /// output said.
+    pub fn typed(&mut self, pane: usize, now: Instant) {
+        if let Some(pane) = pane_mut(&mut self.panes, pane) {
+            let _ = pane.status.typed(now);
+        }
     }
 
     /// Returns a pane's history and screen as plain text, newest last, or with `lines` only the
@@ -991,6 +1010,30 @@ mod tests {
             ShellMarks::default()
         );
         assert!(!reactor.take_alert(quiet));
+    }
+
+    #[test]
+    fn agent_signals_say_needs_you_only_in_an_agent_profiles_pane() {
+        let mut reactor = Reactor::new().unwrap();
+        // The bytes codex-cli sends at its approval prompt, and Claude Code's notification.
+        let script = r"i=0; while [ $i -lt 1000 ]; do
+            printf '\033]7501;state=blocked:app=codex:kind=permission\007\033]9;pwned\007'
+            i=$((i+1)); done; printf end; sleep 30";
+        let shell_pane = reactor.spawn(shell(script), 24, 80).unwrap();
+        let agent = reactor.spawn(shell(script), 24, 80).unwrap();
+        reactor.read_agent_signals(agent);
+        let done = |r: &Reactor| on_screen(r, shell_pane, "end") && on_screen(r, agent, "end");
+        assert!(turn_until(&mut reactor, done));
+
+        assert_eq!(reactor.status(shell_pane), Some((Status::Idle, false, "")));
+        assert!(!reactor.take_alert(shell_pane));
+        assert_eq!(reactor.status(agent), Some((Status::NeedsYou, false, "")));
+        assert!(reactor.take_alert(agent));
+        assert!(!reactor.take_alert(agent), "one alert, rate limited");
+        assert!(!on_screen(&reactor, agent, "pwned"));
+
+        reactor.typed(agent, Instant::now());
+        assert_eq!(reactor.status(agent), Some((Status::Idle, false, "")));
     }
 
     #[test]

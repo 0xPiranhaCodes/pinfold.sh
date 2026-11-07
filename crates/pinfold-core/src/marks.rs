@@ -1,4 +1,5 @@
-//! OSC 133 command marks and the OSC 7 working directory, which the parser drops.
+//! OSC 133 command marks, the OSC 7 working directory and an agent CLI's OSC 7501 states and
+//! OSC 9 notifications, which the parser drops.
 //!
 //! Program output writes all of this, so any program can fake it (T4 in the threat model).
 //! It is a hint to show as reported by output, and it never reaches a reply.
@@ -65,6 +66,53 @@ impl ShellMarks {
             _ => return false,
         };
         true
+    }
+}
+
+/// What an agent CLI last signalled of itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AgentSignal {
+    /// OSC 7501 `state=blocked`: it waits at its own approval prompt.
+    Blocked,
+    /// OSC 7501 `state=working`.
+    Working,
+    /// OSC 7501 `state=done`.
+    Done,
+    /// OSC 7501 `state=idle`.
+    Idle,
+    /// OSC 7501 `state=clear`: it has stopped saying anything, such as on exit.
+    Clear,
+    /// An OSC 9 notification. Its text is never kept.
+    Notified,
+}
+
+/// What an agent CLI in the pane last signalled through output. Any program can print these,
+/// so only a pane launched from an agent profile reads them (ADR-0046).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AgentMarks {
+    /// The latest signal, if one has arrived.
+    pub latest: Option<AgentSignal>,
+    /// How many signals have arrived, wrapping, so a reader sees a repeat.
+    pub signals: u32,
+}
+
+impl AgentMarks {
+    fn signal(&mut self, signal: AgentSignal) {
+        self.latest = Some(signal);
+        self.signals = self.signals.wrapping_add(1);
+    }
+}
+
+/// Reads the text after `7501;`, as codex-cli sends it: `state=blocked:app=codex:kind=...`.
+/// Fields after the state are ignored, and a query such as `?` is no signal.
+fn agent_state(text: &[u8]) -> Option<AgentSignal> {
+    match text.split(|&byte| byte == b':').next()? {
+        b"state=blocked" => Some(AgentSignal::Blocked),
+        b"state=working" => Some(AgentSignal::Working),
+        b"state=done" => Some(AgentSignal::Done),
+        b"state=idle" => Some(AgentSignal::Idle),
+        b"state=clear" => Some(AgentSignal::Clear),
+        _ => None,
     }
 }
 
@@ -137,6 +185,7 @@ pub(crate) struct Marks {
     open: bool,
     pub(crate) shell: ShellMarks,
     pub(crate) cwd: Option<WorkingDirectory>,
+    pub(crate) agent: AgentMarks,
 }
 
 impl Marks {
@@ -165,7 +214,9 @@ impl Marks {
             _ => {
                 self.text.push(byte);
                 let matches = |prefix: &&[u8]| prefix.iter().zip(&self.text).all(|(a, b)| a == b);
-                self.open = [b"133;".as_slice(), b"7;"].iter().any(matches);
+                self.open = [b"133;".as_slice(), b"7;", b"7501;", b"9;"]
+                    .iter()
+                    .any(matches);
             }
         }
         false
@@ -180,6 +231,17 @@ impl Marks {
             && let Some(cwd) = working_directory(url)
         {
             self.cwd = Some(cwd);
+        }
+        if let Some(signal) = self.text.strip_prefix(b"7501;").and_then(agent_state) {
+            self.agent.signal(signal);
+        }
+        // ConEmu's `9;4;...` progress and other numbered OSC 9 commands are not notifications.
+        if self
+            .text
+            .strip_prefix(b"9;")
+            .is_some_and(|body| !body.first().is_some_and(u8::is_ascii_digit))
+        {
+            self.agent.signal(AgentSignal::Notified);
         }
         false
     }
