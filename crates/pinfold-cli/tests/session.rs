@@ -2845,3 +2845,67 @@ fn every_api_method_replies_as_its_snapshot() {
         insta::assert_snapshot!(format!("replies_{name}"), said);
     }
 }
+
+#[test]
+fn the_documented_agent_hooks_set_their_panes_status() {
+    let session = Session::new("hk", None).unwrap();
+    let docs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/hooks");
+    let claude = fs::read_to_string(docs.join("claude-code.json")).unwrap();
+    let readme = fs::read_to_string(docs.join("README.md")).unwrap();
+    assert!(
+        readme.contains(&claude),
+        "the README shows claude-code.json as it is"
+    );
+    let claude: serde_json::Value = serde_json::from_str(&claude).unwrap();
+    // Claude Code runs a hook's command with a shell, its event as JSON on stdin.
+    let hook = |event: &str| {
+        let command = claude["hooks"][event][0]["hooks"][0]["command"].as_str();
+        format!("echo '{{}}' | {{ {}; }}", command.unwrap())
+    };
+    // Codex runs `notify` as argv, with the event as JSON after it. TOML's array is JSON's here.
+    let codex = fs::read_to_string(docs.join("codex.toml")).unwrap();
+    let notify = codex.lines().find(|line| line.starts_with("notify = "));
+    assert!(
+        readme.contains(notify.unwrap()),
+        "the README shows codex.toml's line"
+    );
+    let notify = notify.and_then(|line| line.strip_prefix("notify = "));
+    let notify: Vec<String> = serde_json::from_str(notify.unwrap()).unwrap();
+    let quoted: Vec<String> = notify.iter().map(|word| format!("'{word}'")).collect();
+    let notify = format!(
+        "{} '{{\"type\":\"agent-turn-complete\"}}'",
+        quoted.join(" ")
+    );
+
+    let list = "pinfold ctl list --json";
+    let steps = [
+        hook("Notification"),
+        hook("PostToolUse"),
+        hook("Stop"),
+        hook("UserPromptSubmit"),
+        notify,
+    ];
+    let mut shell = format!("PATH='{}':$PATH", session.directory.display());
+    for (index, step) in steps.iter().enumerate() {
+        shell += &format!("; {step} && {}", into(list, &index.to_string()));
+    }
+    shell += "; exec sleep 30";
+    let mut core = session.start_core(&["--idle", "1"], &shell).unwrap();
+    assert!(session.wait_for("4"), "{}", session.read_log());
+
+    let shown: Vec<(String, String)> = (0..steps.len())
+        .map(|index| {
+            let list: serde_json::Value =
+                serde_json::from_str(&session.read(&index.to_string())).unwrap();
+            let pane = &list["panes"][0];
+            (pane["status"].to_string(), pane["source"].to_string())
+        })
+        .collect();
+    let reported = |status: &str| (format!("\"{status}\""), "\"reported\"".to_owned());
+    assert_eq!(
+        shown,
+        ["needs-you", "running", "done", "running", "done"].map(reported)
+    );
+    core.kill().unwrap();
+    core.wait().unwrap();
+}

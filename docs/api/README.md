@@ -104,7 +104,9 @@ marks, which output can fake, so `pane.list` and `pane.status` events carry `sou
 `reported`. From marks, a command that finished shows `done` or `error` until the next one runs.
 In a pane `agent.launch` opened, `marks` also covers the CLI's OSC 7501 states and OSC 9
 notifications, which can say `needs-you` ([ADR-0046](../adr/0046-agent-panes-read-needs-you-from-output.md)).
-The window shows the state as glyph, colour and word, and the message only in its own chrome.
+The window shows the state as glyph, colour and word, and the message only in its own chrome. `pinfold
+ctl status <state> [message]` reports it from a shell, which is how
+[Claude Code and Codex hooks](../hooks/README.md) say needs you.
 
 The core records each request it answers in a hash-chained audit log: when, the caller's pane
 (or outside a pane, or unidentified), the method, the target pane, and whether it was allowed,
