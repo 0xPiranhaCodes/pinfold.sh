@@ -45,12 +45,12 @@ The maintainer decided on 2026-11-07:
    `Notification` hook and a Codex `notify` setting that call `pinfold` to set `pane.status`,
    with example config the tests run.
 5. **Notifications are PinFold's words.** A needs you from output alerts as a report does: the
-   pane's tab is marked while hidden, and the window raises a notification. Its text is written
-   by PinFold, "<tab or pane name> needs you", and never the OSC 9, OSC 777 or title text the
-   program sent. Limits: the tracker's alert interval stays at one per pane per 10 s, with
-   output and API alerts counted apart; the window adds one notification per pane per 60 s and
-   one per 10 s across all panes. Clicking a notification focuses its pane where the platform
-   tells the window.
+   pane's tab is marked while hidden, and the window raises a notification when a tab comes to
+   need you while hidden or in the background. Its text is written by PinFold, "<tab> needs
+   you", and never the OSC 9, OSC 777 or title text the program sent. Limits: the tracker's
+   alert interval stays at one per pane per 10 s, with output and API alerts counted apart; the
+   window adds one notification per tab per 60 s and one per 10 s across all tabs. Clicking a
+   notification goes to its tab where the platform tells the window.
 6. **The smallest platform mechanism.** On macOS the window uses `NSUserNotificationCenter` from
    the `objc2-foundation` binding it already links. It is deprecated, but on macOS 27.0.1 it
    delivers from an ad hoc signed bundle, and it needs no entitlement. Outside a bundle, such as
