@@ -21,6 +21,8 @@ use pinfold_sys::pty::Pty;
 /// esctest resizes to 25 rows of 80 at the start of every test, which the engine ignores.
 const ROWS: u16 = 25;
 const COLUMNS: u16 = 80;
+/// EIO is 5 on Linux and macOS; this crate has no libc to name it.
+const EIO: i32 = 5;
 
 fn main() -> io::Result<()> {
     let mut arguments = std::env::args_os().skip(1);
@@ -50,8 +52,9 @@ fn main() -> io::Result<()> {
                 }
                 thread::sleep(Duration::from_millis(1));
             }
-            // Linux reports EIO on the master once the program has exited.
-            Err(_) if pty.try_wait()?.is_some() => break,
+            // Linux reports EIO on the master once the program has closed the terminal, which
+            // it does in exit before it can be waited for, so EIO is the end of its output.
+            Err(error) if error.raw_os_error() == Some(EIO) => break,
             Err(error) => return Err(error),
         }
     }
