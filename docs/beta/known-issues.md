@@ -38,7 +38,8 @@ still welcome if it adds a case not listed here. Report bugs with the
   Finder showed "Verifying PinFold.dmg" and whether it worked after waiting a few seconds, and add
   it to #279.
 - **The disk image has no icon layout yet.** It holds PinFold and an Applications link in Finder's
-  default view.
+  default view. `packaging/macos/dmg-layout.sh` writes the layout file once on a Mac with a
+  screen, and the next `.dmg` picks it up.
 
 ## Memory
 
