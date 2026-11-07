@@ -128,10 +128,24 @@ impl Session {
     /// Whether `name` appeared in time. A writer of more than one write renames it into place,
     /// so a non-empty file is a finished one. A helper's panic fails the test at once.
     fn wait_for(&self, name: &str) -> bool {
+        self.wait_beside(name, None)
+    }
+
+    /// As [`Session::wait_for`], and fails at once if `core` ends first, taking its panes with
+    /// it, as when macOS kills a core at exec (#288).
+    fn wait_beside(&self, name: &str, mut core: Option<&mut Child>) -> bool {
         let start = Instant::now();
         while start.elapsed() < PATIENCE {
             let failed = self.read("failed");
             assert!(failed.is_empty(), "a helper process failed: {failed}");
+            if let Some(core) = core.as_deref_mut() {
+                let ended = core.try_wait().ok().flatten();
+                assert!(
+                    ended.is_none(),
+                    "the core ended: {ended:?}\n{}",
+                    self.read_log()
+                );
+            }
             if !self.read(name).is_empty() {
                 return true;
             }
@@ -489,6 +503,26 @@ fn a_window_that_exits_during_start_fails_the_launcher() {
     use std::os::unix::fs::PermissionsExt;
     let mode = fs::metadata(session.log()).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
+}
+
+/// As macOS's Gatekeeper sometimes kills an unsigned build at exec (#288).
+#[test]
+fn a_core_killed_before_it_answers_fails_the_launcher_at_once() {
+    let session = Session::new("kc", None).unwrap();
+    let core = session.directory.join("pinfold-core");
+    fs::remove_file(&core).unwrap();
+    fs::write(&core, "#!/bin/sh\nkill -9 $$\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&core, fs::Permissions::from_mode(0o700)).unwrap();
+    let start = Instant::now();
+    let error = launch_failure(&session).unwrap();
+    assert!(
+        error.contains("the core was killed before it answered"),
+        "{error}"
+    );
+    assert!(error.contains("signal: 9"), "{error}");
+    // The launcher's start wait, which it used to sit out before saying no core answered.
+    assert!(start.elapsed() < Duration::from_secs(5));
 }
 
 #[test]
@@ -1594,7 +1628,8 @@ fn mcp_lists_tools_calls_the_core_as_its_pane_and_reports_a_refusal_as_a_tool_er
         "{mcp} < {client}/requests > {client}/o && mv {client}/o {client}/out; exec sleep 30"
     );
     let mut core = session.start_core(&["--idle", "1"], &shell).unwrap();
-    assert!(session.wait_for("out"), "{}", session.read_log());
+    let waited = session.wait_beside("out", Some(&mut core));
+    assert!(waited, "{}", session.read_log());
 
     let out = session.read("out");
     let replies: Vec<serde_json::Value> = out

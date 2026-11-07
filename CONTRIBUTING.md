@@ -145,6 +145,12 @@ we want but do not have links to its issue.
 
 - **Unit tests** sit next to the code. Tests that need a real core, window link or PTY
   go in the crate's `tests/`, such as `crates/pinfold-cli/tests/session.rs`.
+  `crates/pinfold-cli/tests/repeat.sh RUNS [arguments]` runs that binary in a loop and counts
+  failed runs, for measuring a flake. On macOS, Gatekeeper checks each unsigned program the
+  tests place in a temporary folder and sometimes kills one at exec, about once in 100 runs
+  of `session` on an arm64 Mac (#288); `repeat.sh` lists each refusal from the system log.
+  Add the app your terminal runs in to System Settings > Privacy & Security > Developer
+  Tools to stop those checks.
 - **Property tests** (`proptest`) cover the config parser (`crates/pinfold-config`), the
   window link decoder (`crates/pinfold-proto/src/link.rs`), the layout tree
   (`crates/pinfold-mux`), the VT engine on arbitrary bytes split across reads and resizes
