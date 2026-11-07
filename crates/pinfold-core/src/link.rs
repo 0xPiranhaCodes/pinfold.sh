@@ -230,8 +230,10 @@ impl Session {
     }
 
     /// Tells the window of input a pane had no room for. A pane that has closed is no news.
-    fn note_input(&mut self, reactor: &Reactor, pane: u32, taken: bool) {
-        if !taken && reactor.engine(pane as usize).is_some() {
+    fn note_input(&mut self, reactor: &mut Reactor, pane: u32, taken: bool) {
+        if taken {
+            reactor.typed(pane as usize, std::time::Instant::now());
+        } else if reactor.engine(pane as usize).is_some() {
             self.refused = Some(Refusal::Input);
         }
     }

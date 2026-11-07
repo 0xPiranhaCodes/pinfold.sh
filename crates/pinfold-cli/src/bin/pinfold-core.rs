@@ -265,6 +265,7 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                 }
                 None => family.spawn_command(reactor, own, of, way, Some(&cwd), command)?,
             };
+            reactor.read_agent_signals(pane);
             Ok(json!({"pane": pane}))
         }
         Method::PaneClose { pane } => {

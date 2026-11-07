@@ -2,8 +2,9 @@
 
 Real sessions of agent CLIs, replayed by `tests/agent_sessions.rs` through the VT engine
 and status engine. `NAME.rec` is the raw PTY output, one read at a time, as
-`DELAY_MS LENGTH\n` and then LENGTH bytes. `NAME.states` lists the statuses the pane shows
-while it replays, in order.
+`DELAY_MS LENGTH\n` and then LENGTH bytes. `NAME.states` lists the statuses a plain shell pane
+shows while it replays, in order, and `NAME.agent.states` those of a pane launched from an
+agent profile.
 
 | Fixture | CLI | Recorded | Size |
 | --- | --- | --- | --- |
@@ -31,10 +32,17 @@ holds the home directory, user name, host name, `/Users/`, `/home/`, an email ad
 
 ## What the pane shows
 
-Both sessions replay as `idle, running, done, running, error`. Needs you is not among
-them: at the permission prompts the pane says running, as OSC 133 marks never say needs
-you (threat model T4); an agent says it with `pane.status`. Both CLIs send signals of their
-own that Pinfold does not read ([#276](https://github.com/0xPiranhaCodes/pinfold.sh/issues/276)).
+In a plain shell pane both sessions replay as `idle, running, done, running, error`. Needs
+you is not among them: at the permission prompts the pane says running, as OSC 133 marks
+never say needs you (threat model T4). That is the spoof test: the same bytes in a plain pane
+never say needs you.
+
+In an agent profile's pane (ADR-0045) codex reads as `idle, running, idle, running,
+needs-you, running, done, idle, running, done, running, error`: its OSC 7501 states outrank the
+shell's marks, `blocked` is needs you at the approval prompt, and `clear` on exit hands back
+to the shell until its `D` mark. Claude Code sends no state, only spinner titles, which are
+not read, so it replays as in a plain pane; it says needs you through a hook that calls
+`pane.status`.
 The shell sends `D` with `A`, and `B` 0–2 ms later in a separate read, so a finish stays
 shown at the prompt until the next command runs.
 

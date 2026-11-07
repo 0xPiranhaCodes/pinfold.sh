@@ -1,13 +1,16 @@
 //! Per-pane agent status derived from shell marks and explicit API reports.
 //!
-//! An API report outranks OSC 133 output until the caller clears it, because output can
-//! fake a "done" mark and an identified caller cannot (threat model T4). Shell marks still
-//! update the fallback status while a report holds, so clearing it reveals the latest
-//! shell state.
+//! An API report outranks output until the caller clears it, because output can fake a
+//! "done" mark and an identified caller cannot (threat model T4). Shell marks still update the
+//! fallback status while a report holds, so clearing it reveals the latest shell state.
+//!
+//! In a pane launched from an agent profile, the agent CLI's own OSC 7501 states and OSC 9
+//! notifications outrank its shell's marks, and they alone can say "needs you" from output
+//! (ADR-0045). A plain shell pane never reads them.
 
 use std::time::{Duration, Instant};
 
-use crate::marks::{ShellMarks, ShellPhase};
+use crate::marks::{AgentMarks, AgentSignal, ShellMarks, ShellPhase};
 
 /// The minimum time between alerts from one pane.
 ///
@@ -231,6 +234,11 @@ pub struct Tracker {
     output_status: Status,
     reported: bool,
     observed_finished: u32,
+    /// Whether output's agent signals count, which only an agent profile's pane allows.
+    agent: bool,
+    /// What the agent CLI last signalled, which outranks shell marks until it clears.
+    agent_status: Option<Status>,
+    observed_signals: u32,
     // Separate limits, so a fake alert printed by output cannot silence a real API one.
     last_api_alert: Option<Instant>,
     last_output_alert: Option<Instant>,
@@ -295,7 +303,83 @@ impl Tracker {
     /// ```
     pub fn clear_report(&mut self, now: Instant) -> Option<Alert> {
         self.reported = false;
-        self.transition(self.output_status, now)
+        self.transition(self.output(), now)
+    }
+
+    /// Makes [`Tracker::observe_agent`] count, for a pane launched from an agent profile
+    /// (ADR-0045). Without it a pane keeps to its shell marks, whatever its output prints.
+    pub fn read_agent_signals(&mut self) {
+        self.agent = true;
+    }
+
+    /// Observes what an agent CLI signalled through output. Blocked and a notification say
+    /// "needs you", working, done and idle say so, and clear hands back to the shell's marks.
+    /// Nothing changes unless [`Tracker::read_agent_signals`] was called.
+    ///
+    /// ```
+    /// use pinfold_core::marks::{AgentMarks, AgentSignal};
+    /// use pinfold_core::status::{Status, Tracker};
+    /// use std::time::Instant;
+    ///
+    /// let blocked = AgentMarks { latest: Some(AgentSignal::Blocked), signals: 1 };
+    /// let mut shell = Tracker::default();
+    /// shell.observe_agent(blocked, Instant::now());
+    /// assert_eq!(shell.status(), Status::Idle);
+    ///
+    /// let mut agent = Tracker::default();
+    /// agent.read_agent_signals();
+    /// assert!(agent.observe_agent(blocked, Instant::now()).is_some());
+    /// assert_eq!(agent.status(), Status::NeedsYou);
+    /// assert!(agent.from_output());
+    /// ```
+    pub fn observe_agent(&mut self, marks: AgentMarks, now: Instant) -> Option<Alert> {
+        if !self.agent || marks.signals == self.observed_signals {
+            return None;
+        }
+        self.observed_signals = marks.signals;
+        self.agent_status = match marks.latest? {
+            AgentSignal::Blocked | AgentSignal::Notified => Some(Status::NeedsYou),
+            AgentSignal::Working => Some(Status::Running),
+            AgentSignal::Done => Some(Status::Done),
+            AgentSignal::Idle => Some(Status::Idle),
+            AgentSignal::Clear => None,
+        };
+        self.show(now)
+    }
+
+    /// The person typed into the pane, which answers a prompt, so "needs you" from output
+    /// clears. A report from the API stays.
+    ///
+    /// ```
+    /// use pinfold_core::marks::{AgentMarks, AgentSignal};
+    /// use pinfold_core::status::{Status, Tracker};
+    /// use std::time::Instant;
+    ///
+    /// let mut tracker = Tracker::default();
+    /// tracker.read_agent_signals();
+    /// tracker.observe_agent(AgentMarks { latest: Some(AgentSignal::Notified), signals: 1 }, Instant::now());
+    /// tracker.typed(Instant::now());
+    /// assert_eq!(tracker.status(), Status::Idle);
+    /// ```
+    pub fn typed(&mut self, now: Instant) -> Option<Alert> {
+        if self.agent_status != Some(Status::NeedsYou) {
+            return None;
+        }
+        self.agent_status = None;
+        self.show(now)
+    }
+
+    /// The status output says: the agent CLI's latest signal, or else the shell's marks.
+    fn output(&self) -> Status {
+        self.agent_status.unwrap_or(self.output_status)
+    }
+
+    fn show(&mut self, now: Instant) -> Option<Alert> {
+        if self.reported {
+            None
+        } else {
+            self.transition(self.output(), now)
+        }
     }
 
     /// Observes the latest OSC 133 marks and updates the output-derived fallback.
@@ -316,6 +400,8 @@ impl Tracker {
     pub fn observe_shell(&mut self, marks: ShellMarks, now: Instant) -> Option<Alert> {
         if marks.finished != self.observed_finished {
             self.observed_finished = marks.finished;
+            // The command ended, so whatever its agent CLI last said no longer holds.
+            self.agent_status = None;
             self.output_status = match marks.exit {
                 Some(0) => Status::Done,
                 Some(_) => Status::Error,
@@ -334,12 +420,7 @@ impl Tracker {
                 ShellPhase::Unknown | ShellPhase::Finished => self.output_status,
             };
         }
-
-        if self.reported {
-            None
-        } else {
-            self.transition(self.output_status, now)
-        }
+        self.show(now)
     }
 
     fn transition(&mut self, status: Status, now: Instant) -> Option<Alert> {
@@ -494,6 +575,90 @@ mod tests {
             })
         );
         assert_eq!(repeated, None);
+    }
+
+    fn signal(latest: AgentSignal, signals: u32) -> AgentMarks {
+        AgentMarks {
+            latest: Some(latest),
+            signals,
+        }
+    }
+
+    #[test]
+    fn an_agent_pane_needs_you_until_its_cli_moves_on_or_the_person_types() {
+        let now = Instant::now();
+        let mut tracker = Tracker::default();
+        tracker.read_agent_signals();
+        tracker.observe_shell(marks(ShellPhase::Running, 0, None), now);
+
+        let first = tracker.observe_agent(signal(AgentSignal::Blocked, 1), now);
+        assert_eq!(first.map(Alert::status), Some(Status::NeedsYou));
+        assert!(tracker.from_output());
+        // Shell marks of the same command do not hide it.
+        tracker.observe_shell(marks(ShellPhase::Running, 0, None), now);
+        assert_eq!(tracker.status(), Status::NeedsYou);
+        tracker.observe_agent(signal(AgentSignal::Working, 2), now);
+        assert_eq!(tracker.status(), Status::Running);
+        tracker.observe_agent(signal(AgentSignal::Done, 3), now);
+        assert_eq!(tracker.status(), Status::Done);
+
+        tracker.observe_agent(signal(AgentSignal::Notified, 4), now);
+        assert_eq!(tracker.status(), Status::NeedsYou);
+        tracker.typed(now);
+        assert_eq!(
+            tracker.status(),
+            Status::Running,
+            "back to the shell's marks"
+        );
+        tracker.observe_agent(signal(AgentSignal::Blocked, 5), now);
+        tracker.observe_agent(signal(AgentSignal::Clear, 6), now);
+        assert_eq!(tracker.status(), Status::Running);
+        // A finished command ends what its CLI said.
+        tracker.observe_agent(signal(AgentSignal::Idle, 7), now);
+        tracker.observe_shell(marks(ShellPhase::Prompt, 1, Some(0)), now);
+        assert_eq!(tracker.status(), Status::Done);
+    }
+
+    #[test]
+    fn a_shell_pane_never_needs_you_from_output_and_a_report_outranks_an_agent() {
+        let now = Instant::now();
+        let mut shell = Tracker::default();
+        for count in 1..=1000 {
+            assert_eq!(
+                shell.observe_agent(signal(AgentSignal::Blocked, count), now),
+                None
+            );
+        }
+        assert_eq!(shell.status(), Status::Idle);
+
+        let mut agent = Tracker::default();
+        agent.read_agent_signals();
+        agent.report(Status::Running, now);
+        assert_eq!(
+            agent.observe_agent(signal(AgentSignal::Blocked, 1), now),
+            None
+        );
+        assert_eq!(agent.typed(now), None);
+        assert_eq!(agent.status(), Status::Running);
+        assert!(!agent.from_output());
+    }
+
+    #[test]
+    fn a_flapping_agent_cli_raises_one_alert_in_ten_seconds() {
+        let now = Instant::now();
+        let mut tracker = Tracker::default();
+        tracker.read_agent_signals();
+        let mut alerts: usize = 0;
+        for step in 0_u32..1000 {
+            let at = now + Duration::from_millis(u64::from(step) * 5);
+            let latest = [AgentSignal::Blocked, AgentSignal::Working][step as usize % 2];
+            alerts += usize::from(
+                tracker
+                    .observe_agent(signal(latest, step + 1), at)
+                    .is_some(),
+            );
+        }
+        assert_eq!(alerts, 1);
     }
 
     #[test]
