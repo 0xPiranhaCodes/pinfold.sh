@@ -107,7 +107,10 @@ refused. A sandboxed profile's directory must also pass the checks below. The co
 A profile's pane reads its CLI's own state from output: OSC 7501 `state=blocked` (codex-cli
 sends it at its approval prompt) or an OSC 9 notification shows ◆ needs you, labelled from
 output, and `working`, `done`, `idle` and `clear` move it on. Typing into the pane clears a
-needs you. A plain shell pane never reads them, so a program there cannot fake needs you
+needs you. When a tab comes to need you while it is hidden or the window is in the background,
+macOS shows a notification, "<tab> needs you", never the program's own text; clicking it goes
+to the tab. At most one comes per tab a minute and one every 10 seconds in all. A build outside
+an app bundle, such as `cargo run`, bounces the Dock icon instead, and Linux marks the tab only. A plain shell pane never reads them, so a program there cannot fake needs you
 ([ADR-0046](adr/0046-agent-panes-read-needs-you-from-output.md)).
 
 ```toml

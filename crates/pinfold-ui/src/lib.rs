@@ -13,6 +13,7 @@ mod input;
 pub mod link;
 mod menu_bar;
 mod mouse;
+mod notify;
 mod outbox;
 mod panes;
 mod paste;

@@ -21,6 +21,8 @@ pub mod mapped;
 pub mod menu;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub mod metal;
+#[cfg(all(target_os = "macos", feature = "menu"))]
+pub mod notify;
 pub mod pty;
 pub mod seccomp;
 pub mod socket;
