@@ -1,4 +1,4 @@
-//! Notifications that a tab needs you (ADR-0045). The text is PinFold's, "<tab> needs you",
+//! Notifications that a tab needs you (ADR-0045). The text is PinFold's, "`<tab>` needs you",
 //! never what a program printed, and they are rate-limited per tab and across all of them.
 
 use std::time::{Duration, Instant};
@@ -80,12 +80,20 @@ impl Notifier {
             if !self.limit.allow(pane(index), now) {
                 continue;
             }
-            #[cfg(target_os = "macos")]
-            if let Some(system) = &self.system {
-                system.notify(&text(tabs.labels.get(index), index), index);
-            }
+            self.show(&text(tabs.labels.get(index), index), index);
         }
     }
+
+    #[cfg(target_os = "macos")]
+    fn show(&self, text: &str, index: usize) {
+        if let Some(system) = &self.system {
+            system.notify(text, index);
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[expect(clippy::unused_self, reason = "the same interface as on macOS")]
+    fn show(&self, _text: &str, _index: usize) {}
 }
 
 /// A notification's text, from the tab's label alone, or its number without one.
