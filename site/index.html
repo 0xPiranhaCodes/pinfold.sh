@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PinFold: a memory-first terminal for agentic coding</title>
-<meta name="description" content="PinFold is a terminal for macOS and Linux, written in Rust, with tabs, splits and sessions built in, a local API for coding agents, and prompts no program can fake.">
+<meta name="description" content="PinFold is a terminal written in Rust, in beta on macOS with Linux to follow, with tabs, splits and sessions built in, a local API for coding agents, and prompts no program can fake.">
 <link rel="canonical" href="https://pinfold.sh/">
 <meta name="theme-color" content="#0B0D11">
 <link rel="icon" href="img/icon-32.png" sizes="32x32" type="image/png">
@@ -14,7 +14,7 @@
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://pinfold.sh/">
 <meta property="og:title" content="PinFold: a memory-first terminal for agentic coding">
-<meta property="og:description" content="Tabs, splits and sessions built in. Agents drive panes through a scoped, audited API, and when one needs you, PinFold says so.">
+<meta property="og:description" content="In beta on macOS, with Linux to follow. Tabs, splits and sessions built in. Agents drive panes through a scoped, audited API, and when one needs you, PinFold says so.">
 <meta property="og:image" content="https://pinfold.sh/img/og.png">
 <meta property="og:image:width" content="1200">
 <meta property="og:image:height" content="630">
@@ -45,7 +45,7 @@
     <div class="hero" id="top">
       <section class="pane" aria-labelledby="h1">
         <span class="pane-label">1 · about</span>
-        <div class="eyebrow"><span class="dot" aria-hidden="true"></span> macOS beta soon · <b>◆ 0.1.0-beta.1</b> · Rust</div>
+        <div class="eyebrow"><span class="dot" aria-hidden="true"></span> macOS beta out · <b>◆ 0.1.0-beta.1</b> · Rust</div>
 <pre class="logo" aria-hidden="true">
  ██████╗ ██╗███╗   ██╗███████╗ ██████╗ ██╗     ██████╗
  ██╔══██╗██║████╗  ██║██╔════╝██╔═══██╗██║     ██╔══██╗
@@ -56,7 +56,8 @@
         <h1 id="h1">A memory-first terminal for <em>agentic coding</em>.</h1>
         <p class="lede">Tabs, splits and sessions built in. Agents drive panes through a <b>scoped, audited API</b>, and when one needs you, PinFold asks with a prompt <b>no program can fake</b>.</p>
         <div class="cta">
-          <a class="btn" href="#install" aria-disabled="true">↓ macOS beta · coming soon</a>
+          <a class="btn" href="https://github.com/0xPiranhaCodes/pinfold.sh/releases/download/v0.1.0-beta.1/PinFold.dmg">↓ macOS beta · PinFold.dmg</a>
+          <a class="btn ghost" href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/docs/beta/known-issues.md">known issues ↗</a>
           <a class="btn ghost" href="https://github.com/0xPiranhaCodes/pinfold.sh">GitHub ↗</a>
         </div>
         <div class="copy"><span class="m">$</span><code id="src-cmd">cargo build --release -p pinfold-cli</code><button type="button" id="copy-btn" aria-label="Copy build command" hidden data-js>copy</button></div>
@@ -139,7 +140,7 @@ $ pinfold  <span class="st-run">reopens the session</span></pre>
           <tr><td>core, beside window</td><td>Linux</td><td class="num"><b>3.79 MB</b></td><td class="num">4.00 MB</td><td><span class="bar"><span class="track"><i class="warm" style="width:95%"></i></span><span class="pct">95%</span></span></td></tr>
         </tbody>
       </table>
-      <div class="caption"><span>From <a href="https://github.com/0xPiranhaCodes/pinfold.sh/pull/169">PR #169</a>: an M1 Pro at 1512×1890 (<code>phys_footprint</code>) and Linux CI under Xvfb at 1920×1080 (PSS). The worst window row is an open menu on macOS and a full glyph cache on Linux. A macOS window reads about 45.5 or 51 MB from run to run as Metal pools memory; ten runs all passed.</span><span>reproduce: <code>XDG_CONFIG_HOME="$(mktemp -d)" cargo xtask mem-gate</code></span></div>
+      <div class="caption"><span>From <a href="https://github.com/0xPiranhaCodes/pinfold.sh/pull/169">PR #169</a>: an M1 Pro at 1512×1890 (<code>phys_footprint</code>) and Linux CI under Xvfb at 1920×1080 (PSS). The worst window row is an open menu on macOS and a full glyph cache on Linux. A macOS window reads about 45.5 or 51 MB from run to run as Metal pools memory; ten runs all passed. An eight-hour Linux soak held the core at 4.31–4.64 MB PSS (<a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/benches/soak.md">benches/soak.md</a>, <code>OUT=&lt;dir&gt; tests/window/soak.sh 480</code>).</span><span>reproduce: <code>XDG_CONFIG_HOME="$(mktemp -d)" cargo xtask mem-gate</code></span></div>
     </div>
   </section>
 
@@ -221,8 +222,12 @@ Docs: https://github.com/0xPiranhaCodes/pinfold.sh#readme
     <div class="section-head"><h2 id="in-h">install</h2><span class="rule" aria-hidden="true"></span><span class="meta">macOS first, Linux next</span></div>
     <div class="grid3">
       <article class="box hover">
-        <h3>macOS beta <span>/ coming soon</span></h3>
-        <p>A signed, notarized <b>PinFold.dmg</b> on <a href="https://github.com/0xPiranhaCodes/pinfold.sh/releases">GitHub Releases</a>. Apple silicon and Intel in one app. There is no release yet; the <a href="https://github.com/0xPiranhaCodes/pinfold.sh#install-the-beta">install guide</a> and <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/docs/beta/known-issues.md">known issues</a> are ready, and so far it has been tried by hand only on Apple silicon.</p>
+        <h3>macOS beta <span>/ available now</span></h3>
+        <p>Download the signed, notarized <b>PinFold.dmg</b> and <b>SHA256SUMS</b> from the <a href="https://github.com/0xPiranhaCodes/pinfold.sh/releases/tag/v0.1.0-beta.1">v0.1.0-beta.1 release</a>, check one against the other, then drag PinFold to Applications. One app for Apple silicon and Intel: macOS 11 or later on Apple silicon, 10.13.4 or later on Intel. It has been run by hand only on macOS 27 on Apple silicon, so older versions are untested (<a href="https://github.com/0xPiranhaCodes/pinfold.sh/issues/190">#190</a>), and Intel is only partly checked until <a href="https://github.com/0xPiranhaCodes/pinfold.sh/issues/213">#213</a> is done. Read the <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/docs/beta/known-issues.md">known issues</a> and the <a href="https://github.com/0xPiranhaCodes/pinfold.sh#install-the-beta">install guide</a>.</p>
+        <pre>shasum -a 256 -c SHA256SUMS --ignore-missing
+<span class="m"># optional: the pinfold command</span>
+sudo mkdir -p /usr/local/bin
+sudo ln -sf /Applications/PinFold.app/Contents/MacOS/pinfold /usr/local/bin/pinfold</pre>
       </article>
       <article class="box hover">
         <h3>from source <span>/ today</span></h3>
@@ -234,7 +239,7 @@ cargo build --release -p pinfold-cli
       </article>
       <article class="box hover">
         <h3>Linux <span>/ v0.1</span></h3>
-        <p>X11 and Wayland, with tarballs and a Homebrew formula, after the macOS beta.</p>
+        <p>X11 and Wayland, with tarballs and a Homebrew formula, after the macOS beta (<a href="https://github.com/0xPiranhaCodes/pinfold.sh/issues/47">#47</a>).</p>
       </article>
     </div>
   </section>
