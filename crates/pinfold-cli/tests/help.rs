@@ -30,6 +30,7 @@ fn help_lists_every_command_and_option() {
         "ctl list",
         "ctl send",
         "ctl wait",
+        "ctl status",
         "ctl grants",
         "ctl log",
         "ctl session save",
@@ -49,7 +50,15 @@ fn each_command_has_help_naming_its_arguments_and_flags() {
         (&["agent"], &["<name>", "--right", "--down", "--tab"]),
         (
             &["ctl"],
-            &["list", "send", "wait", "grants", "log", "session save"],
+            &[
+                "list",
+                "send",
+                "wait",
+                "status",
+                "grants",
+                "log",
+                "session save",
+            ],
         ),
         (&["ctl", "list"], &["--json"]),
         (&["ctl", "send"], &["<pane>", "<text>"]),
@@ -69,6 +78,7 @@ fn each_command_has_help_naming_its_arguments_and_flags() {
                 "--timeout",
             ],
         ),
+        (&["ctl", "status"], &["<state>", "[message]", "needs-you"]),
         (&["ctl", "grants"], &["--json", "revoke <id>"]),
         (
             &["ctl", "log"],

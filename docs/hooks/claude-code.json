@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "Notification": [
+      { "hooks": [{ "type": "command", "command": "pinfold ctl status needs-you" }] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [{ "type": "command", "command": "pinfold ctl status running" }] }
+    ],
+    "PostToolUse": [
+      { "matcher": "*", "hooks": [{ "type": "command", "command": "pinfold ctl status running" }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "pinfold ctl status done" }] }
+    ]
+  }
+}

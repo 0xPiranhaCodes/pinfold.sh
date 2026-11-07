@@ -1,0 +1,2 @@
+# Codex appends a JSON argument, which `sh -c` takes as $1 and the command ignores.
+notify = ["sh", "-c", "pinfold ctl status done", "pinfold-notify"]

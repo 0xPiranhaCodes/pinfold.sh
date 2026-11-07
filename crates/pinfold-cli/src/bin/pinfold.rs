@@ -37,6 +37,7 @@ Commands:
   ctl list          List the session's panes
   ctl send          Type text into a pane
   ctl wait          Wait until a pane's command exits, it prints or it goes quiet
+  ctl status        Set the state the pane it runs in shows, from an agent's hook
   ctl grants        List or revoke lasting cross-pane grants
   ctl log           Print or verify the audit log of API calls
   ctl session save  Save the session now and print the snapshot's path
@@ -101,6 +102,7 @@ Commands:
   list          List the session's panes
   send          Type text into a pane
   wait          Wait until a pane's command exits, it prints or it goes quiet
+  status        Set the state the pane it runs in shows, from an agent's hook
   grants        List or revoke lasting cross-pane grants
   log           Print or verify the audit log of API calls
   session save  Save the session now and print the snapshot's path
@@ -143,6 +145,24 @@ Arguments:
 
 Example:
   pinfold ctl send 2 $'make test\\r'
+";
+
+const STATUS: &str = "\
+pinfold ctl status: set the state the pane it runs in shows.
+
+Usage: pinfold ctl status <state> [message]
+
+Run it in a PinFold pane, usually from an agent CLI's hook: docs/hooks/README.md has Claude
+Code and Codex settings. The state outranks what the pane's output says from then on, and
+needs-you marks its tab and can raise a notification.
+
+Arguments:
+  <state>    needs-you, running, done, error or idle
+  [message]  At most 200 characters, shown in PinFold's own chrome
+
+Examples:
+  pinfold ctl status needs-you 'approve the diff?'
+  pinfold ctl status done
 ";
 
 const WAIT: &str = "\
@@ -252,6 +272,7 @@ fn help(topic: &[&str]) -> Option<&'static str> {
         ["ctl", "list"] => LIST,
         ["ctl", "send"] => SEND,
         ["ctl", "wait"] => WAIT,
+        ["ctl", "status"] => STATUS,
         ["ctl", "grants"] => GRANTS,
         ["ctl", "log"] => LOG,
         ["ctl", "session"] | ["ctl", "session", "save"] => SESSION,
@@ -515,6 +536,18 @@ fn send(pane: &str, text: &str) -> Result<(), Box<dyn Error>> {
         .map_err(|_| misuse("the pane must be a number"))?;
     let params = json!({"pane": pane, "text": text});
     control::ask(&running()?, "pane.send", &params)?;
+    Ok(())
+}
+
+/// `pinfold ctl status <state> [message]`: reports the state of the pane it runs in, which the
+/// core finds by its terminal. It starts no core.
+fn status(state: &str, message: Option<&str>) -> Result<(), Box<dyn Error>> {
+    let (hello, _) = control::list_panes(&running()?)?;
+    let pane = hello["pane"]
+        .as_u64()
+        .ok_or("pinfold ctl status runs in a PinFold pane")?;
+    let params = json!({"pane": pane, "state": state, "message": message});
+    control::ask(&running()?, "pane.status", &params)?;
     Ok(())
 }
 
@@ -799,6 +832,8 @@ fn main() -> ExitCode {
         ["ctl", "list"] => list(false),
         ["ctl", "list", "--json"] => list(true),
         ["ctl", "send", pane, text] => send(pane, text),
+        ["ctl", "status", state] => status(state, None),
+        ["ctl", "status", state, message] => status(state, Some(message)),
         // 0 once what it waited for happened, 1 if not, and 2 on an error.
         ["ctl", "wait", ref wait_args @ ..] => {
             return match wait(wait_args) {
