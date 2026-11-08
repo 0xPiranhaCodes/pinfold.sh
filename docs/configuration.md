@@ -259,8 +259,10 @@ paste and find.
 Right-click in a pane opens a menu of the same commands, or Shift+right-click when the
 program reports the mouse. On an OSC 8 hyperlink it also offers Open Link and Copy Link.
 Plain URLs that are not OSC 8 links get neither. Open Link opens an `http` or `https` link
-with a host in your browser, through `open` on macOS and `xdg-open` on Linux. Any other
-scheme, or a web link with characters outside ASCII, first shows the whole link under a
+with a host in your browser, through `/usr/bin/open` on macOS and `xdg-open` on Linux.
+PinFold never looks the opener up in `PATH`: it runs the first of `/usr/bin/xdg-open`,
+`/usr/local/bin/xdg-open` and `/run/current-system/sw/bin/xdg-open` that is an executable
+file, and says which paths it tried when none is. Any other scheme, or a web link with characters outside ASCII, first shows the whole link under a
 `◆ needs you` border, with those characters escaped, and opens it on Enter. A link longer
 than 2,048 bytes, or one that is not a URI, gets neither item.
 

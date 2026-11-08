@@ -1545,23 +1545,56 @@ const DOCS: &str = concat!(
     "/blob/main/docs/configuration.md"
 );
 
-/// Opens `target`, a file or URL, in the app the desktop picks for it, without waiting.
-/// `text` asks macOS for the text editor, as a `.toml` file may have no app of its own.
-fn launch(target: &str, text: bool) {
-    let mut command = std::process::Command::new(if cfg!(target_os = "macos") {
-        "/usr/bin/open"
-    } else {
-        "xdg-open"
-    });
+/// Where the opener may live, tried in order. Never found through `PATH`, which whoever
+/// started PinFold controls (#298). NixOS has no `/usr/bin/xdg-open`; its system profile
+/// links programs from `/run/current-system/sw/bin`, which only root can change.
+#[cfg(target_os = "macos")]
+const OPENERS: &[&str] = &["/usr/bin/open"];
+#[cfg(not(target_os = "macos"))]
+const OPENERS: &[&str] = &[
+    "/usr/bin/xdg-open",
+    "/usr/local/bin/xdg-open",
+    "/run/current-system/sw/bin/xdg-open",
+];
+
+/// The first of `candidates` that is a regular, executable file once symlinks are followed.
+fn opener<'a>(candidates: &[&'a str]) -> Result<&'a str, String> {
+    use std::os::unix::fs::PermissionsExt;
+    candidates
+        .iter()
+        .copied()
+        .find(|path| {
+            std::fs::metadata(path)
+                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+        })
+        .ok_or_else(|| format!("no executable opener at {}", candidates.join(", ")))
+}
+
+/// The command that opens `target` with the first opener in `candidates`.
+fn opener_command(
+    candidates: &[&str],
+    target: &str,
+    text: bool,
+) -> Result<std::process::Command, String> {
+    let mut command = std::process::Command::new(opener(candidates)?);
     if text && cfg!(target_os = "macos") {
         command.arg("-t");
     }
-    let spawned = command
+    // The environment is kept: openers need the session's DISPLAY, WAYLAND_DISPLAY,
+    // DBUS_SESSION_BUS_ADDRESS and XDG_* variables to reach the desktop.
+    command
         .arg(target)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn();
+        .stderr(Stdio::null());
+    Ok(command)
+}
+
+/// Opens `target`, a file or URL, in the app the desktop picks for it, without waiting.
+/// `text` asks macOS for the text editor, as a `.toml` file may have no app of its own.
+fn launch(target: &str, text: bool) {
+    let spawned = opener_command(OPENERS, target, text)
+        .and_then(|mut command| command.spawn().map_err(|error| error.to_string()));
     match spawned {
         // Reaped on a thread of its own, so it leaves no zombie and the window does not wait.
         Ok(mut child) => drop(thread::spawn(move || child.wait())),
@@ -1676,6 +1709,81 @@ mod tests {
     use pinfold_proto::link::{ApprovalAction, ApprovalAnswer};
 
     use super::*;
+
+    /// A fresh folder for an opener test.
+    fn opener_dir(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("pinfold-opener-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Writes an executable script at `path` that writes `marker` when run.
+    fn script(path: &std::path::Path, marker: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, format!("#!/bin/sh\n: > '{}'\n", marker.display())).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn the_opener_is_never_found_through_path() {
+        let dir = opener_dir("path");
+        let bin = dir.join("bin");
+        std::fs::create_dir(&bin).unwrap();
+        let (fake, real) = (dir.join("fake-ran"), dir.join("real-ran"));
+        let name = OPENERS[0].rsplit('/').next().unwrap();
+        script(&bin.join(name), &fake);
+        let opener = dir.join("opener");
+        script(&opener, &real);
+        let status = opener_command(&[opener.to_str().unwrap()], "https://example.com", false)
+            .unwrap()
+            .env("PATH", &bin)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        assert!(real.exists());
+        assert!(!fake.exists());
+        let command = opener_command(OPENERS, "x", false);
+        if let Ok(command) = command {
+            assert!(std::path::Path::new(command.get_program()).is_absolute());
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn the_opener_is_the_first_regular_executable_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = opener_dir("pick");
+        let missing = dir.join("missing");
+        let folder = dir.join("folder");
+        std::fs::create_dir(&folder).unwrap();
+        let plain = dir.join("plain");
+        std::fs::write(&plain, "").unwrap();
+        std::fs::set_permissions(&plain, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let (good, later) = (dir.join("good"), dir.join("later"));
+        script(&good, &dir.join("unused"));
+        script(&later, &dir.join("unused"));
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&folder, &link).unwrap();
+        let paths =
+            [&missing, &folder, &link, &plain, &good, &later].map(|path| path.to_str().unwrap());
+        assert_eq!(opener(&paths), Ok(paths[4]));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn no_opener_names_every_path_tried() {
+        let error = opener(&["/nonexistent/a/xdg-open", "/nonexistent/b/xdg-open"]).unwrap_err();
+        assert_eq!(
+            error,
+            "no executable opener at /nonexistent/a/xdg-open, /nonexistent/b/xdg-open"
+        );
+        let Err(error) = opener_command(&["/nonexistent/xdg-open"], "x", false) else {
+            panic!("a missing opener gave a command");
+        };
+        assert!(error.contains("/nonexistent/xdg-open"));
+    }
 
     /// A window with one pane, 1, focused, and no event loop. The poll keeps the waker's queue.
     fn app() -> (App, Inbox, Poll) {
