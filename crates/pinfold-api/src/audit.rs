@@ -28,7 +28,7 @@
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use serde_json::{Value, json};
@@ -220,7 +220,9 @@ impl Log {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Io`] when the file cannot be opened or `path` is not a regular file, and
+    /// Returns [`Error::Io`] when the file cannot be opened, `path` is a symlink or not a regular
+    /// file of this user's, or its folder is not this user's alone (owned, not group or world
+    /// writable), and
     /// [`Error::Malformed`] or
     /// [`Error::Broken`] when the existing file fails verification.
     pub fn with_file(path: impl AsRef<Path>) -> Result<Self, Error> {
@@ -434,27 +436,46 @@ fn cost(record: &Record) -> usize {
     size_of::<Entry>() + record.method.capacity() + record.scope.capacity() + reason.capacity()
 }
 
+/// Opens the log for appending without following a symlink at `path`, and keeps it only if it
+/// is a regular file of ours in a private parent. Every check is of the opened file, never a
+/// second lookup of `path`, so a swapped entry is refused rather than written or chmodded.
+///
+/// The parent must be ours and writable by no one else (`state_dir` is created 0700): then only
+/// this user can swap entries in it. Its ancestors are trusted to be writable only by this user,
+/// as `$HOME` is.
 fn open_file(path: &Path) -> io::Result<File> {
-    // shortcut: a symlink swapped in between this check and the open is still followed; use
-    // O_NOFOLLOW if this crate ever depends on libc or rustix.
-    match fs::symlink_metadata(path) {
-        // A symlink could redirect records and a FIFO would block the open.
-        Ok(metadata) if !metadata.file_type().is_file() => {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "audit log path is not a regular file",
-            ));
-        }
-        Ok(_) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    let parent = fs::metadata(parent.unwrap_or(Path::new(".")))?;
+    if parent.uid() != pinfold_sys::effective_uid() || parent.mode() & 0o022 != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "audit log folder is not private",
+        ));
     }
     let file = OpenOptions::new()
         .create(true)
         .append(true)
         .mode(0o600)
-        .open(path)?;
-    // The mode above applies only to a new file.
+        // O_NONBLOCK, so that a FIFO put here fails at once instead of blocking the open.
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
+        .open(path)
+        .map_err(|error| {
+            if error.raw_os_error() == Some(libc::ELOOP) {
+                io::Error::new(io::ErrorKind::InvalidInput, "audit log path is a symlink")
+            } else {
+                error
+            }
+        })?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() || metadata.uid() != pinfold_sys::effective_uid() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "audit log path is not a regular file of ours",
+        ));
+    }
+    // Through the descriptor: the mode above applies only to a new file.
     file.set_permissions(fs::Permissions::from_mode(0o600))?;
     Ok(file)
 }
@@ -614,12 +635,17 @@ mod tests {
         }
     }
 
+    /// A path in a private folder, as the log refuses a shared one such as Linux's `/tmp`.
     fn path(name: &str) -> PathBuf {
-        std::env::temp_dir().join(format!(
-            "pinfold-audit-{}-{}-{name}",
-            std::process::id(),
-            NEXT.fetch_add(1, Ordering::Relaxed)
-        ))
+        let dir = std::env::temp_dir().join(format!("pinfold-audit-{}", std::process::id()));
+        std::os::unix::fs::DirBuilderExt::mode(&mut fs::DirBuilder::new(), 0o700)
+            .create(&dir)
+            .or_else(|error| match error.kind() {
+                io::ErrorKind::AlreadyExists => Ok(()),
+                _ => Err(error),
+            })
+            .unwrap();
+        dir.join(format!("{}-{name}", NEXT.fetch_add(1, Ordering::Relaxed)))
     }
 
     #[test]
@@ -713,6 +739,7 @@ mod tests {
     fn a_symlinked_path_is_refused() -> Result<(), Error> {
         let target = path("target");
         fs::write(&target, [])?;
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644))?;
         let link = path("link");
         std::os::unix::fs::symlink(&target, &link)?;
         assert!(matches!(
@@ -720,6 +747,7 @@ mod tests {
             Err(Error::Io(error)) if error.kind() == io::ErrorKind::InvalidInput
         ));
         assert_eq!(fs::metadata(&target)?.len(), 0);
+        assert_eq!(fs::metadata(&target)?.permissions().mode() & 0o777, 0o644);
         fs::remove_file(link)?;
         fs::remove_file(target)?;
         Ok(())
@@ -734,11 +762,82 @@ mod tests {
                 .status()?
                 .success()
         );
+        // With no reader the nonblocking open fails (ENXIO); with one, the fstat refuses it.
+        assert!(Log::with_file(&fifo).is_err());
+        let reader = OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&fifo)?;
         assert!(matches!(
             Log::with_file(&fifo),
             Err(Error::Io(error)) if error.kind() == io::ErrorKind::InvalidInput
         ));
+        drop(reader);
         fs::remove_file(fifo)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_swapped_symlink_is_never_written_or_chmodded() -> Result<(), Error> {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+
+        let path = path("swap");
+        let target = PathBuf::from(format!("{}-target", path.display()));
+        fs::write(&target, [])?;
+        fs::set_permissions(&target, fs::Permissions::from_mode(0o644))?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let swapper = {
+            let (path, target, stop) = (path.clone(), target.clone(), Arc::clone(&stop));
+            std::thread::spawn(move || -> io::Result<()> {
+                let staged = PathBuf::from(format!("{}-staged", path.display()));
+                while !stop.load(Ordering::Relaxed) {
+                    std::os::unix::fs::symlink(&target, &staged)?;
+                    fs::rename(&staged, &path)?;
+                    fs::write(&staged, [])?;
+                    fs::rename(&staged, &path)?;
+                }
+                Ok(())
+            })
+        };
+        let mut opened = 0;
+        for _ in 0..2_000 {
+            if let Ok(mut file) = open_file(&path) {
+                file.write_all(b"x")?;
+                opened += 1;
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        swapper.join().unwrap()?;
+        assert!(opened > 0);
+        assert_eq!(fs::metadata(&target)?.len(), 0);
+        assert_eq!(fs::metadata(&target)?.permissions().mode() & 0o777, 0o644);
+        fs::remove_file(path)?;
+        fs::remove_file(target)?;
+        Ok(())
+    }
+
+    #[test]
+    fn a_shared_folder_is_refused_at_open_and_at_rotation() -> Result<(), Error> {
+        let dir = path("shared");
+        fs::create_dir(&dir)?;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
+        let path = dir.join("audit.log");
+        let mut log = Log::with_file(&path)?;
+        log.append(record(0))?;
+        if let Some(disk) = &mut log.disk {
+            disk.bytes = FILE_BYTES;
+        }
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o770))?;
+        assert!(matches!(
+            Log::with_file(&path),
+            Err(Error::Io(error)) if error.kind() == io::ErrorKind::InvalidInput
+        ));
+        assert!(log.append(record(1)).is_err());
+        assert!(log.disk.is_none());
+        assert!(!rotated_path(&path).exists());
+        assert_eq!(verify_file(&path)?, 1);
+        fs::remove_dir_all(dir)?;
         Ok(())
     }
 

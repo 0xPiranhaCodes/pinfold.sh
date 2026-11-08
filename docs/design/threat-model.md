@@ -82,7 +82,7 @@ with a top-level folder.
 | T1  | Protected panes                             | `pinfold-core/src/protect.rs`, `pinfold-sys/src/foreground.rs`                 | `echo_off_patterns_and_marks_refuse_a_send` (`protect.rs`), `a_configured_protect_pattern_refuses_a_send_to_a_pane_that_runs_it` (`session.rs`) |
 | T1  | Sends split at newlines                     | `pinfold-core/src/protect.rs`                                                 | `a_second_line_never_lands_in_ssh` (`protect.rs`)                                                                                       |
 | T1  | `pane.send` limits: 4 KB, 20 per second     | `pinfold-api/src/control.rs` (`MAX_SEND`), `pinfold-core/src/io.rs`            | `a_send_over_4096_bytes_is_refused_whole` (`control.rs`), `sends_past_20_a_second_or_a_full_queue_are_refused` (`io.rs`)                |
-| T1  | Audit log, hash-chained                     | `pinfold-api/src/audit.rs`, `pinfold-cli/src/audit.rs`                         | `detects_changed_dropped_swapped_and_forged_lines` (`pinfold-api/src/audit.rs`), `sends_are_audited_by_size_and_only_a_terminal_outside_a_pane_reads_the_log` (`pinfold-cli/tests/audit.rs`) |
+| T1  | Audit log, hash-chained                     | `pinfold-api/src/audit.rs`, `pinfold-cli/src/audit.rs`                         | `detects_changed_dropped_swapped_and_forged_lines`, `a_swapped_symlink_is_never_written_or_chmodded` (`pinfold-api/src/audit.rs`), `sends_are_audited_by_size_and_only_a_terminal_outside_a_pane_reads_the_log` (`pinfold-cli/tests/audit.rs`) |
 | T2  | Cross-pane reads need approval and redact   | `pinfold-cli/src/bin/pinfold-core.rs` (`pane_action`), `pinfold-api/src/redact.rs` | `only_the_window_answers_cross_pane_actions_and_ctl_revokes_grants` (`session.rs`), `corpus_reports_detection_rates`, `a_read_cut_at_any_row_of_a_key_block_hides_the_rest_of_it` (`pinfold-api/tests/redact_corpus.rs`) |
 | T3  | Only fixed-format replies                   | `pinfold-core/src/vt.rs`                                                      | `sequences_that_echo_strings_get_no_reply`, `replies_are_only_fixed_format_csi`, `any_bytes_split_and_resized_keep_the_grid_and_replies_bounded` (`vt.rs`) |
 | T3  | OSC 52: no read, and writes are refused     | `pinfold-core/src/vt.rs`, `pinfold-ui/src/flash.rs`                            | `a_clipboard_write_is_counted_and_never_answered` (`vt.rs`), `only_a_copy_asked_for_can_reach_the_clipboard` (`pinfold-ui/src/link.rs`) |
@@ -240,7 +240,9 @@ group or others, or not owned by you, are refused.
 **Audit log.** Each API call is recorded with caller, method, target, scope and result
 in a hash chain. The in-memory copy is the source of truth, because an agent running as
 you can rewrite the file on disk. A hash chain cannot show that entries were cut from its
-tail, since a shortened chain is still valid.
+tail, since a shortened chain is still valid. The file is opened without following a symlink and kept
+only if it is a regular file of yours, in a folder that is yours and writable by no one
+else; its mode is set through the open file.
 
 **Limits.** A request line over 32 KiB is rejected. `pane.send` is capped at 4 KB per call and
 20 calls per second per caller, and reads at 2 MB per call. Cold scrollback is capped at 2
