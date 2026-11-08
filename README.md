@@ -10,7 +10,7 @@ A memory-first terminal for agentic coding, written in Rust, with a built-in mul
 ## Install the beta
 
 1. Download `PinFold.dmg` from the
-   [v0.1.0-beta.1 release](https://github.com/0xPiranhaCodes/pinfold.sh/releases/tag/v0.1.0-beta.1).
+   [v0.1.0-beta.2 release](https://github.com/0xPiranhaCodes/pinfold.sh/releases/tag/v0.1.0-beta.2).
 2. Optionally, check it. Download `SHA256SUMS` from the same release into the same folder, then:
 
    ```sh
