@@ -14,10 +14,10 @@ alacritty_terminal = "=0.26.0"
 # The safe features make the crate forbid unsafe code. Off by default: its frame format.
 lz4_flex = { version = "=0.14.0", default-features = false, features = ["alloc", "checked-decode", "safe-decode", "safe-encode"] }
 mio = { version = "1.2.4", features = ["os-ext", "os-poll"] }
-pinfold-api = { path = "../pinfold-api", version = "0.1.0-beta.1" }
-pinfold-mux = { path = "../pinfold-mux", version = "0.1.0-beta.1" }
-pinfold-proto = { path = "../pinfold-proto", version = "0.1.0-beta.1" }
-pinfold-sys = { path = "../pinfold-sys", version = "0.1.0-beta.1" }
+pinfold-api = { path = "../pinfold-api", version = "0.1.0-beta.2" }
+pinfold-mux = { path = "../pinfold-mux", version = "0.1.0-beta.2" }
+pinfold-proto = { path = "../pinfold-proto", version = "0.1.0-beta.2" }
+pinfold-sys = { path = "../pinfold-sys", version = "0.1.0-beta.2" }
 # Linear-time matching for `pane.wait` patterns. Not `regex`, whose engines and Unicode tables
 # add about 0.6 MB to the core's resident size on Linux; the cost is ASCII-only classes.
 regex-lite = "0.1.9"

@@ -1,6 +1,6 @@
 # Known issues in the macOS beta
 
-What testers of `0.1.0-beta.1` should know before reporting a bug. A report about any of these is
+What testers of `0.1.0-beta.2` should know before reporting a bug. A report about any of these is
 still welcome if it adds a case not listed here. Report bugs with the
 [beta bug form](https://github.com/0xPiranhaCodes/pinfold.sh/issues/new?template=beta-bug.yml).
 
