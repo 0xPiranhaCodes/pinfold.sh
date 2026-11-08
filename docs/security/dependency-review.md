@@ -54,7 +54,9 @@ covered.
 Run `cargo vet inspect CRATE VERSION`, or `cargo vet diff CRATE OLD NEW` when an audit
 exists for an earlier version. Read the source as published, not the repository. Then
 record it with `cargo vet certify` and a `notes` line saying what you read and what you
-found. Check these first.
+found. An audit done with an AI agent starts its notes with "AI-assisted review (Claude
+Code) for the maintainer; not yet spot-checked by a person."; a person removes that marker
+once they have spot-checked the audit. Check these first.
 
 - **Build scripts** (`build.rs`): they run with your permissions at build time. They
   should read only `CARGO_*` and target variables, write only under `OUT_DIR`, and not

@@ -5,31 +5,31 @@
 who = "Satheesh Kumar <22219814+0xPiranhaCodes@users.noreply.github.com>"
 criteria = "safe-to-deploy"
 delta = "0.7.6 -> 0.7.8"
-notes = "Adds spare_capacity_mut (a safe slice of the MaybeUninit tail), fixes a ZST double drop in extend with mem::forget, a 16-bit length type, and lifetime elisions. No new unsafe beyond the existing set_len contract."
+notes = "AI-assisted review (Claude Code) for the maintainer; not yet spot-checked by a person. Adds spare_capacity_mut (a safe slice of the MaybeUninit tail), fixes a ZST double drop in extend with mem::forget, a 16-bit length type, and lifetime elisions. No new unsafe beyond the existing set_len contract."
 
 [[audits.cfg-if]]
 who = "Satheesh Kumar <22219814+0xPiranhaCodes@users.noreply.github.com>"
 criteria = "safe-to-deploy"
 delta = "1.0.4 -> 1.0.5"
-notes = "Documentation-only: a deprecation note pointing at cfg_select!, plus CI action bumps."
+notes = "AI-assisted review (Claude Code) for the maintainer; not yet spot-checked by a person. Documentation-only: a deprecation note pointing at cfg_select!, plus CI action bumps."
 
 [[audits.log]]
 who = "Satheesh Kumar <22219814+0xPiranhaCodes@users.noreply.github.com>"
 criteria = "safe-to-deploy"
 delta = "0.4.29 -> 0.4.35"
-notes = "Splits an alloc feature out of std, adds a static-or-borrowed key type with manual Eq/Ord/Hash, std::net value capture, and CI and release workflow changes. No unsafe, build script or I/O added."
+notes = "AI-assisted review (Claude Code) for the maintainer; not yet spot-checked by a person. Splits an alloc feature out of std, adds a static-or-borrowed key type with manual Eq/Ord/Hash, std::net value capture, and CI and release workflow changes. No unsafe, build script or I/O added."
 
 [[audits.signal-hook-registry]]
 who = "Satheesh Kumar <22219814+0xPiranhaCodes@users.noreply.github.com>"
 criteria = "safe-to-deploy"
 delta = "1.4.1 -> 1.4.8"
-notes = "Replaces static mut GLOBAL_DATA with an AtomicPtr set once from Box::into_raw, swaps HashMap/BTreeMap for an insertion-ordered VecMap, saves and restores errno around the handler, and casts handler pointers through *const () for provenance. Adds the errno dependency. No new syscalls or I/O."
+notes = "AI-assisted review (Claude Code) for the maintainer; not yet spot-checked by a person. Replaces static mut GLOBAL_DATA with an AtomicPtr set once from Box::into_raw, swaps HashMap/BTreeMap for an insertion-ordered VecMap, saves and restores errno around the handler, and casts handler pointers through *const () for provenance. Adds the errno dependency. No new syscalls or I/O."
 
 [[audits.vte]]
 who = "Satheesh Kumar <22219814+0xPiranhaCodes@users.noreply.github.com>"
 criteria = "safe-to-deploy"
 version = "0.15.0"
-notes = "Parses untrusted PTY output in the core. Read lib.rs and params.rs in full and ansi.rs for unsafe, I/O and panics. Five unsafe blocks, all in lib.rs: from_utf8_unchecked on prefixes str::from_utf8 already validated, and the OSC param array, whose count is capped at MAX_OSC_PARAMS before the slice cast. ansi.rs is safe code with no file, network or process access. With std the OSC buffer has no length limit; pinfold-core caps OSC strings before they reach the parser (vt.rs, an_unending_osc_string_stops_at_the_limit)."
+notes = "AI-assisted review (Claude Code) for the maintainer; not yet spot-checked by a person. Parses untrusted PTY output in the core. Read lib.rs and params.rs in full and ansi.rs for unsafe, I/O and panics. Five unsafe blocks, all in lib.rs: from_utf8_unchecked on prefixes str::from_utf8 already validated, and the OSC param array, whose count is capped at MAX_OSC_PARAMS before the slice cast. ansi.rs is safe code with no file, network or process access. With std the OSC buffer has no length limit; pinfold-core caps OSC strings before they reach the parser (vt.rs, an_unending_osc_string_stops_at_the_limit)."
 
 [[trusted.aho-corasick]]
 criteria = "safe-to-deploy"
