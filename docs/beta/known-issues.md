@@ -33,13 +33,12 @@ still welcome if it adds a case not listed here. Report bugs with the
   to run from the disk image or a quarantined download and says to move it to Applications. A
   launch that finds an older session hung ends it and restores it after about 17 seconds, and one
   that finds a session running from another copy asks before restarting it.
-- **Dragging PinFold to Applications before opening it may not move the icon** (#279). This is not
-  reproduced yet, as no script can drag in Finder. If it happens, note your macOS version, whether
-  Finder showed "Verifying PinFold.dmg" and whether it worked after waiting a few seconds, and add
-  it to #279.
-- **The disk image has no icon layout yet.** It holds PinFold and an Applications link in Finder's
-  default view. `packaging/macos/dmg-layout.sh` writes the layout file once on a Mac with a
-  screen, and the next `.dmg` picks it up.
+- **Dragging PinFold to Applications before opening it may not move the icon in beta.1** (#279).
+  `0.1.0-beta.2` makes the image's root folder readable by everyone (it was 0700) and opens the
+  image with PinFold beside the Applications link, which likely fixes it, but nobody has dragged
+  from the beta.2 image yet and no script can drag in Finder. If it still happens, note your macOS
+  version, whether Finder showed "Verifying PinFold.dmg" and whether it worked after waiting a few
+  seconds, and add it to #279.
 
 ## Memory
 
@@ -59,6 +58,10 @@ still welcome if it adds a case not listed here. Report bugs with the
   ([#145](https://github.com/0xPiranhaCodes/pinfold.sh/pull/145)).
 - **Only OSC 8 hyperlinks get Open Link and Copy Link.** A plain `https://…` in output gets
   neither ([#171](https://github.com/0xPiranhaCodes/pinfold.sh/pull/171)).
+- **A needs-you alert is a Dock bounce, and a banner needs your permission.** Agent panes show
+  ◆ needs you and bounce the Dock icon. On macOS 27 a notification banner appears only after you
+  allow PinFold's notifications, and clicking one to focus its pane is not checked yet
+  ([ADR-0046](../adr/0046-agent-panes-read-needs-you-from-output.md)).
 
 ## Sandboxed agents
 
