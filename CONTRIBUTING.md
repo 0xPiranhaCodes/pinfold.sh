@@ -46,6 +46,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo deny check
 cargo audit
+cargo vet --locked
 ```
 
 ### Fuzzing
@@ -260,6 +261,10 @@ Justify every new dependency in its PR: why it is needed, its license, maintenan
 status, `unsafe` usage and memory cost. Check the current version on crates.io and
 docs.rs first. A dependency that pulls in an async runtime, a GUI toolkit or a C
 library needs maintainer approval before work starts.
+
+`cargo vet --locked` must pass. [`docs/security/dependency-review.md`](docs/security/dependency-review.md)
+says which criteria apply, whose audits we import, how to review build scripts, proc
+macros, native code and `unsafe`, and when a temporary exemption is allowed.
 
 ## ADRs and RFCs
 
