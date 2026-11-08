@@ -672,8 +672,9 @@ const EMPTY_WAIT: Duration = Duration::from_secs(2);
 #[test]
 fn a_core_started_with_no_shell_exits_if_no_window_ever_opens() {
     let session = Session::new("ns", None).unwrap();
-    let mut core = session.start_core(&["--no-shell"], NOTE_PANE).unwrap();
+    // Before the spawn: the core may start its wait before `start_core` returns (#295).
     let start = Instant::now();
+    let mut core = session.start_core(&["--no-shell"], NOTE_PANE).unwrap();
     let status = loop {
         if let Some(status) = core.try_wait().unwrap() {
             break status;
