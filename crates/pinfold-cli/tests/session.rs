@@ -1692,7 +1692,7 @@ fn send_window(tool: pinfold_proto::link::Tool, ask: impl Fn(&mut Link, &Path) -
     let [text] = &first.texts[..] else {
         panic!("{:?}", first.texts)
     };
-    assert!(!text.ends_with('\n') && !text.contains('\r'), "{text:?}");
+    assert!(!text.contains(['\n', '\r']), "{text:?}");
     note(directory.join("asked"), text).unwrap();
     assert!(link.send(Request::ApprovalAnswer {
         id: first.id,
@@ -1773,7 +1773,10 @@ fn a_hunk_from_diff_waits_on_the_windows_approval_and_a_denial_sends_nothing() {
         fs::write(repo.join("a.txt"), "two\x1b[2J\u{202e}\n").unwrap();
         repo
     });
-    assert_eq!(asked, "nit\n\na.txt\n@@ -1 +1 @@\n-one\n+two^[[2J<U+202E>");
+    assert_eq!(
+        asked,
+        "nit ␤ a.txt ␤ @@ -1 +1 @@ ␤ -one ␤ +two^[[2J<U+202E>"
+    );
 }
 
 #[test]

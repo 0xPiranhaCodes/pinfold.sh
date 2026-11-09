@@ -9,7 +9,7 @@
 //!
 //! `a` sends the hunk at the top with a typed comment to the last focused agent pane through
 //! [`at::send`], a `pane.send` the window approves as any cross-pane send (ADR-0045 section 4).
-//! The hunk goes escaped as on screen, capped, and with no trailing newline, so nothing submits.
+//! The hunk goes escaped as on screen, capped, and on one line with no newline, so nothing submits.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -46,6 +46,9 @@ const WATCH_EVERY: Duration = Duration::from_secs(2);
 const WATCH_TIMES: u32 = 20;
 /// Lines of a hunk sent to an agent; the rest are cut, and the text says how many.
 const MAX_FEEDBACK_LINES: usize = 200;
+/// Joins the comment, name, header and lines of a hunk sent to an agent. `pane.send` writes
+/// raw bytes, so a newline would submit each line to a program that reads lines.
+const SEPARATOR: &str = " ␤ ";
 /// Bytes of a comment, escaped, sent with a hunk; the rest of `pane.send`'s
 /// [`MAX_SEND`] is the hunk's.
 const MAX_COMMENT: usize = 512;
@@ -237,23 +240,24 @@ impl Diff {
 
     /// File `file`'s hunk `hunk` as an agent is sent it: the file's name, the hunk header and
     /// its lines, each escaped as the screen shows them, as they are the repository's untrusted
-    /// text. Past [`MAX_FEEDBACK_LINES`] lines, or what fits in [`MAX_SEND`] beside a
-    /// [`MAX_COMMENT`], the rest is cut and a last line says so. It ends with no newline.
+    /// text, joined by [`SEPARATOR`] into one line with no newline anywhere, so nothing submits.
+    /// Past [`MAX_FEEDBACK_LINES`] lines, or what fits in [`MAX_SEND`] beside a [`MAX_COMMENT`],
+    /// the rest is cut and a last part says so.
     fn feedback(&self, file: usize, hunk: usize) -> Option<String> {
         let this = self.files.get(file)?;
         let hunk = this.hunks.get(hunk)?;
         let line = |range: &Range<usize>| escape(&text(&self.bytes, range));
-        let mut message = format!("{}\n{}", escape(&this.label()), line(&hunk.header));
+        let mut message = [escape(&this.label()), line(&hunk.header)].join(SEPARATOR);
         // Room for the comment, the blank line after it and the note of what is cut.
-        let room = MAX_SEND - MAX_COMMENT - 2 - 32;
+        let room = MAX_SEND - MAX_COMMENT - SEPARATOR.len() - 32;
         for (at, range) in hunk.lines.iter().enumerate() {
             let next = line(range);
-            if at == MAX_FEEDBACK_LINES || message.len() + 1 + next.len() > room {
+            if at == MAX_FEEDBACK_LINES || message.len() + SEPARATOR.len() + next.len() > room {
                 let cut = hunk.lines.len() - at;
-                let _ = write!(message, "\n[{cut} more lines cut]");
+                let _ = write!(message, "{SEPARATOR}[{cut} more lines cut]");
                 break;
             }
-            message.push('\n');
+            message.push_str(SEPARATOR);
             message.push_str(&next);
         }
         (message.len() <= room + 32).then_some(message)
@@ -720,7 +724,7 @@ impl Viewer {
             Key::Enter => {
                 let text = match escape(comment.as_bytes()) {
                     comment if comment.is_empty() => hunk.clone(),
-                    comment => format!("{comment}\n\n{hunk}"),
+                    comment => format!("{comment}{SEPARATOR}{hunk}"),
                 };
                 let (send, receive) = mpsc::channel();
                 thread::spawn(move || send.send(at::send(&text)));
@@ -904,7 +908,7 @@ impl Tool for Viewer {
                 "Send this hunk to the agent pane, with a comment:",
                 bold,
             );
-            let mut lines = hunk.lines();
+            let mut lines = hunk.split(SEPARATOR);
             screen.put(3, 4, lines.next().unwrap_or_default(), bold);
             screen.put(4, 4, lines.next().unwrap_or_default(), colour(Color::Cyan));
             let column = screen.put(6, 4, "> ", dim);
@@ -1179,10 +1183,16 @@ mod tests {
     fn a_hunk_sent_to_an_agent_is_escaped_and_never_ends_a_line() {
         let diff = parse(format!("{CHANGE}{FILES}").into());
         let hostile = diff.feedback(4, 0).unwrap();
-        assert_eq!(hostile, "x^[[2J\n@@ -0,0 +1 @@\n+^Ignp<U+202E>.exe^[]0;x^G");
+        assert_eq!(
+            hostile,
+            "x^[[2J ␤ @@ -0,0 +1 @@ ␤ +^Ignp<U+202E>.exe^[]0;x^G"
+        );
         let first = diff.feedback(0, 0).unwrap();
-        assert!(first.starts_with("src/main.rs\n@@ -1,3 +1,3 @@ fn main() {\n fn main() {"));
-        assert!(first.ends_with("\n }"), "{first:?}");
+        assert!(first.starts_with("src/main.rs ␤ @@ -1,3 +1,3 @@ fn main() { ␤  fn main() {"));
+        assert!(
+            first.ends_with(" ␤  }") && !first.contains(['\n', '\r']),
+            "{first:?}"
+        );
         assert_eq!(diff.feedback(1, 0), None, "a mode change has no hunk");
     }
 
@@ -1193,12 +1203,15 @@ mod tests {
             parse(format!("diff --git a/f b/f\n@@ -0,0 +1,{lines} @@\n{body}").into())
         };
         let many = hunk(300, "x").feedback(0, 0).unwrap();
-        assert_eq!(many.lines().count(), 2 + 200 + 1);
-        assert!(many.ends_with("\n+x\n[100 more lines cut]"), "{many:?}");
+        assert_eq!(many.split(SEPARATOR).count(), 2 + 200 + 1);
+        assert!(many.ends_with(" ␤ +x ␤ [100 more lines cut]"), "{many:?}");
         // Each escape is four bytes, so bytes run out before lines do.
         let long = hunk(100, &"\x1b".repeat(20)).feedback(0, 0).unwrap();
         assert!(long.len() + MAX_COMMENT + 2 <= MAX_SEND, "{}", long.len());
-        let kept = long.lines().filter(|line| line.starts_with('+')).count();
+        let kept = long
+            .split(SEPARATOR)
+            .filter(|line| line.starts_with('+'))
+            .count();
         assert!(kept < 100 && long.ends_with(&format!("[{} more lines cut]", 100 - kept)));
         // The longest comment fits beside it.
         let comment = "\u{202e}".repeat(MAX_COMMENT / 8);
@@ -1218,7 +1231,7 @@ mod tests {
         assert_eq!(keys.next(true), Some(Key::Enter));
         let (comment, hunk) = viewer.comment.as_ref().unwrap();
         assert_eq!(comment, "ok!");
-        assert!(hunk.starts_with("src/main.rs\n"));
+        assert!(hunk.starts_with("src/main.rs ␤ "));
         assert!(viewer.sending.is_none());
         let mut screen = Screen::new(24, 80);
         viewer.draw(&mut screen);
