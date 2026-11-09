@@ -5,6 +5,7 @@
 //! every string, and reads [`Key`]s. [`run`] owns the terminal around it. Every git call goes
 //! through [`git::run`].
 
+mod files;
 pub mod git;
 pub mod keys;
 mod md;
@@ -103,10 +104,23 @@ impl Command {
                     Err(problem) => (format!("md {}", file.display()), Some(problem)),
                 }
             }
-            Self::Files { dir } => (
-                format!("files {}", dir.display()),
-                problem(dir, Path::is_dir),
-            ),
+            Self::Files { dir } => {
+                let found = problem(dir, Path::is_dir).map_or_else(
+                    || {
+                        std::fs::canonicalize(dir)
+                            .map_err(|error| format!("cannot open {}: {error}", dir.display()))
+                    },
+                    Err,
+                );
+                match found {
+                    Ok(path) => {
+                        let title = dir.as_os_str().as_encoded_bytes().to_vec();
+                        run(&mut files::Files::new(title, path))?;
+                        return Ok(true);
+                    }
+                    Err(problem) => (format!("files {}", dir.display()), Some(problem)),
+                }
+            }
             Self::Diff { staged, range } => {
                 let staged = if *staged { " --staged" } else { "" };
                 (
