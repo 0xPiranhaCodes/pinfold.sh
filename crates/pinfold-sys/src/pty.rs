@@ -45,7 +45,7 @@ use libc::ptsname_r;
 /// Opens a PTY's master and slave, each close-on-exec from the moment it exists, so a child
 /// that another thread forks meanwhile inherits neither. A master a stray child holds would
 /// keep a killed pane's program from ending on macOS, as it waits for its output to drain.
-fn open_pair() -> io::Result<(OwnedFd, OwnedFd)> {
+pub(crate) fn open_pair() -> io::Result<(OwnedFd, OwnedFd)> {
     let flags = libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC;
     // SAFETY: posix_openpt takes integer flags and returns a new fd or -1.
     let open = || check(unsafe { libc::posix_openpt(flags) });
