@@ -28,8 +28,9 @@ pub struct Foreground {
 pub struct Process {
     /// The process name the system keeps, which may be cut to 15 or 16 bytes.
     pub name: String,
-    /// The command line, or nothing if this user may not read it. Linux keeps the first 64 KiB,
-    /// and macOS gives nothing for a longer one.
+    /// The command line, or nothing if this user may not read it or the process was still
+    /// starting its program. Linux keeps the first 64 KiB, and macOS gives nothing for a longer
+    /// one.
     pub argv: Option<Vec<String>>,
     /// The user the process acts as.
     pub euid: u32,
@@ -118,22 +119,27 @@ pub fn cwd(pid: u32) -> io::Result<PathBuf> {
 }
 
 fn process(pid: libc::pid_t) -> io::Result<Process> {
-    // macOS refuses the arguments of a process while it starts or ends a program, for a
-    // moment, so a few tries 1 ms apart tell that from one this user may not read.
-    let mut argv = platform::argv(pid);
-    for _ in 0..ARGV_TRIES {
-        if argv.is_some() {
-            break;
+    // A process that starts a program takes the new name and user before its arguments: Linux
+    // shows them empty for that moment and macOS refuses them. So the name and user are read
+    // on both sides of the arguments, and a few tries 1 ms apart tell a program still starting
+    // from one this user may not read. Arguments that may belong to another program are not
+    // kept.
+    let mut tries = 0;
+    loop {
+        let before = platform::name_and_euid(pid)?;
+        let argv = platform::argv(pid);
+        let (name, euid) = platform::name_and_euid(pid)?;
+        let same = before == (name.clone(), euid);
+        if (argv.is_some() && same) || tries == ARGV_TRIES {
+            let argv = argv.filter(|_| same);
+            return Ok(Process { name, argv, euid });
         }
+        tries += 1;
         std::thread::sleep(std::time::Duration::from_millis(1));
-        argv = platform::argv(pid);
     }
-    // Read after the arguments, so both describe the same program.
-    let (name, euid) = platform::name_and_euid(pid)?;
-    Ok(Process { name, argv, euid })
 }
 
-/// How many more times a command line that could not be read is tried.
+/// How many more times a process whose command line could not be read is tried.
 const ARGV_TRIES: usize = 4;
 
 /// Whether an error says the process has exited, so it reads nothing.
@@ -189,6 +195,15 @@ fn scan(
     Ok(found)
 }
 
+/// The arguments in a `/proc/<pid>/cmdline`, or nothing for an empty one. The kernel shows
+/// none between giving a process a new program and setting out its arguments, and none for a
+/// process that has exited; a program started with no arguments still has an empty first one.
+#[cfg(any(target_os = "linux", test))]
+fn cmdline(bytes: &[u8]) -> Option<Vec<String>> {
+    let args = bytes.split(|&byte| byte == 0).filter(|arg| !arg.is_empty());
+    (!bytes.is_empty()).then(|| lossy(args))
+}
+
 fn lossy(args: impl Iterator<Item = impl AsRef<[u8]>>) -> Vec<String> {
     args.map(|arg| String::from_utf8_lossy(arg.as_ref()).into_owned())
         .collect()
@@ -222,6 +237,10 @@ mod platform {
                 .find_map(|line| line.strip_prefix(key))
                 .map(str::trim)
         };
+        // A zombie has no program left, as on macOS, so it reads as exited.
+        if field("State:").is_some_and(|state| state.starts_with(['Z', 'X'])) {
+            return Err(io::Error::from_raw_os_error(libc::ESRCH));
+        }
         let name = field("Name:").unwrap_or_default().to_owned();
         // Real, effective, saved and filesystem ids, in that order.
         let euid = field("Uid:")
@@ -237,8 +256,7 @@ mod platform {
         file.take(super::MAX_ARGS as u64)
             .read_to_end(&mut bytes)
             .ok()?;
-        let args = bytes.split(|&byte| byte == 0).filter(|arg| !arg.is_empty());
-        Some(super::lossy(args))
+        super::cmdline(&bytes)
     }
 }
 
@@ -413,6 +431,38 @@ mod tests {
     }
 
     #[test]
+    fn an_empty_command_line_reads_as_none() {
+        assert_eq!(cmdline(b""), None);
+        assert_eq!(cmdline(b"\0"), Some(Vec::new()));
+        let args = Some(vec!["sleep".to_owned(), "30".to_owned()]);
+        assert_eq!(cmdline(b"sleep\x0030\0"), args);
+        assert_eq!(cmdline(b"sleep\x0030"), args);
+    }
+
+    #[test]
+    fn a_process_that_exited_but_was_not_reaped_reads_as_exited() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let pid = libc::pid_t::try_from(child.id()).unwrap();
+        let mut info = MaybeUninit::<libc::siginfo_t>::zeroed();
+        // SAFETY: `info` is writable for a whole siginfo_t. WNOWAIT waits for the child to exit
+        // and leaves it a zombie, until `child.wait` reaps it.
+        let waited = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                child.id(),
+                info.as_mut_ptr(),
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(waited, 0, "{}", io::Error::last_os_error());
+        assert!(process(pid).is_err_and(|error| exited(&error)));
+        child.wait().unwrap();
+    }
+
+    #[test]
     fn a_group_without_its_leader_is_refused_unless_it_is_empty() {
         assert_eq!(with_leader(100, vec![100, 101]).unwrap(), vec![100, 101]);
         assert!(with_leader(100, vec![101]).is_err());
@@ -425,7 +475,11 @@ mod tests {
     #[test]
     fn the_foreground_process_has_its_name_arguments_and_user() {
         let pty = pty("exec sleep 30");
-        let found = found_when(&pty, |found| named(found, "sleep"));
+        // A program still starting has no arguments yet, which reads as none.
+        let started = |found: &Foreground| {
+            named(found, "sleep") && found.members.iter().all(|m| m.argv.is_some())
+        };
+        let found = found_when(&pty, started);
         assert_eq!(found.group, pty.terminal().session);
         let sleep = &found.members[0];
         assert_eq!(sleep.argv, Some(vec!["sleep".to_owned(), "30".to_owned()]));

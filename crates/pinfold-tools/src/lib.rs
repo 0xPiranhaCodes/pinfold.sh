@@ -2,3 +2,4 @@
 //! own pane (ADR-0045).
 
 pub mod keys;
+pub mod screen;
