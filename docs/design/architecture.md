@@ -140,7 +140,7 @@ The tools follow [ADR-0045](../adr/0045-tools-are-programs-in-their-own-pane.md)
 
 - Runs `git diff` (or `--staged`, or `<rev>..<rev>`) and parses the unified diff. It shows a file list on the left and hunks on the right, unified or side by side, with word-level highlights from `similar`.
 - **Watch mode** (`--watch`, or `w`) re-runs the diff on a poll, so you can watch an agent's edits land.
-- Hunk actions: stage (`git apply --cached`), revert (`git apply -R`), each with a confirmation, and copy the hunk with a comment to an agent pane as review feedback.
+- Hunk actions on the work tree's diff: `s` stages (`git apply --cached`) and `r` reverts (`git apply -R`) the hunk at the top of the view, each after a confirmation drawn in the pane that names the file and the hunk header, and then the diff reloads. Copying the hunk with a comment to an agent pane as review feedback comes next.
 - Nothing stays resident when the pane is closed: the process exits.
 
 ## Agent control API

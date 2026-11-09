@@ -45,10 +45,14 @@ pub(crate) struct Diff {
     pub(crate) files: Vec<File>,
     /// One sentence per cap that cut the diff.
     pub(crate) notes: Vec<String>,
+    /// Whether every line git printed was parsed, so the last hunk is whole.
+    pub(crate) whole: bool,
 }
 
 /// One file's part of the diff, from its `diff --git` line.
 pub(crate) struct File {
+    /// Where its `diff --git` line starts.
+    pub(crate) start: usize,
     /// The path before and after, the same unless the file was renamed or copied.
     pub(crate) old: Vec<u8>,
     pub(crate) new: Vec<u8>,
@@ -74,8 +78,10 @@ impl File {
     }
 }
 
-const KEYS: [&str; 8] = [
+const KEYS: [&str; 10] = [
     "n p                 the next or previous file",
+    "s                   stage the hunk at the top, after y",
+    "r                   revert the hunk at the top, after y",
     "v                   unified or side by side",
     "w                   watch: run git again every 2 s or more",
     "j k  ↓ ↑            a line down or up",
@@ -107,6 +113,7 @@ pub(crate) fn load(repo: &Path, staged: bool, range: Option<&str>) -> Result<Dif
         };
         diff.notes
             .insert(0, format!("{why}, so the diff is cut short."));
+        diff.whole = false;
     }
     Ok(diff)
 }
@@ -115,7 +122,7 @@ pub(crate) fn load(repo: &Path, staged: bool, range: Option<&str>) -> Result<Dif
 pub(crate) fn parse(bytes: Vec<u8>) -> Diff {
     let mut files: Vec<File> = Vec::new();
     let (mut hunks, mut lines, mut long) = (0, 0, false);
-    let mut notes = Vec::new();
+    let (mut notes, mut whole) = (Vec::new(), true);
     let mut start = 0;
     while start < bytes.len() {
         let end = (bytes[start..].iter().position(|&byte| byte == b'\n'))
@@ -126,10 +133,12 @@ pub(crate) fn parse(bytes: Vec<u8>) -> Diff {
         if let Some(rest) = line.strip_prefix(b"diff --git ") {
             if files.len() == MAX_FILES {
                 notes.push(format!("Only the first {MAX_FILES} files show."));
+                whole = false;
                 break;
             }
             let (old, new) = git_paths(rest);
             files.push(File {
+                start: range.start,
                 old,
                 new,
                 header: Vec::new(),
@@ -143,12 +152,14 @@ pub(crate) fn parse(bytes: Vec<u8>) -> Diff {
         };
         if lines == MAX_LINES {
             notes.push(format!("Only the first {MAX_LINES} lines show."));
+            whole = false;
             break;
         }
         lines += 1;
         if line.starts_with(b"@@") {
             if hunks == MAX_HUNKS {
                 notes.push(format!("Only the first {MAX_HUNKS} hunks show."));
+                whole = false;
                 break;
             }
             hunks += 1;
@@ -191,6 +202,25 @@ pub(crate) fn parse(bytes: Vec<u8>) -> Diff {
         bytes,
         files,
         notes,
+        whole,
+    }
+}
+
+impl Diff {
+    /// A patch of file `file`'s hunk `hunk` alone: the bytes git printed from the file's
+    /// `diff --git` line to its first hunk, then the hunk's, uncut. None if there is no such hunk
+    /// or the diff is not whole, as the last hunk may then be cut.
+    fn patch(&self, file: usize, hunk: usize) -> Option<Vec<u8>> {
+        let this = self.files.get(file)?;
+        let header = self
+            .bytes
+            .get(this.start..this.hunks.first()?.header.start)?;
+        let start = this.hunks.get(hunk)?.header.start;
+        let end = (this.hunks.get(hunk + 1).map(|next| next.header.start))
+            .or_else(|| self.files.get(file + 1).map(|next| next.start))
+            .unwrap_or(self.bytes.len());
+        let body = self.bytes.get(start..end).filter(|_| self.whole)?;
+        Some([header, body].concat())
     }
 }
 
@@ -298,6 +328,8 @@ type Loaded = (Result<Diff, String>, Duration);
 struct Watch {
     source: Source,
     on: bool,
+    /// Run git once as soon as no run is in progress, watching or not, as after a stage.
+    again: bool,
     /// When git may run next.
     next: Instant,
     /// The run in progress.
@@ -466,6 +498,20 @@ pub(crate) struct Viewer {
     /// The visible lines' changed words from the last draw, by the starts of a pair's lines.
     words: HashMap<(usize, usize), [Vec<Range<usize>>; 2]>,
     watch: Option<Watch>,
+    /// A stage or revert waiting for `y`.
+    confirm: Option<Confirm>,
+    /// Why the last stage or revert did not happen, until the next key.
+    notice: Option<String>,
+}
+
+/// A stage (`git apply --cached`) or revert (`git apply -R`) of one hunk, drawn in the pane until
+/// `y` applies it or another key drops it. Only the window's keys reach a tool pane, so no API
+/// caller can answer it (ADR-0045 section 4).
+struct Confirm {
+    revert: bool,
+    label: Vec<u8>,
+    header: Vec<u8>,
+    patch: Vec<u8>,
 }
 
 impl Viewer {
@@ -481,6 +527,8 @@ impl Viewer {
             side: false,
             words: HashMap::new(),
             watch: None,
+            confirm: None,
+            notice: None,
         }
     }
 
@@ -490,6 +538,7 @@ impl Viewer {
         self.watch = Some(Watch {
             source,
             on,
+            again: false,
             next: Instant::now() + watch_interval(took),
             running: None,
             failed: None,
@@ -543,6 +592,75 @@ impl Viewer {
             }
         }
         Some(())
+    }
+
+    /// The selected file's hunk shown at the top of the view, or the first one below it.
+    fn hunk_at_top(&self) -> Option<usize> {
+        let (mut at, mut found) = (0, None);
+        self.each_row(|row| {
+            at += 1;
+            if at > self.top {
+                found = match row {
+                    Row::One(hunk, ..) | Row::Two(hunk, ..) => Some(hunk),
+                    Row::Full(..) => None,
+                };
+            }
+            found.is_none()
+        });
+        found
+    }
+
+    /// Asks to stage, or revert if `revert`, the hunk at the top of the view.
+    fn ask(&mut self, revert: bool) {
+        let source = self.watch.as_ref().map(|watch| &watch.source);
+        if !source.is_some_and(|source| !source.staged && source.range.is_none()) {
+            self.notice = Some("Stage and revert work on the work tree's diff alone.".into());
+            return;
+        }
+        let file = self.selected;
+        let found = self.hunk_at_top().and_then(|hunk| {
+            let header = self.diff.files.get(file)?.hunks.get(hunk)?.header.clone();
+            Some((
+                text(&self.diff.bytes, &header),
+                self.diff.patch(file, hunk)?,
+            ))
+        });
+        let Some((header, patch)) = found else {
+            self.notice = Some(if self.diff.whole {
+                "No hunk to stage or revert here.".into()
+            } else {
+                "The diff is cut short, so stage and revert are off.".into()
+            });
+            return;
+        };
+        self.confirm = Some(Confirm {
+            revert,
+            label: self
+                .diff
+                .files
+                .get(file)
+                .map(File::label)
+                .unwrap_or_default(),
+            header,
+            patch,
+        });
+    }
+
+    /// Applies `confirm` with `git apply`, then runs `git diff` again once no run is in progress.
+    fn apply(&mut self, confirm: &Confirm) {
+        let Some(watch) = &mut self.watch else {
+            return;
+        };
+        match git::apply(&watch.source.repo, &confirm.patch, confirm.revert) {
+            Ok(output) if output.status.is_some_and(|status| status.success()) => {}
+            Ok(output) => {
+                let errors = String::from_utf8_lossy(&output.stderr);
+                let first = errors.lines().next().unwrap_or("git was killed");
+                self.notice = Some(format!("git apply failed: {first}"));
+            }
+            Err(error) => self.notice = Some(format!("cannot run git: {error}")),
+        }
+        watch.again = true;
     }
 
     fn last_top(&self) -> usize {
@@ -620,9 +738,10 @@ impl Tool for Viewer {
             }
             return;
         }
-        if !watch.on || Instant::now() < watch.next {
+        if !watch.again && (!watch.on || Instant::now() < watch.next) {
             return;
         }
+        watch.again = false;
         let (sender, receiver) = mpsc::channel();
         let Source {
             repo,
@@ -670,8 +789,23 @@ impl Tool for Viewer {
             }
             return;
         }
+        if let Some(confirm) = &self.confirm {
+            let what = if confirm.revert {
+                "Revert this hunk of "
+            } else {
+                "Stage this hunk of "
+            };
+            let column = screen.put(2, 2, "◆ ", colour(Color::Yellow));
+            let column = screen.put(2, column, what, bold);
+            let column = screen.put(2, column, &confirm.label, bold);
+            screen.put(2, column, "?", bold);
+            screen.put(3, 4, &confirm.header, colour(Color::Cyan));
+            screen.put(5, 4, "y yes, any other key no", dim);
+            return;
+        }
         let mut top = 1;
-        if let Some(failed) = self.watch.as_ref().and_then(|watch| watch.failed.as_ref()) {
+        let failed = self.watch.as_ref().and_then(|watch| watch.failed.as_ref());
+        for failed in self.notice.iter().chain(failed) {
             let column = screen.put(top, 0, "✕ error", colour(Color::Red));
             screen.put(top, column + 1, failed, Style::default());
             top += 1;
@@ -778,11 +912,20 @@ impl Tool for Viewer {
                 Flow::Continue
             };
         }
+        self.notice = None;
+        if let Some(confirm) = self.confirm.take() {
+            if key == Key::Char('y') {
+                self.apply(&confirm);
+            }
+            return Flow::Continue;
+        }
         let page = self.page;
         match key {
             Key::Char('q') => return Flow::Quit,
             Key::Char('?') => self.help = true,
             Key::Char('v') => self.side = !self.side,
+            Key::Char('s') => self.ask(false),
+            Key::Char('r') => self.ask(true),
             Key::Char('w') => {
                 if let Some(watch) = &mut self.watch {
                     watch.on = !watch.on;
@@ -881,6 +1024,167 @@ mod tests {
     fn side_by_side_with_word_highlights() {
         let keys = [Key::Char('v')];
         insta::assert_snapshot!(shown(parse(format!("{CHANGE}{FILES}").into()), &keys));
+    }
+
+    /// A viewer of the work tree's diff of `repo`, not watching.
+    fn work_tree(repo: &Path, diff: Diff) -> Viewer {
+        let source = Source {
+            repo: repo.to_owned(),
+            staged: false,
+            range: None,
+        };
+        Viewer::new(b"diff".to_vec(), diff).watch(source, false, Duration::ZERO)
+    }
+
+    #[test]
+    fn a_stage_asks_first_with_the_name_escaped_and_the_hunk_header() {
+        let diff = parse(format!("{CHANGE}{FILES}").into());
+        let mut viewer = work_tree(Path::new("/nonexistent"), diff);
+        for _ in 0..4 {
+            viewer.key(Key::Char('n'));
+        }
+        viewer.key(Key::Char('s'));
+        let mut screen = Screen::new(24, 80);
+        viewer.draw(&mut screen);
+        insta::assert_snapshot!(screen.runs());
+        // Any key but `y` drops it, and nothing runs.
+        viewer.key(Key::Char('n'));
+        assert!(viewer.confirm.is_none() && viewer.notice.is_none());
+    }
+
+    #[test]
+    fn a_hunk_patch_is_the_file_header_and_that_hunk_uncut() {
+        let diff = parse(format!("{CHANGE}{FILES}").into());
+        let patch = String::from_utf8(diff.patch(0, 1).unwrap()).unwrap();
+        let header = &CHANGE[..CHANGE.find("@@").unwrap()];
+        let hunk = &CHANGE[CHANGE.find("@@ -9").unwrap()..];
+        assert_eq!(patch, format!("{header}{hunk}"));
+        assert!(diff.patch(0, 2).is_none() && diff.patch(2, 0).is_none());
+        let long = format!(
+            "diff --git a/a b/a\n@@ -1 +1 @@\n+{}\n",
+            "x".repeat(MAX_LINE)
+        );
+        let diff = parse(long.clone().into());
+        assert_eq!(
+            diff.patch(0, 0).unwrap(),
+            long.as_bytes(),
+            "a long line is whole"
+        );
+        let mut cut = parse(CHANGE.into());
+        cut.whole = false;
+        assert!(
+            cut.patch(0, 1).is_none(),
+            "a cut diff's last hunk may be cut"
+        );
+    }
+
+    #[test]
+    fn stage_and_revert_work_on_the_work_tree_diff_alone() {
+        let source = Source {
+            repo: "/nonexistent".into(),
+            staged: true,
+            range: None,
+        };
+        let mut viewer = Viewer::new(Vec::new(), parse(CHANGE.into()));
+        viewer = viewer.watch(source, false, Duration::ZERO);
+        viewer.key(Key::Char('r'));
+        assert!(viewer.confirm.is_none() && viewer.notice.is_some());
+    }
+
+    #[test]
+    fn stage_and_revert_apply_the_hunk_at_the_top_in_a_scratch_repository() {
+        let repo = std::env::temp_dir().join(format!("pinfold-stage-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(&repo)
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{args:?}");
+            String::from_utf8(output.stdout).unwrap()
+        };
+        let numbers: String = (1..=20).map(|n| format!("{n}\n")).collect();
+        git(&["init", "-q"]);
+        std::fs::write(repo.join("a.txt"), &numbers).unwrap();
+        std::fs::write(repo.join("b.txt"), "b\n").unwrap();
+        std::fs::write(repo.join("c.txt"), "c\n").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "one"]);
+        let changed = numbers
+            .replace("\n2\n", "\ntwo\n")
+            .replace("19\n", "nineteen\n");
+        std::fs::write(repo.join("a.txt"), &changed).unwrap();
+        std::fs::write(repo.join("b.txt"), "B\n").unwrap();
+        std::fs::write(repo.join("c.txt"), "C\n").unwrap();
+        let mut viewer = work_tree(&repo, load(&repo, false, None).unwrap());
+        let settle = |viewer: &mut Viewer| {
+            let started = Instant::now();
+            loop {
+                viewer.tick();
+                let watch = viewer.watch.as_ref().unwrap();
+                if !watch.again && watch.running.is_none() {
+                    break;
+                }
+                assert!(started.elapsed() < git::TIMEOUT * 2);
+                thread::sleep(Duration::from_millis(10));
+            }
+        };
+        assert_eq!(viewer.diff.files[0].hunks.len(), 2);
+        // Four rows a page; the second hunk's header is the eleventh row.
+        let mut screen = Screen::new(5, 80);
+        viewer.draw(&mut screen);
+        for _ in 0..10 {
+            viewer.key(Key::Char('j'));
+        }
+        viewer.key(Key::Char('s'));
+        let confirm = viewer.confirm.as_ref().unwrap();
+        assert_eq!(confirm.header, b"@@ -16,5 +16,5 @@");
+        viewer.key(Key::Char('y'));
+        assert!(viewer.notice.is_none(), "{:?}", viewer.notice);
+        let staged = git(&["diff", "--cached"]);
+        assert!(
+            staged.contains("+nineteen") && !staged.contains("+two"),
+            "{staged}"
+        );
+        assert!(
+            !staged.contains("b.txt") && !staged.contains("c.txt"),
+            "{staged}"
+        );
+        settle(&mut viewer);
+        assert_eq!(
+            hunk_lines(&viewer.diff, 0),
+            [" 1", "-2", "+two", " 3", " 4", " 5"]
+        );
+        // Revert b.txt, the next file; a key other than `y` first leaves it be.
+        viewer.key(Key::Char('n'));
+        assert_eq!(viewer.diff.files[viewer.selected].label(), b"b.txt");
+        viewer.key(Key::Char('r'));
+        viewer.key(Key::Char('q'));
+        assert_eq!(std::fs::read_to_string(repo.join("b.txt")).unwrap(), "B\n");
+        viewer.key(Key::Char('r'));
+        viewer.key(Key::Char('y'));
+        assert!(viewer.notice.is_none(), "{:?}", viewer.notice);
+        assert_eq!(std::fs::read_to_string(repo.join("b.txt")).unwrap(), "b\n");
+        assert_eq!(std::fs::read_to_string(repo.join("c.txt")).unwrap(), "C\n");
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            changed
+        );
+        settle(&mut viewer);
+        let labels: Vec<_> = viewer.diff.files.iter().map(File::label).collect();
+        assert_eq!(labels, [&b"a.txt"[..], b"c.txt"]);
+        // A hunk git no longer has fails, and says why.
+        viewer.selected = 0;
+        viewer.top = 0;
+        viewer.key(Key::Char('r'));
+        std::fs::write(repo.join("a.txt"), &numbers).unwrap();
+        viewer.key(Key::Char('y'));
+        let notice = viewer.notice.clone().unwrap();
+        assert!(notice.starts_with("git apply failed: "), "{notice}");
+        std::fs::remove_dir_all(repo).unwrap();
     }
 
     #[test]
