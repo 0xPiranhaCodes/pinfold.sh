@@ -1,12 +1,19 @@
-//! The unified-diff parser behind `pinfold diff` (ADR-0045 sections 2 and 6).
+//! The diff viewer behind `pinfold diff` (ADR-0045 sections 2, 3 and 6): the files on the
+//! left and the selected one's unified hunks on the right.
 //!
 //! Git's output is untrusted: names and lines come from the repository. [`parse`] takes any
 //! bytes without panicking, keeps each line as a range into them, and caps each structure;
-//! [`Diff::notes`] says which cap cut it. Nothing here is escaped: [`Screen::put`] does that.
-//!
-//! [`Screen::put`]: crate::screen::Screen::put
+//! [`Diff::notes`] says which cap cut it, and the viewer shows them above the diff. Every name
+//! and line reaches the screen through [`Screen::put`], which escapes it.
 
+use std::iter;
 use std::ops::Range;
+use std::path::Path;
+
+use crate::keys::Key;
+use crate::md::colour;
+use crate::screen::{Color, Screen, Style, escape};
+use crate::{Flow, Tool, git};
 
 /// Files kept; the rest of the diff is dropped.
 const MAX_FILES: usize = 10_000;
@@ -50,6 +57,41 @@ impl File {
         }
         [&self.old[..], " → ".as_bytes(), &self.new].concat()
     }
+}
+
+const KEYS: [&str; 6] = [
+    "n p                 the next or previous file",
+    "j k  ↓ ↑            a line down or up",
+    "space b  PgDn PgUp  a page down or up",
+    "g G  Home End       the top or the end",
+    "?                   these keys",
+    "q                   quit",
+];
+
+/// Runs `git diff` in `repo` through [`git::run`] and parses it, or says why it could not.
+pub(crate) fn load(repo: &Path, staged: bool, range: Option<&str>) -> Result<Diff, String> {
+    // Fixed prefixes, so `diff.noprefix` or `diff.mnemonicPrefix` cannot change the paths.
+    let mut args = vec!["diff", "--src-prefix=a/", "--dst-prefix=b/"];
+    args.extend(staged.then_some("--staged"));
+    args.extend(range);
+    args.push("--");
+    let output = git::run(repo, args).map_err(|error| format!("cannot run git: {error}"))?;
+    // Git cut short at the byte cap dies of SIGPIPE, which is not an error here.
+    if !output.cut_short && output.status.is_some_and(|status| !status.success()) {
+        let errors = String::from_utf8_lossy(&output.stderr);
+        let first = errors.lines().next().unwrap_or_default();
+        return Err(format!("git diff failed: {first}"));
+    }
+    let mut diff = parse(output.stdout);
+    if output.cut_short {
+        let why = match output.status {
+            None => format!("git ran over {} s", git::TIMEOUT.as_secs()),
+            Some(_) => format!("git printed over {} MB", git::MAX_OUTPUT / 1_000_000),
+        };
+        diff.notes
+            .insert(0, format!("{why}, so the diff is cut short."));
+    }
+    Ok(diff)
 }
 
 /// Parses the output of `git diff`, which may be cut short anywhere.
@@ -225,6 +267,157 @@ fn unquote(text: &[u8]) -> (Vec<u8>, &[u8]) {
     (path, rest)
 }
 
+/// The diff viewer.
+pub(crate) struct Viewer {
+    title: Vec<u8>,
+    diff: Diff,
+    selected: usize,
+    top: usize,
+    page: usize,
+    help: bool,
+}
+
+impl Viewer {
+    /// A viewer titled `title`, such as `diff --staged`, for `diff`.
+    pub(crate) fn new(title: Vec<u8>, diff: Diff) -> Self {
+        Self {
+            title,
+            diff,
+            selected: 0,
+            top: 0,
+            page: 1,
+            help: false,
+        }
+    }
+
+    /// The selected file's header and hunk lines, each with its style.
+    fn lines(&self) -> impl Iterator<Item = (&[u8], Style)> {
+        let bytes = &self.diff.bytes;
+        let file = self.diff.files.get(self.selected);
+        let header = (file.into_iter().flat_map(|file| &file.header))
+            .map(|range| (range, colour(Color::BrightBlack)));
+        let hunks = file
+            .into_iter()
+            .flat_map(|file| &file.hunks)
+            .flat_map(move |hunk| {
+                let lines = hunk.lines.iter().map(move |range| {
+                    let fg = match bytes[range.clone()].first() {
+                        Some(b'+') => Color::Green,
+                        Some(b'-') => Color::Red,
+                        Some(b'\\') => Color::BrightBlack,
+                        _ => Color::Default,
+                    };
+                    (range, colour(fg))
+                });
+                iter::once((&hunk.header, colour(Color::Cyan))).chain(lines)
+            });
+        header
+            .chain(hunks)
+            .map(|(range, style)| (&bytes[range.clone()], style))
+    }
+
+    fn last_top(&self) -> usize {
+        let count = self.diff.files.get(self.selected).map_or(0, |file| {
+            file.header.len()
+                + file
+                    .hunks
+                    .iter()
+                    .map(|hunk| 1 + hunk.lines.len())
+                    .sum::<usize>()
+        });
+        count.saturating_sub(self.page)
+    }
+}
+
+impl Tool for Viewer {
+    fn draw(&mut self, screen: &mut Screen) {
+        let (rows, columns) = screen.size();
+        let bold = Style {
+            bold: true,
+            ..Style::default()
+        };
+        let dim = colour(Color::BrightBlack);
+        screen.put(0, 0, &self.title, bold);
+        let files = self.diff.files.len();
+        let place = format!("{}/{files}  ? keys", (self.selected + 1).min(files));
+        let at = columns.saturating_sub(u16::try_from(place.len()).unwrap_or(u16::MAX));
+        screen.put(0, at, place, dim);
+        if self.help {
+            for (row, keys) in (2..rows).zip(KEYS) {
+                screen.put(row, 2, keys, Style::default());
+            }
+            return;
+        }
+        let mut top = 1;
+        for note in &self.diff.notes {
+            screen.put(top, 0, note, colour(Color::Yellow));
+            top += 1;
+        }
+        if files == 0 {
+            screen.put(top, 0, "No changes.", dim);
+            return;
+        }
+        self.page = usize::from(rows.saturating_sub(top)).max(1);
+        self.top = self.top.min(self.last_top());
+        let left = columns / 4;
+        let width = usize::from(left.saturating_sub(1));
+        let first = (self.selected + 1).saturating_sub(self.page);
+        for (row, (at, file)) in (top..rows).zip(self.diff.files.iter().enumerate().skip(first)) {
+            let label: String = escape(&file.label()).chars().take(width).collect();
+            let style = if at == self.selected {
+                Style {
+                    fg: Color::Black,
+                    bg: Color::Blue,
+                    bold: false,
+                }
+            } else {
+                Style::default()
+            };
+            screen.put(row, 0, format!("{label:<width$}"), style);
+        }
+        for (row, (line, style)) in (top..rows).zip(self.lines().skip(self.top)) {
+            let line = line
+                .split(|&byte| byte == b'\t')
+                .collect::<Vec<_>>()
+                .join(&b"    "[..]);
+            screen.put(row, left + 1, line, style);
+        }
+    }
+
+    fn key(&mut self, key: Key) -> Flow {
+        if self.help {
+            self.help = false;
+            return if key == Key::Char('q') {
+                Flow::Quit
+            } else {
+                Flow::Continue
+            };
+        }
+        let page = self.page;
+        match key {
+            Key::Char('q') => return Flow::Quit,
+            Key::Char('?') => self.help = true,
+            Key::Char('n') => {
+                self.selected = (self.selected + 1).min(self.diff.files.len().saturating_sub(1));
+                self.top = 0;
+            }
+            Key::Char('p') => {
+                self.selected = self.selected.saturating_sub(1);
+                self.top = 0;
+            }
+            Key::Char('j') | Key::Down => self.top += 1,
+            Key::Char('k') | Key::Up => self.top = self.top.saturating_sub(1),
+            Key::Char(' ' | 'f') | Key::PageDown => self.top += page,
+            Key::Char('b') | Key::PageUp => self.top = self.top.saturating_sub(page),
+            Key::Char('g') | Key::Home => self.top = 0,
+            Key::Char('G') | Key::End => self.top = self.last_top(),
+            _ => {}
+        }
+        self.top = self.top.min(self.last_top());
+        Flow::Continue
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,6 +445,106 @@ mod tests {
         @@ -9 +9 @@\n\
         --- a/x\n\
         +@@ not a hunk\n";
+
+    /// Every kind of file, with a tab, an escape and a bidi control in the changed lines.
+    const FILES: &str = "diff --git a/run.sh b/run.sh\nold mode 100644\nnew mode 100755\n\
+        diff --git a/logo.png b/logo.png\nindex 1..2 100644\n\
+        Binary files a/logo.png and b/logo.png differ\n\
+        diff --git a/old.txt b/new.txt\nsimilarity index 90%\nrename from old.txt\nrename to new.txt\n\
+        diff --git \"a/x\\033[2J\" \"b/x\\033[2J\"\nnew file mode 100644\n--- /dev/null\n\
+        +++ \"b/x\\033[2J\"\n@@ -0,0 +1 @@\n+\tgnp\u{202e}.exe\x1b]0;x\x07\n";
+
+    /// The screen at 80×24 after `keys`, as rows and style runs.
+    fn shown(diff: Diff, keys: &[Key]) -> String {
+        let mut viewer = Viewer::new(b"diff main..HEAD".to_vec(), diff);
+        for &key in keys {
+            viewer.key(key);
+        }
+        let mut screen = Screen::new(24, 80);
+        viewer.draw(&mut screen);
+        viewer.draw(&mut screen);
+        screen.runs()
+    }
+
+    #[test]
+    fn a_unified_diff() {
+        insta::assert_snapshot!(shown(parse(format!("{CHANGE}{FILES}").into()), &[]));
+    }
+
+    #[test]
+    fn a_hostile_path_and_line_show_escaped() {
+        let keys = [Key::Char('n'); 4];
+        insta::assert_snapshot!(shown(parse(format!("{CHANGE}{FILES}").into()), &keys));
+    }
+
+    #[test]
+    fn a_cut_short_diff() {
+        let mut diff = parse(CHANGE.as_bytes()[..CHANGE.len() - 5].to_vec());
+        diff.notes
+            .push("git printed over 8 MB, so the diff is cut short.".into());
+        insta::assert_snapshot!(shown(diff, &[]));
+    }
+
+    #[test]
+    fn keys_scroll_within_the_diff_and_q_quits() {
+        let mut viewer = Viewer::new(Vec::new(), parse(CHANGE.into()));
+        let mut screen = Screen::new(5, 80);
+        viewer.draw(&mut screen);
+        assert_eq!(viewer.key(Key::Char('G')), Flow::Continue);
+        // Eleven lines, four rows a page.
+        assert_eq!(viewer.top, 7);
+        viewer.key(Key::Char('j'));
+        assert_eq!(viewer.top, 7);
+        viewer.key(Key::Char('n'));
+        assert_eq!((viewer.selected, viewer.top), (0, 0));
+        assert_eq!(viewer.key(Key::Char('q')), Flow::Quit);
+    }
+
+    #[test]
+    fn git_diff_runs_through_git_run_and_says_why_it_failed_or_was_cut_short() {
+        let repo = std::env::temp_dir().join(format!("pinfold-diff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&repo);
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "diff.noprefix=true",
+                ])
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap();
+            assert!(status.success());
+        };
+        git(&["init", "-q"]);
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&["add", "a.txt"]);
+        git(&["commit", "-qm", "one"]);
+        std::fs::write(repo.join("a.txt"), "two\n").unwrap();
+        let diff = load(&repo, false, None).unwrap();
+        assert_eq!(diff.files[0].label(), b"a.txt");
+        assert_eq!(hunk_lines(&diff, 0), ["-one", "+two"]);
+        assert!(load(&repo, true, None).unwrap().files.is_empty());
+        let problem = load(&repo, false, Some("nope..HEAD")).err().unwrap();
+        assert!(problem.starts_with("git diff failed: fatal: "), "{problem}");
+        std::fs::write(
+            repo.join("big.txt"),
+            format!("{}\n", "x".repeat(99)).repeat(100_000),
+        )
+        .unwrap();
+        git(&["add", "-N", "big.txt"]);
+        let diff = load(&repo, false, None).unwrap();
+        assert_eq!(
+            diff.notes,
+            ["git printed over 8 MB, so the diff is cut short."]
+        );
+        std::fs::remove_dir_all(repo).unwrap();
+    }
 
     #[test]
     fn a_change_has_its_path_header_and_hunks() {

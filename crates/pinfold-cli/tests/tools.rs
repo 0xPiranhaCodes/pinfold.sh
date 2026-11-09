@@ -42,21 +42,18 @@ fn each_tool_quits_on_q_and_restores_the_terminal() {
         "md Cargo.toml",
         "files",
         "files src",
+        // The test runs in this repository, where HEAD always resolves; `--staged` takes one commit.
         "diff",
-        "diff --staged main..HEAD",
+        "diff HEAD..HEAD",
+        "diff --staged HEAD",
         // As the core starts them (#312).
         "md -- Cargo.toml",
         "files -- src",
-        "diff --staged -- main..HEAD",
+        "diff --staged -- HEAD",
     ] {
         let pty = tool(args).unwrap();
         let mut text = String::new();
-        let shown = if args.starts_with("diff") {
-            "Press q to leave."
-        } else {
-            "? keys"
-        };
-        read_until(&pty, &mut text, shown);
+        read_until(&pty, &mut text, "? keys");
         assert!(text.contains("\x1b[?1049h"), "{args}: the alternate screen");
         pty.master().write_all(b"jq").unwrap();
         read_until(&pty, &mut text, "exit 0");
