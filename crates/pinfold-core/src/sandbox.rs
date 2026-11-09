@@ -15,6 +15,11 @@
 //! programs' Unix sockets, such as ssh-agent's, it reaches only PinFold's API socket, and on
 //! Linux with Landlock ABI 6 no abstract socket bound outside the sandbox (ADR-0038).
 //!
+//! It cannot read the common credential stores, gets no variable whose name looks like a secret
+//! but those its profile keeps, and cannot reach the clipboard: macOS denies the pasteboard
+//! service, and on Linux the X11 and Wayland sockets are out of reach. The network stays open
+//! (ADR-0041).
+//!
 //! A missing tool is an error: a pane that asked for a sandbox never runs without one.
 
 use std::ffi::{OsStr, OsString};
@@ -34,11 +39,17 @@ const BWRAP: [&str; 3] = ["/usr/bin/bwrap", "/usr/local/bin/bwrap", "/bin/bwrap"
 /// The oldest bubblewrap with `--disable-userns`.
 const BWRAP_OLDEST: (u32, u32) = (0, 8);
 
-/// Variables that name other programs' sockets, which the agent does not get.
-const SOCKET_VARS: [&str; 3] = [
+/// Variables that name other programs' sockets, which the agent does not get: agents', the
+/// session bus's, and the X11 and Wayland displays', which hold the clipboard, with X11's cookie
+/// file (ADR-0041).
+const SOCKET_VARS: [&str; 7] = [
     "SSH_AUTH_SOCK",
     "GPG_AGENT_INFO",
     "DBUS_SESSION_BUS_ADDRESS",
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "WAYLAND_SOCKET",
+    "XAUTHORITY",
 ];
 
 /// Words in the name of a variable that holds a secret, such as `GITHUB_TOKEN` or
@@ -57,6 +68,15 @@ const SECRET_WORDS: [&str; 6] = [
 const PROFILE: &str = "(version 1)(allow default)\
 (deny file-read* file-write* (regex #\"^/dev/ttys[0-9]+$\"))\
 (deny file-ioctl (ioctl-command 2147578994))";
+
+/// The macOS clipboard rule (ADR-0041): no lookup of the pasteboard server's services,
+/// `com.apple.pasteboard.1` and `com.apple.coreservices.uauseractivitypasteboardclient.xpc`,
+/// which `/System/Library/LaunchAgents/com.apple.pboard.plist` lists for `/usr/libexec/pboard`,
+/// nor of Universal Clipboard's `com.apple.coreservices.uasharedpasteboard*`, as `launchctl
+/// print gui/$UID` lists them on macOS 27.
+const CLIPBOARD: &str = "(deny mach-lookup (global-name \"com.apple.pasteboard.1\")\
+(global-name \"com.apple.coreservices.uauseractivitypasteboardclient.xpc\")\
+(global-name-prefix \"com.apple.coreservices.uasharedpasteboard\"))";
 
 /// The macOS write rule: nowhere but the working directory `W`, the user's temporary directory
 /// `T`, `/private/tmp` and `/dev`.
@@ -689,7 +709,7 @@ fn macos_args(
     api: &Path,
     found: &Git,
 ) -> Vec<OsString> {
-    let mut profile = format!("{PROFILE}{WRITES}{GIT}{SOCKETS}");
+    let mut profile = format!("{PROFILE}{CLIPBOARD}{WRITES}{GIT}{SOCKETS}");
     let temp = std::env::temp_dir();
     let temp = temp.canonicalize().unwrap_or(temp);
     let git = work.join(".git");
@@ -1026,7 +1046,7 @@ mod tests {
         let args = macos_args(&hidden, &program, work, api, &found);
         let args = strings(&args);
         assert_eq!(args[0], "-p");
-        assert!(args[1].starts_with(&format!("{PROFILE}{WRITES}{GIT}{SOCKETS}")));
+        assert!(args[1].starts_with(&format!("{PROFILE}{CLIPBOARD}{WRITES}{GIT}{SOCKETS}")));
         assert!(args[1].ends_with(
             "(deny file-write* (literal (param \"K0\")))\
              (deny file-write* (subpath (param \"C1\")))\

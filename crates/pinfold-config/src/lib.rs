@@ -304,7 +304,16 @@ fn data_dir_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathBu
 }
 
 /// Credential stores in the home folder, which a sandboxed agent may not read (ADR-0041).
-const STORES: [&str; 6] = [".aws", ".azure", ".docker", ".gnupg", ".kube", ".netrc"];
+/// `.Xauthority` holds the cookie an X server, and so its clipboard, may ask for.
+const STORES: [&str; 7] = [
+    ".aws",
+    ".azure",
+    ".docker",
+    ".gnupg",
+    ".kube",
+    ".netrc",
+    ".Xauthority",
+];
 
 /// Credential stores under the config directory, `~/.config` or `$XDG_CONFIG_HOME`.
 const CONFIG_STORES: [&str; 2] = ["gcloud", "gh"];
@@ -345,7 +354,7 @@ const CONFIG_BROWSERS: [&str; 0] = [];
 
 /// Returns the credential stores a sandboxed agent may not read, under `home` and the config
 /// directory `config`, whether they exist or not: `~/.aws`, `~/.azure`, `~/.docker`, `~/.gnupg`,
-/// `~/.kube`, `~/.netrc`, `gcloud` and `gh` in `config`, and this system's browser profiles.
+/// `~/.kube`, `~/.netrc`, `~/.Xauthority`, `gcloud` and `gh` in `config`, and this system's browser profiles.
 ///
 /// ```
 /// use std::path::Path;
@@ -795,7 +804,15 @@ mod tests {
     fn private_dirs_hide_credential_stores_that_may_not_exist() {
         let home = PathBuf::from("/nowhere/home");
         let dirs = private_dirs_from(Some("/nowhere/xdg".into()), None, Some(home.clone().into()));
-        for store in [".aws", ".azure", ".docker", ".gnupg", ".kube", ".netrc"] {
+        for store in [
+            ".aws",
+            ".azure",
+            ".docker",
+            ".gnupg",
+            ".kube",
+            ".netrc",
+            ".Xauthority",
+        ] {
             assert!(dirs.contains(&home.join(store)), "{store} {dirs:?}");
         }
         for config in [home.join(".config"), PathBuf::from("/nowhere/xdg")] {
