@@ -1482,6 +1482,102 @@ fn a_pane_spawns_children_and_reaches_only_them() {
     core.wait().unwrap();
 }
 
+/// Names the directory of a run, in the pane that opens a tool.
+const TOOL: &str = "PINFOLD_TEST_TOOL";
+
+/// Not a test: the first pane of [`an_agent_cannot_type_into_the_tool_it_opened`]. It opens a
+/// shell and a tool, sends to the tool, makes refused calls, closes the tool and types into the
+/// shell, and notes each reply.
+#[test]
+#[ignore = "run by an_agent_cannot_type_into_the_tool_it_opened"]
+fn tool_process() {
+    let Some(directory) = helper(TOOL) else {
+        return;
+    };
+    let directory = Path::new(&directory);
+    let root = fs::canonicalize(directory).unwrap();
+    let mut heard = String::new();
+    let shell = ask("pane.spawn", serde_json::json!({"where": "tab"})).unwrap();
+    let files = serde_json::json!({"tool": "files", "path": root, "place": "tab"});
+    let tool = ask("tool.open", files).unwrap();
+    let send = ask("pane.send", serde_json::json!({"pane": 2, "text": "q"})).unwrap();
+    writeln!(heard, "{shell}\n{tool}\n{send}").unwrap();
+    let file = root.join("note.md");
+    fs::write(&file, "# note").unwrap();
+    for refused in [
+        serde_json::json!({"tool": "md", "path": "note.md"}),
+        serde_json::json!({"tool": "md", "path": root}),
+        serde_json::json!({"tool": "files", "path": file}),
+        serde_json::json!({"tool": "files", "path": root.join("missing")}),
+        serde_json::json!({"tool": "diff", "path": root, "range": "--output=/tmp/x"}),
+        serde_json::json!({"tool": "diff", "path": root, "range": "a..b..c"}),
+    ] {
+        writeln!(heard, "{}", ask("tool.open", refused).unwrap()).unwrap();
+    }
+    let list = ask("pane.list", serde_json::json!({})).unwrap();
+    let highest = list["result"]["panes"].as_array().unwrap().iter();
+    let highest = highest.filter_map(|pane| pane["id"].as_u64()).max();
+    writeln!(heard, "{}", serde_json::json!({"highest": highest})).unwrap();
+    // Gone already if this `pinfold` has no `files` yet (#311): then the close finds no pane.
+    let _ = ask("pane.close", serde_json::json!({"pane": 2})).unwrap();
+    ask(
+        "pane.send",
+        serde_json::json!({"pane": 1, "text": "typed\n"}),
+    )
+    .unwrap();
+    // The tty echoes the line and `cat` prints it again.
+    let start = Instant::now();
+    while start.elapsed() < PATIENCE {
+        let read = ask("pane.read", serde_json::json!({"pane": 1})).unwrap();
+        let text = read["result"]["text"].as_str().unwrap_or_default();
+        if text.matches("typed").count() >= 2 {
+            writeln!(heard, "read").unwrap();
+            break;
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    note(directory.join("tooled"), heard).unwrap();
+}
+
+#[test]
+fn an_agent_cannot_type_into_the_tool_it_opened() {
+    let session = Session::new("t", None).unwrap();
+    let exe = env::current_exe().unwrap();
+    let shell = format!(
+        "if mkdir \"$PINFOLD_TEST_CLIENT/first\"; then {TOOL}=\"$PINFOLD_TEST_CLIENT\" exec '{}' \
+         --exact --ignored tool_process; fi; exec cat",
+        exe.display()
+    );
+    let mut core = session.start_core(&["--idle", "1"], &shell).unwrap();
+    assert!(session.wait_for("tooled"), "{}", session.read_log());
+    let heard = session.read("tooled");
+    let replies: Vec<serde_json::Value> = heard
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .collect();
+    assert_eq!(replies[0]["result"], serde_json::json!({"pane": 1}));
+    assert_eq!(
+        replies[1]["result"],
+        serde_json::json!({"pane": 2}),
+        "{heard}"
+    );
+    let refusal = replies[2]["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        refusal.contains("never pane.send") || refusal.contains("no such pane"),
+        "{heard}"
+    );
+    for refused in &replies[3..9] {
+        assert!(refused["error"].is_object(), "{heard}");
+    }
+    // No refused call opened a pane.
+    assert!(replies[9]["highest"].as_u64() <= Some(2), "{heard}");
+    assert!(heard.ends_with("read\n"), "{heard}");
+    let audit = fs::read_to_string(session.log()).unwrap_or_default();
+    assert!(!audit.contains("note.md"), "a path reached the log");
+    core.kill().unwrap();
+    core.wait().unwrap();
+}
+
 #[test]
 fn ctl_wait_prints_how_a_wait_ended_and_exits_0_1_or_2() {
     let session = Session::new("cw", None).unwrap();
@@ -2837,6 +2933,10 @@ fn replies_pane_process() {
         ),
         ("agent.launch", serde_json::json!({"profile": "plain"})),
         ("pane.close", serde_json::json!({"pane": 2})),
+        (
+            "tool.open",
+            serde_json::json!({"tool": "files", "path": "/"}),
+        ),
     ];
     replies(directory, "inside", calls).unwrap();
     let mut outside = Command::new(env::current_exe().unwrap());

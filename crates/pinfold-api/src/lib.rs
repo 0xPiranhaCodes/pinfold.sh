@@ -4,6 +4,7 @@ pub mod audit;
 pub mod control;
 pub mod redact;
 pub mod spawn;
+pub mod tool;
 pub mod trust;
 pub mod workspace;
 

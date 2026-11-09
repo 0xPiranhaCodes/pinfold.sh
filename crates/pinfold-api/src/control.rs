@@ -169,6 +169,8 @@ pub enum Method {
     PaneSpawn(crate::spawn::Spawn),
     /// `agent.launch`, its shape checked.
     AgentLaunch(crate::spawn::Launch),
+    /// `tool.open`, its shape checked.
+    ToolOpen(crate::tool::Open),
     /// `pane.close`: a pane the caller spawned.
     PaneClose {
         /// The pane's number.
@@ -1182,7 +1184,8 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
             | "workspace.trust_state"
             | "workspace.ask_trust"
             | "session.save"
-            | "agent.launch"),
+            | "agent.launch"
+            | "tool.open"),
         ) if *greeted < VERSION => refuse(
             Some(id),
             NO_METHOD,
@@ -1225,6 +1228,10 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
         },
         Some("agent.launch") => match crate::spawn::launch(request.get("params")) {
             Ok(launch) => Step::Ask(id.clone(), Method::AgentLaunch(launch)),
+            Err(reason) => refuse(Some(id), BAD_PARAMS, reason),
+        },
+        Some("tool.open") => match crate::tool::params(request.get("params")) {
+            Ok(open) => Step::Ask(id.clone(), Method::ToolOpen(open)),
             Err(reason) => refuse(Some(id), BAD_PARAMS, reason),
         },
         Some("workspace.open") => match crate::workspace::params(request.get("params")) {
@@ -1580,6 +1587,20 @@ mod tests {
         let launch = pane_request("agent.launch", &json!({"profile": "a"}));
         let (reply, _) = replied(launch.as_bytes(), &mut OLDEST.clone());
         assert_eq!(code(&reply), Some(NO_METHOD));
+        // A refused tool never reaches the reactor, so no process starts.
+        let tool = pane_request(
+            "tool.open",
+            &json!({"tool": "diff", "path": "/r", "range": "-p"}),
+        );
+        let (reply, _) = replied(tool.as_bytes(), &mut VERSION.clone());
+        assert_eq!(code(&reply), Some(BAD_PARAMS));
+        let tool = pane_request("tool.open", &json!({"tool": "files", "path": "/r"}));
+        let (reply, _) = replied(tool.as_bytes(), &mut OLDEST.clone());
+        assert_eq!(code(&reply), Some(NO_METHOD));
+        assert!(matches!(
+            answer(tool.as_bytes(), &mut VERSION.clone()),
+            Step::Ask(_, Method::ToolOpen(_))
+        ));
         let bad = [
             json!(null),
             json!({"pane": -1}),

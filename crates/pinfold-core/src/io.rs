@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use mio::unix::{SourceFd, pipe};
 use mio::{Events, Interest, Poll, Token};
+use pinfold_api::tool::Run;
 use pinfold_mux::{Session, Size};
 use pinfold_proto::link::ApprovalAnswer;
 use pinfold_sys::Terminal;
@@ -25,7 +26,7 @@ use crate::search::{CopyStep, Copying, Direction, Position, Search, SearchStep, 
 use crate::status::{self, Status, Tracker};
 use crate::tap::Tap;
 use crate::vt::{AlacrittyEngine, VtEngine};
-use crate::{paste, shell};
+use crate::{paste, shell, tool};
 
 pub use mio::Waker;
 
@@ -134,6 +135,8 @@ struct Pane {
     message: String,
     /// Whether it raised a "needs you" alert that no window has taken yet.
     alerted: bool,
+    /// The built-in tool it runs, which no API caller may type into (ADR-0045).
+    tool: Option<Run>,
 }
 
 impl Pane {
@@ -165,6 +168,8 @@ pub struct Listed<'a> {
     pub reported: bool,
     /// The reported message, without control or bidi characters. Empty if none.
     pub message: &'a str,
+    /// The built-in tool it runs, or nothing for any other program.
+    pub tool: Option<&'a Run>,
 }
 
 /// What `pane.wait` watches in a pane, with nothing from its screen.
@@ -279,6 +284,7 @@ impl Reactor {
             status: Tracker::default(),
             message: String::new(),
             alerted: false,
+            tool: None,
         });
         Ok(pane)
     }
@@ -416,6 +422,9 @@ impl Reactor {
         let Some(entry) = pane_mut(&mut self.panes, pane) else {
             return Err("no such pane");
         };
+        if entry.tool.is_some() {
+            return Err(tool::NO_SEND);
+        }
         let (since, count) = &mut entry.sends;
         if *count == 0 || now.duration_since(*since) >= Duration::from_secs(1) {
             (*since, *count) = (now, 0);
@@ -630,8 +639,17 @@ impl Reactor {
                 status,
                 reported,
                 message,
+                tool: pane.tool.as_ref(),
             }
         })
+    }
+
+    /// Records that `pane` runs `run`, so it is listed as a tool pane and refuses every
+    /// `pane.send` from now on.
+    pub fn set_tool(&mut self, pane: usize, run: Run) {
+        if let Some(pane) = pane_mut(&mut self.panes, pane) {
+            pane.tool = Some(run);
+        }
     }
 
     /// What would end if the pane started again, as a restored session starts it: a program in
@@ -937,6 +955,7 @@ mod tests {
             status: Status::Running,
             reported: false,
             message: "",
+            tool: None,
         };
         assert_eq!(reactor.list().collect::<Vec<_>>(), [expected]);
     }
