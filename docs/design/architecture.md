@@ -121,7 +121,7 @@ Pinfold does not try to drive an external tmux. Users who need tmux on remote ma
 
 ## Built-in tools
 
-The tools follow [ADR-0045](../adr/0045-tools-are-programs-in-their-own-pane.md). `pinfold md <file>`, `pinfold files [dir]` and `pinfold diff [--staged] [range]` are subcommands of the `pinfold` binary, with their code in `pinfold-tools`. Each is a full-screen terminal program, like `less` or ranger: run in a shell pane it simply runs there, and opened by key, from the palette or by an agent over the API (`tool.open`), the core starts it in a new pane. Its output passes the core's escape filter and VT engine like any program's, so a tool that crashes or hangs costs only its own pane, and its memory goes back to the OS when it exits. No API caller can type into a tool pane. Every string reaches the screen escaped, git runs through one hardened entry point, and each tool caps size and time (ADR-0045, section 4).
+The tools follow [ADR-0045](../adr/0045-tools-are-programs-in-their-own-pane.md). `pinfold md <file>`, `pinfold files [dir]` and `pinfold diff [--staged] [--watch] [range]` are subcommands of the `pinfold` binary, with their code in `pinfold-tools`. Each is a full-screen terminal program, like `less` or ranger: run in a shell pane it simply runs there, and opened by key, from the palette or by an agent over the API (`tool.open`), the core starts it in a new pane. Its output passes the core's escape filter and VT engine like any program's, so a tool that crashes or hangs costs only its own pane, and its memory goes back to the OS when it exits. No API caller can type into a tool pane. Every string reaches the screen escaped, git runs through one hardened entry point, and each tool caps size and time (ADR-0045, section 4).
 
 ### Markdown reader (`pinfold md`)
 
@@ -140,7 +140,7 @@ The tools follow [ADR-0045](../adr/0045-tools-are-programs-in-their-own-pane.md)
 
 - Runs `git diff` (or `--staged`, or `<rev>..<rev>`) and parses the unified diff. It shows a file list on the left and hunks on the right, unified or side by side, with word-level highlights from `similar`.
 - **Watch mode** (`--watch`, or `w`) re-runs the diff on a poll, so you can watch an agent's edits land.
-- Hunk actions: stage (`git apply --cached`), revert (`git apply -R`), each with a confirmation, and copy the hunk with a comment to an agent pane as review feedback.
+- Hunk actions on the work tree's diff: `s` stages (`git apply --cached`) and `r` reverts (`git apply -R`) the hunk at the top of the view, each after a confirmation drawn in the pane that names the file and the hunk header, and then the diff reloads. Copying the hunk with a comment to an agent pane as review feedback comes next.
 - Nothing stays resident when the pane is closed: the process exits.
 
 ## Agent control API

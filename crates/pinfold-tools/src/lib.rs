@@ -16,6 +16,7 @@ pub mod screen;
 use std::io::{self, Read, Write};
 use std::os::fd::AsFd;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 use keys::{Key, Keys};
 use screen::{Color, Screen, Style};
@@ -33,12 +34,14 @@ pub enum Command {
         /// The directory, by default the current one.
         dir: PathBuf,
     },
-    /// `pinfold diff [--staged] [range]`
+    /// `pinfold diff [--staged] [--watch] [range]`
     Diff {
         /// The index against `HEAD`, not the work tree against the index.
         staged: bool,
         /// A revision range, such as `main..HEAD`.
         range: Option<String>,
+        /// Run git again every 2 s, or 20 times as long as it took if that is longer.
+        watch: bool,
     },
 }
 
@@ -51,15 +54,19 @@ impl Command {
     /// use pinfold_tools::Command;
     ///
     /// let diff = Command::parse(&["diff", "--staged"]);
-    /// assert_eq!(diff, Some(Command::Diff { staged: true, range: None }));
+    /// assert_eq!(diff, Some(Command::Diff { staged: true, range: None, watch: false }));
     /// assert_eq!(Command::parse(&["diff", "--stat"]), None);
     /// ```
     pub fn parse(words: &[&str]) -> Option<Self> {
         let (&tool, rest) = words.split_first()?;
-        let (staged, rest) = match (tool, rest) {
-            ("diff", ["--staged", rest @ ..]) => (true, rest),
-            (_, rest) => (false, rest),
-        };
+        let (mut staged, mut watch, mut rest) = (false, false, rest);
+        loop {
+            match (tool, rest) {
+                ("diff", ["--staged", more @ ..]) if !staged => (staged, rest) = (true, more),
+                ("diff", ["--watch", more @ ..]) if !watch => (watch, rest) = (true, more),
+                _ => break,
+            }
+        }
         // After `--`, as the core passes it, a path that starts with `-` is still a path.
         let argument = match rest {
             [] | ["--"] => None,
@@ -76,6 +83,7 @@ impl Command {
             ("diff", range) if !range.is_some_and(|range| range.starts_with('-')) => Self::Diff {
                 staged,
                 range: range.map(str::to_owned),
+                watch,
             },
             _ => return None,
         })
@@ -125,7 +133,11 @@ impl Command {
                     Err(problem) => (format!("files {}", dir.display()), problem),
                 }
             }
-            Self::Diff { staged, range } => {
+            Self::Diff {
+                staged,
+                range,
+                watch,
+            } => {
                 let mut title = "diff".to_owned();
                 if *staged {
                     title.push_str(" --staged");
@@ -133,9 +145,16 @@ impl Command {
                 if let Some(range) = range {
                     title = format!("{title} {range}");
                 }
+                let started = Instant::now();
                 match diff::load(Path::new("."), *staged, range.as_deref()) {
                     Ok(diff) => {
-                        run(&mut diff::Viewer::new(title.into_bytes(), diff))?;
+                        let source = diff::Source {
+                            repo: ".".into(),
+                            staged: *staged,
+                            range: range.clone(),
+                        };
+                        let viewer = diff::Viewer::new(title.into_bytes(), diff);
+                        run(&mut viewer.watch(source, *watch, started.elapsed()))?;
                         return Ok(true);
                     }
                     Err(problem) => (title, problem),
@@ -298,6 +317,7 @@ mod tests {
         let diff = Command::Diff {
             staged: true,
             range,
+            watch: false,
         };
         assert_eq!(
             Command::parse(&["diff", "--staged", "main..HEAD"]),
@@ -312,7 +332,17 @@ mod tests {
         let staged = Command::Diff {
             staged: true,
             range: Some("a..b".to_owned()),
+            watch: false,
         };
+        let watched = Command::Diff {
+            staged: true,
+            range: Some("a..b".to_owned()),
+            watch: true,
+        };
+        assert_eq!(
+            Command::parse(&["diff", "--watch", "--staged", "a..b"]),
+            Some(watched)
+        );
         assert_eq!(
             Command::parse(&["diff", "--staged", "--", "a..b"]),
             Some(staged)
@@ -320,6 +350,7 @@ mod tests {
         let plain = Command::Diff {
             staged: false,
             range: None,
+            watch: false,
         };
         assert_eq!(Command::parse(&["diff", "--"]), Some(plain));
         for wrong in [
@@ -330,6 +361,8 @@ mod tests {
             &["md", "-x"],
             &["files", "a", "b"],
             &["diff", "--x"],
+            &["diff", "--watch", "--watch"],
+            &["md", "--watch", "a"],
             &["diff", "a", "b"],
         ] {
             assert_eq!(Command::parse(wrong), None, "{wrong:?}");
