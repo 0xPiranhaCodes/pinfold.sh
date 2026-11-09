@@ -111,6 +111,7 @@ pub(crate) fn bar() -> Frame {
         title: true,
         time: Some(time),
         inset: 1,
+        unhardened: None,
     };
     top_bar::draw(&mut frame, &bar);
     frame
@@ -123,6 +124,40 @@ fn the_bar_shows_tabs_states_and_the_status_line() {
     insta::with_settings!({snapshot_suffix => std::env::consts::OS}, {
         insta::assert_snapshot!(cells(&frame));
     });
+}
+
+/// A core without the hardened runtime: its notice under the pane and the bar's marker. Only
+/// macOS shows them, so only macOS has the snapshot and image.
+#[cfg(target_os = "macos")]
+pub(crate) fn unhardened() -> Frame {
+    let tabs = ["work", "logs"];
+    let mut frame = pane(' ', 1, 80);
+    let mut flash = crate::flash::Flash::default();
+    let command =
+        "codesign -f -s - -o runtime '/Users/me/pinfold/target/release'/pinfold-{core,window}";
+    flash.unhardened(true, command.to_owned(), Instant::now());
+    flash.banner(&mut frame);
+    let bar = Bar {
+        tabs: &tabs,
+        active: 0,
+        activity: 0,
+        states: &[],
+        status: None,
+        hovered: None,
+        focused: true,
+        title: true,
+        time: None,
+        inset: 1,
+        unhardened: Some(true),
+    };
+    top_bar::draw(&mut frame, &bar);
+    frame
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn an_unhardened_core_has_a_notice_and_a_marker() {
+    insta::assert_snapshot!(cells(&unhardened()));
 }
 
 /// A prompt to approve one pane sending to another.

@@ -225,6 +225,12 @@ fn golden_bar() {
 }
 
 #[test]
+#[cfg(target_os = "macos")]
+fn golden_unhardened() {
+    check("unhardened", draw(&crate::snapshots::unhardened(), true));
+}
+
+#[test]
 fn golden_approval_prompt() {
     check("approval", draw(&approval(), false));
 }
