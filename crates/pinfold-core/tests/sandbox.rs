@@ -581,6 +581,56 @@ fn planted_child() {
     }
 }
 
+/// On macOS an app the agent writes and opens does not run: LaunchServices would start it outside
+/// the sandbox, as launchd's child.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_sandboxed_agent_cannot_start_an_app_outside_its_sandbox() {
+    let home = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("pinfold-lsopen-{}", std::process::id()));
+    let _removed = Removed(home.clone());
+    let work = home.join("work");
+    fs::create_dir_all(&work).unwrap();
+    for dir in [&home, &work] {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    // Outside the working and temporary directories, where the agent itself cannot write.
+    let escaped = home.join("escaped");
+    let work = sandbox::working_directory(&work, &[], LAUNCHD_PATH.as_ref()).unwrap();
+    let app = work.path().join("Probe.app");
+    let script = format!(
+        "mkdir -p '{app}/Contents/MacOS' && \
+         printf '#!/bin/sh\\ntouch {escaped}\\n' >'{app}/Contents/MacOS/Probe' && \
+         chmod +x '{app}/Contents/MacOS/Probe' && \
+         printf '<?xml version=\"1.0\"?><plist version=\"1.0\"><dict>\
+<key>CFBundleExecutable</key><string>Probe</string>\
+<key>CFBundleIdentifier</key><string>sh.pinfold.test.probe-{pid}</string></dict></plist>' \
+           >'{app}/Contents/Info.plist' && echo made=yes; \
+         (touch '{escaped}') 2>/dev/null && echo touch=written || echo touch=refused; \
+         /usr/bin/open -g '{app}' 2>/dev/null; echo open=$?; \
+         /usr/bin/osascript -e 'tell application \"Finder\" to get the clipboard' >/dev/null 2>&1; \
+         echo event=$?; echo end=reached",
+        app = app.display(),
+        escaped = escaped.display(),
+        pid = std::process::id(),
+    );
+    let program = ["/bin/sh".to_owned(), "-c".to_owned(), script];
+    let api = work.path().join("api.sock");
+    let command = sandbox::command(&program, &[], &[], &work, &api, None).unwrap();
+    let output = read_until(&Pty::spawn(command, 24, 80).unwrap(), "end=reached");
+    // An app LaunchServices did start would need a moment to run.
+    thread::sleep(Duration::from_secs(3));
+    assert!(output.contains("end=reached"), "{output}");
+    assert!(output.contains("made=yes"), "{output}");
+    assert!(output.contains("touch=refused"), "{output}");
+    assert!(!output.contains("open=0"), "{output}");
+    assert!(!output.contains("event=0"), "{output}");
+    assert!(
+        !escaped.exists(),
+        "the opened app ran outside the sandbox: {output}"
+    );
+}
+
 /// A directory removed when the test ends, passed or not.
 struct Removed(PathBuf);
 
