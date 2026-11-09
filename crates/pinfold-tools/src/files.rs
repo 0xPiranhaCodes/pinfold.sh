@@ -10,8 +10,12 @@
 //! directory's and the index's modification times are compared, and only a change lists the
 //! directory and runs git again, one call at a time. A directory where git ran over its cap
 //! gets no more calls until it is left.
+//!
+//! Rename and trash (in [`ops`]) each wait on a confirmation drawn in the pane that
+//! lists every name escaped. No API caller can answer it, as `pane.send` to a tool pane is
+//! refused (ADR-0045 section 4).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
@@ -23,6 +27,7 @@ use std::{io, thread};
 use crate::git;
 use crate::keys::Key;
 use crate::md::{self, Reader, colour};
+use crate::ops;
 use crate::screen::{Color, Screen, Style, escape};
 use crate::{Flow, Tool};
 
@@ -39,7 +44,7 @@ const POLL: Duration = Duration::from_secs(1);
 /// Matches the fuzzy jump shows.
 const MAX_JUMPS: usize = 100;
 
-const KEYS: [&str; 9] = [
+const KEYS: [&str; 12] = [
     "j k  ↓ ↑        down or up",
     "h l  ← →        the parent, or into a directory",
     "Enter           into a directory, or a file in the reader",
@@ -47,6 +52,9 @@ const KEYS: [&str; 9] = [
     "g G  Home End   the first or the last",
     "f               jump to a path under the start by fuzzy match",
     "m x  ' x        bookmark this directory as x, or go to x",
+    "Space           mark or unmark; the actions below take the marked, or else the selected",
+    "r               rename",
+    "d               move to the trash",
     "?               these keys",
     "q               quit",
 ];
@@ -254,6 +262,33 @@ struct Jump {
     ranked: Vec<usize>,
 }
 
+/// What a confirmation will do once `y` answers it.
+enum Action {
+    Rename(PathBuf, OsString),
+    Trash(Vec<PathBuf>),
+}
+
+impl Action {
+    /// The question, then the name of each entry it touches, all from one directory; every
+    /// name is shown escaped.
+    fn lines(&self) -> (String, &[PathBuf]) {
+        match self {
+            Self::Rename(from, name) => (
+                format!("Rename to {}?", escape(name.as_bytes())),
+                std::slice::from_ref(from),
+            ),
+            Self::Trash(paths) => (format!("Trash {}?", count(paths)), paths),
+        }
+    }
+}
+
+fn count(paths: &[PathBuf]) -> String {
+    match paths.len() {
+        1 => "1 entry".to_owned(),
+        n => format!("{n} entries"),
+    }
+}
+
 /// `name` escaped and cut to `width` characters.
 fn clip(name: &[u8], width: usize) -> String {
     escape(name).chars().take(width).collect()
@@ -288,6 +323,12 @@ pub(crate) struct Files {
     /// Bookmarks for this run, and `m` or `'` waiting for a bookmark's name.
     marks: HashMap<char, PathBuf>,
     mark: Option<char>,
+    /// Names marked with Space in `dir`, the new name being typed, an open confirmation and
+    /// its scroll, and where trash goes.
+    marked: BTreeSet<OsString>,
+    naming: Option<String>,
+    confirm: Option<(Action, usize)>,
+    trash: Option<(PathBuf, bool)>,
 }
 
 impl Files {
@@ -315,6 +356,10 @@ impl Files {
             jump: None,
             marks: HashMap::new(),
             mark: None,
+            marked: BTreeSet::new(),
+            naming: None,
+            confirm: None,
+            trash: ops::trash_dir(),
         };
         files.go(dir, None);
         files
@@ -328,6 +373,7 @@ impl Files {
             .and_then(|up| list(up).ok())
             .unwrap_or_default();
         self.dir = dir;
+        self.marked.clear();
         self.filter.clear();
         self.refilter();
         self.reselect(select);
@@ -516,6 +562,60 @@ impl Files {
         }
     }
 
+    /// The marked entries' paths, or else the selected one's.
+    fn chosen(&self) -> Vec<PathBuf> {
+        if self.marked.is_empty() {
+            self.entry()
+                .map(|entry| vec![self.dir.join(&entry.name)])
+                .unwrap_or_default()
+        } else {
+            self.marked.iter().map(|name| self.dir.join(name)).collect()
+        }
+    }
+
+    /// Carries out a confirmed action, stopping at the first failure, then lists the directory
+    /// again.
+    fn act(&mut self, action: Action) {
+        let done = match &action {
+            Action::Rename(from, name) => ops::rename_to(from, name),
+            Action::Trash(paths) => match &self.trash {
+                Some((bin, xdg)) => paths
+                    .iter()
+                    .try_for_each(|path| ops::trash(path, (bin, *xdg))),
+                None => Err("no trash: HOME is not set".to_owned()),
+            },
+        };
+        self.problem = done.err();
+        let name = match action {
+            Action::Rename(_, name) => Some(name),
+            _ => self.entry().map(|entry| entry.name.clone()),
+        };
+        self.go(self.dir.clone(), name.as_deref());
+    }
+
+    /// Takes a key while a new name is typed; Enter asks to confirm it.
+    fn name_key(&mut self, key: Key) {
+        let Some(name) = &mut self.naming else { return };
+        match key {
+            Key::Char(character) => name.push(character),
+            Key::Backspace => {
+                name.pop();
+            }
+            Key::Enter => {
+                let name = OsString::from(std::mem::take(name));
+                self.naming = None;
+                let from = self.entry().map(|entry| self.dir.join(&entry.name));
+                match (ops::check_name(&name), from) {
+                    (Err(problem), _) => self.problem = Some(problem),
+                    (Ok(()), Some(from)) => self.confirm = Some((Action::Rename(from, name), 0)),
+                    (Ok(()), None) => {}
+                }
+            }
+            Key::Esc => self.naming = None,
+            _ => {}
+        }
+    }
+
     fn title(&self) -> Vec<u8> {
         let mut title = b"files ".to_vec();
         match self.dir.strip_prefix(&self.start) {
@@ -542,6 +642,7 @@ fn column<'a>(
     entries: impl Iterator<Item = &'a Entry>,
     selected: Option<(usize, Color)>,
     badges: &HashMap<OsString, Badge>,
+    marked: &BTreeSet<OsString>,
 ) {
     let top = selected.map_or(0, |(at, _)| (at + 1).saturating_sub(usize::from(height)));
     for (row, (at, entry)) in (1..=height).zip(entries.enumerate().skip(top)) {
@@ -553,6 +654,8 @@ fn column<'a>(
         let badge = badges.get(&entry.name).copied();
         let fg = if flag {
             Color::Red
+        } else if marked.contains(&entry.name) {
+            Color::Magenta
         } else if badge == Some(Badge::Ignored) {
             Color::BrightBlack
         } else if entry.dir {
@@ -620,6 +723,23 @@ impl Tool for Files {
         }
         let height = rows.saturating_sub(2);
         let status = rows.saturating_sub(1);
+        if let Some((action, scroll)) = &self.confirm {
+            let (question, paths) = action.lines();
+            screen.put(1, 0, question, bold);
+            let room = usize::from(height.saturating_sub(2));
+            for (row, path) in (2..=height).zip(paths.iter().skip(*scroll).take(room)) {
+                let name = path.file_name().unwrap_or(path.as_os_str()).as_bytes();
+                let style = if flagged(name) { red } else { Style::default() };
+                screen.put(row, 2, clip(name, usize::from(columns) - 2), style);
+            }
+            let more = paths.len().saturating_sub(scroll + room);
+            let mut answer = "y yes  any other key no".to_owned();
+            if *scroll > 0 || more > 0 {
+                answer.push_str(&format!("  j k scroll ({more} more below)"));
+            }
+            screen.put(status, 0, answer, colour(Color::Yellow));
+            return;
+        }
         if let Some(jump) = &self.jump {
             for (row, &at) in (1..=height).zip(&jump.ranked) {
                 let style = if row == 1 {
@@ -664,13 +784,14 @@ impl Tool for Files {
             self.parent.entries.iter(),
             up.map(|at| (at, Color::BrightBlack)),
             &HashMap::new(),
+            &BTreeSet::new(),
         );
         match &self.listing {
             Ok(listing) => {
                 let shown = self.shown.iter().map(|&at| &listing.entries[at]);
                 let current = (left + 1, usize::from(middle), height);
                 let selected = Some((self.selected, Color::Blue));
-                column(screen, current, shown, selected, &self.badges);
+                column(screen, current, shown, selected, &self.badges, &self.marked);
             }
             Err(problem) => {
                 screen.put(
@@ -704,7 +825,9 @@ impl Tool for Files {
         for (row, (line, style)) in (1..=height).zip(lines) {
             screen.put(row, right, line, style);
         }
-        if self.typing || !self.filter.is_empty() {
+        if let Some(name) = &self.naming {
+            screen.put(status, 0, format!("rename to: {name}"), Style::default());
+        } else if self.typing || !self.filter.is_empty() {
             screen.put(status, 0, format!("/{}", self.filter), Style::default());
         } else if let Some(problem) = &self.problem {
             let at = screen.put(status, 0, "✕ error", red);
@@ -735,6 +858,19 @@ impl Tool for Files {
             return Flow::Continue;
         }
         self.problem = None;
+        if let Some((action, scroll)) = self.confirm.take() {
+            match key {
+                Key::Char('y') => self.act(action),
+                Key::Char('j') | Key::Down => self.confirm = Some((action, scroll + 1)),
+                Key::Char('k') | Key::Up => self.confirm = Some((action, scroll.saturating_sub(1))),
+                _ => {}
+            }
+            return Flow::Continue;
+        }
+        if self.naming.is_some() {
+            self.name_key(key);
+            return Flow::Continue;
+        }
         if self.jump.is_some() {
             self.jump_key(key);
             return Flow::Continue;
@@ -783,6 +919,18 @@ impl Tool for Files {
                     paths,
                     shown,
                 });
+            }
+            Key::Char(' ') => {
+                if let Some(name) = self.entry().map(|entry| entry.name.clone()) {
+                    if !self.marked.remove(&name) {
+                        self.marked.insert(name);
+                    }
+                    self.select(self.selected + 1);
+                }
+            }
+            Key::Char('r') if self.entry().is_some() => self.naming = Some(String::new()),
+            Key::Char('d') if self.entry().is_some() => {
+                self.confirm = Some((Action::Trash(self.chosen()), 0));
             }
             Key::Esc if !self.filter.is_empty() => {
                 self.filter.clear();
@@ -1256,6 +1404,64 @@ mod tests {
         assert_eq!(
             (files.dir.as_path(), files.problem.as_deref()),
             (work.as_path(), Some("no bookmark x"))
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Presses each key in turn.
+    fn press(files: &mut Files, keys: &str) {
+        for character in keys.chars() {
+            let key = match character {
+                '\n' => Key::Enter,
+                character => Key::Char(character),
+            };
+            files.key(key);
+        }
+    }
+
+    #[test]
+    fn a_trash_confirmation_lists_a_hostile_name_escaped_and_waits_for_y() {
+        let (root, work) = work("trash");
+        std::fs::remove_dir_all(work.join("docs")).unwrap();
+        let hostile = "evil\x1b[2J\u{202e}txt.exe";
+        std::fs::write(work.join(hostile), "").unwrap();
+        let mut files = Files::new(b"work".to_vec(), work.clone());
+        files.trash = Some((root.join("Trash"), true));
+        press(&mut files, " d");
+        let mut screen = Screen::new(24, 80);
+        files.draw(&mut screen);
+        insta::assert_snapshot!(screen.runs());
+        press(&mut files, "n");
+        assert!(work.join(hostile).exists(), "trashed without a yes");
+        press(&mut files, " dy");
+        assert!(!work.join(hostile).exists());
+        assert!(root.join("Trash/files").join(hostile).exists());
+        assert!(
+            root.join("Trash/files/notes.txt").exists(),
+            "the selection moved on"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rename_asks_first_and_refuses_a_name_that_leaves_the_directory() {
+        let (root, work) = work("rename");
+        let mut files = Files::new(b"work".to_vec(), work.clone());
+        press(&mut files, "jr../out\n");
+        assert_eq!(files.problem.as_deref(), Some("../out is not a name"));
+        press(&mut files, "rplan.txt\n");
+        assert!(files.confirm.is_some() && work.join("notes.txt").exists());
+        press(&mut files, "y");
+        assert!(work.join("plan.txt").exists() && !work.join("notes.txt").exists());
+        assert_eq!(
+            files.entry().map(|entry| entry.name.as_os_str()),
+            Some(OsStr::new("plan.txt"))
+        );
+        press(&mut files, "rtool.bin\ny");
+        let refused = files.problem.clone().unwrap_or_default();
+        assert!(
+            refused.ends_with("tool.bin exists; nothing was replaced"),
+            "{refused}"
         );
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -1,0 +1,58 @@
+---
+source: crates/pinfold-tools/src/files.rs
+expression: screen.runs()
+---
+|files work                                                           2/3  ? keys|
+|Trash 1 entry?                                                                  |
+|  evil^[[2J<U+202E>txt.exe                                                      |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|y yes  any other key no                                                         |
+0:0..10 Default Default bold
+0:10..69 Default Default
+0:69..80 BrightBlack Default
+1:0..14 Default Default bold
+1:14..80 Default Default
+2:0..2 Default Default
+2:2..26 Red Default
+2:26..80 Default Default
+3:0..80 Default Default
+4:0..80 Default Default
+5:0..80 Default Default
+6:0..80 Default Default
+7:0..80 Default Default
+8:0..80 Default Default
+9:0..80 Default Default
+10:0..80 Default Default
+11:0..80 Default Default
+12:0..80 Default Default
+13:0..80 Default Default
+14:0..80 Default Default
+15:0..80 Default Default
+16:0..80 Default Default
+17:0..80 Default Default
+18:0..80 Default Default
+19:0..80 Default Default
+20:0..80 Default Default
+21:0..80 Default Default
+22:0..80 Default Default
+23:0..23 Yellow Default
+23:23..80 Default Default
