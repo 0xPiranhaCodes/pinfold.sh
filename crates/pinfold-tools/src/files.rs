@@ -4,12 +4,23 @@
 //! Names and contents are untrusted, so all of them reach the screen through
 //! [`Screen::put`], which escapes them, and a name that needed escaping is flagged red. Enter opens a file in the reader, executables
 //! included; nothing is ever run.
+//!
+//! Inside a repository each entry carries its `git status` badge. Git runs on its own thread,
+//! killed after 2 s, so a slow or huge repository never holds a key or a draw; once a second the
+//! directory's and the index's modification times are compared, and only a change lists the
+//! directory and runs git again, one call at a time. A directory where git ran over its cap
+//! gets no more calls until it is left.
 
+use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::time::{Duration, Instant};
+use std::{io, thread};
 
+use crate::git;
 use crate::keys::Key;
 use crate::md::{self, Reader, colour};
 use crate::screen::{Color, Screen, Style, escape};
@@ -21,6 +32,10 @@ const MAX_ENTRIES: usize = 10_000;
 const MAX_PREVIEW: usize = 64 * 1024;
 /// Bytes of a binary file the hex preview shows.
 const MAX_HEX: usize = 4 * 1024;
+/// Time `git status` may run before it is killed and the directory goes without badges.
+pub(crate) const STATUS_TIMEOUT: Duration = Duration::from_secs(2);
+/// How often the directory's modification time is checked.
+const POLL: Duration = Duration::from_secs(1);
 
 const KEYS: [&str; 7] = [
     "j k  ↓ ↑        down or up",
@@ -110,6 +125,66 @@ fn flagged(name: &[u8]) -> bool {
     std::str::from_utf8(name).map_or(true, |name| escape(name.as_bytes()) != name)
 }
 
+/// What `git status` says of an entry. A directory shows the strongest badge of what it holds,
+/// but is dimmed only if it is ignored itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Badge {
+    Ignored,
+    Untracked,
+    Added,
+    Modified,
+}
+
+/// The repository root above `dir`, found by its `.git` as git finds it, so a directory
+/// outside one costs no git call, and `dir`'s path from there ending in `/`, or empty.
+fn repository(dir: &Path) -> Option<(PathBuf, Vec<u8>)> {
+    let root = dir.ancestors().find(|up| up.join(".git").exists())?;
+    let mut prefix = dir.strip_prefix(root).ok()?.as_os_str().as_bytes().to_vec();
+    if !prefix.is_empty() {
+        prefix.push(b'/');
+    }
+    Some((root.to_path_buf(), prefix))
+}
+
+/// Badges by entry name from `git status --porcelain=v1 -z`, whose entries are `XY path\0`, a
+/// rename's or copy's old path in the next field, each relative to the root, so a name holding
+/// a newline or a quote parses as it is.
+fn badges(output: &[u8], prefix: &[u8]) -> HashMap<OsString, Badge> {
+    let mut badges = HashMap::new();
+    let mut fields = output.split(|&byte| byte == 0);
+    while let Some(field) = fields.next() {
+        let (Some(code), Some(path)) = (field.get(..2), field.get(3..)) else {
+            continue;
+        };
+        if code.contains(&b'R') || code.contains(&b'C') {
+            fields.next();
+        }
+        let badge = match code {
+            b"!!" => Badge::Ignored,
+            b"??" => Badge::Untracked,
+            _ if code.contains(&b'A') => Badge::Added,
+            _ => Badge::Modified,
+        };
+        let Some(rest) = path.strip_prefix(prefix) else {
+            continue;
+        };
+        let (name, inside) = match rest.iter().position(|&byte| byte == b'/') {
+            Some(at) => (&rest[..at], at + 1 < rest.len()),
+            None => (rest, false),
+        };
+        if name.is_empty() || (inside && badge == Badge::Ignored) {
+            continue;
+        }
+        let kept = badges
+            .entry(OsStr::from_bytes(name).to_owned())
+            .or_insert(badge);
+        *kept = (*kept).max(badge);
+    }
+    badges
+}
+/// A finished `git status`, with the directory's prefix in its repository.
+type Status = (Vec<u8>, io::Result<git::Output>);
+
 /// `name` escaped and cut to `width` characters.
 fn clip(name: &[u8], width: usize) -> String {
     escape(name).chars().take(width).collect()
@@ -133,6 +208,13 @@ pub(crate) struct Files {
     pager: Option<Reader>,
     problem: Option<String>,
     help: bool,
+    /// Badges by name in `dir`, the `git status` running for a directory, and why there are none.
+    badges: HashMap<OsString, Badge>,
+    git: Option<(PathBuf, Receiver<Status>)>,
+    git_note: Option<String>,
+    /// The directory's and the index's stamps as last listed, and when they were last checked.
+    stamp: Option<(Option<md::Stamp>, Option<md::Stamp>)>,
+    checked: Option<Instant>,
 }
 
 impl Files {
@@ -152,6 +234,11 @@ impl Files {
             pager: None,
             problem: None,
             help: false,
+            badges: HashMap::new(),
+            git: None,
+            git_note: None,
+            stamp: None,
+            checked: None,
         };
         files.go(dir, None);
         files
@@ -167,12 +254,89 @@ impl Files {
         self.dir = dir;
         self.filter.clear();
         self.refilter();
+        self.reselect(select);
+        self.badges.clear();
+        self.git_note = None;
+        (self.stamp, self.checked) = (None, None);
+    }
+
+    fn reselect(&mut self, name: Option<&OsStr>) {
         let entries = self.entries();
         let selected = self
             .shown
             .iter()
-            .position(|&at| Some(entries[at].name.as_os_str()) == select);
+            .position(|&at| Some(entries[at].name.as_os_str()) == name);
         self.selected = selected.unwrap_or(0);
+    }
+
+    /// Runs `git status` for `dir` on its own thread, if it is in a repository.
+    fn status(&mut self) {
+        let Some((_, prefix)) = repository(&self.dir) else {
+            return;
+        };
+        let (send, receive) = mpsc::channel();
+        let dir = self.dir.clone();
+        thread::spawn(move || {
+            let args = [
+                "status",
+                "--porcelain=v1",
+                "-z",
+                "--ignored",
+                "--untracked-files=normal",
+                "--",
+                ".",
+            ];
+            let _ = send.send((prefix, git::run_within(&dir, args, STATUS_TIMEOUT)));
+        });
+        self.git = Some((self.dir.clone(), receive));
+    }
+
+    /// Takes in what `git status` printed for the directory at `prefix` in its repository.
+    fn show(&mut self, prefix: &[u8], output: io::Result<git::Output>) {
+        match output {
+            Ok(output) if output.cut_short => {
+                let over = STATUS_TIMEOUT.as_secs();
+                self.git_note = Some(format!("git status ran over {over} s, so no badges here."));
+                self.badges.clear();
+            }
+            Ok(output) if output.status.is_some_and(|status| status.success()) => {
+                self.badges = badges(&output.stdout, prefix);
+            }
+            // Not a work tree, or a repository git refuses: no badges, as outside one.
+            _ => self.badges.clear(),
+        }
+    }
+
+    /// Takes in a finished `git status`, then once a second lists the directory again and
+    /// reruns git if it or the index changed. Nothing waits on git.
+    fn poll(&mut self) {
+        if let Some((dir, receive)) = &self.git {
+            match receive.try_recv() {
+                Err(TryRecvError::Empty) => return,
+                Ok((prefix, output)) if *dir == self.dir => self.show(&prefix, output),
+                _ => {}
+            }
+            self.git = None;
+        }
+        if self.checked.is_some_and(|at| at.elapsed() < POLL) {
+            return;
+        }
+        self.checked = Some(Instant::now());
+        let index = repository(&self.dir).and_then(|(root, _)| md::stamp(&root.join(".git/index")));
+        let now = (md::stamp(&self.dir), index);
+        if self.stamp == Some(now) {
+            return;
+        }
+        if self.stamp.is_some() {
+            let name = self.entry().map(|entry| entry.name.clone());
+            self.listing = list(&self.dir);
+            self.refilter();
+            self.reselect(name.as_deref());
+        }
+        self.stamp = Some(now);
+        if self.git_note.is_none() {
+            self.status();
+        }
     }
 
     fn entries(&self) -> &[Entry] {
@@ -248,12 +412,14 @@ impl Files {
     }
 }
 
-/// Draws `entries` in a column `width` wide from `x`, scrolled to show `selected`.
+/// Draws `entries` in a column `width` wide from `x`, scrolled to show `selected`, with each
+/// entry's badge from `badges` in its last two cells.
 fn column<'a>(
     screen: &mut Screen,
     (x, width, height): (u16, usize, u16),
     entries: impl Iterator<Item = &'a Entry>,
     selected: Option<(usize, Color)>,
+    badges: &HashMap<OsString, Badge>,
 ) {
     let top = selected.map_or(0, |(at, _)| (at + 1).saturating_sub(usize::from(height)));
     for (row, (at, entry)) in (1..=height).zip(entries.enumerate().skip(top)) {
@@ -262,8 +428,11 @@ fn column<'a>(
             name.push(b'/');
         }
         let flag = flagged(entry.name.as_bytes());
+        let badge = badges.get(&entry.name).copied();
         let fg = if flag {
             Color::Red
+        } else if badge == Some(Badge::Ignored) {
+            Color::BrightBlack
         } else if entry.dir {
             Color::Blue
         } else {
@@ -277,20 +446,32 @@ fn column<'a>(
             style.fg = Color::Black;
             style.bg = if flag { Color::Red } else { bg };
         }
-        let name = clip(&name, width.saturating_sub(1));
-        screen.put(
-            row,
-            x,
-            format!("{name:<0$}", width.saturating_sub(1)),
-            style,
-        );
+        let mark = match badge {
+            Some(Badge::Modified) => Some(("M", Color::Yellow)),
+            Some(Badge::Added) => Some(("A", Color::Green)),
+            Some(Badge::Untracked) => Some(("?", Color::Cyan)),
+            Some(Badge::Ignored) | None => None,
+        };
+        let room = width.saturating_sub(if mark.is_some() { 3 } else { 1 });
+        let name = clip(&name, room);
+        let at = screen.put(row, x, format!("{name:<room$}"), style);
+        if let Some((mark, fg)) = mark {
+            let fg = if style.fg == Color::Black {
+                style.fg
+            } else {
+                fg
+            };
+            let at = screen.put(row, at, " ", style);
+            screen.put(row, at, mark, Style { fg, ..style });
+        }
     }
 }
 
 impl Tool for Files {
     fn tick(&mut self) {
-        if let Some(pager) = &mut self.pager {
-            pager.tick();
+        match &mut self.pager {
+            Some(pager) => pager.tick(),
+            None => self.poll(),
         }
     }
 
@@ -316,6 +497,7 @@ impl Tool for Files {
             return;
         }
         let height = rows.saturating_sub(2);
+        let status = rows.saturating_sub(1);
         let left = columns / 5;
         let middle = columns * 3 / 10;
         let right = left + middle + 2;
@@ -332,12 +514,14 @@ impl Tool for Files {
             parent,
             self.parent.entries.iter(),
             up.map(|at| (at, Color::BrightBlack)),
+            &HashMap::new(),
         );
         match &self.listing {
             Ok(listing) => {
                 let shown = self.shown.iter().map(|&at| &listing.entries[at]);
                 let current = (left + 1, usize::from(middle), height);
-                column(screen, current, shown, Some((self.selected, Color::Blue)));
+                let selected = Some((self.selected, Color::Blue));
+                column(screen, current, shown, selected, &self.badges);
             }
             Err(problem) => {
                 screen.put(
@@ -371,12 +555,13 @@ impl Tool for Files {
         for (row, (line, style)) in (1..=height).zip(lines) {
             screen.put(row, right, line, style);
         }
-        let status = rows.saturating_sub(1);
         if self.typing || !self.filter.is_empty() {
             screen.put(status, 0, format!("/{}", self.filter), Style::default());
         } else if let Some(problem) = &self.problem {
             let at = screen.put(status, 0, "✕ error", red);
             screen.put(status, at + 1, problem, Style::default());
+        } else if let Some(note) = &self.git_note {
+            screen.put(status, 0, note, colour(Color::Yellow));
         } else if let Ok(Listing {
             more: more @ 1.., ..
         }) = &self.listing
@@ -683,6 +868,146 @@ mod tests {
         assert_eq!(
             files.entry().map(|entry| entry.name.as_os_str()),
             Some(OsStr::new("work"))
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Git in `dir`, through the one entry point, failing the test if it fails.
+    fn git_in(dir: &Path, args: &[&str]) {
+        let output = git::run(dir, args).unwrap();
+        let errors = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.is_some_and(|status| status.success()),
+            "{args:?}: {errors}"
+        );
+    }
+
+    /// `work` as a repository with one of each badge: `notes.txt` modified, `added.txt` added,
+    /// `new.txt` untracked, `docs/` holding a modified file and `tool.bin` ignored.
+    fn repo(test: &str) -> (PathBuf, PathBuf) {
+        let (root, work) = work(test);
+        let me = ["-c", "user.name=t", "-c", "user.email=t@example.com", "-c"];
+        git_in(&work, &["init", "-q"]);
+        std::fs::write(work.join(".gitignore"), "tool.bin\n").unwrap();
+        git_in(&work, &["add", ".gitignore", "notes.txt", "docs/a.md"]);
+        git_in(
+            &work,
+            &[&me[..], &["commit.gpgsign=false", "commit", "-qm", "x"]].concat(),
+        );
+        std::fs::write(work.join("notes.txt"), "changed\n").unwrap();
+        std::fs::write(work.join("docs/a.md"), "# B\n").unwrap();
+        std::fs::write(work.join("added.txt"), "").unwrap();
+        git_in(&work, &["add", "added.txt"]);
+        std::fs::write(work.join("new.txt"), "").unwrap();
+        (root, work)
+    }
+
+    /// Ticks until the directory has been checked and `git status` has answered.
+    fn settle(files: &mut Files) {
+        for _ in 0..1_000 {
+            files.tick();
+            if files.git.is_none() && files.checked.is_some() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        panic!("git status never answered");
+    }
+
+    #[test]
+    fn each_badge_from_a_scratch_repository() {
+        let (root, work) = repo("badges");
+        let mut files = Files::new(b"work".to_vec(), work);
+        settle(&mut files);
+        let mut badges: Vec<_> = files.badges.iter().collect();
+        badges.sort();
+        let expected = [
+            ("added.txt", Badge::Added),
+            ("docs", Badge::Modified),
+            ("new.txt", Badge::Untracked),
+            ("notes.txt", Badge::Modified),
+            ("tool.bin", Badge::Ignored),
+        ];
+        let expected: Vec<_> = expected
+            .map(|(name, badge)| (OsString::from(name), badge))
+            .into();
+        assert_eq!(
+            badges,
+            expected
+                .iter()
+                .map(|(name, badge)| (name, badge))
+                .collect::<Vec<_>>()
+        );
+        let mut screen = Screen::new(24, 80);
+        files.draw(&mut screen);
+        insta::assert_snapshot!(screen.runs());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hostile_status_output_parses_as_it_is() {
+        let output = b"R  sub/new\nname\0sub/old\0?? sub/a b\"c\0!! sub/dir/\0!! sub/in/x.log\0 M top\0AM sub/in/y\0";
+        let mut found: Vec<_> = badges(output, b"sub/").into_iter().collect();
+        found.sort();
+        let expected = [
+            ("a b\"c", Badge::Untracked),
+            ("dir", Badge::Ignored),
+            ("in", Badge::Added),
+            ("new\nname", Badge::Modified),
+        ];
+        assert_eq!(
+            found,
+            expected.map(|(name, badge)| (OsString::from(name), badge))
+        );
+    }
+
+    #[test]
+    fn git_status_over_its_cap_leaves_a_note_and_no_more_calls() {
+        let (root, work) = repo("slow");
+        let mut files = Files::new(b"work".to_vec(), work);
+        settle(&mut files);
+        let killed = git::Output {
+            status: None,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            cut_short: true,
+        };
+        files.show(b"", Ok(killed));
+        assert!(files.badges.is_empty());
+        (files.stamp, files.checked) = (None, None);
+        files.tick();
+        assert!(files.git.is_none(), "git ran again");
+        let mut screen = Screen::new(24, 80);
+        files.draw(&mut screen);
+        assert_eq!(
+            screen.row(23).trim_end(),
+            "git status ran over 2 s, so no badges here."
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_file_added_shows_after_the_next_check_with_its_badge() {
+        let (root, work) = repo("refresh");
+        let mut files = Files::new(b"work".to_vec(), work.clone());
+        settle(&mut files);
+        std::fs::write(work.join("later.txt"), "").unwrap();
+        files.tick();
+        assert!(
+            !files.badges.contains_key(OsStr::new("later.txt")),
+            "checked within a second"
+        );
+        files.checked = None;
+        settle(&mut files);
+        let names: Vec<_> = files
+            .entries()
+            .iter()
+            .map(|entry| entry.name.clone())
+            .collect();
+        assert!(names.contains(&OsString::from("later.txt")), "{names:?}");
+        assert_eq!(
+            files.badges.get(OsStr::new("later.txt")),
+            Some(&Badge::Untracked)
         );
         std::fs::remove_dir_all(root).unwrap();
     }

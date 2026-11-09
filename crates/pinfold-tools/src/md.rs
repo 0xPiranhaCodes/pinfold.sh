@@ -124,9 +124,9 @@ fn folded(text: &str) -> String {
 }
 
 /// What follow mode compares: the file's modification time, length and inode.
-type Stamp = (SystemTime, u64, u64);
+pub(crate) type Stamp = (SystemTime, u64, u64);
 
-fn stamp(path: &Path) -> Option<Stamp> {
+pub(crate) fn stamp(path: &Path) -> Option<Stamp> {
     let metadata = std::fs::metadata(path).ok()?;
     Some((metadata.modified().ok()?, metadata.len(), metadata.ino()))
 }
