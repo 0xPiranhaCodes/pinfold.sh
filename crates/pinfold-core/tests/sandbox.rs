@@ -157,7 +157,7 @@ fn a_sandboxed_agent_cannot_read_hidden_paths_and_keeps_its_identity() {
     let work = sandbox::working_directory(&work, &hidden, LAUNCHD_PATH.as_ref()).unwrap();
     // Where PinFold keeps it, in its data directory.
     let shadow = home.join("data/agents/test/shadow");
-    let command = match sandbox::command(&program, &hidden, &work, &socket, Some(&shadow)) {
+    let command = match sandbox::command(&program, &hidden, &[], &work, &socket, Some(&shadow)) {
         Err(error) if cfg!(target_os = "linux") && error.kind() == ErrorKind::NotFound => {
             // CI must run the real bwrap (#106), so only a local machine may skip.
             assert!(std::env::var_os("CI").is_none(), "{error}");
@@ -302,7 +302,7 @@ fn a_sandboxed_agent_cannot_open_a_new_terminal() {
         false => script,
     };
     let program = ["/bin/sh".to_owned(), "-c".to_owned(), script];
-    let command = match sandbox::command(&program, &[], &work, &api, None) {
+    let command = match sandbox::command(&program, &[], &[], &work, &api, None) {
         Err(error) if cfg!(target_os = "linux") && error.kind() == ErrorKind::NotFound => {
             assert!(std::env::var_os("CI").is_none(), "{error}");
             eprintln!("skipped: no bwrap");
@@ -346,7 +346,7 @@ fn a_sandboxed_agent_cannot_read_credential_stores() {
     let work = sandbox::working_directory(&work, &stores, LAUNCHD_PATH.as_ref()).unwrap();
     let api = work.path().join("api.sock");
     let program = ["/bin/sh".to_owned(), "-c".to_owned(), script];
-    let Some(command) = sandboxed(&program, &stores, &work, &api).unwrap() else {
+    let Some(command) = sandboxed(&program, &stores, &[], &work, &api).unwrap() else {
         return;
     };
     let output = read_until(&Pty::spawn(command, 24, 80).unwrap(), "end=reached");
@@ -355,14 +355,59 @@ fn a_sandboxed_agent_cannot_read_credential_stores() {
     assert!(!output.contains("SECRET-STORE"), "{output}");
 }
 
+/// Variables whose names look like secrets do not reach the agent, but those its profile keeps
+/// and every other one do.
+#[test]
+fn a_sandboxed_agent_gets_no_secret_variables_but_those_it_keeps() {
+    // The variables are read at each launch, so the check runs in a child with its own.
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "--ignored", "secrets_child", "--nocapture"])
+        .env("PINFOLD_SECRETS_CHILD", "1")
+        .env("GITHUB_TOKEN", "SECRET-TOKEN")
+        .env("AWS_PROFILE", "SECRET-AWS")
+        .env("my_password", "SECRET-LOWER")
+        .env("OPENAI_API_KEY", "SECRET-KEY")
+        .env("ANTHROPIC_API_KEY", "KEPT-KEY")
+        .env("PINFOLD_PLAIN", "VISIBLE")
+        .status()
+        .unwrap();
+    assert!(status.success());
+}
+
+#[test]
+#[ignore = "run by a_sandboxed_agent_gets_no_secret_variables_but_those_it_keeps"]
+fn secrets_child() {
+    if std::env::var_os("PINFOLD_SECRETS_CHILD").is_none() {
+        return;
+    }
+    let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("pinfold-secrets-{}", std::process::id()));
+    fs::create_dir_all(&work).unwrap();
+    let _removed = Removed(work.clone());
+    fs::set_permissions(&work, fs::Permissions::from_mode(0o700)).unwrap();
+    let work = sandbox::working_directory(&work, &[], LAUNCHD_PATH.as_ref()).unwrap();
+    let api = work.path().join("api.sock");
+    let program = ["/bin/sh", "-c", "env; echo end=reached"].map(str::to_owned);
+    let keep = ["ANTHROPIC_API_KEY".to_owned()];
+    let Some(command) = sandboxed(&program, &[], &keep, &work, &api).unwrap() else {
+        return;
+    };
+    let output = read_until(&Pty::spawn(command, 24, 80).unwrap(), "end=reached");
+    assert!(output.contains("end=reached"), "{output}");
+    assert!(output.contains("ANTHROPIC_API_KEY=KEPT-KEY"), "{output}");
+    assert!(output.contains("PINFOLD_PLAIN=VISIBLE"), "{output}");
+    assert!(!output.contains("SECRET-"), "{output}");
+}
+
 /// The sandboxed command, or nothing on a machine without bwrap, which CI never is (#106).
 fn sandboxed(
     program: &[String],
     hidden: &[PathBuf],
+    keep: &[String],
     work: &sandbox::WorkingDirectory,
     api: &Path,
 ) -> std::io::Result<Option<Command>> {
-    match sandbox::command(program, hidden, work, api, None) {
+    match sandbox::command(program, hidden, keep, work, api, None) {
         Err(error) if cfg!(target_os = "linux") && error.kind() == ErrorKind::NotFound => {
             assert!(std::env::var_os("CI").is_none(), "{error}");
             eprintln!("skipped: no bwrap");
@@ -403,7 +448,7 @@ fn planted_child() {
     fs::set_permissions(&work, fs::Permissions::from_mode(0o700)).unwrap();
     let work = sandbox::working_directory(&work, &[], LAUNCHD_PATH.as_ref()).unwrap();
     let api = work.path().join("api.sock");
-    let result = sandbox::command(&["/bin/true".to_owned()], &[], &work, &api, None);
+    let result = sandbox::command(&["/bin/true".to_owned()], &[], &[], &work, &api, None);
     fs::remove_dir(work.path()).unwrap();
     match result {
         Ok(command) => assert_ne!(command.get_program(), planted),
