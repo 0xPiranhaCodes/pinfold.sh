@@ -20,7 +20,7 @@ It also prints the site's total size. Run it locally before you push:
 
 ```sh
 python3 .github/scripts/check-site.py site
-python3 -m unittest discover -s .github/scripts
+python3 -B -m unittest discover -s .github/scripts
 ```
 
 ## Deploy
