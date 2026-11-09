@@ -63,11 +63,15 @@ const SECRET_WORDS: [&str; 6] = [
     "APIKEY",
 ];
 
-/// The macOS rules: everything is allowed but the hidden directories, every terminal by name and
-/// TIOCSTI (`0x80017472`). A pane's own terminal is already open, and `/dev/tty` still reaches it.
+/// The macOS rules: everything is allowed but the hidden directories, every terminal by name,
+/// TIOCSTI (`0x80017472`), and starting or driving other programs outside the sandbox: an app
+/// that LaunchServices starts (`open`) is launchd's child, not the agent's, so no rule here would
+/// hold it, and Apple Events ask a running app to act. A pane's own terminal is already open,
+/// and `/dev/tty` still reaches it.
 const PROFILE: &str = "(version 1)(allow default)\
 (deny file-read* file-write* (regex #\"^/dev/ttys[0-9]+$\"))\
-(deny file-ioctl (ioctl-command 2147578994))";
+(deny file-ioctl (ioctl-command 2147578994))\
+(deny lsopen) (deny appleevent-send)";
 
 /// The macOS clipboard rule (ADR-0041): no lookup of the pasteboard server's services,
 /// `com.apple.pasteboard.1` and `com.apple.coreservices.uauseractivitypasteboardclient.xpc`,
