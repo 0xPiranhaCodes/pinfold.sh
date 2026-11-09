@@ -31,9 +31,9 @@ expression: "shown(&work, &[Key::Char('j'), Key::Enter])"
 0:69..80 BrightBlack Default
 1:0..15 Blue Default bold
 1:15..17 Default Default
-1:17..40 Black Blue
+1:17..40 Black Red
 1:40..80 Default Default
-2:0..15 Black BrightBlack bold
+2:0..15 Black Red bold
 2:15..80 Default Default
 3:0..80 Default Default
 4:0..80 Default Default

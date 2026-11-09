@@ -1,0 +1,11 @@
+---
+source: crates/pinfold-tools/src/files.rs
+expression: "kept.join(\"\\n\")"
+---
+|files work                                                       1/10000  ? keys|
+|3 more entries are not listed.                                                  |
+0:0..10 Default Default bold
+0:10..65 Default Default
+0:65..80 BrightBlack Default
+23:0..30 Yellow Default
+23:30..80 Default Default
