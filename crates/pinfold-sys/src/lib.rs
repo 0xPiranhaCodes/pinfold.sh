@@ -625,6 +625,37 @@ pub fn open_nonblocking(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
+/// Renames `from` to `to` only if nothing, not even a dangling link, is at `to`, in one step,
+/// so a name made there after any earlier check is never replaced (#374). Like `rename(2)` it
+/// acts on a link itself. `renameat2` with `RENAME_NOREPLACE` on Linux, `renamex_np` with
+/// `RENAME_EXCL` on macOS.
+///
+/// # Errors
+///
+/// Returns [`io::ErrorKind::AlreadyExists`] if `to` exists and
+/// [`io::ErrorKind::CrossesDevices`] across file systems. A Linux file system that cannot
+/// rename without replacing gets [`io::ErrorKind::Unsupported`]: there is no racy fallback.
+///
+/// # Examples
+///
+/// ```
+/// let dir = std::env::temp_dir().join(format!("pinfold-rename-{}", std::process::id()));
+/// std::fs::create_dir_all(&dir)?;
+/// std::fs::write(dir.join("a"), "a")?;
+/// std::fs::write(dir.join("b"), "b")?;
+/// let refused = pinfold_sys::rename_no_replace(&dir.join("a"), &dir.join("b")).unwrap_err();
+/// assert_eq!(refused.kind(), std::io::ErrorKind::AlreadyExists);
+/// pinfold_sys::rename_no_replace(&dir.join("a"), &dir.join("c"))?;
+/// assert_eq!(std::fs::read(dir.join("c"))?, b"a");
+/// std::fs::remove_dir_all(&dir)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn rename_no_replace(from: &Path, to: &Path) -> io::Result<()> {
+    let from = CString::new(from.as_os_str().as_bytes()).map_err(io::Error::other)?;
+    let to = CString::new(to.as_os_str().as_bytes()).map_err(io::Error::other)?;
+    platform::rename_no_replace(&from, &to)
+}
+
 /// A moment on the local clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LocalTime {
@@ -674,6 +705,7 @@ pub fn local_time(seconds: i64) -> Option<LocalTime> {
 
 #[cfg(target_os = "linux")]
 mod platform {
+    use std::ffi::CStr;
     use std::io;
     use std::mem::MaybeUninit;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -819,10 +851,37 @@ mod platform {
             .map(|kilobytes| kilobytes * 1024)
             .ok_or_else(|| io::Error::other("no Pss line in smaps_rollup"))
     }
+
+    pub fn rename_no_replace(from: &CStr, to: &CStr) -> io::Result<()> {
+        // SAFETY: both paths are NUL-terminated strings that outlive the call, which keeps
+        // neither; AT_FDCWD resolves them as `rename(2)` would.
+        let result = unsafe {
+            libc::renameat2(
+                libc::AT_FDCWD,
+                from.as_ptr(),
+                libc::AT_FDCWD,
+                to.as_ptr(),
+                libc::RENAME_NOREPLACE,
+            )
+        };
+        if result == 0 {
+            return Ok(());
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() == Some(libc::EINVAL) {
+            // Also a directory into itself, which callers refuse before this.
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "this file system cannot rename without replacing; nothing was renamed",
+            ));
+        }
+        Err(error)
+    }
 }
 
 #[cfg(target_os = "macos")]
 mod platform {
+    use std::ffi::CStr;
     use std::io;
     use std::mem::MaybeUninit;
     use std::os::fd::RawFd;
@@ -1012,11 +1071,42 @@ mod platform {
         // SAFETY: the call succeeded, and all-zero bytes are valid for this integer struct.
         Ok(unsafe { info.assume_init() }.ri_phys_footprint)
     }
+
+    pub fn rename_no_replace(from: &CStr, to: &CStr) -> io::Result<()> {
+        // SAFETY: both paths are NUL-terminated strings that outlive the call, which keeps
+        // neither.
+        match unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) } {
+            0 => Ok(()),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_rename_never_replaces_a_target_made_after_any_check() {
+        let dir = std::env::temp_dir().join(format!("pinfold-noreplace-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (from, to) = (dir.join("from"), dir.join("to"));
+        std::fs::write(&from, "from").unwrap();
+        // As if made between a caller's vacancy check and the rename.
+        std::fs::write(&to, "to").unwrap();
+        let refused = rename_no_replace(&from, &to).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read(&to).unwrap(), b"to");
+        assert_eq!(std::fs::read(&from).unwrap(), b"from");
+        // A dangling link is a name too.
+        let link = dir.join("link");
+        std::os::unix::fs::symlink("missing", &link).unwrap();
+        let refused = rename_no_replace(&from, &link).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::AlreadyExists);
+        assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     #[cfg(target_os = "macos")]

@@ -46,18 +46,22 @@ fn vacant(to: &Path) -> Result<(), String> {
     }
 }
 
-/// Renames `from` to `to`, refusing an existing `to` or another file system.
-// shortcut: `to` is checked, then renamed; a name made between the two is replaced. Upgrade to
-// renameat2(RENAME_NOREPLACE) and renamex_np(RENAME_EXCL) in pinfold-sys if that matters.
+/// Renames `from` to `to`, refusing an existing `to` or another file system. [`vacant`] only
+/// words the common case; the rename itself never replaces a name made after it.
 fn rename(from: &Path, to: &Path) -> Result<(), String> {
     vacant(to)?;
-    fs::rename(from, to).map_err(|error| match error.kind() {
+    pinfold_sys::rename_no_replace(from, to).map_err(|error| not_renamed(from, to, &error))
+}
+
+fn not_renamed(from: &Path, to: &Path, error: &io::Error) -> String {
+    match error.kind() {
+        io::ErrorKind::AlreadyExists => format!("{} exists; nothing was replaced", shown(to)),
         io::ErrorKind::CrossesDevices => format!(
             "{} is on another file system; nothing is copied instead",
             shown(from)
         ),
         _ => format!("cannot move {}: {error}", shown(from)),
-    })
+    }
 }
 
 /// Renames `from` to `name` in its own directory.
@@ -216,10 +220,10 @@ pub(crate) fn trash(path: &Path, (trash, xdg): (&Path, bool)) -> Result<(), Stri
         }
         let to = files.join(&taken);
         if !xdg {
-            if vacant(&to).is_ok() {
-                return rename(path, &to);
+            match pinfold_sys::rename_no_replace(path, &to) {
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                moved => return moved.map_err(|error| not_renamed(path, &to, &error)),
             }
-            continue;
         }
         // Creating the info file first claims the name, as the XDG spec asks.
         let mut info = taken.clone();

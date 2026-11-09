@@ -1493,6 +1493,7 @@ dependencies = [
  "pinfold-proto",
  "pinfold-render",
  "pinfold-sys",
+ "pinfold-tools",
  "png",
  "thiserror 2.0.21",
  "unicode-width",

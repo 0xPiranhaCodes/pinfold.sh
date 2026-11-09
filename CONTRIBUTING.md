@@ -201,7 +201,8 @@ we want but do not have links to its issue.
   ([#233](https://github.com/0xPiranhaCodes/pinfold.sh/issues/233)).
 - **Golden images** of renderer output are in `crates/pinfold-ui/src/golden.rs`: plain text,
   wide characters and the cursor on one, bold, italic, inverse and colours, pane borders, the
-  bar, and an approval prompt, drawn by the CPU renderer's painter at 26 pixels (13 points at
+  bar, an approval prompt, and the first screen of each built-in tool (`md`, `files`, `diff`),
+  whose output goes through a core VT engine first, drawn by the CPU renderer's painter at 26 pixels (13 points at
   2x) with the bundled font alone, so no installed font changes them; it has no CJK, so wide
   characters draw as its missing-glyph box. Each is compared with its PNG in `src/golden/`,
   and a channel may differ by 2, as only the system's `powf`, in the sRGB tables, can differ
