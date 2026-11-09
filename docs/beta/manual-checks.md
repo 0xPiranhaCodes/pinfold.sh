@@ -22,7 +22,7 @@ one was there. Record each run in the [results](#results) table.
 4. Quit with `⌘Q` and open PinFold again. Expected: no Gatekeeper prompt this time.
 5. Add the CLI, as the [README](../../README.md#install-the-beta) says, and run `pinfold ctl list`
    in a new Terminal.app window. Expected: the one pane is listed. `pinfold --version` prints
-   `pinfold 0.1.0-beta.2`, and `pinfold --help` lists every command.
+   `pinfold 0.1.0-beta.3`, and `pinfold --help` lists every command.
 
 ## 2. Menu bar
 
@@ -127,7 +127,7 @@ The steps from [#171](https://github.com/0xPiranhaCodes/pinfold.sh/pull/171). In
 
 ## 10. About panel
 
-PinFold > About PinFold. Expected: the icon, the name, `PinFold 0.1.0-beta.2` above the
+PinFold > About PinFold. Expected: the icon, the name, `PinFold 0.1.0-beta.3` above the
 copyright, the getting started text with coloured state glyphs, three working links, and the
 licenses. Check it in light and dark mode.
 

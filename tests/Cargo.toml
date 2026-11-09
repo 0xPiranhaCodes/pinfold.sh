@@ -15,9 +15,9 @@ name = "esctest-driver"
 path = "conformance/driver.rs"
 
 [dependencies]
-pinfold-core = { path = "../crates/pinfold-core", version = "0.1.0-beta.2" }
-pinfold-proto = { path = "../crates/pinfold-proto", version = "0.1.0-beta.2" }
-pinfold-sys = { path = "../crates/pinfold-sys", version = "0.1.0-beta.2" }
+pinfold-core = { path = "../crates/pinfold-core", version = "0.1.0-beta.3" }
+pinfold-proto = { path = "../crates/pinfold-proto", version = "0.1.0-beta.3" }
+pinfold-sys = { path = "../crates/pinfold-sys", version = "0.1.0-beta.3" }
 
 [lints]
 workspace = true

@@ -1344,7 +1344,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pinfold-api"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 dependencies = [
  "libc",
  "mio",
@@ -1356,7 +1356,7 @@ dependencies = [
 
 [[package]]
 name = "pinfold-benches"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 dependencies = [
  "alacritty_terminal",
  "pinfold-api",
@@ -1368,7 +1368,7 @@ dependencies = [
 
 [[package]]
 name = "pinfold-cli"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 dependencies = [
  "insta",
  "pinfold-api",
@@ -1382,7 +1382,7 @@ dependencies = [
 
 [[package]]
 name = "pinfold-config"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 dependencies = [
  "libc",
  "pinfold-sys",
@@ -1395,7 +1395,7 @@ dependencies = [
 
 [[package]]
 name = "pinfold-core"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 dependencies = [
  "alacritty_terminal",
  "insta",
@@ -1415,7 +1415,7 @@ dependencies = [
 
 [[package]]
 name = "pinfold-mux"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 dependencies = [
  "pinfold-proto",
  "proptest",
@@ -1424,7 +1424,7 @@ dependencies = [
 
 [[package]]
 name = "pinfold-proto"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 dependencies = [
  "proptest",
  "thiserror 2.0.21",
@@ -1432,7 +1432,7 @@ dependencies = [
 
 [[package]]
 name = "pinfold-render"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 dependencies = [
  "pinfold-proto",
  "pinfold-sys",
@@ -1445,7 +1445,7 @@ dependencies = [
 
 [[package]]
 name = "pinfold-sys"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 dependencies = [
  "copypasta",
  "libc",
@@ -1462,7 +1462,7 @@ dependencies = [
 
 [[package]]
 name = "pinfold-tests"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 dependencies = [
  "pinfold-core",
  "pinfold-proto",
@@ -1471,11 +1471,11 @@ dependencies = [
 
 [[package]]
 name = "pinfold-tools"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 
 [[package]]
 name = "pinfold-ui"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 dependencies = [
  "insta",
  "mio",
@@ -2694,7 +2694,7 @@ checksum = "b9cc00251562a284751c9973bace760d86c0276c471b4be569fe6b068ee97a56"
 
 [[package]]
 name = "xtask"
-version = "0.1.0-beta.2"
+version = "0.1.0-beta.3"
 dependencies = [
  "pinfold-api",
  "pinfold-sys",
