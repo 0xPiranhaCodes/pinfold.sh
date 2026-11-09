@@ -1477,6 +1477,7 @@ dependencies = [
  "insta",
  "pinfold-sys",
  "pulldown-cmark",
+ "similar",
 ]
 
 [[package]]
