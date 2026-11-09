@@ -4,10 +4,76 @@
 //! [`Reactor::send`](crate::io::Reactor::send) refuses every API caller, so none can confirm a
 //! tool's prompt.
 
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use pinfold_api::tool::{Run, Tool};
+
+/// Most names a markdown listing offers. Past it the rest are not offered, and `pinfold files`
+/// or `pinfold md` opens them.
+pub const MAX_LISTED: usize = 500;
+/// Most directory entries a listing looks at, so a huge directory cannot hold up the core. Past
+/// it the rest are not looked at.
+pub const MAX_SCANNED: usize = 10_000;
+/// Longest name a listing offers, in bytes, the most macOS and Linux file systems allow.
+pub const MAX_NAME: usize = 255;
+
+/// The directory a window last listed for a pane. `open_markdown` lists it again rather than
+/// keeping up to [`MAX_LISTED`] names in the core between the two.
+#[derive(Debug)]
+pub(crate) struct Listing {
+    pub(crate) pane: usize,
+    pub(crate) dir: PathBuf,
+}
+
+/// Returns the regular files named `*.md` directly in `dir`, sorted. Symlinks, other kinds of
+/// file, names that are not UTF-8 and names over [`MAX_NAME`] bytes are left out, and so is
+/// everything past [`MAX_LISTED`] names or [`MAX_SCANNED`] entries, in the order the directory
+/// gives them. An unreadable directory has none.
+pub(crate) fn markdown_in(dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<_> = entries
+        .take(MAX_SCANNED)
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter(|name| {
+            let bytes = name.as_bytes();
+            bytes.len() > 3
+                && bytes.len() <= MAX_NAME
+                && bytes[bytes.len() - 3..].eq_ignore_ascii_case(b".md")
+        })
+        .take(MAX_LISTED)
+        .collect();
+    names.sort_unstable();
+    names
+}
+
+/// Appends `text` with its controls escaped: a C0 control as `^X`, DEL as `^?`, and a C1 or
+/// bidi control as `<U+202E>`, as the tools escape them (ADR-0045 section 4).
+pub fn escape(text: &str, out: &mut String) {
+    for character in text.chars() {
+        match character {
+            '\0'..='\u{1f}' => {
+                out.push('^');
+                out.push(char::from(character as u8 + 0x40));
+            }
+            '\u{7f}' => out.push_str("^?"),
+            '\u{80}'..='\u{9f}'
+            | '\u{61c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}' => {
+                out.push_str(&format!("<U+{:04X}>", u32::from(character)));
+            }
+            _ => out.push(character),
+        }
+    }
+}
 
 /// Why `pane.send` to a tool pane is refused.
 pub const NO_SEND: &str = "a tool pane takes keys from the window alone, never pane.send";
@@ -69,24 +135,7 @@ pub fn title(run: &Run) -> String {
         title.push_str(" --staged");
     }
     title.push(' ');
-    for character in argument.unwrap_or("/").chars() {
-        match character {
-            '\0'..='\u{1f}' => {
-                title.push('^');
-                title.push(char::from(character as u8 + 0x40));
-            }
-            '\u{7f}' => title.push_str("^?"),
-            '\u{80}'..='\u{9f}'
-            | '\u{61c}'
-            | '\u{200e}'
-            | '\u{200f}'
-            | '\u{202a}'..='\u{202e}'
-            | '\u{2066}'..='\u{2069}' => {
-                title.push_str(&format!("<U+{:04X}>", u32::from(character)));
-            }
-            _ => title.push(character),
-        }
-    }
+    escape(argument.unwrap_or("/"), &mut title);
     title
 }
 
@@ -162,6 +211,82 @@ mod tests {
         assert_eq!(listed, [None, Some(&files)]);
         assert_eq!(reactor.tool_title(tool), Some("files /"));
         assert_eq!(reactor.tool_title(shell), None);
+    }
+
+    #[test]
+    fn the_markdown_picker_lists_capped_and_escaped_and_opens_only_what_it_listed() {
+        let directory = env::temp_dir().join(format!("pinfold-md-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let directory = directory.canonicalize().unwrap();
+        let longest = format!("{}.md", "n".repeat(MAX_NAME - 3));
+        for name in [
+            "a.md",
+            "B.MD",
+            "notes.txt",
+            "evil\u{202e}dm.md",
+            "line\nbreak.md",
+            &longest,
+        ] {
+            fs::write(directory.join(name), "# hi").unwrap();
+        }
+        fs::create_dir(directory.join("dir.md")).unwrap();
+        std::os::unix::fs::symlink(directory.join("a.md"), directory.join("link.md")).unwrap();
+        let mut reactor = Reactor::new().unwrap();
+        reactor.set_tools("/bin/sleep".into());
+        let mut sleep = Command::new("/bin/sleep");
+        sleep.arg("30").current_dir(&directory);
+        let shell = reactor.open_tab(sleep, 24, 80).unwrap();
+        let listed = reactor.list_markdown(shell);
+        let expected = [
+            "B.MD",
+            "a.md",
+            "evil<U+202E>dm.md",
+            "line^Jbreak.md",
+            &longest,
+        ];
+        assert_eq!(listed.split('\n').collect::<Vec<_>>(), expected);
+        let open = |reactor: &mut Reactor, name| {
+            reactor.command(link::Request::OpenMarkdown {
+                pane: shell as u32,
+                name,
+            })
+        };
+        // Names it did not list, or as the file system spells them rather than as it listed
+        // them, are refused, and a refusal uses the listing up.
+        for name in [
+            "notes.txt",
+            "link.md",
+            "dir.md",
+            "../a.md",
+            "/etc/passwd",
+            "evil\u{202e}dm.md",
+        ] {
+            reactor.list_markdown(shell);
+            assert_eq!(open(&mut reactor, name), Err(Refusal::Spawn), "{name}");
+        }
+        assert_eq!(open(&mut reactor, "a.md"), Err(Refusal::Spawn));
+        // A file removed since the listing is refused too.
+        reactor.list_markdown(shell);
+        fs::remove_file(directory.join("B.MD")).unwrap();
+        assert_eq!(open(&mut reactor, "B.MD"), Err(Refusal::Spawn));
+        reactor.list_markdown(shell);
+        open(&mut reactor, "evil<U+202E>dm.md").unwrap();
+        let opened: Vec<_> = reactor
+            .list()
+            .filter_map(|pane| pane.tool)
+            .cloned()
+            .collect();
+        assert_eq!(
+            opened,
+            [run(Tool::Md, &directory.join("evil\u{202e}dm.md"))]
+        );
+        // Past the cap the rest are left out.
+        for index in 0..MAX_LISTED {
+            fs::write(directory.join(format!("{index:03}.md")), "").unwrap();
+        }
+        let listed = reactor.list_markdown(shell);
+        assert_eq!(listed.split('\n').count(), MAX_LISTED);
+        fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]

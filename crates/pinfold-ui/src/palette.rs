@@ -27,7 +27,8 @@ const CLOSE_HINT: &str = "esc close";
 
 /// The window's commands, as the palette names them. Focus, resize and a tab by number are
 /// keys only, as in the menus.
-pub const COMMANDS: [(&str, Command); 19] = [
+pub const COMMANDS: [(&str, Command); 20] = [
+    ("Open Markdown", Command::OpenMarkdown),
     ("Open Files", Command::OpenFiles),
     ("Open Diff", Command::OpenDiff),
     ("New Tab", Command::NewTab),
@@ -69,6 +70,8 @@ pub struct Palette {
     shown: Vec<usize>,
     /// Index into `shown`.
     selected: usize,
+    /// What it says when it has no labels at all.
+    empty: &'static str,
 }
 
 impl Palette {
@@ -80,7 +83,22 @@ impl Palette {
             query: String::new(),
             shown,
             selected: 0,
+            empty: "no match",
         }
+    }
+
+    /// Opens on `*.md` names from a [`pinfold_proto::link::Notice::Markdown`], one a line.
+    pub fn markdown(names: &str) -> Self {
+        let names = names.lines().filter(|name| !name.is_empty());
+        Self {
+            empty: "no .md files here",
+            ..Self::open(names.map(str::to_owned).collect())
+        }
+    }
+
+    /// The label at `index`, as it opened with it.
+    pub fn label(&self, index: usize) -> Option<&str> {
+        self.labels.get(index).map(String::as_str)
     }
 
     /// Opens on the window's [`COMMANDS`].
@@ -194,7 +212,11 @@ impl Palette {
                 frame,
                 top + 2,
                 usize::from(left) + 2,
-                "no match",
+                if self.labels.is_empty() {
+                    self.empty
+                } else {
+                    "no match"
+                },
                 HINT,
                 GROUND,
                 end,
@@ -322,14 +344,23 @@ mod tests {
             .iter()
             .map(|&index| COMMANDS[index].0)
             .collect();
-        assert_eq!(shown, ["Paste", "Close Pane", "Zoom Pane", "Previous Tab"]);
+        assert_eq!(
+            shown,
+            [
+                "Paste",
+                "Close Pane",
+                "Zoom Pane",
+                "Open Markdown",
+                "Previous Tab"
+            ]
+        );
         typed(&mut palette, "x");
         assert!(palette.shown.is_empty());
         assert_eq!(named(&mut palette, NamedKey::Enter), Step::Stay);
         named(&mut palette, NamedKey::Backspace);
         // Up from the first wraps to the last.
         named(&mut palette, NamedKey::ArrowUp);
-        assert_eq!(named(&mut palette, NamedKey::Enter), Step::Chose(7));
+        assert_eq!(named(&mut palette, NamedKey::Enter), Step::Chose(8));
     }
 
     #[test]

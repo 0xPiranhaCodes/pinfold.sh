@@ -5,10 +5,10 @@ expression: cells(&frame)
 |xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
 |xxxxxx┌──────────────────────────────────────────────┐xxxxxx|
 |xxxxxx│ ❯ open                             esc close │xxxxxx|
+|xxxxxx│ Open Markdown                                │xxxxxx|
 |xxxxxx│ Open Files                                   │xxxxxx|
 |xxxxxx│ Open Diff                                    │xxxxxx|
 |xxxxxx└──────────────────────────────────────────────┘xxxxxx|
-|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
 |xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
 |xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
 |xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
@@ -37,9 +37,13 @@ expression: cells(&frame)
 4:53..54 fg 343a44 bg 151920
 4:54..60 fg e2e5ea bg 121212
 5:0..6 fg e2e5ea bg 121212
-5:6..54 fg 343a44 bg 151920
+5:6..7 fg 343a44 bg 151920
+5:7..53 fg e2e5ea bg 151920
+5:53..54 fg 343a44 bg 151920
 5:54..60 fg e2e5ea bg 121212
-6:0..60 fg e2e5ea bg 121212
+6:0..6 fg e2e5ea bg 121212
+6:6..54 fg 343a44 bg 151920
+6:54..60 fg e2e5ea bg 121212
 7:0..60 fg e2e5ea bg 121212
 8:0..60 fg e2e5ea bg 121212
 9:0..60 fg e2e5ea bg 121212
