@@ -1475,8 +1475,10 @@ name = "pinfold-tools"
 version = "0.1.0-beta.3"
 dependencies = [
  "insta",
+ "pinfold-api",
  "pinfold-sys",
  "pulldown-cmark",
+ "serde_json",
 ]
 
 [[package]]

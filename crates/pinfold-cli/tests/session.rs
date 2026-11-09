@@ -1586,6 +1586,101 @@ fn an_agent_cannot_type_into_the_tool_it_opened() {
     core.wait().unwrap();
 }
 
+/// Not a test: a window that opens `pinfold files` beside the agent pane, types `@` into it,
+/// denies the send it asks for, then types `@` again and allows it.
+#[test]
+#[ignore = "run by at_in_files_waits_on_the_windows_approval_and_a_denial_sends_nothing"]
+fn at_window_process() {
+    let Some(directory) = helper(CLIENT) else {
+        return;
+    };
+    let directory = Path::new(&directory);
+    let mut link = Link::new(socket::take_link().unwrap()).unwrap();
+    assert!(link.resize(24, 80));
+    until(&mut link, |link| link.is_greeted()).unwrap();
+    until(&mut link, |_| directory.join("ready").exists()).unwrap();
+    let tool = pinfold_proto::link::Tool::Files;
+    assert!(link.send(Request::OpenTool { pane: 0, tool }));
+    // Until the tool is in raw mode an `@` can wait in the line discipline, so type until asked.
+    let asked = |link: &mut Link| -> Approval {
+        let start = Instant::now();
+        loop {
+            assert!(start.elapsed() < PATIENCE, "never asked");
+            assert!(link.send(Request::Input {
+                pane: 1,
+                bytes: b"@"
+            }));
+            let since = Instant::now();
+            let asked = approval_until(link, directory, |_| since.elapsed().as_secs() >= 1);
+            if let Some(asked) = asked {
+                return asked;
+            }
+        }
+    };
+    let first = asked(&mut link);
+    assert_eq!(
+        (first.caller, first.target, first.action),
+        (1, 0, ApprovalAction::Send),
+        "the tool pane asks to type into the agent's"
+    );
+    let [text] = &first.texts[..] else {
+        panic!("{:?}", first.texts)
+    };
+    assert!(text.ends_with(' ') && !text.contains('\n'), "{text:?}");
+    note(directory.join("asked"), text).unwrap();
+    assert!(link.send(Request::ApprovalAnswer {
+        id: first.id,
+        answer: ApprovalAnswer::Deny,
+    }));
+    // The tool sends nothing more until the denial is back, then asks again.
+    let second = asked(&mut link);
+    assert_eq!(&second.texts, &first.texts);
+    note(directory.join("denied"), "yes").unwrap();
+    until(&mut link, |_| directory.join("checked").exists()).unwrap();
+    assert!(link.send(Request::ApprovalAnswer {
+        id: second.id,
+        answer: ApprovalAnswer::AllowOnce,
+    }));
+    until(&mut link, |_| directory.join("done").exists()).unwrap();
+}
+
+#[test]
+fn at_in_files_waits_on_the_windows_approval_and_a_denial_sends_nothing() {
+    let exe = env::current_exe().unwrap();
+    let window = format!(
+        "exec '{}' --exact --ignored at_window_process",
+        exe.display()
+    );
+    let session = Session::new("at", Some(&window)).unwrap();
+    // The agent pane reports a status, as its hooks would, and takes keys unbuffered.
+    let shell = session.directory.join("at-shell");
+    let script = format!(
+        "#!/bin/sh\ncase $1 in -i) exec /bin/sh \"$@\";; esac\n\
+         '{}' ctl status running || exit 1\nstty -icanon -echo\n\
+         touch \"$PINFOLD_TEST_CLIENT/ready\"\nexec cat > \"$PINFOLD_TEST_CLIENT/received\"\n",
+        session.directory.join("pinfold").display()
+    );
+    fs::write(&shell, script).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
+    let launched = session
+        .launcher(shell.to_str().unwrap())
+        .current_dir(&session.directory)
+        .output()
+        .unwrap();
+    assert!(launched.status.success(), "{launched:?}");
+    assert!(session.wait_for("denied"), "{}", session.read_log());
+    let asked = session.read("asked");
+    assert_eq!(session.read("received"), "", "a denied send arrived");
+    note(session.directory.join("checked"), "yes").unwrap();
+    let start = Instant::now();
+    while session.read("received") != asked {
+        assert!(start.elapsed() < PATIENCE, "{:?}", session.read("received"));
+        thread::sleep(Duration::from_millis(10));
+    }
+    note(session.directory.join("done"), "yes").unwrap();
+}
+
 #[test]
 fn ctl_wait_prints_how_a_wait_ended_and_exits_0_1_or_2() {
     let session = Session::new("cw", None).unwrap();

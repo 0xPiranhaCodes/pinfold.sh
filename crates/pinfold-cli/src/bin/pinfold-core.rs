@@ -294,7 +294,8 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                 let message = (pane.reported && own == Some(pane.id)).then_some(pane.message);
                 let mut listed = json!({"id": pane.id, "title": pane.title, "cwd": pane.cwd,
                        "command": pane.command, "status": pane.status.name(),
-                       "source": source(pane.reported), "message": message});
+                       "source": source(pane.reported), "message": message,
+                       "focused": pane.focused});
                 if let Some(run) = pane.tool {
                     listed["kind"] = json!("tool");
                     listed["tool"] = run.describe();

@@ -17,7 +17,7 @@
           "type": "array",
           "items": {
             "type": "object",
-            "required": ["id", "title", "cwd", "command", "status", "source", "message"],
+            "required": ["id", "title", "cwd", "command", "status", "source", "message", "focused"],
             "additionalProperties": false,
             "properties": {
               "id": { "type": "integer", "minimum": 0, "description": "The pane's number, never reused in a session." },
@@ -36,6 +36,7 @@
                 "type": ["string", "null"],
                 "description": "The reported message, cleaned of control and bidi characters, for the caller's own pane only; null for other panes and when source is marks. Events never carry it."
               },
+              "focused": { "type": "integer", "minimum": 0, "description": "An ordering hint, not a timestamp: larger means the pane took its tab's focus in the active tab more recently, and 0 means never. pinfold files' @ sends to the agent pane with the largest." },
               "kind": { "const": "tool", "description": "Present only on a pane tool.open opened, which no caller can send to." },
               "tool": {
                 "type": "object",

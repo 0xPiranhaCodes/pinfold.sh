@@ -47,6 +47,7 @@ expression: said
           {
             "command": "[command]",
             "cwd": null,
+            "focused": 1,
             "id": 0,
             "message": null,
             "source": "marks",
@@ -56,6 +57,7 @@ expression: said
           {
             "command": "[command]",
             "cwd": null,
+            "focused": 0,
             "id": 1,
             "message": null,
             "source": "marks",

@@ -1997,6 +1997,21 @@ mod tests {
         });
         peer.send(Request::Focus { pane: second });
         serve(&mut reactor, &mut peer, |_, p| p.focused == second);
+        // pane.list orders panes by when they last had focus.
+        let focused = |reactor: &Reactor, pane: u32| {
+            let mut listed = reactor.list();
+            listed
+                .find(|listed| listed.id == pane as usize)
+                .map(|listed| listed.focused)
+        };
+        let (was, now) = (focused(&reactor, first), focused(&reactor, second));
+        assert!(was > Some(0) && now > was, "{was:?} {now:?}");
+        peer.send(Request::Focus { pane: second });
+        peer.send(Request::Focus { pane: first });
+        serve(&mut reactor, &mut peer, |_, p| p.focused == first);
+        assert!(focused(&reactor, first) > focused(&reactor, second));
+        peer.send(Request::Focus { pane: second });
+        serve(&mut reactor, &mut peer, |_, p| p.focused == second);
 
         peer.send(Request::Zoom);
         serve(&mut reactor, &mut peer, |r, p| {
