@@ -2,7 +2,8 @@
 //!
 //! Three columns: the parent directory, the current one and a preview of the selected entry.
 //! Names and contents are untrusted, so all of them reach the screen through
-//! [`Screen::put`], which escapes them. Nothing is ever run.
+//! [`Screen::put`], which escapes them. Enter opens a file in the reader, executables
+//! included; nothing is ever run.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
@@ -10,7 +11,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
 use crate::keys::Key;
-use crate::md::{self, colour};
+use crate::md::{self, Reader, colour};
 use crate::screen::{Color, Screen, Style, escape};
 use crate::{Flow, Tool};
 
@@ -24,7 +25,7 @@ const MAX_HEX: usize = 4 * 1024;
 const KEYS: [&str; 7] = [
     "j k  ↓ ↑        down or up",
     "h l  ← →        the parent, or into a directory",
-    "Enter           into a directory",
+    "Enter           into a directory, or a file in the reader",
     "/               filter by name; Enter keeps it, Esc clears it",
     "g G  Home End   the first or the last",
     "?               these keys",
@@ -108,7 +109,7 @@ fn clip(name: &[u8], width: usize) -> String {
     escape(name).chars().take(width).collect()
 }
 
-/// The file manager: Miller columns over `dir`.
+/// The file manager: Miller columns over `dir`, and the reader once a file is opened.
 pub(crate) struct Files {
     /// The directory as it was given, which stands for `start` in the title.
     title: Vec<u8>,
@@ -123,6 +124,8 @@ pub(crate) struct Files {
     typing: bool,
     /// The selected entry's preview, made when it is first drawn.
     preview: Option<Preview>,
+    pager: Option<Reader>,
+    problem: Option<String>,
     help: bool,
 }
 
@@ -140,6 +143,8 @@ impl Files {
             filter: String::new(),
             typing: false,
             preview: None,
+            pager: None,
+            problem: None,
             help: false,
         };
         files.go(dir, None);
@@ -192,12 +197,30 @@ impl Files {
         self.preview = None;
     }
 
-    /// Into the selected directory.
+    /// Into the selected directory, or the selected file in the reader.
     fn open(&mut self) {
-        let Some(entry) = self.entry().filter(|entry| entry.dir) else {
+        let Some(entry) = self.entry() else { return };
+        let (path, dir, name) = (
+            self.dir.join(&entry.name),
+            entry.dir,
+            escape(entry.name.as_bytes()),
+        );
+        if dir {
+            self.go(path, None);
             return;
-        };
-        self.go(self.dir.join(&entry.name), None);
+        }
+        // Read, never run: an executable shows its bytes like any other file.
+        match md::read(&path) {
+            Ok((bytes, whole)) => {
+                let title = path.as_os_str().as_bytes().to_vec();
+                let reader = Reader::new(title, bytes, whole);
+                let markdown = path.extension().is_some_and(|extension| extension == "md");
+                self.pager = Some(if markdown { reader } else { reader.plain() });
+            }
+            Err(error) => {
+                self.problem = Some(format!("cannot open {name}: {error}"));
+            }
+        }
     }
 
     fn title(&self) -> Vec<u8> {
@@ -256,6 +279,10 @@ fn column<'a>(
 
 impl Tool for Files {
     fn draw(&mut self, screen: &mut Screen) {
+        if let Some(pager) = &mut self.pager {
+            pager.draw(screen);
+            return;
+        }
         let (rows, columns) = screen.size();
         let (dim, red) = (colour(Color::BrightBlack), colour(Color::Red));
         let bold = Style {
@@ -331,6 +358,9 @@ impl Tool for Files {
         let status = rows.saturating_sub(1);
         if self.typing || !self.filter.is_empty() {
             screen.put(status, 0, format!("/{}", self.filter), Style::default());
+        } else if let Some(problem) = &self.problem {
+            let at = screen.put(status, 0, "✕ error", red);
+            screen.put(status, at + 1, problem, Style::default());
         } else if let Ok(Listing {
             more: more @ 1.., ..
         }) = &self.listing
@@ -341,6 +371,13 @@ impl Tool for Files {
     }
 
     fn key(&mut self, key: Key) -> Flow {
+        if let Some(pager) = &mut self.pager {
+            if pager.key(key) == Flow::Quit {
+                self.pager = None;
+            }
+            return Flow::Continue;
+        }
+        self.problem = None;
         if self.help {
             self.help = false;
             return if key == Key::Char('q') {
@@ -410,6 +447,8 @@ fn hex(offset: usize, per: usize, bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
     use super::*;
 
     /// A fresh `root/work` in the temp directory, so the parent column holds only `work`.
@@ -477,7 +516,43 @@ mod tests {
     }
 
     #[test]
-    fn a_fifo_is_not_previewed() {
+    fn enter_on_an_executable_opens_it_in_the_reader_and_never_runs_it() {
+        let (root, work) = work("executable");
+        let marker = root.join("ran");
+        let script = work.join("run.sh");
+        std::fs::write(
+            &script,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut files = Files::new(b"work".to_vec(), work);
+        for key in [
+            Key::Char('/'),
+            Key::Char('r'),
+            Key::Char('u'),
+            Key::Enter,
+            Key::Enter,
+        ] {
+            assert_eq!(files.key(key), Flow::Continue);
+        }
+        let mut screen = Screen::new(24, 80);
+        files.draw(&mut screen);
+        assert_eq!(screen.row(1).trim_end(), "#!/bin/sh");
+        assert!(screen.row(2).starts_with("touch "), "{}", screen.row(2));
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!marker.exists(), "the script ran");
+        assert_eq!(
+            files.key(Key::Char('q')),
+            Flow::Continue,
+            "q leaves the reader"
+        );
+        assert_eq!(files.key(Key::Char('q')), Flow::Quit);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_fifo_is_neither_previewed_nor_opened() {
         let (root, work) = work("fifo");
         let fifo = work.join("pipe");
         let made = std::process::Command::new("mkfifo")
@@ -494,6 +569,14 @@ mod tests {
             screen.row(1).contains("No preview: not a regular file"),
             "{}",
             screen.row(1)
+        );
+        files.key(Key::Enter);
+        screen.clear();
+        files.draw(&mut screen);
+        assert!(
+            screen.row(23).contains("not a regular file"),
+            "{}",
+            screen.row(23)
         );
         std::fs::remove_dir_all(root).unwrap();
     }
