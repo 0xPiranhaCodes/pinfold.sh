@@ -28,6 +28,7 @@ pub mod notify;
 pub mod pty;
 pub mod seccomp;
 pub mod socket;
+pub mod tty;
 #[cfg(all(target_os = "macos", feature = "metal"))]
 pub mod window;
 
