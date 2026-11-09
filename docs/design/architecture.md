@@ -12,7 +12,7 @@ Pinfold is a standalone terminal written in Rust, designed **memory-first**. It 
 2. **Draw on the CPU by default.** A terminal changes a few rows at a time, and redrawing only those rows on the CPU is fast enough. That avoids the 15–300 MB that GPU drivers can add. An OpenGL renderer stays available as an optional build feature.
 3. **One process.** The window is part of the background process that owns the panes. Closing the window frees all drawing memory (renderer, glyph cache, fonts), and the panes keep running headless.
 4. **Everything is cells.** Tabs, status bar, pickers and built-in tools all draw into the same cell grid as the shell. One renderer, one glyph cache, no widget toolkit.
-5. **Tools exist only while open.** The md reader, file manager and diff viewer run in-process, load what they need when opened, and give all of it back to the OS when closed.
+5. **Tools exist only while open.** The md reader, file manager and diff viewer are programs in their own pane, and give all of their memory back to the OS by exiting ([ADR-0045](../adr/0045-tools-are-programs-in-their-own-pane.md)).
 6. **Agents are first-class clients.** Anything a human can do with keys, an agent can do over the socket.
 
 **Targets**
@@ -65,7 +65,7 @@ Output flows up from the child process through the PTY reader into the VT engine
 
 ## Tech stack
 
-The stack is Alacritty's proven low-level pieces, with no GUI toolkit: winit for the window, CPU drawing by default, and ratatui to lay out the built-in tools inside the cell grid.
+The stack is Alacritty's proven low-level pieces, with no GUI toolkit: winit for the window, and CPU drawing by default.
 
 | Layer              | Choice                                                                                | Why                                                                                         | Rejected                                                                                         |
 | ------------------ | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ |
@@ -76,11 +76,11 @@ The stack is Alacritty's proven low-level pieces, with no GUI toolkit: winit for
 | VT engine          | [`alacritty_terminal`](https://docs.rs/crate/alacritty_terminal/latest/source/) 0.24+ | Mature, fast, pure Rust                                                                     | `vt100` (incomplete), `libghostty-vt` (no tagged version yet, Zig toolchain)                     |
 | PTY                | [`portable-pty`](https://docs.rs/crate/portable-pty/latest) 0.9                       | Unix PTYs on Linux and macOS behind a trait, which leaves a path open to Windows later      | Hand-rolled `openpty`                                                                            |
 | Event loop         | `mio` + `crossbeam-channel`                                                           | One I/O thread polls every PTY; no async runtime and no thread per pane                     | `tokio` (adds 1–3 MB and complexity)                                                             |
-| Tool UI layout     | `ratatui` with a custom backend writing into Pinfold's grid                           | Battle-tested widgets (lists, tables, paragraphs) at near-zero cost                         | Writing widgets from scratch                                                                     |
+| Tool UI layout | Each tool's own cell writer and key decoder in `pinfold-tools`, run in a PTY pane | No adapter between two cell models, no new crates; a tool owns its whole pane | `ratatui` (60 crates, a Zlib licence exception), `crossterm` (ADR-0045) |
 | Markdown           | `pulldown-cmark`                                                                      | Streaming parser, tiny                                                                      | `comrak` (bigger AST)                                                                            |
-| Syntax colours     | `syntect` loaded lazily, with a curated syntax subset                                 | Good quality; dropped after idle                                                            | `tree-sitter` (a grammar per language costs MBs)                                                 |
-| Files              | `ignore` (gitignore-aware walk) + `notify` (watch)                                    | Same engine as ripgrep                                                                      | —                                                                                                |
-| Diff               | `git` CLI + `similar` for word-level highlights                                       | Respects the user's git config; nothing resident                                            | `git2` / `gix` (large, always loaded)                                                            |
+| Syntax colours | None in v0.2: code blocks and previews are one colour | Keeps a C regex engine and an unmaintained-crate advisory out of the tree | `syntect` (fails `cargo deny`), `tree-sitter`; highlighting gets its own ADR |
+| Files | `std::fs` listing, `git status --ignored` for ignored files, polling | No extra crates | `ignore` (13 crates), `notify` (licence exceptions) (ADR-0045) |
+| Diff | The user's `git` through one hardened entry point, our own fuzzed unified-diff parser, `similar` for word-level highlights | Nothing resident; repository config cannot run commands | `git2` (links libgit2, C), `gix` (large) |
 | IPC                | Unix domain socket, JSON-RPC 2.0 via `serde_json`                                     | Any language can talk to it                                                                 | gRPC (heavy)                                                                                     |
 | Config             | `toml` + `serde`                                                                      | One readable file                                                                           | Lua (an embedded VM costs memory)                                                                |
 | Notifications      | `notify-rust`                                                                         | Native notifications on Linux (D-Bus) and macOS (Notification Center)                       | —                                                                                                |
@@ -111,7 +111,7 @@ Each pane is a `Pane` that owns a PTY, an `alacritty_terminal::Term` and a damag
 Pinfold replaces tmux inside its own window. The daemon holds a tree of **session → tab → split layout → pane**, and the GUI is just a view of it, so detach and attach work like tmux.
 
 - **Layout:** a binary split tree per tab, with ratios stored as fractions so resizes are exact. Preset layouts: even-horizontal, even-vertical, main-left, grid. Zoom toggles one pane to full tab.
-- **Pane kinds:** `Shell` (PTY), `Tool` (md / files / diff, in-process) and `Agent` (a PTY pane tagged with an agent profile, which enables status detection).
+- **Pane kinds:** `Shell` (PTY), `Tool` (md / files / diff, a `pinfold` subcommand in a PTY pane) and `Agent` (a PTY pane tagged with an agent profile, which enables status detection).
 - **Navigation:** direct keys (Alt + arrows to move, Alt + Shift + arrows to resize) plus a tmux-style prefix mode (Ctrl + a by default) for everything else. A command palette (Ctrl + Shift + p) lists every action with fuzzy search.
 - **Detach and attach:** closing the window frees all drawing memory, and the process keeps every PTY running headless. `pinfold attach [session]` reopens it. The daemon exits when the last session ends, unless `keep_alive = true`.
 - **Copy mode:** vi keys over scrollback, with search, yank to system clipboard and "send selection to pane" (useful for pasting an error into an agent).
@@ -121,28 +121,27 @@ Pinfold does not try to drive an external tmux. Users who need tmux on remote ma
 
 ## Built-in tools
 
-The three tools are in-process `Tool` panes that implement one trait (`render(area, grid)`, `on_key`, `on_event`). They lay out their content with ratatui through a backend that writes straight into Pinfold's grid. Each can be opened by key, from the palette, by CLI (`pinfold open README.md`) or by an agent over the API.
+The tools follow [ADR-0045](../adr/0045-tools-are-programs-in-their-own-pane.md). `pinfold md <file>`, `pinfold files [dir]` and `pinfold diff [--staged] [range]` are subcommands of the `pinfold` binary, with their code in `pinfold-tools`. Each is a full-screen terminal program, like `less` or ranger: run in a shell pane it simply runs there, and opened by key, from the palette or by an agent over the API (`tool.open`), the core starts it in a new pane. Its output passes the core's escape filter and VT engine like any program's, so a tool that crashes or hangs costs only its own pane, and its memory goes back to the OS when it exits. No API caller can type into a tool pane. Every string reaches the screen escaped, git runs through one hardened entry point, and each tool caps size and time (ADR-0045, section 4).
 
 ### Markdown reader (`pinfold md`)
 
-- Parses with `pulldown-cmark` and renders headings, lists, tables, task lists, block quotes, links (OSC 8, clickable) and fenced code with syntax colours.
-- Has an outline sidebar (jump to heading), search, and follow mode, which re-renders on file change. Follow mode is handy for watching an agent's `PLAN.md` or `TODO.md` update live.
-- `syntect` loads only the grammars a file needs, on its first code block, and is freed when the pane closes.
-- Images show as `[image: alt]` placeholders in v1. Real images wait on Kitty graphics support (see Risks).
+- Parses with `pulldown-cmark` and renders headings, lists, tables, task lists, block quotes, links (OSC 8, clickable) and fenced code in one colour.
+- Has an outline (jump to heading), search, and follow mode, which re-renders when the file's modification time changes. Follow mode is handy for watching an agent's `PLAN.md` or `TODO.md` update live.
+- Images show as `[image: alt]` placeholders. Real images wait on Kitty graphics support (see Risks).
 
 ### File manager (`pinfold files`), ranger-style
 
-- Miller columns: parent | current | preview. hjkl or arrow keys to move, with the preview using the md reader, syntax highlighting, a hex view or directory stats.
-- Gitignore-aware listing via `ignore`, with git status badges (M, A, ?), and live refresh via `notify`. The watcher only runs while the pane is visible.
-- Actions: open in `$EDITOR` in a new split, copy / move / rename / trash, bulk rename in the editor, fuzzy jump, and bookmarks.
-- **For agents:** `@` inserts the selected path(s) into the last focused agent pane's prompt. `Ctrl + Enter` opens an agent pane in that directory.
+- Miller columns: parent | current | preview. hjkl or arrow keys to move, with a plain, hex or directory-stats preview.
+- Git status badges (M, A, ?) and ignored files from `git status`, and a refresh when the directory's modification time changes, checked once a second.
+- Actions: open in `$EDITOR` in the tool's pane, copy / move / rename / trash with a confirmation, fuzzy jump, and bookmarks. Enter opens executables in the pager; there is no "run" action.
+- **For agents:** `@` inserts the selected path(s) into the last focused agent pane's prompt, as an approved cross-pane send.
 
 ### Git diff viewer (`pinfold diff`)
 
 - Runs `git diff` (or `--staged`, or `<rev>..<rev>`) and parses the unified diff. It shows a file list on the left and hunks on the right, unified or side by side, with word-level highlights from `similar`.
-- **Watch mode** re-runs the diff when the working tree changes, so you can watch an agent's edits land in real time.
-- Hunk actions: stage (`git apply --cached`), revert (`git apply -R`), and copy the hunk with a comment to an agent pane as review feedback.
-- Nothing stays resident when the pane is closed. The diff is plain text held only while it is on screen.
+- **Watch mode** (`--watch`, or `w`) re-runs the diff on a poll, so you can watch an agent's edits land.
+- Hunk actions: stage (`git apply --cached`), revert (`git apply -R`), each with a confirmation, and copy the hunk with a comment to an agent pane as review feedback.
+- Nothing stays resident when the pane is closed: the process exits.
 
 ## Agent control API
 
@@ -211,7 +210,7 @@ Sessions survive at two levels. While the daemon runs, nothing is lost: detach a
 
 - The layout tree (tabs, splits, ratios, zoom, focused pane).
 - Per pane: kind, title, cwd (tracked via OSC 7), the command line, the agent profile, and a small allowlisted part of the environment.
-- Tool pane state: the file being read and scroll position, the directory in the file manager, the diff range.
+- Tool pane state: the tool and its argument (the file, directory or diff range).
 - Scrollback, off by default (opt-in per session) and redacted before saving: the last N lines (default 2,000) per pane, zstd-compressed, with a per-session cap (default 5 MB).
 
 Snapshots are written on detach, on clean exit, every 60 seconds if something changed, and on `pinfold ctl session save`. They are written atomically (write to a temp file, then rename).
@@ -221,7 +220,7 @@ Snapshots are written on detach, on clean exit, every 60 seconds if something ch
 1. Shell panes reopen a fresh shell in the saved cwd, with the old scrollback shown above a dimmed "restored" divider.
 2. Agent panes run the profile's resume command, for example `claude --continue`.
 3. Other commands are **not** re-run automatically. The pane shows "was running: `npm run dev` — press Enter to restart". Commands on `restore.auto_rerun` (such as `nvim` or `htop`) are re-run.
-4. Tool panes reopen at the same file and position.
+4. Tool panes run the same tool on the same argument again. Restoring the scroll position comes later.
 
 **Named workspaces.** A project can ship a `.pinfold/layout.toml`, such as editor plus agent plus tests plus diff watcher. `pinfold up` in that directory creates or attaches to that session. This is similar to tmuxinator, but built in.
 
@@ -331,7 +330,7 @@ Out of scope: a process already running as your user outside Pinfold with no san
 | T3  | Hostile program output abuses escape sequences           | Title-report sequence echoes attacker text back into the shell's input; OSC 52 reads the clipboard                    | Reply sequences disabled; clipboard read off; length limits                                                 |
 | T4  | Spoofed status or alerts                                 | Output prints a fake OSC 133 "done" or a flood of OSC 9 notifications                                                 | Output-reported status labelled as such; token-signed status preferred; rate limits                         |
 | T5  | Malicious repo content                                   | `.pinfold/layout.toml` runs commands on `pinfold up`; `git diff` runs a hostile `core.fsmonitor`                      | Workspace trust prompt; hardened git invocation                                                             |
-| T6  | Hostile files in the built-in tools                      | Escape bytes or Trojan Source bidi characters in a filename or markdown file; regex-heavy file stalls the highlighter | Control and bidi characters shown escaped; size and time caps                                               |
+| T6  | Hostile files in the built-in tools                      | Escape bytes or Trojan Source bidi characters in a filename or markdown file; a file that stalls the parser | Control and bidi characters shown escaped; size and time caps; each tool is its own process in its own pane |
 | T7  | Paste injection                                          | Pasted text containing `ESC[201~` ends bracketed paste early and runs the rest                                        | Strip paste terminators and control characters; multi-line paste warning                                    |
 | T8  | Another local user or a sandboxed app reaches the socket | Shared host; Flatpak app with a socket portal                                                                         | 0700 directory, 0600 socket, peer UID check, token required                                                 |
 | T9  | Secrets leak at rest or over the network                 | Snapshot with scrollback copied off the disk; webhook carries output                                                  | Scrollback snapshots off by default and redacted; in-memory key for spill files; webhooks carry status only |
@@ -404,11 +403,11 @@ The rule: bytes from programs, files and repos may change what is drawn, but the
 
 **Paste.** Bracketed-paste terminators (`ESC[201~`) and other C0/C1 control characters are stripped from pasted text. Pasting more than one line into a shell at a prompt shows a confirmation with the line count. If the paste contains `sudo`, `curl … | sh` or similar patterns, the confirmation highlights them.
 
-**Markdown reader.** Rendering never runs anything. Control characters and escape bytes in the file are shown as visible `^[`-style symbols, never passed to the grid as sequences. Links show their target before opening, and `file://` and relative links open inside Pinfold. Files over 5 MB open as plain text, and syntax highlighting has a 50 ms budget per screen, after which the rest renders uncoloured.
+**Markdown reader.** Rendering never runs anything. Control characters and escape bytes in the file are shown as visible `^[`-style symbols, never passed to the grid as sequences. Links show their target before opening, and `file://` and relative links open inside Pinfold. Files over 5 MB show their first 5 MB as plain text, and parsing stops after 2 s, after which the rest shows as plain text.
 
-**File manager.** Filenames with control characters, newlines or bidi override characters (Trojan Source) are shown escaped and flagged in red. Opening a file never executes it. Executables, scripts and `.desktop` / `.app` bundles open in the pager unless you choose "run" and confirm. Delete moves to the trash, and bulk operations show the full list before running.
+**File manager.** Filenames with control characters, newlines or bidi override characters (Trojan Source) are shown escaped and flagged in red. Opening a file never executes it. Executables, scripts and `.desktop` / `.app` bundles open in the pager; there is no "run" action. Delete moves to the trash, and bulk operations show the full list before running.
 
-**Git diff viewer.** Running git inside an untrusted repo can execute code through repo config. Pinfold always runs git as `git --no-pager -c core.fsmonitor=false -c core.hooksPath=/dev/null diff --no-ext-diff --no-textconv`, with `GIT_TERMINAL_PROMPT=0`, and respects `safe.directory`. Paths in diffs are sanitized like filenames. Stage and revert need a key press and are never exposed to agents without the `children` or a granted scope.
+**Git diff viewer.** Running git inside an untrusted repo can execute code through repo config. Every git call goes through one entry point that clears inherited `GIT_*` variables, disables fsmonitor, hooks, pagers, external diff, textconv and repository filters, respects `safe.directory`, and caps git at 10 s and 8 MB of output (ADR-0045, section 4). Paths in diffs are sanitized like filenames. Stage and revert need a key press: `pane.send` to a tool pane is refused for every API caller, so no agent can stage or revert.
 
 **Workspace trust.** A repo's `.pinfold/layout.toml` is untrusted, like a `.envrc` under direnv. The first `pinfold up` shows every command the layout would run and asks whether to trust it. Trust is stored by the file's SHA-256 hash, so any change asks again. Repos can never supply agent profiles, key bindings, hooks or alert destinations; those come only from your own config.
 

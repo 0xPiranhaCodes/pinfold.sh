@@ -1,7 +1,8 @@
 # ADR-0045: The built-in tools are programs in their own pane
 
-- **Status:** Proposed
+- **Status:** Accepted, by the maintainer's decision of 2026-11-09
 - **Date:** 2026-11-07
+- **Supersedes in part:** ADR-0003 (the window hosting the built-in tools)
 
 ## Context
 
@@ -63,9 +64,9 @@ escape-sequence filter and VT engine like any program's. A tool that crashes or 
 own pane; closing the pane hangs it up. Its memory is returned when the process exits. The
 window and the core gain no parsers.
 
-If accepted, this ADR replaces the clause of ADR-0003 that has the window host the built-in
-tools, and the in-process `Tool` trait and ratatui backend of `architecture.md`. ADR-0003 is
-otherwise unchanged, and neither document is edited until the maintainer accepts this one.
+This ADR replaces the clause of ADR-0003 that has the window host the built-in tools, and the
+in-process `Tool` trait and ratatui backend of `architecture.md`. ADR-0003 is otherwise
+unchanged.
 
 ### 2. Drawing, panes, tabs, status and keys
 
@@ -202,29 +203,33 @@ missed target is reported with its number.
 
 ### 7. Slices
 
-Each is one PR of about 400 changed lines, in this order. None is opened as an issue until this
-ADR is accepted.
+Each is one issue in the "M4: built-in tools" milestone and one PR of about 400 changed lines,
+in this order. Each tool has a basic slice and a hardening slice; the diff viewer's hardening,
+the git entry point, lands before any tool runs git.
 
-1. `pinfold-tools`: `Screen`, escaping, the row-diff writer and the key decoder; raw mode in
-   `pinfold-sys`; the `tool_keys` fuzz target.
-2. Markdown reader: layout with `pulldown-cmark`, its caps, `pinfold md`, snapshots and the
-   `markdown` fuzz target. Closes [#263].
-3. Markdown reader: outline, search, links and follow mode.
-4. Core: the `tool` pane kind, `tool.open` with its schema, MCP tool and `pinfold open`, refusing
-   `pane.send` to tool panes, restore, and the session test.
-5. The git entry point and the hostile-repository test. Closes [#262].
-6. Unified-diff parser and the `unified_diff` fuzz target. Closes [#235].
-7. Diff viewer: file list and unified hunks, `pinfold diff`, its caps and snapshots.
-8. Diff viewer: side by side, word highlights and watch mode.
-9. Diff viewer: stage and revert through `git apply`, with a confirmation, and a hunk sent to an
-   agent pane.
-10. File manager: columns, preview, plain and hex views, its caps, flagged names and snapshots.
-    Closes [#233] with the snapshots of the other tools.
-11. File manager: git badges, polling, fuzzy jump and bookmarks.
-12. File manager: rename, copy, move and trash with confirmations, `$EDITOR`, and `@`.
+1. [#311]: `pinfold-tools`: `Screen`, escaping, the row-diff writer and the key decoder; raw mode
+   in `pinfold-sys`; the `md`, `files` and `diff` subcommands; the `tool_keys` fuzz target.
+2. [#312]: Core: the `tool` pane kind, `tool.open` with its schema, MCP tool and `pinfold open`,
+   refusing `pane.send` to tool panes, restore, and the session test.
+3. [#313]: Window: opening a tool by key and from the palette.
+4. [#314]: Markdown reader, basic: layout with `pulldown-cmark`, `pinfold md`, snapshots.
+5. [#315]: Markdown reader hardening: its caps and the `markdown` fuzz target.
+6. [#316]: Markdown reader: outline, search, links and follow mode.
+7. [#317]: File manager, basic: columns, preview, plain and hex views, snapshots.
+8. [#318]: File manager hardening: flagged names and its caps. Closes [#263].
+9. [#262]: The git entry point and the hostile-repository test.
+10. [#319]: File manager: git badges, polling, fuzzy jump and bookmarks.
+11. [#320]: File manager: rename, copy, move and trash with confirmations, `$EDITOR`, and `@`.
     "New agent here" needs `agent.launch` to take a directory, an API change for its own slice.
-13. Golden images and the mem-gate rows; the tools sections of `architecture.md`, the
-    threat-model table rows for T5 and T6, and ADR-0003's pointer to this ADR.
+12. [#321]: Diff viewer, basic: the unified-diff parser and `unified_diff` fuzz target, file list
+    and unified hunks, `pinfold diff`, snapshots. Closes [#233] and [#235].
+13. [#322]: Diff viewer: side by side, word highlights and watch mode.
+14. [#323]: Diff viewer: stage and revert through `git apply`, with a confirmation, and a hunk
+    sent to an agent pane.
+15. [#324]: Golden images and the mem-gate rows.
+
+The tools sections of `architecture.md`, the threat-model rows for T5 and T6, and ADR-0003's
+pointer to this ADR changed when it was accepted.
 
 ## Consequences
 
@@ -245,3 +250,17 @@ panes need a drawing API after all.
 [#235]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/235
 [#262]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/262
 [#263]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/263
+[#311]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/311
+[#312]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/312
+[#313]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/313
+[#314]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/314
+[#315]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/315
+[#316]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/316
+[#317]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/317
+[#318]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/318
+[#319]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/319
+[#320]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/320
+[#321]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/321
+[#322]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/322
+[#323]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/323
+[#324]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/324

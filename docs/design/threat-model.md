@@ -59,7 +59,7 @@ the network (see Sandbox below).
 | T3  | Hostile program output abuses escape sequences           | Title-report sequence echoes attacker text into the shell's input; OSC 52 reads the clipboard      | Reply sequences disabled; clipboard read off; length limits                                                    |
 | T4  | Spoofed status or alerts                                 | Output prints a fake OSC 133 "done", or floods OSC 9 notifications                                 | Output-reported status labelled as such; API status from a PTY-identified caller outranks it; only agent-profile panes read "needs you" from output (ADR-0046); rate limits |
 | T5  | Malicious repo content                                   | `.pinfold/layout.toml` runs commands on `pinfold up`; `git diff` runs a hostile `core.fsmonitor`   | Workspace trust prompt; hardened git invocation                                                                |
-| T6  | Hostile files in the built-in tools                      | Escape bytes or Trojan Source bidi characters in a filename; a file that stalls the highlighter    | Control and bidi characters shown escaped; size and time caps                                                  |
+| T6  | Hostile files in the built-in tools                      | Escape bytes or Trojan Source bidi characters in a filename; a file that stalls the parser         | Control and bidi characters shown escaped; size and time caps; each tool is its own process in its own pane    |
 | T7  | Paste injection                                          | Pasted text containing `ESC[201~` ends bracketed paste early and runs the rest                     | Strip paste terminators and control characters; multi-line paste warning                                       |
 | T8  | Another local user or a sandboxed app reaches the socket | Shared host; Flatpak app with a socket portal                                                      | 0700 directory, 0600 socket, peer UID check, PTY-derived identity                                              |
 | T9  | Secrets leak at rest or over the network                 | Snapshot with scrollback copied off the disk; webhook carries output                               | Scrollback snapshots off by default and redacted; spill files, once they exist, under an in-memory key; webhooks carry status only |
@@ -115,8 +115,10 @@ with a top-level folder.
 
 ## Trust boundaries
 
-`pinfold-core` is the trusted code. The window process hosts rendering and the built-in
-tools, and it can crash or restart without touching a PTY. Four kinds of input cross
+`pinfold-core` is the trusted code. The window process hosts rendering, and it can crash or
+restart without touching a PTY. The built-in tools are programs the core starts in their
+own pane ([ADR-0045](../adr/0045-tools-are-programs-in-their-own-pane.md)), so their output
+is program output, and `pane.send` to a tool pane is refused for every API caller. Four kinds of input cross
 into the core:
 
 - **API callers** are identified from their PTY, never from something they present.

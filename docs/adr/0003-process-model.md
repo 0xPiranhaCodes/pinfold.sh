@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-10-31
+- **Superseded in part by:** ADR-0045 (the window no longer hosts the built-in tools)
 
 ## Context
 
@@ -13,7 +14,8 @@ Finding H4 added that a long-lived core needs an upgrade path.
 
 `pinfold-core` is a tiny headless daemon that owns PTYs, VT state, the mux, sessions and
 the API, with a target of ≤ 4 MB. `pinfold` is the window process, which hosts rendering
-and the built-in tools and can exit or restart freely. The core is the only long-lived
+and can exit or restart freely. The built-in tools are programs in their own pane
+([ADR-0045](0045-tools-are-programs-in-their-own-pane.md)). The core is the only long-lived
 process. A crash in the window or tools must never kill a PTY.
 
 We design for live upgrade of the core through PTY fd handover over `SCM_RIGHTS`;
