@@ -98,7 +98,9 @@ impl Command {
                 match read {
                     Ok((bytes, whole)) => {
                         let title = file.as_os_str().as_encoded_bytes().to_vec();
-                        run(&mut md::Reader::new(title, bytes, whole))?;
+                        let mut reader = md::Reader::new(title, bytes, whole);
+                        reader.path.clone_from(file);
+                        run(&mut reader)?;
                         return Ok(true);
                     }
                     Err(problem) => (format!("md {}", file.display()), Some(problem)),
@@ -166,6 +168,8 @@ pub trait Tool {
     fn draw(&mut self, screen: &mut Screen);
     /// Handles a key. Every tool quits on `q` when no prompt of its own is open.
     fn key(&mut self, key: Key) -> Flow;
+    /// Called before each draw, at least every 100 ms, for a tool that polls.
+    fn tick(&mut self) {}
 }
 
 /// The screen a tool shows until its own slice lands, and the screen of one that cannot start.
@@ -244,6 +248,7 @@ pub fn run(tool: &mut dyn Tool) -> io::Result<()> {
             screen = Screen::new(size.0, size.1);
         }
         screen.clear();
+        tool.tick();
         tool.draw(&mut screen);
         out.clear();
         screen.frame(&mut out);
