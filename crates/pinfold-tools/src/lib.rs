@@ -5,6 +5,7 @@
 //! every string, and reads [`Key`]s. [`run`] owns the terminal around it. Every git call goes
 //! through [`git::run`].
 
+mod diff;
 mod files;
 pub mod git;
 pub mod keys;
@@ -142,6 +143,22 @@ impl Command {
 #[doc(hidden)]
 pub fn fuzz_markdown(markdown: &[u8], width: u16) -> Vec<String> {
     md::lines(markdown, width)
+}
+
+/// Parses `diff` as `pinfold diff` does, and returns its notes and each file's label, header and
+/// hunk lines, escaped. For the `unified_diff` fuzz target.
+#[doc(hidden)]
+pub fn fuzz_unified_diff(diff: &[u8]) -> Vec<String> {
+    let diff = diff::parse(diff.to_vec());
+    let mut shown = diff.notes.clone();
+    for file in &diff.files {
+        shown.push(screen::escape(&file.label()));
+        let hunks =
+            (file.hunks.iter()).flat_map(|hunk| std::iter::once(&hunk.header).chain(&hunk.lines));
+        let lines = file.header.iter().chain(hunks);
+        shown.extend(lines.map(|range| screen::escape(&diff.bytes[range.clone()])));
+    }
+    shown
 }
 
 /// Why `path` cannot be opened, if `kind` is not true of it.

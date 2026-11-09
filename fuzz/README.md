@@ -28,5 +28,10 @@ It fails on a panic or a hang, or if the two give different keys.
 first two bytes. It fails on a panic or a hang, or if a laid-out line holds a control or bidi
 character that `escape` would change.
 
+`unified_diff` parses any bytes as `git diff` output, as `pinfold diff` does. It fails on a
+panic or a hang, or if a file's label or a shown line holds a control or bidi character that
+`escape` would change. Its seeds in `seeds/unified_diff/` are a change, a rename, a binary
+file, a mode change, a missing final newline and a hostile quoted path.
+
 `vt.dict` holds the escape sequences a mutator rarely writes by chance. It uses libFuzzer's
 format, which only knows the escapes `\\`, `\"` and `\xNN`.

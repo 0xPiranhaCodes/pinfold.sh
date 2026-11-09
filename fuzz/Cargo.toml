@@ -77,6 +77,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "unified_diff"
+path = "fuzz_targets/unified_diff.rs"
+test = false
+doc = false
+bench = false
+
 [dependencies]
 libfuzzer-sys = "0.4"
 pinfold-api = { path = "../crates/pinfold-api" }
