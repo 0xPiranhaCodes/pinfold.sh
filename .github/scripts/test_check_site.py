@@ -1,4 +1,4 @@
-"""Tests for check-site.py. Run: python3 -m unittest discover -s .github/scripts"""
+"""Tests for check-site.py. Run: python3 -B -m unittest discover -s .github/scripts"""
 import importlib.util
 import tempfile
 import unittest

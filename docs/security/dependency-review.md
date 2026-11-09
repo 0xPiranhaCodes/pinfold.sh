@@ -89,6 +89,13 @@ it is out of scope for the PR that adds it. It must:
 - carry `notes` naming who added it and why, and the issue that will review it;
 - be called out in the PR's security-impact section.
 
+On pull requests the `vet` job runs `.github/scripts/check-vet-notes.py`, which fails when
+the PR adds an `[[exemptions.*]]` or `[[trusted.*]]` entry whose `notes` do not name who
+(`by NAME`), why, and the tracking issue (`#N`), for example `"Added by NAME because WHY.
+Review in #N."`. An entry counts as added when its crate, criteria and version (or
+publisher) are not in the PR's base, so entries already on `main` are not checked, and a
+new trusted entry needs the same notes as an exemption.
+
 `cargo vet prune` removes exemptions that audits or imports now cover; run it after
 `regenerate imports` and after certifying. Never add an exemption to make CI green for a
 crate you could review in the same PR.
