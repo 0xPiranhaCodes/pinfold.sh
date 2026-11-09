@@ -8,6 +8,7 @@
 //! Only the active tab is laid out. A hidden tab's programs keep their old size until the tab is
 //! shown, so a window resize costs no wake-ups in panes nobody can see.
 
+use std::fs;
 use std::process::Command;
 
 use pinfold_api::tool::{Run, Tool};
@@ -159,6 +160,65 @@ impl Reactor {
             staged: false,
             range: None,
         };
+        self.start_tool(pane, run)
+    }
+
+    /// Lists the `*.md` files where `pane`'s shell is, for the window's picker, and remembers
+    /// that directory for [`Reactor::open_markdown`]. Returns the names escaped, one a line.
+    pub(crate) fn list_markdown(&mut self, pane: usize) -> String {
+        self.markdown = None;
+        let Some(dir) = self.shell_cwd(pane) else {
+            return String::new();
+        };
+        let mut lines = String::new();
+        for name in tool::markdown_in(&dir) {
+            if !lines.is_empty() {
+                lines.push('\n');
+            }
+            tool::escape(&name, &mut lines);
+        }
+        self.markdown = Some(tool::Listing { pane, dir });
+        lines
+    }
+
+    /// Opens `md` right of `pane` on `name`, which the window chose from the last listing for
+    /// `pane`. The core lists that directory again and refuses a name it does not list, so the
+    /// window can only pick a regular file, by one name, in that directory.
+    fn open_markdown(&mut self, pane: usize, name: &str) -> Result<(), Refusal> {
+        let listing = (self.markdown.take()).filter(|listing| listing.pane == pane);
+        let dir = listing.ok_or(Refusal::Spawn)?.dir;
+        let real = tool::markdown_in(&dir).into_iter().find(|real| {
+            let mut escaped = String::new();
+            tool::escape(real, &mut escaped);
+            escaped == name
+        });
+        let real = real
+            .filter(|real| !real.contains('/') && real != "." && real != "..")
+            .ok_or(Refusal::Spawn)?;
+        let path = dir.join(real);
+        // Checked again as it is opened, without following a link or waiting on a FIFO.
+        let regular = fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_file())
+            && pinfold_sys::open_nonblocking(&path)
+                .and_then(|file| file.metadata())
+                .is_ok_and(|meta| meta.is_file());
+        if !regular {
+            return Err(Refusal::Spawn);
+        }
+        let path = path
+            .into_os_string()
+            .into_string()
+            .map_err(|_| Refusal::Spawn)?;
+        let run = Run {
+            tool: Tool::Md,
+            path,
+            staged: false,
+            range: None,
+        };
+        self.start_tool(pane, run)
+    }
+
+    /// Starts `run` in a new pane right of `pane`.
+    fn start_tool(&mut self, pane: usize, run: Run) -> Result<(), Refusal> {
         let binary = self.tools().ok_or(Refusal::Spawn)?;
         let command = tool::command(binary, &run).map_err(|_| Refusal::Spawn)?;
         let opened = self.split(pane, command, SplitWay::Right)?;
@@ -189,6 +249,10 @@ impl Reactor {
             }
             Request::OpenTool { pane, tool } => {
                 self.open_tool(pane as usize, tool)?;
+                false
+            }
+            Request::OpenMarkdown { pane, name } => {
+                self.open_markdown(pane as usize, name)?;
                 false
             }
             Request::ClosePane { pane } => {

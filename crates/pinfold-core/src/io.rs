@@ -213,6 +213,8 @@ pub struct Reactor {
     pub(crate) unhardened: Option<bool>,
     /// The `pinfold` binary that runs the built-in tools.
     tools: Option<PathBuf>,
+    /// The directory last listed for a window's markdown picker.
+    pub(crate) markdown: Option<crate::tool::Listing>,
 }
 
 impl Reactor {
@@ -243,6 +245,7 @@ impl Reactor {
             protect: Protect::default(),
             unhardened: None,
             tools: None,
+            markdown: None,
         })
     }
 

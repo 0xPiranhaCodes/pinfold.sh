@@ -39,7 +39,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 12;
+pub const VERSION: u16 = 13;
 
 /// The oldest version this side still speaks, one before [`VERSION`] (ADR-0043).
 pub const OLDEST: u16 = VERSION - 1;
@@ -135,6 +135,8 @@ const APPROVAL_ANSWER: u8 = 19;
 const WAS_RUNNING_ANSWER: u8 = 20;
 const LINK: u8 = 21;
 const OPEN_TOOL: u8 = 22;
+const LIST_MARKDOWN: u8 = 23;
+const OPEN_MARKDOWN: u8 = 24;
 
 const FRAME: u8 = 1;
 const CWD: u8 = 2;
@@ -149,6 +151,7 @@ const APPROVAL: u8 = 10;
 const WAS_RUNNING: u8 = 11;
 const LINKED: u8 = 12;
 const UNHARDENED: u8 = 13;
+const MARKDOWN: u8 = 14;
 
 /// How many agent states there are. [`Notice::Status`] numbers them in the order of the
 /// contributor rule: needs you, running, done, error, idle.
@@ -566,6 +569,21 @@ pub enum Request<'a> {
         /// Which tool.
         tool: Tool,
     },
+    /// Asks for the `*.md` files in the directory the system says `pane`'s shell is in, as
+    /// [`Notice::Markdown`]. Since version 13.
+    ListMarkdown {
+        /// The pane.
+        pane: u32,
+    },
+    /// Opens `pinfold md` on a file a [`Notice::Markdown`] for `pane` listed, right of `pane`.
+    /// The core opens only a name it listed, still a regular file in that directory. Since
+    /// version 13.
+    OpenMarkdown {
+        /// The pane.
+        pane: u32,
+        /// The name as the notice gave it, escaped.
+        name: &'a str,
+    },
     /// Answers [`Notice::WasRunning`] for a pane: with `run`, the core types the command and a
     /// newline into the pane's shell, if it offered that. Either way it forgets the command.
     WasRunningAnswer {
@@ -671,6 +689,14 @@ pub enum Notice<'a> {
     Unhardened {
         /// Whether the core read its own signing flags. False means the check failed.
         checked: bool,
+    },
+    /// The `*.md` files a [`Request::ListMarkdown`] found, sorted. Since version 13.
+    Markdown {
+        /// The pane.
+        pane: u32,
+        /// One name a line, with control and bidi characters escaped, so none holds a line
+        /// break. Empty if there are none.
+        names: &'a str,
     },
 }
 
@@ -891,6 +917,7 @@ impl Request<'_> {
     pub fn since(&self) -> u16 {
         match self {
             Self::OpenTool { .. } => 12,
+            Self::ListMarkdown { .. } | Self::OpenMarkdown { .. } => 13,
             _ => OLDEST,
         }
     }
@@ -979,6 +1006,15 @@ impl Request<'_> {
                 out.push(tool as u8);
                 OPEN_TOOL
             }
+            Self::ListMarkdown { pane } => put!(out, LIST_MARKDOWN, pane),
+            Self::OpenMarkdown { pane, name } => put_tail(
+                out,
+                start,
+                MAX_REQUEST,
+                OPEN_MARKDOWN,
+                pane,
+                name.as_bytes(),
+            )?,
             Self::WasRunningAnswer { pane, run } => {
                 put!(out; pane);
                 out.push(u8::from(run));
@@ -1065,6 +1101,11 @@ impl Request<'_> {
                 Request::MoveBorder { side, cells }
             }
             ZOOM => Request::Zoom,
+            LIST_MARKDOWN => Request::ListMarkdown { pane: body.u32()? },
+            OPEN_MARKDOWN => Request::OpenMarkdown {
+                pane: body.u32()?,
+                name: body.text()?,
+            },
             OPEN_TOOL => Request::OpenTool {
                 pane: body.u32()?,
                 tool: body.tag("tool", &[Tool::Files, Tool::Diff])?,
@@ -1098,6 +1139,7 @@ impl Notice<'_> {
     pub fn since(&self) -> u16 {
         match self {
             Self::Approval(approval) => approval.action.since(),
+            Self::Markdown { .. } => 13,
             _ => OLDEST,
         }
     }
@@ -1148,6 +1190,9 @@ impl Notice<'_> {
             Self::Unhardened { checked } => {
                 out.push(u8::from(*checked));
                 UNHARDENED
+            }
+            Self::Markdown { pane, names } => {
+                put_tail(out, start, MAX_MESSAGE, MARKDOWN, *pane, names.as_bytes())?
             }
             Self::Activity { tabs, alerts } => put!(out, ACTIVITY, tabs, alerts),
             Self::Refused { reason } => {
@@ -1243,6 +1288,10 @@ impl Notice<'_> {
             },
             LAYOUT => Notice::Layout(read_layout(&mut body)?),
             RAISE => Notice::Raise,
+            MARKDOWN => Notice::Markdown {
+                pane: body.u32()?,
+                names: body.text()?,
+            },
             UNHARDENED => Notice::Unhardened {
                 checked: body.tag("checked", &[false, true])?,
             },
@@ -1919,7 +1968,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 12, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 13, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -2141,15 +2190,25 @@ mod tests {
             pane: 1,
             tool: Tool::Files,
         };
-        assert_eq!(open.since(), 12);
+        assert_eq!(open.since(), OLDEST);
+        let markdown = Notice::Markdown {
+            pane: 1,
+            names: "a.md",
+        };
+        let newer = Error::Newer {
+            kind: MARKDOWN,
+            since: 13,
+        };
+        assert_eq!(at_oldest(markdown), Err(newer));
+        let list = Request::ListMarkdown { pane: 1 };
         let mut wire = raw(HELLO, &OLDEST.to_le_bytes());
-        open.encode(&mut wire).unwrap();
+        list.encode(&mut wire).unwrap();
         let mut decoder = Decoder::default();
         let mut input = wire.as_slice();
         decoder.next_request(&mut input).unwrap();
         let newer = Error::Newer {
-            kind: OPEN_TOOL,
-            since: 12,
+            kind: LIST_MARKDOWN,
+            since: 13,
         };
         assert_eq!(decoder.next_request(&mut input), Err(newer));
     }
@@ -3000,6 +3059,7 @@ mod tests {
                 Request::MoveBorder { side, cells },
                 Request::Zoom,
                 Request::OpenTool { pane, tool: if forward { Tool::Files } else { Tool::Diff } },
+                Request::ListMarkdown { pane },
                 Request::WasRunningAnswer { pane, run: forward },
             ] {
                 prop_assert!(request_survives(command, chunk), "changed on the link");
@@ -3127,6 +3187,12 @@ mod tests {
         #[test]
         fn raise_round_trips(chunk in chunks()) {
             prop_assert!(notice_survives(&Notice::Raise, chunk), "changed on the link");
+        }
+
+        #[test]
+        fn markdown_round_trips(pane in any::<u32>(), name in any::<String>(), chunk in chunks()) {
+            prop_assert!(request_survives(Request::OpenMarkdown { pane, name: &name }, chunk), "changed on the link");
+            prop_assert!(notice_survives(&Notice::Markdown { pane, names: &name }, chunk), "changed on the link");
         }
 
         #[test]

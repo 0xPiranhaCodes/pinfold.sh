@@ -18,11 +18,13 @@
 //! | `d`                 | Detach                  | tmux                       |
 //! | `f`                 | Open files here         | the design doc             |
 //! | `g`                 | Open the git diff here  | the design doc             |
+//! | `m`                 | Pick markdown to read   | ADR-0045                   |
 //!
 //! Alt+arrows matter on macOS, where the desktop takes Ctrl+arrows. `h` `j` `k` `l` stay free,
-//! because the design keeps `l` for the audit log, as it keeps `u` and `A`. `f` and `g` open a
-//! tool (ADR-0045) right of the focused pane, in its shell's directory; tmux binds neither, and
-//! behind the prefix no shell or program ever sees them.
+//! because the design keeps `l` for the audit log, as it keeps `u` and `A`. `f`, `g` and `m` open a
+//! tool (ADR-0045) right of the focused pane, in its shell's directory, `m` after a pick from
+//! its `*.md` files. Tmux binds neither `f` nor `g`, and marks a pane with `m`, which PinFold
+//! has no use for; behind the prefix no shell or program ever sees them.
 //!
 //! The prefix pressed twice passes the second press through, so the pane gets it as it would
 //! any key. Any other key after the prefix cancels and is swallowed. There is no timeout: the
@@ -93,6 +95,8 @@ pub enum Command {
     OpenFiles,
     /// Open `pinfold diff` beside the focused pane, in its shell's directory.
     OpenDiff,
+    /// Pick a `*.md` file in the focused pane's shell's directory, and open `pinfold md` on it.
+    OpenMarkdown,
 }
 
 impl Command {
@@ -124,9 +128,12 @@ impl Command {
             Self::FontReset => "Actual Size",
             Self::OpenConfig => "Settings…",
             Self::OpenDocs => "PinFold Help",
-            Self::Tab(_) | Self::Focus(_) | Self::Resize(..) | Self::OpenFiles | Self::OpenDiff => {
-                ""
-            }
+            Self::Tab(_)
+            | Self::Focus(_)
+            | Self::Resize(..)
+            | Self::OpenFiles
+            | Self::OpenDiff
+            | Self::OpenMarkdown => "",
         }
     }
 }
@@ -204,6 +211,7 @@ fn command(key: &Key, modifiers: ModifiersState) -> Option<Command> {
             b"d" => Some(Command::Detach),
             b"f" => Some(Command::OpenFiles),
             b"g" => Some(Command::OpenDiff),
+            b"m" => Some(Command::OpenMarkdown),
             _ => None,
         },
         _ => None,
@@ -349,6 +357,7 @@ mod tests {
             ("d", Command::Detach),
             ("f", Command::OpenFiles),
             ("g", Command::OpenDiff),
+            ("m", Command::OpenMarkdown),
         ] {
             assert_after_prefix(&text(key), NONE, Step::Run(command));
         }

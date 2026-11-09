@@ -262,10 +262,19 @@ Press the prefix, then one of these. The prefix pressed twice sends it to the pr
 | `d`                | Close the window. The session stays, and `pinfold` reopens it |
 | `f`                | Open the file manager, `pinfold files`, right of the pane     |
 | `g`                | Open the git diff viewer, `pinfold diff`, right of the pane   |
+| `m`                | Pick a `*.md` file, then open it in `pinfold md` right of the pane |
 
 `f` and `g` open the tool in the directory the system says the focused pane's shell is in,
 never one a program's output reported, as a new tab or split does. Tmux binds neither key,
-and behind the prefix no shell or program sees them. In a tool's pane the prefix and the
+and behind the prefix no shell or program sees them.
+
+`m` lists the `*.md` files directly in that directory, not in folders below it, in the
+palette's box: type to filter, Enter opens one, Esc closes. It lists regular files only, not
+symlinks, and at most 500 names of up to 255 bytes, from the first 10,000 entries the
+directory gives; past either cap the rest are not offered, so open them from `pinfold files`.
+Control and bidi characters in a name show escaped, as `^J` or `<U+202E>`. PinFold opens only
+a name it listed, and checks again that it is still a regular file in that directory. Tmux
+marks a pane with `m`, which PinFold does not have. In a tool's pane the prefix and the
 window's own keys still work, and every other key goes to the tool.
 
 A tab closes with its last pane, and the session ends with its last tab.
@@ -292,7 +301,7 @@ paste and find.
 
 Ctrl+Shift+P, on every system, opens the command palette over the panes: type to filter
 the window's commands, Up and Down choose, Enter runs one, and Esc, a click or Ctrl+Shift+P
-again closes it. It offers Open Files and Open Diff, which open the tools as `f` and `g` do,
+again closes it. It offers Open Markdown, Open Files and Open Diff, which open the tools as `m`, `f` and `g` do,
 and every command in the menus above. Labels whose start matches what you typed come first,
 then those containing it, then those with its letters in order. While it is open every key
 goes to it, and none to the program, which cannot draw over it.

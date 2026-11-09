@@ -84,6 +84,8 @@ enum Notice {
     Copied(String),
     /// The hyperlink's target at a pane's cell, empty if it has none.
     Linked(u32, Position, String),
+    /// A pane's `*.md` names, escaped, one a line.
+    Markdown(u32, String),
     /// The core did not carry out a command.
     Refused(proto::Refusal),
     Approval(Approval),
@@ -184,6 +186,7 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
         let linked = link
             .take_linked()
             .map(|(pane, at, uri)| Notice::Linked(pane, at, uri));
+        let markdown = (link.take_markdown()).map(|(pane, names)| Notice::Markdown(pane, names));
         let raised = link.take_raised().then_some(Notice::Raise);
         let unhardened = link.take_unhardened().map(Notice::Unhardened);
         let refused = link.take_refused().map(Notice::Refused);
@@ -194,9 +197,11 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
         }
         let ran = link.take_was_running().into_iter();
         let ran = ran.map(|(pane, runnable, command)| Notice::WasRunning(pane, runnable, command));
-        let notices = [searched, copied, linked, raised, unhardened, refused]
-            .into_iter()
-            .flatten();
+        let notices = [
+            searched, copied, linked, markdown, raised, unhardened, refused,
+        ]
+        .into_iter()
+        .flatten();
         for notice in notices.chain(ran) {
             if proxy.send_event(notice).is_err() {
                 return;
@@ -371,6 +376,8 @@ struct App {
     menu: Option<Menu>,
     /// The command palette, while open. Every key goes to it.
     palette: Option<Palette>,
+    /// The pane whose `*.md` files the open palette lists, if it lists them.
+    picking: Option<u32>,
     /// The pane and cell the open menu asked the core for a hyperlink at.
     asking: Option<(u32, Position)>,
     prefix: Prefix,
@@ -460,6 +467,7 @@ impl App {
             },
             menu: None,
             palette: None,
+            picking: None,
             asking: None,
             flash: Flash::default(),
             unhardened: None,
@@ -854,6 +862,8 @@ impl App {
                 pane,
                 tool: proto::Tool::Diff,
             },
+            // The picker opens when the core answers with the names.
+            Command::OpenMarkdown => proto::Request::ListMarkdown { pane },
             Command::Detach => return,
             // A program dies with its pane, so this asks first as tmux does.
             Command::ClosePane => {
@@ -925,6 +935,7 @@ impl App {
         if input::is_palette(key, self.modifiers) {
             self.menu = None;
             self.palette = Some(Palette::commands());
+            self.picking = None;
             self.redraw_soon();
             return true;
         }
@@ -955,6 +966,18 @@ impl App {
         true
     }
 
+    /// Opens the markdown picker on the names the core listed for `pane`: only for the pane
+    /// still focused, and never over a prompt or another palette.
+    fn pick_markdown(&mut self, pane: u32, names: &str) {
+        let free = self.prompt.is_none() && self.approvals.is_empty();
+        if pane == self.focused && free && self.palette.is_none() {
+            self.menu = None;
+            self.palette = Some(Palette::markdown(names));
+            self.picking = Some(pane);
+            self.redraw_soon();
+        }
+    }
+
     /// Hands a key to the open palette, and returns the command it chose. Ctrl+Shift+P again
     /// closes it.
     fn palette_key(&mut self, key: &Key, text: Option<&str>) -> Option<Command> {
@@ -972,8 +995,13 @@ impl App {
                 None
             }
             palette::Step::Chose(index) => {
-                self.palette = None;
-                palette::COMMANDS.get(index).map(|&(_, command)| command)
+                let palette = self.palette.take()?;
+                let Some(pane) = self.picking.take() else {
+                    return palette::COMMANDS.get(index).map(|&(_, command)| command);
+                };
+                let name = palette.label(index)?.to_owned();
+                self.request(Request::OpenMarkdown(pane, name));
+                None
             }
         }
     }
@@ -1514,6 +1542,7 @@ impl ApplicationHandler<Notice> for App {
                     self.redraw_soon();
                 }
             }
+            Notice::Markdown(pane, names) => self.pick_markdown(pane, &names),
             Notice::Copied(text) if text.is_empty() => {}
             Notice::Copied(text) => {
                 if let Some(clipboard) = self.clipboard() {
@@ -2050,6 +2079,41 @@ mod tests {
         assert_eq!(app.palette_key(&text("P"), Some("\u{10}")), None);
         assert!(app.palette.is_none());
         assert!(inbox.take().is_empty());
+    }
+
+    #[test]
+    fn prefix_m_and_open_markdown_list_then_the_pick_goes_back_by_its_listed_name() {
+        let (mut app, inbox, _poll) = app();
+        let text = |text: &str| Key::Character(text.into());
+        let enter = Key::Named(NamedKey::Enter);
+        app.modifiers = ModifiersState::CONTROL;
+        assert_eq!(app.pane_key(&text("a"), None, false), None);
+        app.modifiers = ModifiersState::empty();
+        let command = app.pane_key(&text("m"), None, false).unwrap();
+        app.run(command);
+        app.palette = Some(Palette::commands());
+        app.palette_key(&text("markdown"), Some("markdown"));
+        let command = app.palette_key(&enter, None).unwrap();
+        app.run(command);
+        let sent = inbox.take();
+        let list = |request: &Request| {
+            matches!(
+                request,
+                Request::Core(proto::Request::ListMarkdown { pane: 1 })
+            )
+        };
+        assert!(sent.len() == 2 && sent.iter().all(list));
+        // A listing for a pane no longer focused opens nothing.
+        app.pick_markdown(2, "a.md");
+        assert!(app.palette.is_none());
+        app.pick_markdown(1, "README.md\nevil<U+202E>dm.md");
+        app.palette_key(&text("evil"), Some("evil"));
+        assert_eq!(app.palette_key(&enter, None), None);
+        assert!(app.palette.is_none() && app.picking.is_none());
+        let sent = inbox.take();
+        assert!(
+            matches!(&sent[..], [Request::OpenMarkdown(1, name)] if name == "evil<U+202E>dm.md")
+        );
     }
 
     #[test]

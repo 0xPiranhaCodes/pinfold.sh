@@ -136,6 +136,7 @@ impl Session {
         let text = match notice {
             Notice::Copied { text, .. } => text.len(),
             Notice::Linked { uri, .. } => uri.len(),
+            Notice::Markdown { names, .. } => names.len(),
             _ => 0,
         };
         if self.pending() + NOTICE_HEAD + text > MAX_PENDING {
@@ -210,6 +211,13 @@ impl Session {
                     pane,
                     at,
                     uri: uri.as_deref().unwrap_or_default(),
+                })?;
+            }
+            Request::ListMarkdown { pane } => {
+                let names = reactor.list_markdown(pane as usize);
+                self.notice(&Notice::Markdown {
+                    pane,
+                    names: &names,
                 })?;
             }
             Request::FullFrame { pane } => {
@@ -829,6 +837,7 @@ mod tests {
         searched: Vec<Option<link::Selection>>,
         copied: Vec<String>,
         linked: Vec<String>,
+        markdown: Vec<(u32, String)>,
         raises: usize,
         activity: u32,
         alerts: u32,
@@ -859,6 +868,7 @@ mod tests {
                 searched: Vec::new(),
                 copied: Vec::new(),
                 linked: Vec::new(),
+                markdown: Vec::new(),
                 raises: 0,
                 activity: 0,
                 alerts: 0,
@@ -928,6 +938,9 @@ mod tests {
                         Notice::Searched { found, .. } => self.searched.push(found),
                         Notice::Copied { text, .. } => self.copied.push(text.to_owned()),
                         Notice::Linked { uri, .. } => self.linked.push(uri.to_owned()),
+                        Notice::Markdown { pane, names } => {
+                            self.markdown.push((pane, names.to_owned()));
+                        }
                         Notice::Raise => self.raises += 1,
                         Notice::Activity { tabs, alerts } => {
                             (self.activity, self.alerts) = (tabs, alerts);
@@ -1039,7 +1052,8 @@ mod tests {
     /// which its version does not have.
     #[test]
     fn an_older_window_is_served_without_what_it_cannot_read() {
-        // Since version 12 no notice is newer than `OLDEST`, so this checks the link stays up.
+        // The one notice newer than `OLDEST`, `Markdown`, answers a request only a window of
+        // version 13 sends, so this checks the link stays up.
         let mut reactor = Reactor::new().unwrap();
         let pane = reactor
             .open_tab(shell("echo hi; sleep 30"), 24, 80)
@@ -1518,6 +1532,24 @@ mod tests {
         });
         serve(&mut reactor, &mut peer, |_, p| p.linked.len() == 5);
         assert_eq!(peer.linked, ["https://pinfold.sh/a", "", "", "", ""]);
+        assert_pty_lives(&mut reactor, pane);
+    }
+
+    #[test]
+    fn a_markdown_listing_answers_every_ask_and_an_unknown_pane_has_none() {
+        let mut reactor = Reactor::new().unwrap();
+        let pane = reactor.open_tab(shell(ALIVE), 24, 80).unwrap();
+        let mut peer = Peer::watching(&mut reactor, pane);
+        peer.send(Request::ListMarkdown { pane: 9 });
+        serve(&mut reactor, &mut peer, |_, p| !p.markdown.is_empty());
+        assert_eq!(peer.markdown, [(9, String::new())]);
+        // A name with no listing behind it is refused, and the link stays up.
+        peer.send(Request::OpenMarkdown {
+            pane: pane as u32,
+            name: "a.md",
+        });
+        serve(&mut reactor, &mut peer, |_, p| !p.refused.is_empty());
+        assert_eq!(peer.refused, [Refusal::Spawn]);
         assert_pty_lives(&mut reactor, pane);
     }
 

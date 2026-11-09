@@ -166,6 +166,8 @@ struct State {
     copied: Option<String>,
     /// The latest answer to a [`Request::Link`]: the pane, the cell and the URI, empty for none.
     linked: Option<(u32, Position, String)>,
+    /// The last markdown listing: the pane, and its escaped names one a line.
+    markdown: Option<(u32, String)>,
     /// Copies asked for and not answered.
     copying: u32,
     raised: bool,
@@ -236,6 +238,7 @@ impl State {
                 self.copied = Some(text.to_owned());
             }
             Notice::Linked { pane, at, uri } => self.linked = Some((pane, at, uri.to_owned())),
+            Notice::Markdown { pane, names } => self.markdown = Some((pane, names.to_owned())),
             Notice::Raise => self.raised = true,
             Notice::Unhardened { checked } => self.unhardened = Some(checked),
             Notice::Activity { tabs, alerts } => {
@@ -648,6 +651,11 @@ impl Link {
         self.state.linked.take()
     }
 
+    /// Returns the markdown listing that came since the last call, if one did.
+    pub fn take_markdown(&mut self) -> Option<(u32, String)> {
+        self.state.markdown.take()
+    }
+
     /// Returns whether someone asked to bring this window to the front since the last call.
     pub fn take_raised(&mut self) -> bool {
         std::mem::take(&mut self.state.raised)
@@ -686,7 +694,7 @@ mod tests {
 
     use pinfold_proto::Cell;
     use pinfold_proto::link::{
-        Direction, MAX_MESSAGE, MAX_PASTE, Position, Tool, encode_frame, encode_layout,
+        Direction, MAX_MESSAGE, MAX_PASTE, Position, encode_frame, encode_layout,
     };
 
     use super::*;
@@ -856,10 +864,7 @@ mod tests {
             let hello = Request::Hello { version: spoken };
             assert_eq!(peer.requests(1), [shown(hello)]);
             assert_eq!(link.disconnected(), None);
-            let open = Request::OpenTool {
-                pane: 1,
-                tool: Tool::Files,
-            };
+            let open = Request::ListMarkdown { pane: 1 };
             assert_eq!(link.send(open), spoken >= open.since());
         }
     }

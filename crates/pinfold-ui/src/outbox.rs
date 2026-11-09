@@ -34,6 +34,8 @@ pub(crate) enum Request {
         direction: Direction,
     },
     Copy(u32, Selection),
+    /// The `*.md` name picked for a pane, as the core listed it.
+    OpenMarkdown(u32, String),
     /// Anything that owns all it says.
     Core(proto::Request<'static>),
 }
@@ -42,7 +44,9 @@ impl Request {
     fn cost(&self) -> usize {
         SLOT + match self {
             Self::Input(_, bytes) => bytes.capacity(),
-            Self::Paste(_, text) | Self::Search { query: text, .. } => text.capacity(),
+            Self::Paste(_, text)
+            | Self::OpenMarkdown(_, text)
+            | Self::Search { query: text, .. } => text.capacity(),
             _ => 0,
         }
     }
@@ -74,6 +78,9 @@ impl Request {
                 query: &query,
             }),
             Self::Copy(pane, selection) => link.copy(pane, selection),
+            Self::OpenMarkdown(pane, name) => {
+                link.send(proto::Request::OpenMarkdown { pane, name: &name })
+            }
             Self::Core(request) => link.send(request),
         };
     }

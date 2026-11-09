@@ -61,6 +61,12 @@ From 11, `OLDEST` is 10, so a version 9 core from beta.1 restarts the session, a
 
 From 12, `OLDEST` is 11, so a version 10 core restarts the session.
 
+| Change in 13 | Spoken version 12 |
+|---|---|
+| `Request::ListMarkdown`, `Request::OpenMarkdown` and `Notice::Markdown` ([#364]) | the window never asks: prefix `m` and Open Markdown do nothing until the core is updated, and the core sends the notice only in answer. Every other key and palette entry works. |
+
+From 13, `OLDEST` is 12, so a version 11 core restarts the session.
+
 **Raising the version.** A PR that changes the link raises `VERSION`, gives each new message or
 value a `since` of the new version, and adds a row to this table saying how the older version
 degrades. A change with no safe degradation, such as a new field every frame needs, says so
@@ -86,3 +92,4 @@ here, and that update restarts the session.
 [#217]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/217
 [#238]: https://github.com/0xPiranhaCodes/pinfold.sh/pull/238
 [#313]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/313
+[#364]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/364
