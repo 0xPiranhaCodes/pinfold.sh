@@ -82,7 +82,7 @@ pub(crate) fn read_at_most(path: &Path, max: usize) -> io::Result<(Vec<u8>, bool
 /// Lays `bytes` out as the reader does at `width`, and returns each line's text.
 pub(crate) fn lines(bytes: &[u8], width: u16) -> Vec<String> {
     let reader = Reader::new(Vec::new(), bytes.to_vec(), true);
-    texts(&layout(&reader.text, usize::from(width), true, MAX_PARSE).0)
+    texts(&layout(&reader.text, usize::from(width), true, false, MAX_PARSE).0)
 }
 
 fn texts(lines: &[Line]) -> Vec<String> {
@@ -96,8 +96,9 @@ fn texts(lines: &[Line]) -> Vec<String> {
 pub(crate) struct Reader {
     title: Vec<u8>,
     text: String,
-    /// The whole file was read, so it is parsed as markdown.
+    /// The whole file was read, so it is parsed as markdown if `markdown`.
     whole: bool,
+    markdown: bool,
     width: u16,
     lines: Vec<Line>,
     widest: usize,
@@ -126,6 +127,7 @@ impl Reader {
             title,
             text,
             whole,
+            markdown: true,
             width: 0,
             lines: Vec::new(),
             widest: 0,
@@ -134,6 +136,12 @@ impl Reader {
             page: 1,
             help: false,
         }
+    }
+
+    /// Shows the text as it is, not as markdown, as the file manager's pager does.
+    pub(crate) fn plain(mut self) -> Self {
+        self.markdown = false;
+        self
     }
 
     fn last_top(&self) -> usize {
@@ -145,8 +153,13 @@ impl Tool for Reader {
     fn draw(&mut self, screen: &mut Screen) {
         let (rows, columns) = screen.size();
         if columns != self.width {
-            (self.lines, self.widest) =
-                layout(&self.text, usize::from(columns), self.whole, MAX_PARSE);
+            (self.lines, self.widest) = layout(
+                &self.text,
+                usize::from(columns),
+                self.whole && self.markdown,
+                !self.whole,
+                MAX_PARSE,
+            );
             self.width = columns;
         }
         self.page = usize::from(rows.saturating_sub(1)).max(1);
@@ -239,17 +252,23 @@ pub(crate) fn colour(fg: Color) -> Style {
     }
 }
 
-/// Lays `text` out at `width` columns, as markdown if `whole` for up to `budget` and as plain
+/// Lays `text` out at `width` columns, as markdown if `markdown` for up to `budget` and as plain
 /// text after, and returns the lines and the widest one's length. A banner above says what
-/// any cap cut.
-fn layout(text: &str, width: usize, whole: bool, budget: Duration) -> (Vec<Line>, usize) {
+/// any cap cut, the byte cap if `cut`.
+fn layout(
+    text: &str,
+    width: usize,
+    markdown: bool,
+    cut: bool,
+    budget: Duration,
+) -> (Vec<Line>, usize) {
     let width = width.clamp(1, MAX_LINE);
     let mut layout = Layout {
         width,
         ..Layout::default()
     };
     let mut notes = Vec::new();
-    if whole {
+    if markdown {
         let options = Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
         let started = Instant::now();
         // shortcut: the time is checked between events, so pulldown-cmark's first pass over the
@@ -278,10 +297,12 @@ fn layout(text: &str, width: usize, whole: bool, budget: Duration) -> (Vec<Line>
             layout.event(event);
         }
     } else {
-        notes.push(format!(
-            "This file is over {} MB, so its first {0} MB shows as plain text.",
-            MAX_BYTES / 1_000_000
-        ));
+        if cut {
+            notes.push(format!(
+                "This file is over {} MB, so its first {0} MB shows as plain text.",
+                MAX_BYTES / 1_000_000
+            ));
+        }
         layout.plain(text);
     }
     layout.flush();
@@ -772,7 +793,7 @@ mod tests {
     #[test]
     fn long_words_and_lines_wrap_at_the_width() {
         let text = format!("{} short words here", "x".repeat(25));
-        let (lines, widest) = layout(&text, 10, true, MAX_PARSE);
+        let (lines, widest) = layout(&text, 10, true, false, MAX_PARSE);
         assert_eq!(
             texts(&lines),
             ["xxxxxxxxxx", "xxxxxxxxxx", "xxxxx", "short", "words here"]
@@ -782,7 +803,13 @@ mod tests {
 
     #[test]
     fn deep_nesting_leaves_a_column_for_text() {
-        let (lines, _) = layout(&format!("{}deep", "> ".repeat(500)), 6, true, MAX_PARSE);
+        let (lines, _) = layout(
+            &format!("{}deep", "> ".repeat(500)),
+            6,
+            true,
+            false,
+            MAX_PARSE,
+        );
         let first: String = lines[0].iter().map(|span| span.text.as_str()).collect();
         assert_eq!(first, "│ │ │d");
         assert!(
@@ -869,7 +896,7 @@ mod tests {
     #[test]
     fn past_the_time_cap_the_rest_shows_as_plain_text() {
         let markdown = "Some **bold** text.\n";
-        let (lines, _) = layout(markdown, 80, true, Duration::ZERO);
+        let (lines, _) = layout(markdown, 80, true, false, Duration::ZERO);
         assert_eq!(
             texts(&lines),
             [
@@ -878,14 +905,14 @@ mod tests {
                 "Some **bold** text."
             ]
         );
-        let (lines, _) = layout(markdown, 80, true, MAX_PARSE);
+        let (lines, _) = layout(markdown, 80, true, false, MAX_PARSE);
         assert_eq!(texts(&lines), ["Some bold text."]);
     }
 
     #[test]
     fn lines_past_the_line_cap_are_dropped() {
         let markdown = format!("```\n{}```\n", "x\n".repeat(MAX_LINES + 10));
-        let (lines, _) = layout(&markdown, 80, true, MAX_PARSE);
+        let (lines, _) = layout(&markdown, 80, true, false, MAX_PARSE);
         assert_eq!(lines.len(), MAX_LINES + 2);
         assert_eq!(texts(&lines[..1]), ["Only the first 100000 lines show."]);
     }
@@ -893,7 +920,7 @@ mod tests {
     #[test]
     fn a_line_past_the_length_cap_is_cut() {
         let markdown = format!("```\n{}\n```\n", "y".repeat(MAX_LINE + 5));
-        let (lines, widest) = layout(&markdown, 80, true, MAX_PARSE);
+        let (lines, widest) = layout(&markdown, 80, true, false, MAX_PARSE);
         assert_eq!(widest, MAX_LINE);
         assert_eq!(texts(&lines[..1]), ["Lines over 10000 characters are cut."]);
         assert_eq!(texts(&lines[2..])[0].len(), MAX_LINE);
@@ -930,7 +957,7 @@ mod tests {
             .concat();
             for whole in [true, false] {
                 let reader = Reader::new(Vec::new(), markdown.clone(), whole);
-                let shown = texts(&layout(&reader.text, 80, whole, MAX_PARSE).0).concat();
+                let shown = texts(&layout(&reader.text, 80, whole, !whole, MAX_PARSE).0).concat();
                 let raw_text = std::str::from_utf8(raw).unwrap_or("\u{fffd}");
                 assert!(!shown.contains(raw_text), "{raw:?} drawn raw");
                 for (before, after) in [("a", "b"), ("c", "d"), ("e", "f")] {
