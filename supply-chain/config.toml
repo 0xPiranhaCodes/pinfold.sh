@@ -55,13 +55,10 @@ criteria = "safe-to-run"
 version = "2.13.2"
 criteria = "safe-to-deploy"
 
-[[exemptions.block-buffer]]
-version = "0.12.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.block2]]
 version = "0.5.1"
 criteria = "safe-to-deploy"
+notes = "Kept by Satheesh Kumar because the backwards diff from mozilla's 0.6.2 audit is 2,295 lines and 0.5.1 has 85 unsafe tokens; neither was read in this pass. Review in #302."
 
 [[exemptions.borsh]]
 version = "1.8.1"
@@ -107,28 +104,12 @@ criteria = "safe-to-deploy"
 version = "2.5.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.const-oid]]
-version = "0.10.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.copypasta]]
-version = "0.10.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.core-graphics]]
-version = "0.23.2"
-criteria = "safe-to-deploy"
-
 [[exemptions.crc32fast]]
 version = "1.5.4"
 criteria = "safe-to-run"
 
 [[exemptions.crossbeam-utils]]
 version = "0.8.23"
-criteria = "safe-to-deploy"
-
-[[exemptions.crypto-common]]
-version = "0.2.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.ctor]]
@@ -139,17 +120,15 @@ criteria = "safe-to-deploy"
 version = "1.2.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.digest]]
-version = "0.11.3"
-criteria = "safe-to-deploy"
-
 [[exemptions.dispatch]]
 version = "0.2.0"
 criteria = "safe-to-deploy"
+notes = "Kept by Satheesh Kumar because its 53 unsafe tokens over libdispatch FFI were not read in this pass. Review in #302."
 
 [[exemptions.dispatch2]]
 version = "0.3.1"
 criteria = "safe-to-deploy"
+notes = "Kept by Satheesh Kumar because it has 243 unsafe tokens over libdispatch FFI; google rates 0.3.0 ub-risk-3 and does not certify it safe-to-deploy. Review in #302."
 
 [[exemptions.dlib]]
 version = "0.5.3"
@@ -190,6 +169,7 @@ criteria = "safe-to-run"
 [[exemptions.font-types]]
 version = "0.12.7"
 criteria = "safe-to-deploy"
+notes = "Kept by Satheesh Kumar because only the new unsafe TableDataRef::header in the 952-line diff from mozilla's 0.12.1 audit was read (sound: length checked, alignment 1, AnyBitPattern); the rest was not. Review in #302."
 
 [[exemptions.foreign-types-macros]]
 version = "0.2.4"
@@ -221,10 +201,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.home]]
 version = "0.5.12"
-criteria = "safe-to-deploy"
-
-[[exemptions.hybrid-array]]
-version = "0.4.15"
 criteria = "safe-to-deploy"
 
 [[exemptions.indexmap]]
@@ -263,10 +239,6 @@ criteria = "safe-to-deploy"
 version = "0.3.107"
 criteria = "safe-to-deploy"
 
-[[exemptions.libc]]
-version = "0.2.191"
-criteria = "safe-to-deploy"
-
 [[exemptions.libloading]]
 version = "0.8.9"
 criteria = "safe-to-deploy"
@@ -277,10 +249,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.lock_api]]
 version = "0.4.14"
-criteria = "safe-to-deploy"
-
-[[exemptions.lz4_flex]]
-version = "0.14.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.memmap2]]
@@ -311,21 +279,20 @@ criteria = "safe-to-deploy"
 version = "0.7.6"
 criteria = "safe-to-deploy"
 
-[[exemptions.objc-sys]]
-version = "0.3.5"
-criteria = "safe-to-deploy"
-
 [[exemptions.objc2]]
 version = "0.5.3"
 criteria = "safe-to-deploy"
+notes = "Kept by Satheesh Kumar because no import covers 0.5.x; mozilla audits 0.6.3, and the backwards diff to 0.5.3 is 123 files. winit 0.30 and copypasta need 0.5. Review in #302."
 
 [[exemptions.objc2-app-kit]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
+notes = "Kept by Satheesh Kumar because its 87,848 lines are generated AppKit bindings, mostly unsafe extern methods; no import covers 0.2.x. winit 0.30 and copypasta need it. Review in #302."
 
 [[exemptions.objc2-app-kit]]
 version = "0.3.2"
 criteria = "safe-to-deploy"
+notes = "Kept by Satheesh Kumar because its 121,787 lines are generated AppKit bindings that pinfold-sys uses for the menu bar; no import covers this crate. Review in #302."
 
 [[exemptions.objc2-cloud-kit]]
 version = "0.2.2"
@@ -354,6 +321,7 @@ criteria = "safe-to-deploy"
 [[exemptions.objc2-foundation]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
+notes = "Kept by Satheesh Kumar because its 60,961 lines are generated Foundation bindings; mozilla audits only 0.3.2. winit 0.30 and copypasta need 0.2. Review in #302."
 
 [[exemptions.objc2-link-presentation]]
 version = "0.2.2"
@@ -362,10 +330,12 @@ criteria = "safe-to-deploy"
 [[exemptions.objc2-metal]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
+notes = "Kept by Satheesh Kumar because it is 18,749 lines of generated Metal bindings; mozilla audits only 0.3.2. Review in #302."
 
 [[exemptions.objc2-quartz-core]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
+notes = "Kept by Satheesh Kumar because it is 5,310 lines of generated QuartzCore bindings; mozilla audits only 0.3.2. Review in #302."
 
 [[exemptions.objc2-symbols]]
 version = "0.2.2"
@@ -475,14 +445,6 @@ criteria = "safe-to-deploy"
 version = "1.2.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.sha2]]
-version = "0.11.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.signal-hook]]
-version = "0.4.6"
-criteria = "safe-to-deploy"
-
 [[exemptions.simd-adler32]]
 version = "0.3.10"
 criteria = "safe-to-run"
@@ -503,10 +465,6 @@ criteria = "safe-to-deploy"
 version = "0.19.2"
 criteria = "safe-to-deploy"
 
-[[exemptions.smithay-clipboard]]
-version = "0.7.2"
-criteria = "safe-to-deploy"
-
 [[exemptions.smol_str]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
@@ -514,10 +472,12 @@ criteria = "safe-to-deploy"
 [[exemptions.softbuffer]]
 version = "0.4.8"
 criteria = "safe-to-deploy"
+notes = "Kept by Satheesh Kumar because its 87 unsafe tokens across the CoreGraphics, X11 shared-memory and Wayland shm backends (libraries loaded with dlopen) were not read in this pass. Review in #302."
 
 [[exemptions.swash]]
 version = "0.2.10"
 criteria = "safe-to-deploy"
+notes = "Kept by Satheesh Kumar because it is a 26,528-line font parser and scaler with 54 unsafe tokens, and font files are semi-trusted input; a partial read would not be an audit. Review in #302."
 
 [[exemptions.tiny-xlib]]
 version = "0.2.5"
@@ -529,10 +489,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.tracing]]
 version = "0.1.44"
-criteria = "safe-to-deploy"
-
-[[exemptions.typenum]]
-version = "1.20.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.version_check]]
@@ -654,10 +610,7 @@ criteria = "safe-to-deploy"
 [[exemptions.winit]]
 version = "0.30.13"
 criteria = "safe-to-deploy"
-
-[[exemptions.x11-clipboard]]
-version = "0.9.3"
-criteria = "safe-to-deploy"
+notes = "Kept by Satheesh Kumar because winit is 62,412 lines of platform FFI across macOS, X11, Wayland, Windows, web, Android and Orbital backends and no import covers it; a partial read would not be an audit. Review in #302."
 
 [[exemptions.x11-dl]]
 version = "2.21.0"
@@ -686,10 +639,12 @@ criteria = "safe-to-deploy"
 [[exemptions.yazi]]
 version = "0.2.1"
 criteria = "safe-to-deploy"
+notes = "Kept by Satheesh Kumar because it has no unsafe, but swash uses it to inflate PNG glyph bitmaps from font files and its Vec sink has no output cap; allocation limits were not checked. Review in #302."
 
 [[exemptions.zeno]]
 version = "0.3.3"
 criteria = "safe-to-deploy"
+notes = "Kept by Satheesh Kumar because raster.rs to_fixed calls f32::to_int_unchecked, which is undefined behaviour for NaN, infinite or out-of-range values, and the outline callers that feed it were not traced. Review in #302."
 
 [[exemptions.zerocopy]]
 version = "0.8.63"
