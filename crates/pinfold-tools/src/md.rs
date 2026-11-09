@@ -1,11 +1,13 @@
 //! The markdown reader behind `pinfold md` (ADR-0045 sections 2 and 3).
 //!
 //! The file is laid out again for each width, as lines of styled spans that are already
-//! escaped, so a line's length in characters is its length in cells.
+//! escaped, so a line's length in characters is its length in cells. It is parsed a window of
+//! whole top-level blocks at a time, which bounds the memory of the parse (#380).
 //!
 //! Each cap is a constant (ADR-0045 section 4), and the reader says above the file when one
 //! cut it.
 
+use std::borrow::Cow;
 use std::ffi::OsString;
 use std::io::{self, Read};
 use std::ops::Range;
@@ -24,6 +26,9 @@ use crate::{Flow, Tool};
 const MAX_BYTES: usize = 5_000_000;
 /// Time parsing may take at each width, after which the rest shows as plain text.
 const MAX_PARSE: Duration = Duration::from_secs(2);
+/// Bytes of markdown parsed at a time. pulldown-cmark builds a tree of all it is given before
+/// its first event, about 11 bytes for each byte of dense markdown (#380).
+const WINDOW: usize = 32 * 1024;
 /// Characters on a laid-out line. Code, table and plain-text lines are cut here.
 const MAX_LINE: usize = 10_000;
 /// Laid-out lines; the rest of the file is not shown.
@@ -851,32 +856,37 @@ fn layout(
     };
     let mut notes = Vec::new();
     if markdown {
-        let options = Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
         let started = Instant::now();
-        // shortcut: the time is checked between events, so pulldown-cmark's first pass over the
-        // blocks and any one slow event are not cut short; a parse thread with a deadline would
+        // shortcut: the time is checked between events, so pulldown-cmark's first pass over a
+        // window and any one slow event are not cut short; a parse thread with a deadline would
         // be, if a hostile file is ever found to stall either.
+        let defs = definitions(text, WINDOW, || started.elapsed() <= budget);
         // Where the text laid out so far ends: a start's range covers its whole element.
         let mut done = 0;
-        for (event, range) in Parser::new_ext(text, options).into_offset_iter() {
+        let mut late = false;
+        parse(text, &defs, WINDOW, |event, range| {
             if layout.full {
-                break;
+                return false;
             }
-            if started.elapsed() > budget {
-                notes.push(format!(
-                    "Parsing took over {} s, so the rest shows as plain text.",
-                    MAX_PARSE.as_secs()
-                ));
-                let at = (done..text.len())
-                    .find(|&at| text.is_char_boundary(at))
-                    .unwrap_or(text.len());
-                layout.plain(&text[at..]);
-                break;
+            late = started.elapsed() > budget;
+            if late {
+                return false;
             }
             if !matches!(event, Event::Start(_)) {
                 done = done.max(range.end);
             }
             layout.event(event);
+            true
+        });
+        if late {
+            notes.push(format!(
+                "Parsing took over {} s, so the rest shows as plain text.",
+                MAX_PARSE.as_secs()
+            ));
+            let at = (done..text.len())
+                .find(|&at| text.is_char_boundary(at))
+                .unwrap_or(text.len());
+            layout.plain(&text[at..]);
         }
     } else {
         if cut {
@@ -915,6 +925,114 @@ fn layout(
         banner.widest.max(layout.widest),
         layout.headings,
     )
+}
+
+/// Parses `text` as markdown `window` bytes at a time, with `defs` above each window, and passes
+/// each event and its range in `text` to `each` until it returns false. A window ends at a line
+/// end, and its last top-level block, which that end may have cut, starts the next window, so
+/// each event is the one a parse of the whole text gives. A block longer than a window doubles
+/// it.
+///
+/// shortcut: a single top-level block, such as a list, is parsed whole, so a 5 MB one still
+/// costs pulldown-cmark's tree of it; cutting inside blocks would bound that, if such files
+/// turn up.
+fn parse(text: &str, defs: &str, window: usize, each: impl FnMut(Event<'_>, Range<usize>) -> bool) {
+    windows(text, defs, window, each, |_| {});
+}
+
+/// The source of each link reference definition in `text`, a line each, as [`parse`] puts them
+/// above every window so a link can use a definition in a later one. It stops when `more` says.
+///
+/// shortcut: a definition that spans lines inside a block quote keeps the `>` of its later lines,
+/// so a link before its window does not find it; such definitions are rare.
+fn definitions(text: &str, window: usize, mut more: impl FnMut() -> bool) -> String {
+    let mut spans = Vec::new();
+    if text.contains("]:") {
+        windows(text, "", window, |_, _| more(), |span| spans.push(span));
+    }
+    spans.sort_by_key(|span| span.start);
+    let mut defs = String::new();
+    for span in spans {
+        defs.push_str(text.get(span).unwrap_or_default());
+        defs.push('\n');
+    }
+    defs
+}
+
+/// [`parse`], which also passes `found` the span of each definition in the blocks it passed on.
+fn windows(
+    text: &str,
+    defs: &str,
+    window: usize,
+    mut each: impl FnMut(Event<'_>, Range<usize>) -> bool,
+    mut found: impl FnMut(Range<usize>),
+) {
+    let options = Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
+    let (mut from, mut size) = (0, window.max(1));
+    while from < text.len() {
+        let end = (text.as_bytes().get(from.saturating_add(size)..))
+            .and_then(|rest| rest.iter().position(|&byte| byte == b'\n'))
+            .map_or(text.len(), |at| from + size + at + 1);
+        let last = end == text.len();
+        let body = text.get(from..end).unwrap_or_default();
+        // A blank line ends the definitions, so the window's first line is not a title.
+        let input: Cow<'_, str> = if defs.is_empty() {
+            body.into()
+        } else {
+            format!("{defs}\n{body}").into()
+        };
+        let skip = input.len() - body.len();
+        let place = |range: Range<usize>| {
+            from + range.start.saturating_sub(skip)..from + range.end.saturating_sub(skip)
+        };
+        let mut parser = Parser::new_ext(&input, options).into_offset_iter();
+        // The events of the top-level block in progress, and where its line starts.
+        let mut held = Vec::new();
+        let mut block = from;
+        let mut depth = 0_usize;
+        for (event, range) in parser.by_ref() {
+            let range = place(range);
+            if depth == 0 && !matches!(event, Event::End(_)) {
+                // A top-level block starts, so the one before it is whole.
+                for (event, range) in held.drain(..) {
+                    if !each(event, range) {
+                        return;
+                    }
+                }
+                let before = text.as_bytes().get(..range.start).unwrap_or_default();
+                block = before
+                    .iter()
+                    .rposition(|&byte| byte == b'\n')
+                    .map_or(0, |at| at + 1)
+                    .max(from);
+            }
+            match event {
+                Event::Start(_) => depth += 1,
+                Event::End(_) => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            held.push((event, range));
+        }
+        let kept = if last { end } else { block };
+        for (_, def) in parser.reference_definitions().iter() {
+            if def.span.start >= skip && place(def.span.clone()).start < kept {
+                found(place(def.span.clone()));
+            }
+        }
+        if last {
+            for (event, range) in held {
+                if !each(event, range) {
+                    return;
+                }
+            }
+            return;
+        }
+        if block == from {
+            size = size.saturating_mul(2);
+        } else {
+            (from, size) = (block, window.max(1));
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1645,13 +1763,44 @@ mod tests {
         assert_eq!(texts(&lines)[headings[0].line], "# Title");
     }
 
-    /// The median time to lay out `cargo xtask mem-gate`'s 5 MB file, and one of plain prose, at
-    /// 80 columns:
+    #[test]
+    fn parsing_a_window_at_a_time_gives_the_events_of_the_whole_text() {
+        let blocks = [
+            "# Title\n\nSee [the ref][later], [Later] and [x]: no.\n",
+            "Setext\n======\n\nAnother\n---\n",
+            "| a | b |\n| - | - |\n| 1 | 2 |\nlazy row\n",
+            "```\ncode\n\n# not a heading\n\n```\n",
+            "    indented\n\n    still code\n",
+            "- tight\n- list\n\n- now loose\n\n  more of it\n\n1. one\n2. two\n",
+            "> quote\nlazy\n\n> - [x] task\n>   ```\n>   fenced\n",
+            "<!-- a comment\n\n# inside it\n\n-->\n\n<div>\nhtml\n</div>\n",
+            "Hard  \nbreak and `code`, **bold *both***\n\n***\n",
+            "[later]: https://pinfold.sh/later \"Title\"\n[x]:\n  <spaced dest>\n",
+        ];
+        let text = blocks.concat().repeat(4);
+        let options = Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
+        let whole: Vec<_> = Parser::new_ext(&text, options)
+            .into_offset_iter()
+            .map(|(event, range)| format!("{event:?} {range:?}"))
+            .collect();
+        assert!(whole.iter().any(|event| event.contains("pinfold.sh/later")));
+        for window in [1, 7, 64, 300, WINDOW] {
+            let defs = definitions(&text, window, || true);
+            let mut events = Vec::new();
+            parse(&text, &defs, window, |event, range| {
+                events.push(format!("{event:?} {range:?}"));
+                true
+            });
+            assert_eq!(events, whole, "{window}-byte windows");
+        }
+    }
+
+    /// The median time to lay out each of `cargo xtask mem-gate`'s 5 MB files at 80 columns:
     /// `cargo test --release -p pinfold-tools layout_time -- --ignored --nocapture`.
     #[test]
     #[ignore = "a measurement, run by hand"]
     fn layout_time_at_the_byte_cap() {
-        // The markdown as `write_tool_inputs` in `xtask/src/main.rs` writes it.
+        // As `write_tool_inputs` in `xtask/src/main.rs` writes them.
         let markdown = |section: usize| {
             format!(
                 "## Section {section}\n\n見出し 日本語 中文 한국어\n\nSome *emphasis*, **bold**, \

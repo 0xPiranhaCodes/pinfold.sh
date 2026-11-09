@@ -31,13 +31,6 @@ pub const GIT_OUTPUT_CAP: u64 = 8_000_000;
 pub const READER_LIMIT: u64 = TOOL_LIMIT + 3 * MARKDOWN_CAP;
 pub const FILES_LIMIT: u64 = TOOL_LIMIT + 512 * ENTRY_CAP;
 pub const DIFF_LIMIT: u64 = TOOL_LIMIT + 3 * GIT_OUTPUT_CAP;
-/// The reader's row, a known miss.
-pub const READER: &str = "Markdown reader, a 5 MB file";
-/// The reader measured 91.32 MB on macOS (#380). This ceiling, 10% over that, keeps it from
-/// getting worse; #380's fix deletes it, and the row must then pass `READER_LIMIT`.
-const READER_CEILING: u64 = 100_500_000;
-/// Rows over budget with an open issue, which pass up to their ceiling and fail above it.
-const KNOWN_MISSES: [(&str, u64, &str); 1] = [(READER, READER_CEILING, "#380")];
 /// Long enough for a tool to read and lay out what it opened at its cap.
 pub const TOOL_SETTLE: Duration = Duration::from_secs(3);
 /// How soon a core is back within its budget after a tool pane closes.
@@ -205,9 +198,6 @@ pub fn run(budgets: &[Budget]) -> bool {
     let mut passed = true;
     for budget in budgets {
         let limit = megabytes(budget.limit);
-        let miss = KNOWN_MISSES
-            .into_iter()
-            .find(|miss| miss.0 == budget.metric);
         match measure(budget) {
             Ok((bytes, true)) if bytes <= budget.limit => {
                 println!(
@@ -221,15 +211,6 @@ pub fn run(budgets: &[Budget]) -> bool {
                     "| {} | {:.2} | {limit:.2} | pass |",
                     budget.metric,
                     megabytes(bytes)
-                );
-            }
-            Ok((bytes, _)) if miss.is_some_and(|miss| bytes <= miss.1) => {
-                let (_, ceiling, issue) = miss.unwrap_or_default();
-                println!(
-                    "| {} | {:.2} | {limit:.2} | **missed**, see {issue}; fails over {:.2} |",
-                    budget.metric,
-                    megabytes(bytes),
-                    megabytes(ceiling)
                 );
             }
             Ok((bytes, _)) => {
@@ -287,16 +268,6 @@ mod tests {
     #[test]
     fn a_process_that_exits_early_fails() {
         assert!(!run(&[sleep(u64::MAX, &["0"])]));
-    }
-
-    #[test]
-    fn a_known_miss_passes_up_to_its_ceiling() {
-        let miss = Budget {
-            metric: READER,
-            ..sleep(1, &["30"])
-        };
-        assert!(run(&[miss]));
-        assert!(!run(&[sleep(1, &["30"])]));
     }
 
     #[test]
