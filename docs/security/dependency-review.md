@@ -42,8 +42,9 @@ new version, `cargo vet` fails and `cargo vet suggest` shows the smallest diff t
 
 ### Trusted publishers
 
-`supply-chain/audits.toml` also trusts six crates.io publishers for named crates: David
-Tolnay, Andrew Gallant, Ed Page, Dan Gohman, Thomas de Zeeuw and Manish Goregaokar. We
+`supply-chain/audits.toml` also trusts seven crates.io publishers for named crates: David
+Tolnay, Andrew Gallant, Ed Page, Dan Gohman, Thomas de Zeeuw, Manish Goregaokar and
+`rust-lang-owner` (for `libc` only). We
 trust a publisher only when at least one import above already trusts them, and each
 entry's notes say whether an import trusts them for that crate or only for others. Each
 entry ends a year after it was written. A version published by anyone else is not
@@ -52,6 +53,11 @@ covered.
 A new version from a trusted publisher still fails `cargo vet --locked` until `cargo vet
 regenerate imports` records who published it in `supply-chain/imports.lock`. Dependabot
 does not run it, so a bump like #291 needs that commit, not an audit or exemption.
+
+`libc` 0.2.190 and later are published by crates.io trusted publishing
+(`github:rust-lang/libc`), which no import trusts. Trusting `rust-lang-owner` covers
+0.2.189, bytecode-alliance audits 0.2.189 to 0.2.190, and our own delta audit covers
+0.2.190 to 0.2.191, so each new `libc` needs a delta audit from the last one.
 
 ## Reviewing a crate
 
@@ -81,6 +87,11 @@ once they have spot-checked the audit. Check these first.
   (`vte`, `toml`, `serde_json`, `lz4_flex`) also needs its panics and allocation limits
   checked, because the core must not panic or grow without bound on external input. Say
   in the notes when Pinfold, not the crate, enforces a limit.
+
+When an audit depends on the features Pinfold enables (`lz4_flex` with `safe-decode`), or
+skips code that does not build for macOS or Linux, its notes say so. When a crate is too
+large to read in full (`winit`, the generated `objc2-*` bindings), it stays exempt with
+notes saying why, rather than getting an audit of the parts that were read.
 
 ## Exemptions
 
