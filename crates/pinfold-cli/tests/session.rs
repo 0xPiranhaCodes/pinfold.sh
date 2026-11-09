@@ -1525,7 +1525,8 @@ fn tool_process() {
     let stderr = String::from_utf8_lossy(&opened.stderr);
     let opened = serde_json::json!({"open": opened.status.code(), "stderr": stderr});
     writeln!(heard, "{opened}").unwrap();
-    // Stage and revert are keys in the diff viewer, and no API caller can send it a key.
+    // Stage, revert and sending a hunk to an agent are keys in the diff viewer, and no API
+    // caller can send it a key.
     let git = |args: &[&str]| {
         let mut git = Command::new("git");
         git.args(["-c", "user.name=t", "-c", "user.email=t@t"]);
@@ -1541,7 +1542,7 @@ fn tool_process() {
     let diff = ask("tool.open", diff).unwrap();
     let mut sends = Vec::new();
     if let Some(pane) = diff["result"]["pane"].as_u64() {
-        for text in ["s", "y", "r", "y", "sy\n"] {
+        for text in ["s", "y", "r", "y", "sy\n", "ahi\r"] {
             let sent = ask("pane.send", serde_json::json!({"pane": pane, "text": text}));
             sends.push(sent.unwrap()["error"].is_object());
         }
@@ -1609,7 +1610,7 @@ fn an_agent_cannot_type_into_the_tool_it_opened() {
     assert!(diff["diff"]["result"]["pane"].is_u64(), "{heard}");
     assert_eq!(
         diff["refused"],
-        serde_json::json!([true, true, true, true, true]),
+        serde_json::json!([true, true, true, true, true, true]),
         "{heard}"
     );
     assert_eq!(diff["unchanged"], true, "{heard}");
@@ -1620,23 +1621,21 @@ fn an_agent_cannot_type_into_the_tool_it_opened() {
     core.wait().unwrap();
 }
 
+/// Whether pane `pane`'s screen shows `text`.
+fn pane_shows(link: &Link, pane: u32, text: &str) -> bool {
+    let screen = link.screens().iter().find(|screen| screen.pane == pane);
+    let cells = screen.iter().flat_map(|screen| &screen.frame.cells);
+    let cells: String = cells.map(|cell| cell.character).collect();
+    cells.contains(text)
+}
+
 /// Not a test: a window that opens `pinfold files` beside the agent pane, types `@` into it,
 /// denies the send it asks for, then types `@` again and allows it.
 #[test]
 #[ignore = "run by at_in_files_waits_on_the_windows_approval_and_a_denial_sends_nothing"]
 fn at_window_process() {
-    let Some(directory) = helper(CLIENT) else {
-        return;
-    };
-    let directory = Path::new(&directory);
-    let mut link = Link::new(socket::take_link().unwrap()).unwrap();
-    assert!(link.resize(24, 80));
-    until(&mut link, |link| link.is_greeted()).unwrap();
-    until(&mut link, |_| directory.join("ready").exists()).unwrap();
-    let tool = pinfold_proto::link::Tool::Files;
-    assert!(link.send(Request::OpenTool { pane: 0, tool }));
     // Until the tool is in raw mode an `@` can wait in the line discipline, so type until asked.
-    let asked = |link: &mut Link| -> Approval {
+    send_window(pinfold_proto::link::Tool::Files, |link, directory| {
         let start = Instant::now();
         loop {
             assert!(start.elapsed() < PATIENCE, "never asked");
@@ -1650,8 +1649,41 @@ fn at_window_process() {
                 return asked;
             }
         }
+    });
+}
+
+/// Not a test: as [`at_window_process`], with `pinfold diff` and `a`, a comment and Enter.
+#[test]
+#[ignore = "run by a_hunk_from_diff_waits_on_the_windows_approval_and_a_denial_sends_nothing"]
+fn hunk_window_process() {
+    send_window(pinfold_proto::link::Tool::Diff, |link, directory| {
+        // Drawn means in raw mode; asking again waits for the denial to show.
+        until(link, |link| {
+            pane_shows(link, 1, "? keys") && !pane_shows(link, 1, "waits for the window")
+        })
+        .unwrap();
+        assert!(link.send(Request::Input {
+            pane: 1,
+            bytes: b"anit\r"
+        }));
+        approval(link, directory).unwrap()
+    });
+}
+
+/// Opens `tool` beside the agent pane and has `ask` make it ask to send, twice: denies the
+/// first, then allows the second once the test has checked nothing arrived.
+#[allow(clippy::unwrap_used, clippy::panic, reason = "run only by tests")]
+fn send_window(tool: pinfold_proto::link::Tool, ask: impl Fn(&mut Link, &Path) -> Approval) {
+    let Some(directory) = helper(CLIENT) else {
+        return;
     };
-    let first = asked(&mut link);
+    let directory = Path::new(&directory);
+    let mut link = Link::new(socket::take_link().unwrap()).unwrap();
+    assert!(link.resize(24, 80));
+    until(&mut link, |link| link.is_greeted()).unwrap();
+    until(&mut link, |_| directory.join("ready").exists()).unwrap();
+    assert!(link.send(Request::OpenTool { pane: 0, tool }));
+    let first = ask(&mut link, directory);
     assert_eq!(
         (first.caller, first.target, first.action),
         (1, 0, ApprovalAction::Send),
@@ -1660,14 +1692,14 @@ fn at_window_process() {
     let [text] = &first.texts[..] else {
         panic!("{:?}", first.texts)
     };
-    assert!(text.ends_with(' ') && !text.contains('\n'), "{text:?}");
+    assert!(!text.contains(['\n', '\r']), "{text:?}");
     note(directory.join("asked"), text).unwrap();
     assert!(link.send(Request::ApprovalAnswer {
         id: first.id,
         answer: ApprovalAnswer::Deny,
     }));
     // The tool sends nothing more until the denial is back, then asks again.
-    let second = asked(&mut link);
+    let second = ask(&mut link, directory);
     assert_eq!(&second.texts, &first.texts);
     note(directory.join("denied"), "yes").unwrap();
     until(&mut link, |_| directory.join("checked").exists()).unwrap();
@@ -1678,14 +1710,14 @@ fn at_window_process() {
     until(&mut link, |_| directory.join("done").exists()).unwrap();
 }
 
-#[test]
-fn at_in_files_waits_on_the_windows_approval_and_a_denial_sends_nothing() {
+/// Runs `window`, an ignored test that opens a tool beside an agent pane in `cwd`, and returns
+/// the text the tool asked to send, after checking a denial sent nothing and an approval sent
+/// exactly that.
+#[allow(clippy::unwrap_used, clippy::panic, reason = "run only by tests")]
+fn send_from_tool(name: &str, window: &str, cwd: impl Fn(&Path) -> PathBuf) -> String {
     let exe = env::current_exe().unwrap();
-    let window = format!(
-        "exec '{}' --exact --ignored at_window_process",
-        exe.display()
-    );
-    let session = Session::new("at", Some(&window)).unwrap();
+    let window = format!("exec '{}' --exact --ignored {window}", exe.display());
+    let session = Session::new(name, Some(&window)).unwrap();
     // The agent pane reports a status, as its hooks would, and takes keys unbuffered.
     let shell = session.directory.join("at-shell");
     let script = format!(
@@ -1699,7 +1731,7 @@ fn at_in_files_waits_on_the_windows_approval_and_a_denial_sends_nothing() {
     fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
     let launched = session
         .launcher(shell.to_str().unwrap())
-        .current_dir(&session.directory)
+        .current_dir(cwd(&session.directory))
         .output()
         .unwrap();
     assert!(launched.status.success(), "{launched:?}");
@@ -1713,6 +1745,38 @@ fn at_in_files_waits_on_the_windows_approval_and_a_denial_sends_nothing() {
         thread::sleep(Duration::from_millis(10));
     }
     note(session.directory.join("done"), "yes").unwrap();
+    asked
+}
+
+#[test]
+fn at_in_files_waits_on_the_windows_approval_and_a_denial_sends_nothing() {
+    let asked = send_from_tool("at", "at_window_process", Path::to_owned);
+    assert!(asked.ends_with(' '), "{asked:?}");
+}
+
+#[test]
+fn a_hunk_from_diff_waits_on_the_windows_approval_and_a_denial_sends_nothing() {
+    let asked = send_from_tool("hk", "hunk_window_process", |directory| {
+        let repo = directory.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let mut git = Command::new("git");
+            git.args(["-c", "user.name=t", "-c", "user.email=t@t"]);
+            let output = git.args(args).current_dir(&repo).output().unwrap();
+            assert!(output.status.success(), "{args:?}");
+        };
+        fs::write(repo.join("a.txt"), "one\n").unwrap();
+        git(&["init", "-q"]);
+        git(&["add", "a.txt"]);
+        git(&["commit", "-qm", "one"]);
+        // An escape and a bidi override in the line reach the agent escaped.
+        fs::write(repo.join("a.txt"), "two\x1b[2J\u{202e}\n").unwrap();
+        repo
+    });
+    assert_eq!(
+        asked,
+        "nit ␤ a.txt ␤ @@ -1 +1 @@ ␤ -one ␤ +two^[[2J<U+202E>"
+    );
 }
 
 #[test]
