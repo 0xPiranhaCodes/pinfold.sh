@@ -1525,6 +1525,32 @@ fn tool_process() {
     let stderr = String::from_utf8_lossy(&opened.stderr);
     let opened = serde_json::json!({"open": opened.status.code(), "stderr": stderr});
     writeln!(heard, "{opened}").unwrap();
+    // Stage and revert are keys in the diff viewer, and no API caller can send it a key.
+    let git = |args: &[&str]| {
+        let mut git = Command::new("git");
+        git.args(["-c", "user.name=t", "-c", "user.email=t@t"]);
+        let output = git.args(args).current_dir(&root).output().unwrap();
+        assert!(output.status.success(), "{args:?}");
+        String::from_utf8(output.stdout).unwrap()
+    };
+    git(&["init", "-q"]);
+    git(&["add", "note.md"]);
+    git(&["commit", "-qm", "one"]);
+    fs::write(&file, "# changed").unwrap();
+    let diff = serde_json::json!({"tool": "diff", "path": root, "place": "tab"});
+    let diff = ask("tool.open", diff).unwrap();
+    let mut sends = Vec::new();
+    if let Some(pane) = diff["result"]["pane"].as_u64() {
+        for text in ["s", "y", "r", "y", "sy\n"] {
+            let sent = ask("pane.send", serde_json::json!({"pane": pane, "text": text}));
+            sends.push(sent.unwrap()["error"].is_object());
+        }
+        let _ = ask("pane.close", serde_json::json!({"pane": pane})).unwrap();
+    }
+    let unchanged =
+        git(&["diff", "--cached"]).is_empty() && fs::read_to_string(&file).unwrap() == "# changed";
+    let diff = serde_json::json!({"diff": diff, "refused": sends, "unchanged": unchanged});
+    writeln!(heard, "{diff}").unwrap();
     // Gone already if this `pinfold` has no `files` yet (#311): then the close finds no pane.
     let _ = ask("pane.close", serde_json::json!({"pane": 2})).unwrap();
     ask(
@@ -1579,6 +1605,14 @@ fn an_agent_cannot_type_into_the_tool_it_opened() {
     // No refused call opened a pane.
     assert!(replies[9]["highest"].as_u64() <= Some(2), "{heard}");
     assert_eq!(replies[10]["open"], 0, "{heard}");
+    let diff = &replies[11];
+    assert!(diff["diff"]["result"]["pane"].is_u64(), "{heard}");
+    assert_eq!(
+        diff["refused"],
+        serde_json::json!([true, true, true, true, true]),
+        "{heard}"
+    );
+    assert_eq!(diff["unchanged"], true, "{heard}");
     assert!(heard.ends_with("read\n"), "{heard}");
     let audit = fs::read_to_string(session.log()).unwrap_or_default();
     assert!(!audit.contains("note.md"), "a path reached the log");

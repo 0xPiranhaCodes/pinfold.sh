@@ -1479,6 +1479,7 @@ dependencies = [
  "pinfold-sys",
  "pulldown-cmark",
  "serde_json",
+ "similar",
 ]
 
 [[package]]

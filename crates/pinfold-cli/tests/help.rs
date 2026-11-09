@@ -93,7 +93,7 @@ fn each_command_has_help_naming_its_arguments_and_flags() {
         (&["mcp"], &["pinfold mcp"]),
         (&["md"], &["<file>"]),
         (&["files"], &["[dir]"]),
-        (&["diff"], &["--staged", "[range]"]),
+        (&["diff"], &["--staged", "--watch", "[range]"]),
     ];
     for (command, words) in commands {
         let text = stdout(&[command, &["--help"][..]].concat()).unwrap();
@@ -133,7 +133,7 @@ fn a_bad_argument_names_the_problem_in_one_line_and_exits_2() {
         (&["files", "a", "b"], "usage: pinfold files [dir]"),
         (
             &["diff", "--stat"],
-            "usage: pinfold diff [--staged] [range]",
+            "usage: pinfold diff [--staged] [--watch] [range]",
         ),
         (&["ctl", "send", "x", "y"], "the pane must be a number"),
         (&["ctl", "wait"], "'ctl wait' needs a pane"),
