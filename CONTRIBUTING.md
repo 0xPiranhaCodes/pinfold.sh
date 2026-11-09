@@ -17,6 +17,15 @@ cargo build
 cargo xtask --help
 ```
 
+On macOS a `cargo` build lacks the hardened runtime, so its window shows a notice and keeps
+`▲ unhardened` in the tab row ([ADR-0044](docs/adr/0044-cores-without-the-hardened-runtime-warn.md)).
+To run a source build as hardened as `PinFold.app`, sign it after each build, with no Apple
+account (use `target/debug` for a debug build):
+
+```sh
+codesign --force --sign - --options runtime target/release/pinfold-core target/release/pinfold-window
+```
+
 Optional tools, used by the checks below:
 
 ```sh

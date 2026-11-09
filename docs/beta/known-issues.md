@@ -84,4 +84,10 @@ pass their automated tests, but nobody has yet clicked them in a signed install.
 ## Builds from source
 
 A build from `cargo` lacks the hardened runtime, so another program running as you can read its
-memory. The signed `.dmg` has it ([#109](https://github.com/0xPiranhaCodes/pinfold.sh/issues/109)).
+memory. The signed `.dmg` has it. Such a core says so: its window shows the command that signs
+it once and keeps `▲ unhardened` in the tab row ([#109](https://github.com/0xPiranhaCodes/pinfold.sh/issues/109)).
+Signing removes both, and needs no Apple account:
+
+```sh
+codesign --force --sign - --options runtime target/release/pinfold-core target/release/pinfold-window
+```

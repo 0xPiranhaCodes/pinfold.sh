@@ -170,7 +170,17 @@ into the core:
    A plain macOS build is therefore not safe from a same-user process that can ad-hoc sign a
    program, which needs no admin rights and no Developer Mode. That task port reads the core's
    memory, and a task port normally allows writes too, which was not tried. `PinFold.app` is
-   signed with the hardened runtime for this reason. A `cargo` build is not.
+   signed with the hardened runtime for this reason. A `cargo` build is not, so its core says
+   so ([ADR-0044](../adr/0044-cores-without-the-hardened-runtime-warn.md)): at start it reads its
+   own flags with `csops`, logs `hardened_runtime=no` at warn, and the window shows a notice
+   with the command that signs the build and keeps `▲ unhardened` in the tab row for the
+   session. A failed check says `unchecked` instead. Refusing the session was not chosen, as
+   same-user `ptrace` of pane programs stays open without a sandbox. To sign a source build,
+   with no Apple account:
+
+   ```sh
+   codesign --force --sign - --options runtime target/release/pinfold-core target/release/pinfold-window
+   ```
 
    These stay open on purpose. `pinfold-core --idle <panes>` and `--window` skip hardening so
    that the core can be measured and debugged, and any same-user process can run them. If one
@@ -186,10 +196,6 @@ environment.
 
 ### Still open
 
-- Whether a build without the hardened runtime, such as Homebrew building from source, should
-  refuse to run a session or warn about it. Only the core and window of `PinFold.app` have it.
-  [ADR-0044](../adr/0044-cores-without-the-hardened-runtime-warn.md), Proposed, shows that a core
-  can read its own flag and proposes a warning and a status-bar marker; the maintainer decides.
 - How sandboxed agents block TIOCSTI while staying in their pane's session, tested with
   real bubblewrap and `sandbox-exec`.
 

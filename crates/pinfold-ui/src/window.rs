@@ -91,6 +91,8 @@ enum Notice {
     Ended,
     /// Asked to come to the front.
     Raise,
+    /// The core lacks the hardened runtime, and whether it could tell (ADR-0044).
+    Unhardened(bool),
     /// The config file was saved, and this is what it now says.
     Config(Config),
     /// A menu item was chosen.
@@ -182,6 +184,7 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
             .take_linked()
             .map(|(pane, at, uri)| Notice::Linked(pane, at, uri));
         let raised = link.take_raised().then_some(Notice::Raise);
+        let unhardened = link.take_unhardened().map(Notice::Unhardened);
         let refused = link.take_refused().map(Notice::Refused);
         while let Some(approval) = link.take_approval() {
             if proxy.send_event(Notice::Approval(approval)).is_err() {
@@ -190,7 +193,7 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
         }
         let ran = link.take_was_running().into_iter();
         let ran = ran.map(|(pane, runnable, command)| Notice::WasRunning(pane, runnable, command));
-        let notices = [searched, copied, linked, raised, refused]
+        let notices = [searched, copied, linked, raised, unhardened, refused]
             .into_iter()
             .flatten();
         for notice in notices.chain(ran) {
@@ -332,6 +335,9 @@ struct App {
     states: Vec<u8>,
     /// The active tab's state, whether its agent reported it, and its message.
     status: Option<(u8, bool, String)>,
+    /// Set for the session once the core says it lacks the hardened runtime: whether it could
+    /// tell. The bar keeps a marker while it is set.
+    unhardened: Option<bool>,
     /// The tab under the pointer.
     over_tab: Option<usize>,
     /// Whether the system says this window has the keyboard.
@@ -452,6 +458,7 @@ impl App {
             menu: None,
             asking: None,
             flash: Flash::default(),
+            unhardened: None,
             selecting: Selecting::default(),
             bar: None,
             vi: None,
@@ -755,6 +762,7 @@ impl App {
                 title: !open.fullscreen,
                 time,
                 inset,
+                unhardened: self.unhardened,
             };
             top_bar::draw(&mut self.composed, &bar);
             open.renderer.draw(&self.composed)?;
@@ -1172,7 +1180,8 @@ impl App {
         let (on_bar, pointer) = top_bar::locate(open.padding(), x, y, cell_size, grid);
         self.on_bar = on_bar;
         self.on_title = top_bar::on_title(open.padding(), y, cell_size.1);
-        let over = match top_bar::hit(pointer.1, &self.labels, self.activity, self.area.1) {
+        let columns = top_bar::tab_columns(self.area.1, self.unhardened);
+        let over = match top_bar::hit(pointer.1, &self.labels, self.activity, columns) {
             Some(Hit::Tab(tab)) if on_bar && !self.on_title => Some(tab),
             _ => None,
         };
@@ -1308,7 +1317,8 @@ impl App {
     fn bar_pressed(&mut self) {
         let Some(open) = &self.open else { return };
         if !self.on_title {
-            match top_bar::hit(self.pointer.1, &self.labels, self.activity, self.area.1) {
+            let columns = top_bar::tab_columns(self.area.1, self.unhardened);
+            match top_bar::hit(self.pointer.1, &self.labels, self.activity, columns) {
                 Some(Hit::NewTab) => self.core(proto::Request::NewTab),
                 Some(Hit::Tab(tab)) => self.core(proto::Request::SwitchTab { index: tab as u16 }),
                 None => {}
@@ -1444,6 +1454,12 @@ impl ApplicationHandler<Notice> for App {
             }
             Notice::Refused(reason) => {
                 self.flash.refused(reason, Instant::now());
+                self.redraw_soon();
+            }
+            Notice::Unhardened(checked) => {
+                self.unhardened = Some(checked);
+                self.flash
+                    .unhardened(checked, pinfold_sys::sign_command(), Instant::now());
                 self.redraw_soon();
             }
             Notice::Approval(approval) => {

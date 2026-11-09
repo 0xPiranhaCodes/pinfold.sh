@@ -77,6 +77,10 @@ pub const STATES: [(char, &str, u32); 5] = [
     ('✕', "error", 0x00ff_8a8a),
     ('○', "idle", 0x009a_a1ac),
 ];
+/// The mark for a core without the hardened runtime (ADR-0044): not a state's glyph, in a
+/// colour no state uses, and [`label`] keeps the glyph out of labels.
+pub const UNHARDENED: char = '▲';
+pub const VIOLET: u32 = 0x00c7_92ea;
 pub(crate) const NEEDS_YOU: u8 = 0;
 const IDLE: u8 = 4;
 /// Widest message in cells, so it cannot crowd out the clock for long.
@@ -170,6 +174,21 @@ pub struct Bar<'a, L> {
     pub time: Option<LocalTime>,
     /// Cells left of the title.
     pub inset: usize,
+    /// Set when the core lacks the hardened runtime: whether it could tell.
+    pub unhardened: Option<bool>,
+}
+
+/// The word beside [`UNHARDENED`]: the core lacks the runtime, or could not tell.
+#[must_use]
+pub fn unhardened_word(checked: bool) -> &'static str {
+    if checked { "unhardened" } else { "unchecked" }
+}
+
+/// Returns the columns the tabs and button may take: the row, less the marker at its end.
+#[must_use]
+pub fn tab_columns(columns: u16, unhardened: Option<bool>) -> u16 {
+    let marker = unhardened.map_or(0, |checked| width(unhardened_word(checked)) + 2 + GAP);
+    columns.saturating_sub(marker as u16)
 }
 
 /// Adds the bar above the pane in `frame`. The title is the active tab's label.
@@ -351,7 +370,12 @@ fn look<L>(index: usize, bar: &Bar<'_, L>) -> (u32, u32, u32) {
 
 /// Writes the tabs' row, which starts at cell `row`: pills from the left, then the button.
 fn strip(frame: &mut Frame, bar: &Bar<'_, impl AsRef<str>>, row: usize) {
-    let columns = usize::from(frame.columns);
+    let columns = usize::from(tab_columns(frame.columns, bar.unhardened));
+    if let Some(checked) = bar.unhardened {
+        let marker = format!("{UNHARDENED} {}", unhardened_word(checked));
+        let at = usize::from(frame.columns).saturating_sub(width(&marker));
+        write(frame, row, at, &marker, VIOLET | BOLD);
+    }
     let mut button = 0;
     for span in spans(bar.tabs, bar.activity, columns) {
         button = span.end + 1;
@@ -618,7 +642,40 @@ mod tests {
             title: true,
             time: None,
             inset: 1,
+            unhardened: None,
         }
+    }
+
+    #[test]
+    fn an_unhardened_core_keeps_a_marker_at_the_end_of_the_tabs() {
+        let names = ["work"; 6];
+        for (title, checked, word) in [(true, true, "unhardened"), (false, false, "unchecked")] {
+            let mut frame = pane(1, 50);
+            let bar = Bar {
+                title,
+                unhardened: Some(checked),
+                ..shown(&names, 0)
+            };
+            draw(&mut frame, &bar);
+            let row = usize::from(title);
+            let tabs = text(&frame, row);
+            assert!(tabs.ends_with(&format!("{UNHARDENED} {word}")), "{tabs}");
+            let marker = tabs.chars().position(|c| c == UNHARDENED).unwrap();
+            assert_eq!(frame.cells[row * 50 + marker].foreground, VIOLET | BOLD);
+            let room = tab_columns(50, Some(checked));
+            let button = (0..room).rev().find(|&c| hit(c, &names, 0, room).is_some());
+            assert!(
+                button.is_some_and(|c| usize::from(c) + GAP < marker),
+                "{tabs}"
+            );
+        }
+        assert_eq!(tab_columns(50, None), 50);
+        assert!(
+            STATES
+                .iter()
+                .all(|&(glyph, _, tint)| glyph != UNHARDENED && tint != VIOLET)
+        );
+        assert!(!safe(UNHARDENED), "a label could fake it");
     }
 
     #[test]
