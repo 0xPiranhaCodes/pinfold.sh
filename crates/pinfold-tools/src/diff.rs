@@ -1,14 +1,19 @@
 //! The diff viewer behind `pinfold diff` (ADR-0045 sections 2, 3 and 6): the files on the
-//! left and the selected one's unified hunks on the right.
+//! left and the selected one's hunks on the right, unified or side by side, with the changed
+//! words of each removed line and the added line beside it highlighted.
 //!
 //! Git's output is untrusted: names and lines come from the repository. [`parse`] takes any
 //! bytes without panicking, keeps each line as a range into them, and caps each structure;
 //! [`Diff::notes`] says which cap cut it, and the viewer shows them above the diff. Every name
 //! and line reaches the screen through [`Screen::put`], which escapes it.
 
+use std::collections::HashMap;
 use std::iter;
 use std::ops::Range;
 use std::path::Path;
+use std::time::{Duration, Instant};
+
+use similar::{Algorithm, DiffTag};
 
 use crate::keys::Key;
 use crate::md::colour;
@@ -23,6 +28,10 @@ const MAX_HUNKS: usize = 100_000;
 const MAX_LINES: usize = 500_000;
 /// Bytes kept of a line; the rest of it is cut.
 const MAX_LINE: usize = 10_000;
+/// Longest line, prefix included, whose changed words are highlighted.
+const MAX_WORDS_LINE: usize = 1024;
+/// Time `similar` may spend on one hunk's lines on one draw, after which it marks whole lines.
+const WORDS_DEADLINE: Duration = Duration::from_millis(50);
 
 /// A parsed `git diff`, which owns the bytes its ranges point into.
 pub(crate) struct Diff {
@@ -59,8 +68,9 @@ impl File {
     }
 }
 
-const KEYS: [&str; 6] = [
+const KEYS: [&str; 7] = [
     "n p                 the next or previous file",
+    "v                   unified or side by side",
     "j k  ↓ ↑            a line down or up",
     "space b  PgDn PgUp  a page down or up",
     "g G  Home End       the top or the end",
@@ -267,6 +277,149 @@ fn unquote(text: &[u8]) -> (Vec<u8>, &[u8]) {
     (path, rest)
 }
 
+/// A hunk's lines: one context line, or removed lines and the added lines after them.
+enum Block {
+    Same(usize),
+    Change(Range<usize>, Range<usize>),
+}
+
+fn blocks<'a>(bytes: &'a [u8], lines: &'a [Range<usize>]) -> impl Iterator<Item = Block> + 'a {
+    let starts = move |at: usize, prefix: u8| {
+        (lines.get(at))
+            .is_some_and(|range| bytes.get(range.clone()).and_then(<[u8]>::first) == Some(&prefix))
+    };
+    let mut at = 0;
+    iter::from_fn(move || {
+        if at >= lines.len() {
+            return None;
+        }
+        let start = at;
+        while starts(at, b'-') {
+            at += 1;
+        }
+        let middle = at;
+        while starts(at, b'+') {
+            at += 1;
+        }
+        if at == start {
+            at += 1;
+            return Some(Block::Same(start));
+        }
+        Some(Block::Change(start..middle, middle..at))
+    })
+}
+
+/// One row of the selected file: a header across the view, or hunk lines, each with the hunk's
+/// index and, for a change, the line it pairs with for word highlights.
+enum Row {
+    /// A file or hunk header.
+    Full(Range<usize>, Color),
+    /// A unified line and its pair.
+    One(usize, Range<usize>, Option<Range<usize>>),
+    /// The old and new sides; a context line is on both.
+    Two(usize, Option<Range<usize>>, Option<Range<usize>>),
+}
+
+/// The changed words of `old` and `new`, a removed line and the added line beside it, as ranges
+/// into each. None on a line over [`MAX_WORDS_LINE`] bytes; past `deadline`, whole lines.
+fn words(old: &[u8], new: &[u8], deadline: Instant) -> [Vec<Range<usize>>; 2] {
+    if old.len() > MAX_WORDS_LINE || new.len() > MAX_WORDS_LINE {
+        return Default::default();
+    }
+    let (old_starts, new_starts) = (split_words(old), split_words(new));
+    let (old_words, new_words) = (tokens(old, &old_starts), tokens(new, &new_starts));
+    let ops = similar::capture_diff_slices_deadline(
+        Algorithm::Myers,
+        &old_words,
+        &new_words,
+        Some(deadline),
+    );
+    let (mut old_marks, mut new_marks): (Vec<Range<usize>>, _) = (Vec::new(), Vec::new());
+    for op in ops {
+        let (tag, old_range, new_range) = op.as_tag_tuple();
+        if tag == DiffTag::Equal {
+            continue;
+        }
+        for (marks, starts, range) in [
+            (&mut old_marks, &old_starts, old_range),
+            (&mut new_marks, &new_starts, new_range),
+        ] {
+            let (Some(&start), Some(&end)) = (starts.get(range.start), starts.get(range.end))
+            else {
+                continue;
+            };
+            match marks.last_mut() {
+                _ if start == end => {}
+                Some(last) if last.end == start => last.end = end,
+                _ => marks.push(start..end),
+            }
+        }
+    }
+    [old_marks, new_marks]
+}
+
+/// The words of `line` that `starts` gives.
+fn tokens<'a>(line: &'a [u8], starts: &[usize]) -> Vec<&'a [u8]> {
+    let tokens = starts.windows(2).map(|pair| line.get(pair[0]..pair[1]));
+    tokens.map(Option::unwrap_or_default).collect()
+}
+
+/// Where each word of `line` after its `-` or `+` starts, and where the last ends: runs of
+/// letters, digits, `_` and non-ASCII bytes, so a character is never split, runs of spaces, and
+/// each other byte alone.
+fn split_words(line: &[u8]) -> Vec<usize> {
+    let class = |byte: u8| match byte {
+        b'_' | 0x80.. => 0,
+        _ if byte.is_ascii_alphanumeric() => 0,
+        _ if byte.is_ascii_whitespace() => 1,
+        _ => 2,
+    };
+    let mut at = line.len().min(1);
+    let mut starts = vec![at];
+    while let Some(&byte) = line.get(at) {
+        at += 1;
+        while class(byte) != 2 && line.get(at).is_some_and(|&next| class(next) == class(byte)) {
+            at += 1;
+        }
+        starts.push(at);
+    }
+    starts
+}
+
+/// Draws `line` from `column` in at most `width` cells, tabs as four spaces, and the bytes in
+/// `marks` in `marked`.
+fn put_line(
+    screen: &mut Screen,
+    (row, column, width): (u16, u16, u16),
+    line: &[u8],
+    style: Style,
+    marks: &[Range<usize>],
+    marked: Style,
+) {
+    let end = column.saturating_add(width);
+    let (mut column, mut at) = (column, 0);
+    let mut parts = Vec::new();
+    for mark in marks {
+        parts.extend([(at..mark.start, style), (mark.clone(), marked)]);
+        at = mark.end;
+    }
+    parts.push((at..line.len(), style));
+    for (range, style) in parts {
+        let Some(part) = line.get(range) else {
+            continue;
+        };
+        let part = part
+            .split(|&byte| byte == b'\t')
+            .collect::<Vec<_>>()
+            .join(&b"    "[..]);
+        let part: String = escape(&part)
+            .chars()
+            .take(usize::from(end.saturating_sub(column)))
+            .collect();
+        column = screen.put(row, column, part, style);
+    }
+}
+
 /// The diff viewer.
 pub(crate) struct Viewer {
     title: Vec<u8>,
@@ -275,6 +428,9 @@ pub(crate) struct Viewer {
     top: usize,
     page: usize,
     help: bool,
+    side: bool,
+    /// The visible lines' changed words from the last draw, by the starts of a pair's lines.
+    words: HashMap<(usize, usize), [Vec<Range<usize>>; 2]>,
 }
 
 impl Viewer {
@@ -287,46 +443,101 @@ impl Viewer {
             top: 0,
             page: 1,
             help: false,
+            side: false,
+            words: HashMap::new(),
         }
     }
 
-    /// The selected file's header and hunk lines, each with its style.
-    fn lines(&self) -> impl Iterator<Item = (&[u8], Style)> {
-        let bytes = &self.diff.bytes;
-        let file = self.diff.files.get(self.selected);
-        let header = (file.into_iter().flat_map(|file| &file.header))
-            .map(|range| (range, colour(Color::BrightBlack)));
-        let hunks = file
-            .into_iter()
-            .flat_map(|file| &file.hunks)
-            .flat_map(move |hunk| {
-                let lines = hunk.lines.iter().map(move |range| {
-                    let fg = match bytes[range.clone()].first() {
-                        Some(b'+') => Color::Green,
-                        Some(b'-') => Color::Red,
-                        Some(b'\\') => Color::BrightBlack,
-                        _ => Color::Default,
-                    };
-                    (range, colour(fg))
-                });
-                iter::once((&hunk.header, colour(Color::Cyan))).chain(lines)
-            });
-        header
-            .chain(hunks)
-            .map(|(range, style)| (&bytes[range.clone()], style))
+    /// Calls `each` with the selected file's rows in order, until it returns false.
+    fn each_row(&self, mut each: impl FnMut(Row) -> bool) -> Option<()> {
+        let mut emit = |row| each(row).then_some(());
+        let file = self.diff.files.get(self.selected)?;
+        for range in &file.header {
+            emit(Row::Full(range.clone(), Color::BrightBlack))?;
+        }
+        for (index, hunk) in file.hunks.iter().enumerate() {
+            emit(Row::Full(hunk.header.clone(), Color::Cyan))?;
+            let line = |at: usize| hunk.lines.get(at).cloned();
+            let pair = |lines: &Range<usize>, at: usize| {
+                line(lines.start + at).filter(|_| at < lines.len())
+            };
+            for block in blocks(&self.diff.bytes, &hunk.lines) {
+                match block {
+                    Block::Same(at) if self.side => emit(Row::Two(index, line(at), line(at)))?,
+                    Block::Same(at) => emit(Row::One(index, line(at)?, None))?,
+                    Block::Change(old, new) if self.side => {
+                        for at in 0..old.len().max(new.len()) {
+                            emit(Row::Two(index, pair(&old, at), pair(&new, at)))?;
+                        }
+                    }
+                    Block::Change(old, new) => {
+                        for at in 0..old.len() {
+                            emit(Row::One(index, pair(&old, at)?, pair(&new, at)))?;
+                        }
+                        for at in 0..new.len() {
+                            emit(Row::One(index, pair(&new, at)?, pair(&old, at)))?;
+                        }
+                    }
+                }
+            }
+        }
+        Some(())
     }
 
     fn last_top(&self) -> usize {
-        let count = self.diff.files.get(self.selected).map_or(0, |file| {
-            file.header.len()
-                + file
-                    .hunks
-                    .iter()
-                    .map(|hunk| 1 + hunk.lines.len())
-                    .sum::<usize>()
+        let mut count = 0_usize;
+        self.each_row(|_| {
+            count += 1;
+            true
         });
         count.saturating_sub(self.page)
     }
+
+    /// The changed words of `old` and `new`, from the last draw or worked out now within the
+    /// deadline of `hunk`.
+    fn marks(
+        &mut self,
+        last: &mut HashMap<(usize, usize), [Vec<Range<usize>>; 2]>,
+        deadline: &mut Option<(usize, Instant)>,
+        (hunk, old, new): (usize, &Range<usize>, &Range<usize>),
+    ) -> [Vec<Range<usize>>; 2] {
+        let key = (old.start, new.start);
+        if let Some(marks) = self.words.get(&key) {
+            return marks.clone();
+        }
+        let marks = last.remove(&key).unwrap_or_else(|| {
+            let deadline = match *deadline {
+                Some((index, at)) if index == hunk => at,
+                _ => deadline.insert((hunk, Instant::now() + WORDS_DEADLINE)).1,
+            };
+            let bytes = &self.diff.bytes;
+            let line = |range: &Range<usize>| bytes.get(range.clone()).unwrap_or_default();
+            words(line(old), line(new), deadline)
+        });
+        self.words.insert(key, marks.clone());
+        marks
+    }
+}
+
+/// The bytes of `range`, or none if it is out of `bytes`.
+fn text(bytes: &[u8], range: &Range<usize>) -> Vec<u8> {
+    bytes.get(range.clone()).unwrap_or_default().to_vec()
+}
+
+/// The colour of a hunk line, and of its changed words.
+fn line_styles(line: &[u8]) -> (Style, Style) {
+    let (fg, bg) = match line.first() {
+        Some(b'+') => (Color::Green, Color::Green),
+        Some(b'-') => (Color::Red, Color::Red),
+        Some(b'\\') => (Color::BrightBlack, Color::Default),
+        _ => (Color::Default, Color::Default),
+    };
+    let marked = Style {
+        fg: Color::Black,
+        bg,
+        bold: false,
+    };
+    (colour(fg), marked)
 }
 
 impl Tool for Viewer {
@@ -340,7 +551,7 @@ impl Tool for Viewer {
         screen.put(0, 0, &self.title, bold);
         let files = self.diff.files.len();
         let place = format!("{}/{files}  ? keys", (self.selected + 1).min(files));
-        let at = columns.saturating_sub(u16::try_from(place.len()).unwrap_or(u16::MAX));
+        let at = columns.saturating_sub(u16::try_from(place.chars().count()).unwrap_or(u16::MAX));
         screen.put(0, at, place, dim);
         if self.help {
             for (row, keys) in (2..rows).zip(KEYS) {
@@ -375,12 +586,70 @@ impl Tool for Viewer {
             };
             screen.put(row, 0, format!("{label:<width$}"), style);
         }
-        for (row, (line, style)) in (top..rows).zip(self.lines().skip(self.top)) {
-            let line = line
-                .split(|&byte| byte == b'\t')
-                .collect::<Vec<_>>()
-                .join(&b"    "[..]);
-            screen.put(row, left + 1, line, style);
+        let (mut skip, mut shown) = (self.top, Vec::new());
+        self.each_row(|row| {
+            if skip > 0 {
+                skip -= 1;
+                return true;
+            }
+            shown.push(row);
+            shown.len() < self.page
+        });
+        let mut last = std::mem::take(&mut self.words);
+        let mut deadline = None;
+        let (start, half) = (left + 1, columns.saturating_sub(left + 1) / 2);
+        for (row, line) in (top..rows).zip(shown) {
+            match line {
+                Row::Full(range, fg) => {
+                    put_line(
+                        screen,
+                        (row, start, columns),
+                        &text(&self.diff.bytes, &range),
+                        colour(fg),
+                        &[],
+                        colour(fg),
+                    );
+                }
+                Row::One(hunk, line, pair) => {
+                    let shown = text(&self.diff.bytes, &line);
+                    let (style, marked) = line_styles(&shown);
+                    let marks = match pair {
+                        Some(pair) if shown.first() == Some(&b'-') => {
+                            self.marks(&mut last, &mut deadline, (hunk, &line, &pair))[0].clone()
+                        }
+                        Some(pair) => {
+                            self.marks(&mut last, &mut deadline, (hunk, &pair, &line))[1].clone()
+                        }
+                        None => Vec::new(),
+                    };
+                    put_line(screen, (row, start, columns), &shown, style, &marks, marked);
+                }
+                Row::Two(hunk, old, new) => {
+                    let marks = match (&old, &new) {
+                        (Some(old), Some(new)) if old != new => {
+                            self.marks(&mut last, &mut deadline, (hunk, old, new))
+                        }
+                        _ => Default::default(),
+                    };
+                    for ((side, marks), column) in
+                        [old, new].into_iter().zip(marks).zip([start, start + half])
+                    {
+                        let shown = side
+                            .map(|range| text(&self.diff.bytes, &range))
+                            .unwrap_or_default();
+                        let (style, marked) = line_styles(&shown);
+                        put_line(
+                            screen,
+                            (row, column, half.saturating_sub(1)),
+                            &shown,
+                            style,
+                            &marks,
+                            marked,
+                        );
+                    }
+                    screen.put(row, start + half - 1, "│", dim);
+                }
+            }
         }
     }
 
@@ -397,6 +666,7 @@ impl Tool for Viewer {
         match key {
             Key::Char('q') => return Flow::Quit,
             Key::Char('?') => self.help = true,
+            Key::Char('v') => self.side = !self.side,
             Key::Char('n') => {
                 self.selected = (self.selected + 1).min(self.diff.files.len().saturating_sub(1));
                 self.top = 0;
@@ -419,6 +689,7 @@ impl Tool for Viewer {
 }
 
 #[cfg(test)]
+#[allow(clippy::single_range_in_vec_init, reason = "marks are lists of ranges")]
 mod tests {
     use super::*;
 
@@ -483,6 +754,63 @@ mod tests {
         diff.notes
             .push("git printed over 8 MB, so the diff is cut short.".into());
         insta::assert_snapshot!(shown(diff, &[]));
+    }
+
+    #[test]
+    fn side_by_side_with_word_highlights() {
+        let keys = [Key::Char('v')];
+        insta::assert_snapshot!(shown(parse(format!("{CHANGE}{FILES}").into()), &keys));
+    }
+
+    #[test]
+    fn changed_words_are_marked_on_both_lines() {
+        let far = Instant::now() + Duration::from_secs(60);
+        let marks = words(b"-    println!(\"hi\");", b"+    println!(\"hello\");", far);
+        assert_eq!(marks, [[15..17], [15..20]]);
+        let marks = words("-tä x".as_bytes(), "+tö x".as_bytes(), far);
+        assert_eq!(marks, [[1..4], [1..4]], "a character is never split");
+    }
+
+    #[test]
+    fn a_line_past_the_word_cap_has_no_marks() {
+        let far = Instant::now() + Duration::from_secs(60);
+        let (old, new) = (
+            format!("-{}", "a ".repeat(MAX_WORDS_LINE)),
+            format!("+b {}", "a ".repeat(MAX_WORDS_LINE)),
+        );
+        let at = |line: &str| line.as_bytes()[..MAX_WORDS_LINE].to_vec();
+        assert_ne!(words(&at(&old), &at(&new), far), [vec![], vec![]]);
+        let over = |line: &str| line.as_bytes()[..=MAX_WORDS_LINE].to_vec();
+        assert_eq!(words(&over(&old), &over(&new), far), [vec![], vec![]]);
+    }
+
+    #[test]
+    fn word_highlights_stop_at_the_hunk_deadline() {
+        // Each pair of lines shares no word, the worst case for Myers.
+        let (old, new) = (
+            format!("-{}\n", "(".repeat(MAX_WORDS_LINE - 1)),
+            format!("+{}\n", ")".repeat(MAX_WORDS_LINE - 1)),
+        );
+        let rows = 100;
+        let hunk = format!(
+            "diff --git a/a b/a\n@@ -1 +1 @@\n{}{}",
+            old.repeat(rows),
+            new.repeat(rows)
+        );
+        let mut viewer = Viewer::new(Vec::new(), parse(hunk.into()));
+        viewer.key(Key::Char('v'));
+        let mut screen = Screen::new(u16::try_from(rows).unwrap(), 80);
+        let started = Instant::now();
+        viewer.draw(&mut screen);
+        let took = started.elapsed();
+        assert!(took < WORDS_DEADLINE * 10, "{took:?}");
+        // Past the deadline a pair is marked whole.
+        assert!(
+            viewer
+                .words
+                .values()
+                .all(|marks| *marks == [[1..MAX_WORDS_LINE], [1..MAX_WORDS_LINE]])
+        );
     }
 
     #[test]
