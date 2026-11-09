@@ -191,6 +191,30 @@ pub fn fuzz_unified_diff(diff: &[u8]) -> Vec<String> {
     shown
 }
 
+/// What each tool writes first at `rows` × `columns`: entering the alternate screen, then its
+/// first frame of `markdown`, the directory `dir`, and the unified diff `diff`. For the golden
+/// images, which feed these through a core VT engine.
+#[doc(hidden)]
+pub fn first_frames(
+    markdown: &[u8],
+    dir: &Path,
+    diff: &[u8],
+    rows: u16,
+    columns: u16,
+) -> [Vec<u8>; 3] {
+    let mut reader = md::Reader::new(b"README.md".to_vec(), markdown.to_vec(), true);
+    let mut files = files::Files::new(b"work".to_vec(), dir.to_path_buf());
+    let mut viewer = diff::Viewer::new(b"diff".to_vec(), diff::parse(diff.to_vec()));
+    [&mut reader as &mut dyn Tool, &mut files, &mut viewer].map(|tool| {
+        let mut screen = Screen::new(rows, columns);
+        tool.tick();
+        tool.draw(&mut screen);
+        let mut out = ENTER.to_vec();
+        screen.frame(&mut out);
+        out
+    })
+}
+
 /// Why `path` cannot be opened, if `kind` is not true of it.
 fn problem(path: &Path, kind: fn(&Path) -> bool) -> Option<String> {
     match std::fs::metadata(path) {
