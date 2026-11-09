@@ -6,7 +6,7 @@
 
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -90,8 +90,38 @@ where
     run_within(repo, args, TIMEOUT)
 }
 
+/// Runs `git apply` in `repo` through [`run`]'s hardening, with `patch` on its standard input
+/// and no file written: `--cached` stages it, or `-R` reverts it in the work tree. There is never
+/// `--unsafe-paths`, so git refuses a path outside the repository or behind a symbolic link.
+///
+/// # Errors
+///
+/// As [`run`].
+///
+/// # Examples
+///
+/// ```no_run
+/// let patch = b"diff --git a/a b/a\n--- a/a\n+++ b/a\n@@ -1 +1 @@\n-x\n+y\n";
+/// let output = pinfold_tools::git::apply("/path/to/repo".as_ref(), patch, false)?;
+/// assert!(output.status.is_some_and(|status| status.success()));
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn apply(repo: &Path, patch: &[u8], revert: bool) -> io::Result<Output> {
+    let how = if revert { "-R" } else { "--cached" };
+    spawn(repo, ["apply", how], TIMEOUT, patch)
+}
+
 /// [`run`], with git and its configuration listing killed once `timeout` has passed in all.
 pub(crate) fn run_within<I, S>(repo: &Path, args: I, timeout: Duration) -> io::Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    spawn(repo, args, timeout, &[])
+}
+
+/// [`run_within`], with `input` on git's standard input if there is any.
+fn spawn<I, S>(repo: &Path, args: I, timeout: Duration, input: &[u8]) -> io::Result<Output>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
@@ -102,6 +132,7 @@ where
     let listed = capture(
         command(&git, repo, &[]).args(["config", "--list", "-z"]),
         deadline,
+        &[],
     )?;
     if listed.cut_short {
         return Ok(Output {
@@ -127,7 +158,10 @@ where
             command.arg("--ignore-submodules=all");
         }
     }
-    capture(command.args(args), deadline)
+    if !input.is_empty() {
+        command.stdin(Stdio::piped());
+    }
+    capture(command.args(args), deadline, input)
 }
 
 /// The first absolute `PATH` entry with an executable `git`. PATH is the user's choice of git,
@@ -199,9 +233,14 @@ fn overrides(listed: &[u8]) -> Vec<(OsString, &'static str)> {
         .collect()
 }
 
-/// Runs `command`, keeping capped output, and kills it at `deadline`.
-fn capture(command: &mut Command, deadline: Instant) -> io::Result<Output> {
+/// Runs `command` with `input` on its piped standard input, keeping capped output, and kills it
+/// at `deadline`.
+fn capture(command: &mut Command, deadline: Instant, input: &[u8]) -> io::Result<Output> {
     let mut child = command.spawn()?;
+    let stdin = child.stdin.take();
+    let input = input.to_vec();
+    // Dropping the pipe at the end ends git's input; a write to a git that died fails, unseen.
+    let writer = thread::spawn(move || stdin.map(|mut stdin| stdin.write_all(&input)));
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     // At the cap the reader drops the pipe, and git's next write ends it with SIGPIPE.
@@ -220,6 +259,7 @@ fn capture(command: &mut Command, deadline: Instant) -> io::Result<Output> {
     };
     // shortcut: a process git started that keeps the pipe open holds this join; kill git's
     // process group if a tool ever hangs here.
+    let _ = writer.join();
     let mut stdout = out.join().unwrap_or_default();
     let cut_short = status.is_none() || stdout.len() > MAX_OUTPUT;
     stdout.truncate(MAX_OUTPUT);
@@ -267,7 +307,8 @@ mod tests {
         let start = Instant::now();
         let mut sleep = Command::new("sleep");
         sleep.arg("30");
-        let output = capture(&mut sleep, start + crate::files::STATUS_TIMEOUT).expect("sleep");
+        let deadline = start + crate::files::STATUS_TIMEOUT;
+        let output = capture(&mut sleep, deadline, &[]).expect("sleep");
         let took = start.elapsed();
         assert!(output.cut_short && output.status.is_none());
         assert!((2.0..5.0).contains(&took.as_secs_f64()), "{took:?}");

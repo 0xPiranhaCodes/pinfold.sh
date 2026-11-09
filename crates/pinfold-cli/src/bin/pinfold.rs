@@ -321,15 +321,16 @@ Example:
 const DIFF: &str = "\
 pinfold diff: view a git diff, full screen.
 
-Usage: pinfold diff [--staged] [range]
+Usage: pinfold diff [--staged] [--watch] [range]
 
 Shows the work tree against the index, or a revision range such as main..HEAD. A range never
 starts with -.
 
 Options:
   --staged  The index against HEAD instead
+  --watch   Run git again every 2 s, or 20 times as long as it took if that is longer
 
-Keys: hjkl or the arrows move, / searches, ? lists the keys, q quits.
+Keys: v shows the hunks side by side, w turns watching on or off, ? lists the keys, q quits.
 
 Examples:
   pinfold diff --staged
