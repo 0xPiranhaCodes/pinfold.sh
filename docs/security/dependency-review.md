@@ -49,6 +49,10 @@ entry's notes say whether an import trusts them for that crate or only for other
 entry ends a year after it was written. A version published by anyone else is not
 covered.
 
+A new version from a trusted publisher still fails `cargo vet --locked` until `cargo vet
+regenerate imports` records who published it in `supply-chain/imports.lock`. Dependabot
+does not run it, so a bump like #291 needs that commit, not an audit or exemption.
+
 ## Reviewing a crate
 
 Run `cargo vet inspect CRATE VERSION`, or `cargo vet diff CRATE OLD NEW` when an audit
