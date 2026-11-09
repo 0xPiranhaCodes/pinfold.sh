@@ -128,13 +128,20 @@ fn copy(from: &Path, to: &Path) -> io::Result<()> {
     } else if kind.is_dir() {
         // Private while it fills, then the source's mode, so no one else sees it half made.
         DirBuilder::new().mode(0o700).create(to)?;
+        let made = fs::symlink_metadata(to)?;
         // shortcut: a directory swapped for a link after the lstat above is listed through it;
         // walk with openat(O_NOFOLLOW | O_DIRECTORY) in pinfold-sys if another user's race matters.
         for entry in fs::read_dir(from)? {
             let entry = entry?;
             copy(&entry.path(), &to.join(entry.file_name()))?;
         }
-        fs::set_permissions(to, fs::Permissions::from_mode(meta.mode() & 0o777))
+        // Through a descriptor checked to be the directory made above, never a link put there.
+        let opened = File::open(to)?;
+        let found = opened.metadata()?;
+        if (found.dev(), found.ino()) != (made.dev(), made.ino()) {
+            return Err(io::Error::other("it changed while being copied"));
+        }
+        opened.set_permissions(fs::Permissions::from_mode(meta.mode() & 0o777))
     } else if kind.is_file() {
         let mut source = File::open(from)?;
         let opened = source.metadata()?;
