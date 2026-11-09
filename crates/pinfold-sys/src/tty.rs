@@ -2,12 +2,24 @@
 
 use std::io;
 use std::mem::MaybeUninit;
-use std::os::fd::{AsRawFd, BorrowedFd, RawFd};
+use std::os::fd::{AsRawFd, BorrowedFd};
 
-/// A terminal in raw mode, back in its old mode when dropped.
+/// A terminal in raw mode, back in its old mode when dropped. It borrows the descriptor, so it
+/// cannot outlive it and restore a terminal that later took the same number.
+///
+/// ```compile_fail,E0597
+/// use std::os::fd::AsFd;
+///
+/// let raw = {
+///     let terminal = std::fs::File::open("/dev/tty")?;
+///     pinfold_sys::tty::raw(terminal.as_fd())?
+/// }; // `terminal` closes here, while `raw` still holds it: refused
+/// # drop(raw);
+/// # Ok::<(), std::io::Error>(())
+/// ```
 #[derive(Debug)]
-pub struct Raw {
-    fd: RawFd,
+pub struct Raw<'fd> {
+    fd: BorrowedFd<'fd>,
     saved: libc::termios,
 }
 
@@ -28,8 +40,8 @@ pub struct Raw {
 /// drop(raw); // the old mode is back
 /// # Ok::<(), std::io::Error>(())
 /// ```
-pub fn raw(fd: BorrowedFd<'_>) -> io::Result<Raw> {
-    let fd = fd.as_raw_fd();
+pub fn raw(terminal: BorrowedFd<'_>) -> io::Result<Raw<'_>> {
+    let fd = terminal.as_raw_fd();
     let mut mode = MaybeUninit::<libc::termios>::zeroed();
     // SAFETY: `mode` is valid for writes of a whole termios for the call.
     if unsafe { libc::tcgetattr(fd, mode.as_mut_ptr()) } != 0 {
@@ -46,13 +58,16 @@ pub fn raw(fd: BorrowedFd<'_>) -> io::Result<Raw> {
     if unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &raw const raw) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(Raw { fd, saved })
+    Ok(Raw {
+        fd: terminal,
+        saved,
+    })
 }
 
-impl Drop for Raw {
+impl Drop for Raw<'_> {
     fn drop(&mut self) {
-        // SAFETY: `saved` is the valid termios tcgetattr gave. A closed fd only fails the call.
-        unsafe { libc::tcsetattr(self.fd, libc::TCSAFLUSH, &raw const self.saved) };
+        // SAFETY: the borrow keeps `fd` open, and `saved` is the valid termios tcgetattr gave.
+        unsafe { libc::tcsetattr(self.fd.as_raw_fd(), libc::TCSAFLUSH, &raw const self.saved) };
     }
 }
 
