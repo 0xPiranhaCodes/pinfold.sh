@@ -208,10 +208,28 @@ mod tests {
     #[test]
     fn a_large_clipboard_costs_this_process_the_limit() {
         const MIB: usize = 1024 * 1024;
+        const NAME: &str = "PINFOLD_TEST_LARGE_CLIPBOARD";
+        // Other tests allocate on parallel threads, so the read is measured alone in a
+        // child: this test binary run again for this test only (#361).
+        if std::env::var_os(NAME).is_none() {
+            let test = "clipboard::tests::a_large_clipboard_costs_this_process_the_limit";
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test, "--nocapture"])
+                .env(NAME, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            eprint!("{}", String::from_utf8_lossy(&output.stderr));
+            assert!(output.status.success(), "{stdout}");
+            assert!(stdout.contains("1 passed"), "{stdout}");
+            return;
+        }
         let footprint = || crate::footprint(std::process::id()).unwrap_or(0) as usize;
         let before = footprint();
-        let script = "head -c 67108864 /dev/zero | tr '\\0' x";
-        assert_eq!(printed(script, MIB), Err(Unread::TooLarge));
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "head -c 67108864 /dev/zero | tr '\\0' x"]);
+        // A paste's own deadline: under load the pipeline can take over `printed`'s 500 ms.
+        assert_eq!(bounded(command, MIB, TIMEOUT), Err(Unread::TooLarge));
         let grown = footprint().saturating_sub(before);
         eprintln!("a 64 MiB clipboard grew this process by {grown} bytes");
         assert!(grown < 4 * MIB, "{grown}");
