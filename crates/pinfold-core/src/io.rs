@@ -624,6 +624,12 @@ impl Reactor {
         self.panes.len()
     }
 
+    /// The pid of a pane's program, which leads the pane's session.
+    #[must_use]
+    pub fn pid(&self, pane: usize) -> Option<u32> {
+        Some(self.pane(pane)?.pty.terminal().session)
+    }
+
     /// Returns whether a pane's child has closed the PTY. Unknown panes count as closed.
     #[must_use]
     pub fn is_closed(&self, pane: usize) -> bool {

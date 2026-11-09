@@ -144,22 +144,102 @@ fn write_corpora(dir: &Path) -> io::Result<()> {
     }
 }
 
-/// The core starts the window beside it, and the two profiles build into separate directories.
-fn beside_the_core(target: &Path) -> io::Result<()> {
+/// The core starts the window and the tools beside it, and the two profiles build into separate
+/// directories.
+fn beside_the_core(target: &Path, binary: &str) -> io::Result<()> {
     fs::copy(
-        target.join("release/pinfold-window"),
-        target.join("release-core/pinfold-window"),
+        target.join("release").join(binary),
+        target.join("release-core").join(binary),
     )?;
     Ok(())
+}
+
+/// Runs git in `repo` with no hooks and no signing, as an author the gate names.
+fn git(repo: &Path, args: &[&str]) -> io::Result<()> {
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["-c", "user.name=gate", "-c", "user.email=gate@localhost"])
+        .args([
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+        ])
+        .args(args)
+        .status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!("git {} failed", args.join(" "))))
+    }
+}
+
+/// Fills the tools' caps in `dir`, outside any repository so the file manager runs no git:
+/// `reader.md` of exactly 5 MB, an `empty` directory, `entries` of 10,000 files, a `repo` whose
+/// work tree's diff is over 8 MB, and `tool-screen.sh`, a window's shell that runs the reader.
+fn write_tool_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _ = fs::remove_dir_all(dir);
+    fs::create_dir_all(dir.join("empty"))?;
+    fs::create_dir_all(dir.join("entries"))?;
+    fs::create_dir_all(dir.join("repo"))?;
+    let mut markdown = Vec::new();
+    for section in 0.. {
+        if markdown.len() as u64 >= mem_gate::MARKDOWN_CAP {
+            break;
+        }
+        markdown.extend(format!(
+            "## Section {section}\n\n見出し 日本語 中文 한국어\n\nSome *emphasis*, **bold**, `code` \
+             and a [link](https://pinfold.sh/{section}).\n\n- one\n- two\n\n\
+             | a | b |\n| --- | --- |\n| 1 | 2 |\n\n```\nfn main() {{}}\n```\n\n"
+        ).bytes());
+    }
+    // Cut at the cap, which may split a character; the reader shows that as hex.
+    markdown.truncate(mem_gate::MARKDOWN_CAP as usize);
+    fs::write(dir.join("reader.md"), markdown)?;
+    for entry in 0..mem_gate::ENTRY_CAP {
+        fs::write(dir.join(format!("entries/{entry:05}.txt")), "")?;
+    }
+    let repo = dir.join("repo");
+    let lines = |side: &str| -> String {
+        (0..100_000)
+            .map(|n| format!("{side} line {n:06}, long enough for an 8 MB diff\n"))
+            .collect()
+    };
+    git(&repo, &["init", "-q"])?;
+    fs::write(repo.join("a.txt"), lines("old"))?;
+    git(&repo, &["add", "a.txt"])?;
+    git(&repo, &["commit", "-q", "-m", "base"])?;
+    fs::write(repo.join("a.txt"), lines("new"))?;
+    let quote = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', r"'\''"));
+    let script = dir.join("tool-screen.sh");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nexec {} md -- {}\n",
+            quote(tools),
+            quote(&dir.join("reader.md"))
+        ),
+    )?;
+    fs::set_permissions(script, fs::Permissions::from_mode(0o755))
 }
 
 fn mem_gate_task() -> ExitCode {
     let target = std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into());
     let corpora = Path::new(&target).join("corpora");
+    let inputs = std::env::temp_dir().join(format!("pinfold-tool-gate-{}", std::process::id()));
     if let Err(error) = build("release-core", "pinfold-core", &["--no-default-features"])
         .and_then(|()| build("release", "pinfold-window", &[]))
-        .and_then(|()| beside_the_core(Path::new(&target)))
+        .and_then(|()| build("release", "pinfold", &[]))
+        .and_then(|()| beside_the_core(Path::new(&target), "pinfold-window"))
+        .and_then(|()| beside_the_core(Path::new(&target), "pinfold"))
         .and_then(|()| write_corpora(&corpora))
+        .and_then(|()| {
+            let tools = fs::canonicalize(Path::new(&target).join("release-core/pinfold"))?;
+            write_tool_inputs(&inputs, &tools)
+        })
     {
         eprintln!("mem-gate: {error}");
         return ExitCode::FAILURE;
@@ -171,6 +251,18 @@ fn mem_gate_task() -> ExitCode {
         eprintln!("mem-gate: the target directory is not valid UTF-8");
         return ExitCode::FAILURE;
     };
+    let Some(inputs_text) = inputs.to_str() else {
+        eprintln!("mem-gate: the temp directory is not valid UTF-8");
+        return ExitCode::FAILURE;
+    };
+    let input = |name: &str| format!("{inputs_text}/{name}");
+    let (markdown, empty, entries, repo) = (
+        input("reader.md"),
+        input("empty"),
+        input("entries"),
+        input("repo"),
+    );
+    let tool_screen = inputs.join("tool-screen.sh");
     let replay_typical = ["--replay", typical.as_str()];
     let replay_hostile = ["--replay", hostile.as_str()];
     let replay_baseline: &[&str] = &["--replay", "/dev/null"];
@@ -225,6 +317,62 @@ fn mem_gate_task() -> ExitCode {
             menu: false,
         },
     ];
+    // ADR-0045 section 5. Each tool runs in a pane of a core, which prints the tool's pid.
+    let idle_tool = ["--tool", "1", "files", empty.as_str()];
+    let reader = ["--tool", "1", "md", markdown.as_str()];
+    let file_manager = ["--tool", "1", "files", entries.as_str()];
+    let diff_viewer = ["--tool", "1", "diff", repo.as_str()];
+    let readers = ["--tool", "8", "md", markdown.as_str()];
+    let closed = ["--tool-closed", "md", markdown.as_str()];
+    let tool = mem_gate::Budget {
+        metric: "A tool process, nothing open (files of an empty directory)",
+        limit: mem_gate::TOOL_LIMIT,
+        program: &core,
+        args: &idle_tool,
+        per_pane_over: None,
+        settle: mem_gate::TOOL_SETTLE,
+        wait_for_line: true,
+        screen: None,
+        window: Some(Side::Window),
+        menu: false,
+    };
+    budgets.extend([
+        mem_gate::Budget { ..tool },
+        mem_gate::Budget {
+            metric: mem_gate::READER,
+            limit: mem_gate::READER_LIMIT,
+            args: &reader,
+            ..tool
+        },
+        mem_gate::Budget {
+            metric: "File manager, 10,000 entries",
+            limit: mem_gate::FILES_LIMIT,
+            args: &file_manager,
+            ..tool
+        },
+        mem_gate::Budget {
+            metric: "Diff viewer, git output cut at 8 MB",
+            limit: mem_gate::DIFF_LIMIT,
+            args: &diff_viewer,
+            ..tool
+        },
+        mem_gate::Budget {
+            metric: "Each tool pane in the core (markdown reader)",
+            limit: mem_gate::PANE_LIMIT,
+            args: &readers,
+            per_pane_over: Some((&reader, 7)),
+            window: Some(Side::Core),
+            ..tool
+        },
+        mem_gate::Budget {
+            metric: "Core 2 s after a tool pane closes, its tool gone",
+            limit: mem_gate::CORE_LIMIT,
+            args: &closed,
+            settle: mem_gate::CLOSED_SETTLE,
+            window: Some(Side::Closed),
+            ..tool
+        },
+    ]);
     if cfg!(target_os = "macos") {
         budgets.push(mem_gate::Budget {
             metric: "Window on macOS, 1512x1890",
@@ -285,6 +433,18 @@ fn mem_gate_task() -> ExitCode {
             screen: Some(Path::new(HEAVY_SCREEN)),
             window: Some(Side::Window),
             menu: true,
+        });
+        budgets.push(mem_gate::Budget {
+            metric: "Window on macOS with the markdown reader, 1512x1890",
+            limit: mem_gate::WINDOW_LIMIT_HALF_RETINA,
+            program: &core,
+            args: &["--window", "1", "1512x1890"],
+            per_pane_over: None,
+            settle: mem_gate::WINDOW_SETTLE,
+            wait_for_line: true,
+            screen: Some(&tool_screen),
+            window: Some(Side::Window),
+            menu: false,
         });
         budgets.push(mem_gate::Budget {
             metric: "Core beside that window, 8 idle tabs",
@@ -361,6 +521,18 @@ fn mem_gate_task() -> ExitCode {
             menu: true,
         });
         budgets.push(mem_gate::Budget {
+            metric: "Window on X11 with the markdown reader, 1920x1080",
+            limit: mem_gate::WINDOW_LIMIT_FULL_HD,
+            program: &core,
+            args: &["--window", "1", "1920x1080"],
+            per_pane_over: None,
+            settle: mem_gate::WINDOW_SETTLE,
+            wait_for_line: true,
+            screen: Some(&tool_screen),
+            window: Some(Side::Window),
+            menu: false,
+        });
+        budgets.push(mem_gate::Budget {
             metric: "Core beside that window, 8 idle tabs",
             limit: mem_gate::CORE_LIMIT,
             program: &core,
@@ -373,7 +545,9 @@ fn mem_gate_task() -> ExitCode {
             menu: false,
         });
     }
-    if mem_gate::run(&budgets) {
+    let passed = mem_gate::run(&budgets);
+    let _ = fs::remove_dir_all(&inputs);
+    if passed {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE
@@ -397,7 +571,7 @@ fn soak_task(args: &[String]) -> ExitCode {
     let target = std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into());
     let passed = build("release-core", "pinfold-core", &["--no-default-features"])
         .and_then(|()| build("release", "pinfold-window", &[]))
-        .and_then(|()| beside_the_core(Path::new(&target)))
+        .and_then(|()| beside_the_core(Path::new(&target), "pinfold-window"))
         .and_then(|()| {
             soak::run(
                 &Path::new(&target).join("release-core/pinfold-core"),
