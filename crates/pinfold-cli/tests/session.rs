@@ -9,6 +9,8 @@ use std::fmt::Write as _;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 use std::{env, fs, thread};
 
@@ -33,16 +35,33 @@ const PATIENCE: Duration = Duration::from_secs(120);
 
 type Result<T = ()> = std::result::Result<T, Box<dyn Error>>;
 
+/// Numbers each [`Session`] in this process, so two tests that pass one name never share a
+/// directory (#353).
+static SESSIONS: AtomicUsize = AtomicUsize::new(0);
+/// The directories of this process's live sessions.
+static LIVE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
 /// A runtime and binary directory, whose core dies with the test whatever happens.
 struct Session {
     directory: PathBuf,
 }
 
 impl Session {
-    /// A short path, as a socket's path has a low limit on macOS.
+    /// A short path, as a socket's path has a low limit on macOS. `name` only labels it: the
+    /// number after it makes it this session's alone, and it fails if a live one has it.
     fn new(name: &str, window: Option<&str>) -> Result<Self> {
-        let directory = env::temp_dir().join(format!("ps{}{name}", std::process::id()));
-        let _ = fs::remove_dir_all(&directory);
+        let number = SESSIONS.fetch_add(1, Ordering::Relaxed);
+        let directory = env::temp_dir().join(format!("ps{}{name}-{number}", std::process::id()));
+        let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
+        if live.contains(&directory) {
+            return Err(format!("two live sessions share {}", directory.display()).into());
+        }
+        live.push(directory.clone());
+        drop(live);
+        // Built now, so an early return below unregisters it too.
+        let session = Self { directory };
+        let directory = &session.directory;
+        let _ = fs::remove_dir_all(directory);
         fs::create_dir_all(directory.join("run"))?;
         place(env!("CARGO_BIN_EXE_pinfold"), &directory.join("pinfold"))?;
         place(
@@ -55,7 +74,7 @@ impl Session {
             use std::os::unix::fs::PermissionsExt;
             fs::set_permissions(&script, fs::Permissions::from_mode(0o700))?;
         }
-        Ok(Self { directory })
+        Ok(session)
     }
 
     fn launcher(&self, shell: &str) -> Command {
@@ -162,7 +181,15 @@ impl Drop for Session {
             let _ = kill(core.trim()).stderr(Stdio::null()).status();
         }
         let _ = fs::remove_dir_all(&self.directory);
+        let mut live = LIVE.lock().unwrap_or_else(PoisonError::into_inner);
+        live.retain(|directory| *directory != self.directory);
     }
+}
+
+#[test]
+fn sessions_with_one_name_never_share_a_directory() {
+    let (first, second) = (Session::new("dup", None), Session::new("dup", None));
+    assert_ne!(first.unwrap().directory, second.unwrap().directory);
 }
 
 /// Writes `text` to `path` whole: a reader sees nothing or all of it, never part.
@@ -1678,6 +1705,9 @@ fn send_window(tool: pinfold_proto::link::Tool, ask: impl Fn(&mut Link, &Path) -
         return;
     };
     let directory = Path::new(&directory);
+    // So the session's drop kills the core the launcher started, and its panes.
+    let core = std::os::unix::process::parent_id().to_string();
+    note(directory.join("core"), core).unwrap();
     let mut link = Link::new(socket::take_link().unwrap()).unwrap();
     assert!(link.resize(24, 80));
     until(&mut link, |link| link.is_greeted()).unwrap();
