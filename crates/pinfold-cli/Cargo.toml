@@ -38,6 +38,7 @@ pinfold-config = { path = "../pinfold-config", version = "0.1.0-beta.3" }
 pinfold-core = { path = "../pinfold-core", version = "0.1.0-beta.3" }
 pinfold-proto = { path = "../pinfold-proto", version = "0.1.0-beta.3" }
 pinfold-sys = { path = "../pinfold-sys", version = "0.1.0-beta.3" }
+pinfold-tools = { path = "../pinfold-tools", version = "0.1.0-beta.3" }
 serde_json = "1.0.154"
 
 [dev-dependencies]

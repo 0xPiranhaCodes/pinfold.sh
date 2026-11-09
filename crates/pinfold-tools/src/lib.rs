@@ -1,4 +1,303 @@
 //! Markdown reader, file manager and diff viewer: full-screen programs that each run in their
 //! own pane (ADR-0045).
+//!
+//! A tool draws into a [`Screen`], whose [`put`](screen::Screen::put) escapes
+//! every string, and reads [`Key`]s. [`run`] owns the terminal around it.
 
+pub mod keys;
 pub mod screen;
+
+use std::io::{self, Read, Write};
+use std::os::fd::AsFd;
+use std::path::{Path, PathBuf};
+
+use keys::{Key, Keys};
+use screen::{Color, Screen, Style};
+
+/// A tool and its arguments, as `pinfold md`, `files` and `diff` take them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Command {
+    /// `pinfold md <file>`
+    Md {
+        /// The markdown file.
+        file: PathBuf,
+    },
+    /// `pinfold files [dir]`
+    Files {
+        /// The directory, by default the current one.
+        dir: PathBuf,
+    },
+    /// `pinfold diff [--staged] [range]`
+    Diff {
+        /// The index against `HEAD`, not the work tree against the index.
+        staged: bool,
+        /// A revision range, such as `main..HEAD`.
+        range: Option<String>,
+    },
+}
+
+impl Command {
+    /// Parses the words after `pinfold`, or `None` if they are not a tool's.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pinfold_tools::Command;
+    ///
+    /// let diff = Command::parse(&["diff", "--staged"]);
+    /// assert_eq!(diff, Some(Command::Diff { staged: true, range: None }));
+    /// assert_eq!(Command::parse(&["diff", "--stat"]), None);
+    /// ```
+    pub fn parse(words: &[&str]) -> Option<Self> {
+        let (&tool, rest) = words.split_first()?;
+        let (staged, rest) = match (tool, rest) {
+            ("diff", ["--staged", rest @ ..]) => (true, rest),
+            (_, rest) => (false, rest),
+        };
+        // After `--`, as the core passes it, a path that starts with `-` is still a path.
+        let argument = match rest {
+            [] | ["--"] => None,
+            ["--", word] => Some(*word),
+            [word] if !word.starts_with('-') => Some(*word),
+            _ => return None,
+        };
+        Some(match (tool, argument) {
+            ("md", Some(file)) => Self::Md { file: file.into() },
+            ("files", dir) => Self::Files {
+                dir: dir.unwrap_or(".").into(),
+            },
+            // A range is never an option, even after `--` (ADR-0045 section 4).
+            ("diff", range) if !range.is_some_and(|range| range.starts_with('-')) => Self::Diff {
+                staged,
+                range: range.map(str::to_owned),
+            },
+            _ => return None,
+        })
+    }
+
+    /// Runs the tool in this process's terminal until it quits, and returns whether it started.
+    /// One that could not start shows ✕ error with the reason, and quits on the next key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if standard input or output is not a terminal, or writing to it fails.
+    pub fn run(&self) -> io::Result<bool> {
+        let (title, problem) = match self {
+            Self::Md { file } => (
+                format!("md {}", file.display()),
+                problem(file, Path::is_file),
+            ),
+            Self::Files { dir } => (
+                format!("files {}", dir.display()),
+                problem(dir, Path::is_dir),
+            ),
+            Self::Diff { staged, range } => {
+                let staged = if *staged { " --staged" } else { "" };
+                (
+                    format!("diff{staged} {}", range.as_deref().unwrap_or("")),
+                    None,
+                )
+            }
+        };
+        let started = problem.is_none();
+        run(&mut Placeholder { title, problem })?;
+        Ok(started)
+    }
+}
+
+/// Why `path` cannot be opened, if `kind` is not true of it.
+fn problem(path: &Path, kind: fn(&Path) -> bool) -> Option<String> {
+    match std::fs::metadata(path) {
+        Ok(_) if kind(path) => None,
+        Ok(_) => Some(format!("{} is the wrong kind of file", path.display())),
+        Err(error) => Some(format!("cannot open {}: {error}", path.display())),
+    }
+}
+
+/// What a tool does after a key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Flow {
+    /// Keep running.
+    Continue,
+    /// Leave, restoring the terminal.
+    Quit,
+}
+
+/// A full-screen tool, which [`run`] draws and sends keys to.
+pub trait Tool {
+    /// Draws the whole screen; only the rows that changed reach the terminal.
+    fn draw(&mut self, screen: &mut Screen);
+    /// Handles a key. Every tool quits on `q` when no prompt of its own is open.
+    fn key(&mut self, key: Key) -> Flow;
+}
+
+/// The screen a tool shows until its own slice lands, and the startup failure screen.
+struct Placeholder {
+    title: String,
+    problem: Option<String>,
+}
+
+impl Tool for Placeholder {
+    fn draw(&mut self, screen: &mut Screen) {
+        let bold = Style {
+            bold: true,
+            ..Style::default()
+        };
+        screen.put(0, 0, format!("pinfold {}", self.title), bold);
+        if let Some(problem) = &self.problem {
+            let red = Style {
+                fg: Color::Red,
+                ..Style::default()
+            };
+            let column = screen.put(2, 0, "✕ error", red);
+            screen.put(2, column + 1, problem, Style::default());
+            screen.put(4, 0, "Press any key to leave.", Style::default());
+        } else {
+            screen.put(
+                2,
+                0,
+                "This tool is not built yet. Press q to leave.",
+                Style::default(),
+            );
+        }
+    }
+
+    fn key(&mut self, key: Key) -> Flow {
+        match (key, &self.problem) {
+            (_, Some(_)) | (Key::Char('q'), None) => Flow::Quit,
+            _ => Flow::Continue,
+        }
+    }
+}
+
+/// Alternate screen, cursor hidden, no autowrap, SGR mouse reports; and their undoing.
+const ENTER: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1006h";
+const LEAVE: &[u8] = b"\x1b[?1006l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l";
+
+/// The terminal in raw mode and the alternate screen, restored when dropped.
+struct Terminal<'fd> {
+    _raw: pinfold_sys::tty::Raw<'fd>,
+}
+
+impl Drop for Terminal<'_> {
+    fn drop(&mut self) {
+        let mut out = io::stdout();
+        let _ = out.write_all(LEAVE).and_then(|()| out.flush());
+    }
+}
+
+/// Runs `tool` full screen until it quits, redrawing after each key, read or 100 ms without one.
+///
+/// # Errors
+///
+/// Returns an error if standard input or output is not a terminal, or reading or writing fails.
+pub fn run(tool: &mut dyn Tool) -> io::Result<()> {
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+    let _terminal = Terminal {
+        _raw: pinfold_sys::tty::raw(stdin.as_fd())?,
+    };
+    stdout.write_all(ENTER)?;
+    let mut screen = Screen::new(0, 0);
+    let mut keys = Keys::default();
+    let (mut out, mut input) = (Vec::new(), [0; 1024]);
+    loop {
+        let size = pinfold_sys::tty::size(stdout.as_fd())?;
+        if size != screen.size() {
+            screen = Screen::new(size.0, size.1);
+        }
+        screen.clear();
+        tool.draw(&mut screen);
+        out.clear();
+        screen.frame(&mut out);
+        stdout.write_all(&out)?;
+        stdout.flush()?;
+        // Raw mode returns from a read after 100 ms with nothing.
+        let read = stdin.lock().read(&mut input)?;
+        keys.push(&input[..read]);
+        while let Some(key) = keys.next(read == 0) {
+            if tool.key(key) == Flow::Quit {
+                return Ok(());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn arguments() {
+        let md = Command::Md {
+            file: "README.md".into(),
+        };
+        assert_eq!(Command::parse(&["md", "README.md"]), Some(md));
+        assert_eq!(
+            Command::parse(&["files"]),
+            Some(Command::Files { dir: ".".into() })
+        );
+        let range = Some("main..HEAD".to_owned());
+        let diff = Command::Diff {
+            staged: true,
+            range,
+        };
+        assert_eq!(
+            Command::parse(&["diff", "--staged", "main..HEAD"]),
+            Some(diff)
+        );
+        let dashed = Command::Md {
+            file: "-notes.md".into(),
+        };
+        assert_eq!(Command::parse(&["md", "--", "-notes.md"]), Some(dashed));
+        let dashed = Command::Files { dir: "-x".into() };
+        assert_eq!(Command::parse(&["files", "--", "-x"]), Some(dashed));
+        let staged = Command::Diff {
+            staged: true,
+            range: Some("a..b".to_owned()),
+        };
+        assert_eq!(
+            Command::parse(&["diff", "--staged", "--", "a..b"]),
+            Some(staged)
+        );
+        let plain = Command::Diff {
+            staged: false,
+            range: None,
+        };
+        assert_eq!(Command::parse(&["diff", "--"]), Some(plain));
+        for wrong in [
+            &["md"][..],
+            &["md", "--"],
+            &["diff", "--", "--output=x"],
+            &["files", "--", "a", "b"],
+            &["md", "-x"],
+            &["files", "a", "b"],
+            &["diff", "--x"],
+            &["diff", "a", "b"],
+        ] {
+            assert_eq!(Command::parse(wrong), None, "{wrong:?}");
+        }
+    }
+
+    #[test]
+    fn a_tool_that_cannot_start_shows_the_reason_in_red_and_leaves_on_any_key() {
+        let mut tool = Placeholder {
+            title: "md gone.md".into(),
+            problem: problem(Path::new("gone.md"), Path::is_file),
+        };
+        let mut screen = Screen::new(6, 60);
+        tool.draw(&mut screen);
+        assert!(screen.row(2).starts_with("✕ error cannot open gone.md: "));
+        assert_eq!(tool.key(Key::Char('j')), Flow::Quit);
+    }
+
+    #[test]
+    fn a_placeholder_quits_on_q_only() {
+        let mut tool = Placeholder {
+            title: "files .".into(),
+            problem: None,
+        };
+        assert_eq!(tool.key(Key::Char('j')), Flow::Continue);
+        assert_eq!(tool.key(Key::Char('q')), Flow::Quit);
+    }
+}
