@@ -1548,7 +1548,7 @@ fn tool_process() {
 
 #[test]
 fn an_agent_cannot_type_into_the_tool_it_opened() {
-    let session = Session::new("t", None).unwrap();
+    let session = Session::new("tl", None).unwrap();
     let exe = env::current_exe().unwrap();
     let shell = format!(
         "if mkdir \"$PINFOLD_TEST_CLIENT/first\"; then {TOOL}=\"$PINFOLD_TEST_CLIENT\" exec '{}' \
