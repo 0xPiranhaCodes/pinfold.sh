@@ -87,9 +87,28 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    run_within(repo, args, TIMEOUT)
+}
+
+/// [`run`], with git and its configuration listing killed once `timeout` has passed in all.
+pub(crate) fn run_within<I, S>(repo: &Path, args: I, timeout: Duration) -> io::Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let deadline = Instant::now() + timeout;
     let path = env::var_os("PATH").unwrap_or_default();
     let git = find(&path).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no git"))?;
-    let listed = capture(command(&git, repo, &[]).args(["config", "--list", "-z"]))?;
+    let listed = capture(
+        command(&git, repo, &[]).args(["config", "--list", "-z"]),
+        deadline,
+    )?;
+    if listed.cut_short {
+        return Ok(Output {
+            stdout: Vec::new(),
+            ..listed
+        });
+    }
     if listed.status.is_none_or(|status| !status.success()) {
         let errors = String::from_utf8_lossy(&listed.stderr);
         return Err(io::Error::other(format!(
@@ -108,7 +127,7 @@ where
             command.arg("--ignore-submodules=all");
         }
     }
-    capture(command.args(args))
+    capture(command.args(args), deadline)
 }
 
 /// The first absolute `PATH` entry with an executable `git`. PATH is the user's choice of git,
@@ -180,15 +199,14 @@ fn overrides(listed: &[u8]) -> Vec<(OsString, &'static str)> {
         .collect()
 }
 
-/// Runs `command`, keeping capped output, and kills it at the time cap.
-fn capture(command: &mut Command) -> io::Result<Output> {
+/// Runs `command`, keeping capped output, and kills it at `deadline`.
+fn capture(command: &mut Command, deadline: Instant) -> io::Result<Output> {
     let mut child = command.spawn()?;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     // At the cap the reader drops the pipe, and git's next write ends it with SIGPIPE.
     let out = thread::spawn(move || read(stdout, MAX_OUTPUT));
     let errors = thread::spawn(move || read(stderr, MAX_ERRORS));
-    let deadline = Instant::now() + TIMEOUT;
     let status = loop {
         if let Some(status) = child.try_wait()? {
             break Some(status);
@@ -242,6 +260,17 @@ mod tests {
                 assert!(!code.contains("Command::new"), "{}", path.display());
             }
         }
+    }
+
+    #[test]
+    fn a_call_is_killed_at_its_deadline() {
+        let start = Instant::now();
+        let mut sleep = Command::new("sleep");
+        sleep.arg("30");
+        let output = capture(&mut sleep, start + crate::files::STATUS_TIMEOUT).expect("sleep");
+        let took = start.elapsed();
+        assert!(output.cut_short && output.status.is_none());
+        assert!((2.0..5.0).contains(&took.as_secs_f64()), "{took:?}");
     }
 
     #[test]
