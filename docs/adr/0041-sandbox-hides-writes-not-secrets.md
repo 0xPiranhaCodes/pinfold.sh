@@ -55,7 +55,7 @@ Each control has a test that runs the real `sandbox-exec` and bubblewrap.
 ## Consequences
 
 A sandboxed agent can no longer read the listed stores, see secret-looking variables the
-profile does not keep, or use the clipboard. An agent CLI that read one of those stores, or
+profile does not keep, or use the clipboard directly. An agent CLI that read one of those stores, or
 needs a stripped variable, breaks until the profile keeps the variable or the person runs it
 unsandboxed; each hidden store has a known-issues entry. Stores not on the list, and anything
 the agent can reach over the network, are not protected: an agent a prompt injection steers can

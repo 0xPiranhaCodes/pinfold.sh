@@ -10,9 +10,9 @@ What PinFold aims for, what v1 leaves out, and the memory targets behind its bud
    that channel is scoped, audited and gated by prompts that programs cannot fake.
    See the [threat model](threat-model.md), including what these
    controls do not do. A sandboxed agent profile limits what the agent writes and
-   which terminals it reaches, but in the beta it can still read your credentials
-   outside `~/.ssh`, such as `~/.aws` or `~/.config/gh`, use the macOS clipboard and
-   reach the network ([ADR-0041](../adr/0041-sandbox-hides-writes-not-secrets.md)).
+   which terminals it reaches, and hides the common credential stores, secret-looking
+   variables and direct clipboard access, but it can read your other files and reach the
+   network ([ADR-0041](../adr/0041-sandbox-hides-writes-not-secrets.md)).
 3. **Crash isolation.** A small core process owns your PTYs. A crash in the window
    or the built-in tools never kills a running agent.
 

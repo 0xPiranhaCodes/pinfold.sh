@@ -58,8 +58,10 @@ Linux packages come with the main release
   redacted, and the core keeps an audit log of requests. See the
   [API reference](docs/api/README.md).
 - **Sandboxed agent profiles.** A sandboxed agent cannot write outside its working and temporary
-  directories or open another pane's terminal. It can still read most of your files, such as `~/.aws`
-  ([ADR-0041](docs/adr/0041-sandbox-hides-writes-not-secrets.md)).
+  directories, open another pane's terminal, read `~/.ssh` or the common credential stores such
+  as `~/.aws`, `~/.config/gh` and browser profiles, get secret-looking environment variables its
+  profile does not keep, or use the clipboard directly. It can read your other files and reach the
+  network ([ADR-0041](docs/adr/0041-sandbox-hides-writes-not-secrets.md)).
 - **Memory first.** Every subsystem has a budget that `cargo xtask mem-gate` checks. In an
   eight-hour Linux soak the core's PSS stayed between 4.31 and 4.64 MB
   ([benches/soak.md](benches/soak.md)).
@@ -71,8 +73,10 @@ Linux packages come with the main release
 - macOS only, and there is no update check: to update, download the new `.dmg`.
 - Restoring a session brings back the layout and directories, but not the scrollback or what
   ran in a shell pane.
-- A sandboxed agent can read credentials outside `~/.ssh`, use the clipboard and reach the
-  network.
+- A sandboxed agent can read credential stores not on the sandbox's list and reach the
+  network. On macOS it can read the environment of your other processes, such as a token
+  exported in another pane's shell
+  ([ADR-0047](docs/adr/0047-macos-sandbox-reads-other-processes-environment.md)).
 
 Read the [known issues](docs/beta/known-issues.md) before you report a bug.
 
