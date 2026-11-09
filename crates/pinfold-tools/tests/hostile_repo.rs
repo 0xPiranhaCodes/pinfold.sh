@@ -151,15 +151,14 @@ fn nothing_a_hostile_repository_configures_runs() {
     }
 
     let run = |args: &[&str]| git::run(&repo, args).unwrap();
-    let patch = root.join("a.patch");
-    fs::write(&patch, run(&["diff", "--", "a.txt"]).stdout).unwrap();
-    let patch = patch.to_str().unwrap();
+    // The diff viewer's stage and revert: the patch goes in on standard input, no file.
+    let patch = run(&["diff", "--", "a.txt"]).stdout;
     let outputs = [
         run(&["diff"]),
         run(&["diff", "--staged"]),
         run(&["status", "--porcelain"]),
-        run(&["apply", "--cached", "--", patch]),
-        run(&["apply", "-R", "--", patch]),
+        git::apply(&repo, &patch, false).unwrap(),
+        git::apply(&repo, &patch, true).unwrap(),
         // Each transport is refused, so none of the remote's commands can run.
         run(&["fetch", "ext"]),
         run(&["fetch", "file"]),
