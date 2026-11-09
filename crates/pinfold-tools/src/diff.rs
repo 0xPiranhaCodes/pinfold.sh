@@ -10,7 +10,9 @@
 use std::collections::HashMap;
 use std::iter;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, TryRecvError};
+use std::thread;
 use std::time::{Duration, Instant};
 
 use similar::{Algorithm, DiffTag};
@@ -32,6 +34,10 @@ const MAX_LINE: usize = 10_000;
 const MAX_WORDS_LINE: usize = 1024;
 /// Time `similar` may spend on one hunk's lines on one draw, after which it marks whole lines.
 const WORDS_DEADLINE: Duration = Duration::from_millis(50);
+/// Least time between two runs of git in watch mode.
+const WATCH_EVERY: Duration = Duration::from_secs(2);
+/// Times the last run's duration that watch mode waits, if longer than [`WATCH_EVERY`].
+const WATCH_TIMES: u32 = 20;
 
 /// A parsed `git diff`, which owns the bytes its ranges point into.
 pub(crate) struct Diff {
@@ -68,9 +74,10 @@ impl File {
     }
 }
 
-const KEYS: [&str; 7] = [
+const KEYS: [&str; 8] = [
     "n p                 the next or previous file",
     "v                   unified or side by side",
+    "w                   watch: run git again every 2 s or more",
     "j k  ↓ ↑            a line down or up",
     "space b  PgDn PgUp  a page down or up",
     "g G  Home End       the top or the end",
@@ -277,6 +284,33 @@ fn unquote(text: &[u8]) -> (Vec<u8>, &[u8]) {
     (path, rest)
 }
 
+/// Where a viewer's diff comes from, so watch mode can run git again.
+pub(crate) struct Source {
+    pub(crate) repo: PathBuf,
+    pub(crate) staged: bool,
+    pub(crate) range: Option<String>,
+}
+
+/// What one run of git in watch mode found, and how long it took.
+type Loaded = (Result<Diff, String>, Duration);
+
+/// Watch mode. Git runs on a thread of its own, one run at a time, so the viewer never waits.
+struct Watch {
+    source: Source,
+    on: bool,
+    /// When git may run next.
+    next: Instant,
+    /// The run in progress.
+    running: Option<Receiver<Loaded>>,
+    /// Why the last run failed; the diff shown is the one before it.
+    failed: Option<String>,
+}
+
+/// How long watch mode waits after a run of git that took `last`.
+fn watch_interval(last: Duration) -> Duration {
+    last.saturating_mul(WATCH_TIMES).max(WATCH_EVERY)
+}
+
 /// A hunk's lines: one context line, or removed lines and the added lines after them.
 enum Block {
     Same(usize),
@@ -431,6 +465,7 @@ pub(crate) struct Viewer {
     side: bool,
     /// The visible lines' changed words from the last draw, by the starts of a pair's lines.
     words: HashMap<(usize, usize), [Vec<Range<usize>>; 2]>,
+    watch: Option<Watch>,
 }
 
 impl Viewer {
@@ -445,7 +480,33 @@ impl Viewer {
             help: false,
             side: false,
             words: HashMap::new(),
+            watch: None,
         }
+    }
+
+    /// This viewer, able to run git again for `source` with `w`, and watching if `on`. The
+    /// first run took `took`.
+    pub(crate) fn watch(mut self, source: Source, on: bool, took: Duration) -> Self {
+        self.watch = Some(Watch {
+            source,
+            on,
+            next: Instant::now() + watch_interval(took),
+            running: None,
+            failed: None,
+        });
+        self
+    }
+
+    /// Shows `diff`, keeping the selected file if it is still there.
+    fn reload(&mut self, diff: Diff) {
+        let label = self.diff.files.get(self.selected).map(File::label);
+        let found =
+            label.and_then(|label| diff.files.iter().position(|file| file.label() == label));
+        self.selected = found
+            .unwrap_or(self.selected)
+            .min(diff.files.len().saturating_sub(1));
+        self.diff = diff;
+        self.words.clear();
     }
 
     /// Calls `each` with the selected file's rows in order, until it returns false.
@@ -541,6 +602,48 @@ fn line_styles(line: &[u8]) -> (Style, Style) {
 }
 
 impl Tool for Viewer {
+    fn tick(&mut self) {
+        let Some(watch) = &mut self.watch else {
+            return;
+        };
+        if let Some(running) = &watch.running {
+            let (loaded, took) = match running.try_recv() {
+                Ok(loaded) => loaded,
+                Err(TryRecvError::Empty) => return,
+                Err(TryRecvError::Disconnected) => (Err("git stopped".to_owned()), WATCH_EVERY),
+            };
+            watch.running = None;
+            watch.next = Instant::now() + watch_interval(took);
+            watch.failed = loaded.as_ref().err().cloned();
+            if let Ok(diff) = loaded {
+                self.reload(diff);
+            }
+            return;
+        }
+        if !watch.on || Instant::now() < watch.next {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let Source {
+            repo,
+            staged,
+            range,
+        } = &watch.source;
+        let (repo, staged, range) = (repo.clone(), *staged, range.clone());
+        let spawned = thread::Builder::new().name("git".into()).spawn(move || {
+            let started = Instant::now();
+            let loaded = load(&repo, staged, range.as_deref());
+            let _ = sender.send((loaded, started.elapsed()));
+        });
+        match spawned {
+            Ok(_) => watch.running = Some(receiver),
+            Err(error) => {
+                watch.failed = Some(format!("cannot run git: {error}"));
+                watch.next = Instant::now() + WATCH_EVERY;
+            }
+        }
+    }
+
     fn draw(&mut self, screen: &mut Screen) {
         let (rows, columns) = screen.size();
         let bold = Style {
@@ -550,7 +653,15 @@ impl Tool for Viewer {
         let dim = colour(Color::BrightBlack);
         screen.put(0, 0, &self.title, bold);
         let files = self.diff.files.len();
-        let place = format!("{}/{files}  ? keys", (self.selected + 1).min(files));
+        let watching = if self.watch.as_ref().is_some_and(|watch| watch.on) {
+            "watching  "
+        } else {
+            ""
+        };
+        let place = format!(
+            "{watching}{}/{files}  ? keys",
+            (self.selected + 1).min(files)
+        );
         let at = columns.saturating_sub(u16::try_from(place.chars().count()).unwrap_or(u16::MAX));
         screen.put(0, at, place, dim);
         if self.help {
@@ -560,6 +671,11 @@ impl Tool for Viewer {
             return;
         }
         let mut top = 1;
+        if let Some(failed) = self.watch.as_ref().and_then(|watch| watch.failed.as_ref()) {
+            let column = screen.put(top, 0, "✕ error", colour(Color::Red));
+            screen.put(top, column + 1, failed, Style::default());
+            top += 1;
+        }
         for note in &self.diff.notes {
             screen.put(top, 0, note, colour(Color::Yellow));
             top += 1;
@@ -667,6 +783,11 @@ impl Tool for Viewer {
             Key::Char('q') => return Flow::Quit,
             Key::Char('?') => self.help = true,
             Key::Char('v') => self.side = !self.side,
+            Key::Char('w') => {
+                if let Some(watch) = &mut self.watch {
+                    watch.on = !watch.on;
+                }
+            }
             Key::Char('n') => {
                 self.selected = (self.selected + 1).min(self.diff.files.len().saturating_sub(1));
                 self.top = 0;
@@ -814,6 +935,20 @@ mod tests {
     }
 
     #[test]
+    fn watch_waits_2_s_or_20_times_the_last_run() {
+        assert_eq!(watch_interval(Duration::ZERO), WATCH_EVERY);
+        assert_eq!(
+            watch_interval(Duration::from_millis(100)),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            watch_interval(Duration::from_millis(150)),
+            Duration::from_secs(3)
+        );
+        assert_eq!(watch_interval(Duration::MAX), Duration::MAX);
+    }
+
+    #[test]
     fn keys_scroll_within_the_diff_and_q_quits() {
         let mut viewer = Viewer::new(Vec::new(), parse(CHANGE.into()));
         let mut screen = Screen::new(5, 80);
@@ -857,6 +992,39 @@ mod tests {
         let diff = load(&repo, false, None).unwrap();
         assert_eq!(diff.files[0].label(), b"a.txt");
         assert_eq!(hunk_lines(&diff, 0), ["-one", "+two"]);
+        // Watch mode runs git on its own thread, one run at a time, and keeps the old diff
+        // until the run ends.
+        let source = Source {
+            repo: repo.clone(),
+            staged: false,
+            range: None,
+        };
+        let mut viewer = Viewer::new(Vec::new(), diff).watch(source, false, Duration::ZERO);
+        viewer.tick();
+        assert!(
+            viewer.watch.as_ref().unwrap().running.is_none(),
+            "watch is off"
+        );
+        viewer.key(Key::Char('w'));
+        viewer.watch.as_mut().unwrap().next = Instant::now();
+        std::fs::write(repo.join("a.txt"), "three\n").unwrap();
+        viewer.tick();
+        let started = Instant::now();
+        while viewer.watch.as_ref().unwrap().running.is_some() {
+            assert_eq!(hunk_lines(&viewer.diff, 0), ["-one", "+two"]);
+            assert!(started.elapsed() < git::TIMEOUT * 2);
+            thread::sleep(Duration::from_millis(10));
+            viewer.tick();
+        }
+        assert_eq!(hunk_lines(&viewer.diff, 0), ["-one", "+three"]);
+        let watch = viewer.watch.as_ref().unwrap();
+        assert!(watch.next > Instant::now() + WATCH_EVERY / 2);
+        assert!(watch.failed.is_none());
+        viewer.tick();
+        assert!(
+            viewer.watch.as_ref().unwrap().running.is_none(),
+            "not before the interval"
+        );
         assert!(load(&repo, true, None).unwrap().files.is_empty());
         let problem = load(&repo, false, Some("nope..HEAD")).err().unwrap();
         assert!(problem.starts_with("git diff failed: fatal: "), "{problem}");
