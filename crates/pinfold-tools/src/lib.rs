@@ -2,8 +2,10 @@
 //! own pane (ADR-0045).
 //!
 //! A tool draws into a [`Screen`], whose [`put`](screen::Screen::put) escapes
-//! every string, and reads [`Key`]s. [`run`] owns the terminal around it.
+//! every string, and reads [`Key`]s. [`run`] owns the terminal around it. Every git call goes
+//! through [`git::run`].
 
+pub mod git;
 pub mod keys;
 mod md;
 pub mod screen;
