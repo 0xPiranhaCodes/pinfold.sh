@@ -23,6 +23,8 @@ winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", 
 # Off by default, as in pinfold-core: coloured diffs pull in `console`.
 insta = { version = "1.49.0", default-features = false }
 pinfold-core = { path = "../pinfold-core", version = "0.1.0-beta.3" }
+# Golden images of the built-in tools' screens.
+pinfold-tools = { path = "../pinfold-tools", version = "0.1.0-beta.3" }
 # Golden images of the renderer's output.
 png = "0.18.1"
 

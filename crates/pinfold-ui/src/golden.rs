@@ -234,3 +234,40 @@ fn golden_unhardened() {
 fn golden_approval_prompt() {
     check("approval", draw(&approval(), false));
 }
+
+const MARKDOWN: &str = "# Reader\n\nSome *italic*, **bold** and `code`, with [a link](https://pinfold.sh).\n\n\
+    - a list\n- of items\n\n| Tool | Key |\n| --- | --- |\n| md | m |\n\n```\nfn main() {}\n```\n";
+
+const DIFF: &str = "diff --git a/src/main.rs b/src/main.rs\nindex 1a2b3c4..5d6e7f8 100644\n\
+    --- a/src/main.rs\n+++ b/src/main.rs\n@@ -1,3 +1,3 @@ fn main() {\n fn main() {\n\
+    -    println!(\"hi\");\n+    println!(\"hello\");\n }\n";
+
+/// Each tool's first screen, as a core's VT engine holds it after the tool's output.
+fn tools() -> [Frame; 3] {
+    use pinfold_core::vt::{AlacrittyEngine, VtEngine};
+
+    let root = std::env::temp_dir().join(format!("pinfold-golden-{}", std::process::id()));
+    let work = root.join("work");
+    std::fs::create_dir_all(work.join("docs")).unwrap();
+    std::fs::write(work.join("docs/a.md"), "# A\n").unwrap();
+    std::fs::write(work.join("notes.txt"), "First line\n").unwrap();
+    let outputs = pinfold_tools::first_frames(MARKDOWN.as_bytes(), &work, DIFF.as_bytes(), 12, 64);
+    std::fs::remove_dir_all(root).unwrap();
+    outputs.map(|output| {
+        let mut engine = AlacrittyEngine::new(12, 64);
+        engine.feed(&output, &mut Vec::new());
+        let mut frame = Frame::default();
+        engine.frame(&mut frame);
+        frame
+    })
+}
+
+#[test]
+fn golden_tools() {
+    for (name, frame) in ["tool-md", "tool-files", "tool-diff"]
+        .into_iter()
+        .zip(tools())
+    {
+        check(name, draw(&frame, false));
+    }
+}
