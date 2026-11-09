@@ -11,7 +11,7 @@
 //! directory and runs git again, one call at a time. A directory where git ran over its cap
 //! gets no more calls until it is left.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::fmt::Write as _;
 use std::os::unix::ffi::OsStrExt;
@@ -36,13 +36,17 @@ const MAX_HEX: usize = 4 * 1024;
 pub(crate) const STATUS_TIMEOUT: Duration = Duration::from_secs(2);
 /// How often the directory's modification time is checked.
 const POLL: Duration = Duration::from_secs(1);
+/// Matches the fuzzy jump shows.
+const MAX_JUMPS: usize = 100;
 
-const KEYS: [&str; 7] = [
+const KEYS: [&str; 9] = [
     "j k  ↓ ↑        down or up",
     "h l  ← →        the parent, or into a directory",
     "Enter           into a directory, or a file in the reader",
     "/               filter by name; Enter keeps it, Esc clears it",
     "g G  Home End   the first or the last",
+    "f               jump to a path under the start by fuzzy match",
+    "m x  ' x        bookmark this directory as x, or go to x",
     "?               these keys",
     "q               quit",
 ];
@@ -182,8 +186,73 @@ fn badges(output: &[u8], prefix: &[u8]) -> HashMap<OsString, Badge> {
     }
     badges
 }
+
+/// Paths under `start`, relative to it, breadth first so the cap keeps the shallow ones.
+/// Links are listed but not followed, so a loop cannot hold it, and `.git` is skipped.
+fn walk(start: &Path) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut queue = VecDeque::from([PathBuf::new()]);
+    while let Some(dir) = queue.pop_front() {
+        let Ok(read) = std::fs::read_dir(start.join(&dir)) else {
+            continue;
+        };
+        for entry in read.flatten() {
+            if paths.len() == MAX_ENTRIES {
+                return paths;
+            }
+            let path = dir.join(entry.file_name());
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) && entry.file_name() != ".git" {
+                queue.push_back(path.clone());
+            }
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+/// How well `query` matches `path` as a subsequence, ignoring case, or `None` if it does not:
+/// each character scores 1, and 10 more right after the last match or else 8 more at the start
+/// of a word, so a run beats scattered word starts; a shorter path wins a tie.
+fn score(query: &str, path: &str) -> Option<i64> {
+    let path: Vec<char> = path.to_lowercase().chars().collect();
+    let (mut score, mut last) = (0_i64, None);
+    for wanted in query.to_lowercase().chars() {
+        let from = last.map_or(0, |last| last + 1);
+        let at = (from..path.len()).find(|&at| path[at] == wanted)?;
+        score += 1;
+        if last.is_some() && at == from {
+            score += 10;
+        } else if at == 0 || matches!(path[at - 1], '/' | '.' | '_' | '-' | ' ') {
+            score += 8;
+        }
+        last = Some(at);
+    }
+    Some(score * 10_000 - i64::try_from(path.len()).unwrap_or(i64::MAX / 2))
+}
+
+/// Indices of `paths` that match `query`, best first, at most [`MAX_JUMPS`].
+fn rank(query: &str, paths: &[String]) -> Vec<usize> {
+    let mut ranked: Vec<(i64, usize)> = (paths.iter().enumerate())
+        .filter_map(|(at, path)| Some((score(query, path)?, at)))
+        .collect();
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| paths[a.1].cmp(&paths[b.1])));
+    ranked
+        .into_iter()
+        .take(MAX_JUMPS)
+        .map(|(_, at)| at)
+        .collect()
+}
+
 /// A finished `git status`, with the directory's prefix in its repository.
 type Status = (Vec<u8>, io::Result<git::Output>);
+
+/// The fuzzy jump: what was typed, the paths under the start, escaped, and the best matches.
+struct Jump {
+    query: String,
+    paths: Vec<PathBuf>,
+    shown: Vec<String>,
+    ranked: Vec<usize>,
+}
 
 /// `name` escaped and cut to `width` characters.
 fn clip(name: &[u8], width: usize) -> String {
@@ -215,6 +284,10 @@ pub(crate) struct Files {
     /// The directory's and the index's stamps as last listed, and when they were last checked.
     stamp: Option<(Option<md::Stamp>, Option<md::Stamp>)>,
     checked: Option<Instant>,
+    jump: Option<Jump>,
+    /// Bookmarks for this run, and `m` or `'` waiting for a bookmark's name.
+    marks: HashMap<char, PathBuf>,
+    mark: Option<char>,
 }
 
 impl Files {
@@ -239,6 +312,9 @@ impl Files {
             git_note: None,
             stamp: None,
             checked: None,
+            jump: None,
+            marks: HashMap::new(),
+            mark: None,
         };
         files.go(dir, None);
         files
@@ -336,6 +412,52 @@ impl Files {
         self.stamp = Some(now);
         if self.git_note.is_none() {
             self.status();
+        }
+    }
+
+    /// Goes to the best match: into it if it is a directory, else to it in its directory.
+    fn land(&mut self) {
+        let Some(jump) = self.jump.take() else { return };
+        let Some(&best) = jump.ranked.first() else {
+            return;
+        };
+        let path = self.start.join(&jump.paths[best]);
+        if path.is_dir() {
+            self.go(path, None);
+        } else if let (Some(dir), Some(name)) = (path.parent(), path.file_name()) {
+            self.go(dir.to_path_buf(), Some(name));
+        }
+    }
+
+    fn jump_key(&mut self, key: Key) {
+        let Some(jump) = &mut self.jump else { return };
+        match key {
+            Key::Char(character) => jump.query.push(character),
+            Key::Backspace => {
+                jump.query.pop();
+            }
+            Key::Enter => return self.land(),
+            Key::Esc => {
+                self.jump = None;
+                return;
+            }
+            _ => return,
+        }
+        jump.ranked = rank(&jump.query, &jump.shown);
+    }
+
+    /// `m x` bookmarks this directory as `x`, and `' x` goes to it.
+    fn mark_key(&mut self, kind: char, key: Key) {
+        let Key::Char(name) = key else { return };
+        if kind == 'm' {
+            self.marks.insert(name, self.dir.clone());
+        } else if let Some(dir) = self.marks.get(&name).cloned() {
+            self.go(dir, None);
+        } else {
+            self.problem = Some(format!(
+                "no bookmark {}",
+                escape(name.to_string().as_bytes())
+            ));
         }
     }
 
@@ -498,6 +620,33 @@ impl Tool for Files {
         }
         let height = rows.saturating_sub(2);
         let status = rows.saturating_sub(1);
+        if let Some(jump) = &self.jump {
+            for (row, &at) in (1..=height).zip(&jump.ranked) {
+                let style = if row == 1 {
+                    colour(Color::Blue)
+                } else {
+                    Style::default()
+                };
+                let style = Style {
+                    bold: row == 1,
+                    ..style
+                };
+                screen.put(
+                    row,
+                    2,
+                    clip(jump.shown[at].as_bytes(), usize::from(columns) - 2),
+                    style,
+                );
+            }
+            let typed = format!(
+                "jump {}  ({} of {})",
+                jump.query,
+                jump.ranked.len(),
+                jump.shown.len()
+            );
+            screen.put(status, 0, typed, Style::default());
+            return;
+        }
         let left = columns / 5;
         let middle = columns * 3 / 10;
         let right = left + middle + 2;
@@ -560,6 +709,13 @@ impl Tool for Files {
         } else if let Some(problem) = &self.problem {
             let at = screen.put(status, 0, "✕ error", red);
             screen.put(status, at + 1, problem, Style::default());
+        } else if let Some(mark) = self.mark {
+            screen.put(
+                status,
+                0,
+                format!("{mark} bookmark: a key"),
+                Style::default(),
+            );
         } else if let Some(note) = &self.git_note {
             screen.put(status, 0, note, colour(Color::Yellow));
         } else if let Ok(Listing {
@@ -579,6 +735,14 @@ impl Tool for Files {
             return Flow::Continue;
         }
         self.problem = None;
+        if self.jump.is_some() {
+            self.jump_key(key);
+            return Flow::Continue;
+        }
+        if let Some(kind) = self.mark.take() {
+            self.mark_key(kind, key);
+            return Flow::Continue;
+        }
         if self.help {
             self.help = false;
             return if key == Key::Char('q') {
@@ -607,6 +771,19 @@ impl Tool for Files {
             Key::Char('q') => return Flow::Quit,
             Key::Char('?') => self.help = true,
             Key::Char('/') => self.typing = true,
+            Key::Char(kind @ ('m' | '\'')) => self.mark = Some(kind),
+            Key::Char('f') => {
+                let paths = walk(&self.start);
+                let shown = (paths.iter())
+                    .map(|path| escape(path.as_os_str().as_bytes()))
+                    .collect();
+                self.jump = Some(Jump {
+                    query: String::new(),
+                    ranked: (0..paths.len().min(MAX_JUMPS)).collect(),
+                    paths,
+                    shown,
+                });
+            }
             Key::Esc if !self.filter.is_empty() => {
                 self.filter.clear();
                 self.refilter();
@@ -1008,6 +1185,98 @@ mod tests {
         assert_eq!(
             files.badges.get(OsStr::new("later.txt")),
             Some(&Badge::Untracked)
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fuzzy_jump_ranks_word_starts_and_runs_first_then_shorter_paths() {
+        let paths = [
+            "fixtures/i_l_e/s.txt",
+            "src/old/files.rs",
+            "src/files.rs",
+            "profiles.toml",
+            "docs/notes.md",
+        ]
+        .map(String::from);
+        let ranked: Vec<&str> = rank("files", &paths)
+            .iter()
+            .map(|&at| paths[at].as_str())
+            .collect();
+        assert_eq!(
+            ranked,
+            [
+                "src/files.rs",
+                "src/old/files.rs",
+                "fixtures/i_l_e/s.txt",
+                "profiles.toml"
+            ]
+        );
+        assert_eq!(
+            rank("FILES", &paths),
+            rank("files", &paths),
+            "case is ignored"
+        );
+    }
+
+    #[test]
+    fn fuzzy_jump_lands_on_a_file_in_its_directory() {
+        let (root, work) = work("jump");
+        let mut files = Files::new(b"work".to_vec(), work.clone());
+        for key in [
+            Key::Char('f'),
+            Key::Char('a'),
+            Key::Char('.'),
+            Key::Char('m'),
+            Key::Enter,
+        ] {
+            files.key(key);
+        }
+        assert_eq!(files.dir, work.join("docs"));
+        assert_eq!(
+            files.entry().map(|entry| entry.name.as_os_str()),
+            Some(OsStr::new("a.md"))
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_bookmark_goes_back_to_its_directory() {
+        let (root, work) = work("marks");
+        let mut files = Files::new(b"work".to_vec(), work.clone());
+        for key in [Key::Char('m'), Key::Char('w'), Key::Enter, Key::Enter] {
+            files.key(key);
+        }
+        assert_eq!(files.dir, work.join("docs/old"));
+        files.key(Key::Char('\''));
+        files.key(Key::Char('w'));
+        assert_eq!(files.dir, work);
+        files.key(Key::Char('\''));
+        files.key(Key::Char('x'));
+        assert_eq!(
+            (files.dir.as_path(), files.problem.as_deref()),
+            (work.as_path(), Some("no bookmark x"))
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn the_jump_walk_stops_at_the_entry_cap_and_skips_dot_git() {
+        let (root, work) = work("walk");
+        std::fs::create_dir(work.join(".git")).unwrap();
+        std::fs::write(work.join(".git/HEAD"), "").unwrap();
+        for at in 0..MAX_ENTRIES {
+            std::fs::write(work.join("docs/old").join(format!("{at:05}")), "").unwrap();
+        }
+        let paths = walk(&work);
+        assert_eq!(paths.len(), 10_000);
+        assert!(
+            !paths.contains(&PathBuf::from(".git/HEAD")),
+            "went into .git"
+        );
+        assert!(
+            paths.contains(&PathBuf::from("docs/a.md")),
+            "kept the shallow paths"
         );
         std::fs::remove_dir_all(root).unwrap();
     }
