@@ -50,6 +50,21 @@ fn nothing_a_hostile_repository_configures_runs() {
     }
     git(&["add", "."]);
     git(&["commit", "-qm", "one"]);
+    // A submodule with its own filter, which `ignore = none` asks git to look inside.
+    let sub = repo.join("sub");
+    fs::create_dir(&sub).unwrap();
+    let in_sub = |args: &[&str]| assert!(plain(&root, &sub, args).status.success(), "{args:?}");
+    in_sub(&["init", "-q"]);
+    fs::write(sub.join(".gitattributes"), "*.txt filter=sub\n").unwrap();
+    fs::write(sub.join("s.txt"), "one\n").unwrap();
+    in_sub(&["add", "."]);
+    in_sub(&["commit", "-qm", "one"]);
+    let modules = "[submodule \"sub\"]\n\tpath = sub\n\turl = ./sub\n\tignore = none\n";
+    fs::write(repo.join(".gitmodules"), modules).unwrap();
+    git(&["add", ".gitmodules", "sub"]);
+    git(&["commit", "-qm", "sub"]);
+    // The same size, so only the filter can tell.
+    fs::write(sub.join("s.txt"), "two\n").unwrap();
     fs::write(repo.join("b.txt"), "staged\n").unwrap();
     git(&["add", "b.txt"]);
     fs::write(repo.join("a.txt"), "one\nchanged\n").unwrap();
@@ -98,14 +113,34 @@ fn nothing_a_hostile_repository_configures_runs() {
     for (key, value) in hostile {
         git(&["config", key, &value]);
     }
+    in_sub(&[
+        "config",
+        "filter.sub.process",
+        &format!("{}; false", mark("sub")),
+    ]);
 
     // Control: plain git runs the repository's commands.
     plain(&root, &repo, &["diff", "--", "a.txt"]);
     plain(&root, &repo, &["diff", "--", "eq.txt"]);
     plain(&root, &repo, &["fetch", "ext"]);
     plain(&root, &repo, &["hook", "run", "pre-commit"]);
+    // Past the filter that fails on purpose, to the submodule.
+    let past = "filter.evil.required=false";
+    plain(
+        &root,
+        &repo,
+        &[
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "filter.evil.process=",
+            "-c",
+            past,
+            "status",
+        ],
+    );
     let fired = markers(&marks);
-    for expected in ["clean-eq", "ext", "fsmonitor", "hook", "process"] {
+    for expected in ["clean-eq", "ext", "fsmonitor", "hook", "process", "sub"] {
         assert!(
             fired.iter().any(|name| name == expected),
             "{expected}: {fired:?}"
@@ -115,36 +150,37 @@ fn nothing_a_hostile_repository_configures_runs() {
         fs::remove_file(marks.join(name)).unwrap();
     }
 
-    let diff = git::run(&repo, ["diff"]).unwrap();
-    let text = String::from_utf8_lossy(&diff.stdout);
-    assert!(text.contains("+changed"), "{text}");
+    let run = |args: &[&str]| git::run(&repo, args).unwrap();
     let patch = root.join("a.patch");
-    fs::write(
-        &patch,
-        &git::run(&repo, ["diff", "--", "a.txt"]).unwrap().stdout,
-    )
-    .unwrap();
-    let staged = git::run(&repo, ["diff", "--staged"]).unwrap();
-    assert!(String::from_utf8_lossy(&staged.stdout).contains("+staged"));
-    let status = git::run(&repo, ["status", "--porcelain"]).unwrap();
-    assert!(String::from_utf8_lossy(&status.stdout).contains("a.txt"));
+    fs::write(&patch, run(&["diff", "--", "a.txt"]).stdout).unwrap();
     let patch = patch.to_str().unwrap();
-    for args in [
-        &["apply", "--cached", "--", patch][..],
-        &["apply", "-R", "--", patch],
-        &["status"],
-    ] {
-        let output = git::run(&repo, args).unwrap();
-        let errors = String::from_utf8_lossy(&output.stderr);
-        assert!(output.status.unwrap().success(), "{args:?}: {errors}");
-    }
-    // Each refused, so none of the remote's commands can run.
-    for remote in ["ext", "file", "ssh"] {
-        let fetched = git::run(&repo, ["fetch", remote]).unwrap();
-        assert!(!fetched.status.unwrap().success(), "{remote}");
-    }
-    git::run(&repo, ["hook", "run", "--ignore-missing", "pre-commit"]).unwrap();
-
+    let outputs = [
+        run(&["diff"]),
+        run(&["diff", "--staged"]),
+        run(&["status", "--porcelain"]),
+        run(&["apply", "--cached", "--", patch]),
+        run(&["apply", "-R", "--", patch]),
+        // Each transport is refused, so none of the remote's commands can run.
+        run(&["fetch", "ext"]),
+        run(&["fetch", "file"]),
+        run(&["fetch", "ssh"]),
+        run(&["hook", "run", "--ignore-missing", "pre-commit"]),
+    ];
     assert_eq!(markers(&marks), Vec::<String>::new());
+
+    let [diff, staged, status, cached, reverse, ext, file, ssh, _] = outputs;
+    let has =
+        |output: &git::Output, text: &str| String::from_utf8_lossy(&output.stdout).contains(text);
+    assert!(has(&diff, "+changed") && has(&staged, "+staged") && has(&status, "a.txt"));
+    for output in [&cached, &reverse] {
+        let errors = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            output.status.is_some_and(|status| status.success()),
+            "{errors}"
+        );
+    }
+    for fetched in [&ext, &file, &ssh] {
+        assert!(fetched.status.is_some_and(|status| !status.success()));
+    }
     fs::remove_dir_all(root).unwrap();
 }

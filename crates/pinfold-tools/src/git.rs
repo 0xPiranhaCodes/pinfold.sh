@@ -24,10 +24,13 @@ const TIMEOUT: Duration = Duration::from_secs(10);
 /// Overrides on every call. `-c` beats every configuration file. With every transport refused,
 /// `core.sshCommand`, credential helpers and `core.askPass` cannot be reached; they are emptied
 /// as well, and an empty `credential.helper` clears the list.
-const OVERRIDES: [&str; 13] = [
+const OVERRIDES: [&str; 14] = [
     "core.fsmonitor=false",
     "core.hooksPath=/dev/null",
     "core.pager=cat",
+    // A submodule's own filters are not in this repository's list (below), so git never looks
+    // inside one. `submodule.<name>.ignore` beats this; `--ignore-submodules=all` beats both.
+    "diff.ignoreSubmodules=all",
     "core.sshCommand=",
     "core.askPass=",
     "credential.helper=",
@@ -59,9 +62,10 @@ pub struct Output {
 /// Every inherited `GIT_*` variable is cleared, so neither `GIT_EXTERNAL_DIFF` nor `GIT_DIR`
 /// reaches git, and `GIT_TERMINAL_PROMPT=0`, `GIT_OPTIONAL_LOCKS=0` and `GIT_NO_LAZY_FETCH=1`
 /// are set. Git gets `--no-pager` and the `-c` overrides above; `git config --list -z` (which runs
-/// nothing) first names the filter drivers and protocols to turn off, and `diff` gets
-/// `--no-ext-diff --no-textconv --no-color`. Another subcommand that prints a diff, such as
-/// `show`, must pass those itself. `safe.directory` is left to the user's configuration.
+/// nothing) first names the filter drivers and protocols to turn off. `diff` gets
+/// `--no-ext-diff --no-textconv --no-color`, and `diff` and `status` get
+/// `--ignore-submodules=all`, so a submodule's changes do not show. Another subcommand that
+/// prints a diff, such as `show`, must pass those itself. `safe.directory` is left to the user's configuration.
 ///
 /// `args` are the caller's own: a value from outside, such as a path, goes after `--`, and a
 /// revision range is checked first, as `tool.open` does.
@@ -99,6 +103,9 @@ where
         command.arg(&subcommand);
         if subcommand == "diff" {
             command.args(["--no-ext-diff", "--no-textconv", "--no-color"]);
+        }
+        if subcommand == "diff" || subcommand == "status" {
+            command.arg("--ignore-submodules=all");
         }
     }
     capture(command.args(args))
