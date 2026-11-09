@@ -7,11 +7,13 @@ use std::io::Read;
 use std::process::{Command, Stdio};
 #[cfg(target_os = "macos")]
 use std::sync::mpsc;
-#[cfg(target_os = "macos")]
 use std::time::Duration;
 
 use copypasta::{ClipboardContext, ClipboardProvider};
 use raw_window_handle::HasDisplayHandle;
+
+#[cfg(not(target_os = "macos"))]
+mod x11;
 
 /// Why [`Clipboard::text`] gave no text.
 #[derive(Debug, PartialEq, Eq)]
@@ -25,6 +27,9 @@ pub enum Unread {
 /// A connection to the clipboard.
 pub struct Clipboard {
     provider: Box<dyn ClipboardProvider>,
+    /// Whether `provider` is X11's, whose clipboard is read within a limit by [`x11::text`].
+    #[cfg(not(target_os = "macos"))]
+    x11: bool,
     // Declared after `provider`, so a Wayland display outlives what was built on it.
     _display: Box<dyn Any>,
 }
@@ -33,12 +38,18 @@ impl Clipboard {
     /// Connects to the clipboard of `display`, which it keeps until dropped.
     #[must_use]
     pub fn new<D: HasDisplayHandle + 'static>(display: D) -> Option<Self> {
-        let provider = wayland(&display).or_else(|| {
-            let context = ClipboardContext::new().ok()?;
-            Some(Box::new(context) as Box<dyn ClipboardProvider>)
-        })?;
+        if let Some(provider) = wayland(&display) {
+            return Some(Self {
+                provider,
+                #[cfg(not(target_os = "macos"))]
+                x11: false,
+                _display: Box::new(display),
+            });
+        }
         Some(Self {
-            provider,
+            provider: Box::new(ClipboardContext::new().ok()?),
+            #[cfg(not(target_os = "macos"))]
+            x11: true,
             _display: Box::new(display),
         })
     }
@@ -66,6 +77,9 @@ impl Clipboard {
     /// Returns why there is no text.
     #[cfg(not(target_os = "macos"))]
     pub fn text(&mut self, limit: usize) -> Result<String, Unread> {
+        if self.x11 {
+            return x11::text(limit, TIMEOUT);
+        }
         let text = self.provider.get_contents().map_err(|_| Unread::Empty)?;
         if text.len() > limit {
             return Err(Unread::TooLarge);
@@ -75,7 +89,20 @@ impl Clipboard {
 
     /// Replaces the clipboard's text, and returns whether it did.
     pub fn set_text(&mut self, text: String) -> bool {
-        self.provider.set_contents(text).is_ok()
+        if self.provider.set_contents(text.clone()).is_ok() {
+            return true;
+        }
+        // x11-clipboard serves copies from a thread that a requestor can panic mid-transfer
+        // (`value.len() - pos` in run.rs, #310); every later copy then fails. The window
+        // unwinds, so only that thread ends, and a new connection starts another.
+        #[cfg(not(target_os = "macos"))]
+        if self.x11
+            && let Ok(fresh) = ClipboardContext::new()
+        {
+            self.provider = Box::new(fresh);
+            return self.provider.set_contents(text).is_ok();
+        }
+        false
     }
 }
 
@@ -99,7 +126,6 @@ fn wayland(_: &impl HasDisplayHandle) -> Option<Box<dyn ClipboardProvider>> {
 }
 
 /// How long a paste waits for the clipboard's owner, as copypasta waits on X11.
-#[cfg(target_os = "macos")]
 const TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Runs `command`, which prints the clipboard, and takes at most `limit` bytes of it, so a huge
@@ -128,6 +154,11 @@ fn bounded(mut command: Command, limit: usize, timeout: Duration) -> Result<Stri
     if text.len() > limit {
         return Err(Unread::TooLarge);
     }
+    utf8(text)
+}
+
+/// Returns `text` as a string, or that there is none.
+fn utf8(text: Vec<u8>) -> Result<String, Unread> {
     String::from_utf8(text)
         .ok()
         .filter(|text| !text.is_empty())
@@ -227,5 +258,96 @@ mod tests {
             _display: Box::new(()),
         };
         eprintln!("{:?}", clipboard.text(1024 * 1024).map(|text| text.len()));
+    }
+}
+
+#[cfg(test)]
+#[cfg(not(target_os = "macos"))]
+mod tests {
+    use x11_clipboard::Context;
+    use x11rb::connection::Connection;
+    use x11rb::protocol::Event;
+    use x11rb::protocol::xproto::{ConnectionExt, Property};
+
+    use super::*;
+
+    /// Another X11 client, which asks for the clipboard into a property of its own, as
+    /// x11-clipboard keeps one transfer for each property name.
+    struct Requestor(Context, u32);
+
+    impl Requestor {
+        fn new(property: &str) -> Self {
+            let context = Context::new(None).unwrap();
+            let atom = context.connection.intern_atom(false, property.as_bytes());
+            let atom = atom.unwrap().reply().unwrap().atom;
+            Self(context, atom)
+        }
+
+        /// Asks the owner for its text, and waits for its answer.
+        fn ask(&self) {
+            let Self(context, property) = self;
+            let (atoms, time) = (&context.atoms, x11rb::CURRENT_TIME);
+            let (selection, target) = (atoms.clipboard, atoms.utf8_string);
+            let connection = &context.connection;
+            connection
+                .convert_selection(context.window, selection, target, *property, time)
+                .unwrap();
+            connection.flush().unwrap();
+            self.written();
+        }
+
+        /// Asks for the next INCR chunk, by deleting the property.
+        fn next(&self) {
+            let Self(context, property) = self;
+            let connection = &context.connection;
+            connection
+                .delete_property(context.window, *property)
+                .unwrap();
+            connection.flush().unwrap();
+        }
+
+        fn written(&self) {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                let event = self.0.connection.poll_for_event().unwrap();
+                if let Some(Event::PropertyNotify(event)) = event
+                    && event.atom == self.1
+                    && event.state == Property::NEW_VALUE
+                {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            panic!("the owner never wrote the property");
+        }
+    }
+
+    /// Needs an X server: `tests/window/clipboard.sh` runs it under Xvfb.
+    #[test]
+    fn copies_work_again_after_a_requestor_ends_x11_clipboards_thread() {
+        if std::env::var_os("DISPLAY").is_none() {
+            eprintln!("skipped: no DISPLAY");
+            return;
+        }
+        let mut clipboard = Clipboard {
+            provider: Box::new(ClipboardContext::new().unwrap()),
+            x11: true,
+            _display: Box::new(()),
+        };
+        // Past the largest request, so the owner sends it by INCR.
+        assert!(clipboard.set_text("x".repeat(20 * 1024 * 1024)));
+        let (first, second) = (Requestor::new("FIRST"), Requestor::new("SECOND"));
+        first.ask();
+        second.ask();
+        first.next();
+        first.written();
+        // A new copy ends only the second transfer, so the first one's position is now past
+        // the end of the new text, and its next chunk is `value.len() - pos`.
+        assert!(clipboard.provider.set_contents("short".to_owned()).is_ok());
+        first.next();
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(clipboard.provider.set_contents("lost".to_owned()).is_err());
+        assert!(clipboard.set_text("after".to_owned()));
+        assert_eq!(clipboard.text(64), Ok("after".to_owned()));
     }
 }

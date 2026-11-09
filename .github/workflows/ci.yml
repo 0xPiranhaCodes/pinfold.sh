@@ -117,9 +117,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - if: runner.os == 'Linux'
-        run: sudo apt-get install -y fonts-noto-cjk libxkbcommon-x11-0 xvfb
+        run: sudo apt-get install -y fonts-noto-cjk libxkbcommon-x11-0 xclip xvfb
       - if: runner.os == 'Linux'
         run: xvfb-run -a -s "-screen 0 1920x1080x24" cargo xtask mem-gate
+      # The clipboard tests that need a display, one at a time as they share its selection.
+      - if: runner.os == 'Linux'
+        run: xvfb-run -a cargo test --locked -p pinfold-sys --features clipboard clipboard -- --test-threads=1
       - if: runner.os == 'macOS'
         run: cargo xtask mem-gate
 

@@ -19,7 +19,7 @@ signal-hook = { version = "0.4.6", default-features = false }
 
 [features]
 # Off in the core, which never touches the clipboard.
-clipboard = ["dep:copypasta", "dep:raw-window-handle"]
+clipboard = ["dep:copypasta", "dep:raw-window-handle", "dep:x11-clipboard", "dep:x11rb"]
 # The macOS menu bar. Off in the core, which has no window.
 menu = ["dep:objc2", "dep:objc2-app-kit", "dep:objc2-foundation"]
 # Off in the core, so it never loads Apple's graphics frameworks.
@@ -46,6 +46,11 @@ objc2-metal = { version = "0.3.2", optional = true }
 objc2-quartz-core = { version = "0.3.2", optional = true }
 
 # Only `appkit_reads_a_whole_pasteboard`, which measures what the clipboard avoids.
+# The versions copypasta already builds, for a clipboard read within a limit (#310).
+[target.'cfg(not(target_os = "macos"))'.dependencies]
+x11-clipboard = { version = "0.9.3", optional = true }
+x11rb = { version = "0.13.2", optional = true }
+
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 objc2 = "0.6.5"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPasteboard"] }
