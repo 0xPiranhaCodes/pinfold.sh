@@ -2,12 +2,28 @@
 //!
 //! The file is laid out again for each width, as lines of styled spans that are already
 //! escaped, so a line's length in characters is its length in cells.
+//!
+//! Each cap is a constant (ADR-0045 section 4), and the reader says above the file when one
+//! cut it.
+
+use std::io::{self, Read};
+use std::path::Path;
+use std::time::{Duration, Instant};
 
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 use crate::keys::Key;
 use crate::screen::{Color, Screen, Style, escape};
 use crate::{Flow, Tool};
+
+/// Bytes of a file the reader reads. A longer file shows this much, as plain text.
+const MAX_BYTES: usize = 5_000_000;
+/// Time parsing may take at each width, after which the rest shows as plain text.
+const MAX_PARSE: Duration = Duration::from_secs(2);
+/// Characters on a laid-out line. Code, table and plain-text lines are cut here.
+const MAX_LINE: usize = 10_000;
+/// Laid-out lines; the rest of the file is not shown.
+const MAX_LINES: usize = 100_000;
 
 /// Columns `h` and `l` move by.
 const SIDEWAYS: usize = 8;
@@ -31,10 +47,45 @@ struct Span {
 
 type Line = Vec<Span>;
 
+/// Reads at most [`MAX_BYTES`] of the regular file at `path`, and whether that was all of it.
+pub(crate) fn read(path: &Path) -> io::Result<(Vec<u8>, bool)> {
+    let file = pinfold_sys::open_nonblocking(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
+    // The length is only a hint for the buffer: the file can change while it is read.
+    let hint = usize::try_from(metadata.len()).map_or(MAX_BYTES, |len| len.min(MAX_BYTES));
+    let mut bytes = Vec::with_capacity(hint + 1);
+    // One byte past the cap says whether there is more, and nothing further is read.
+    file.take(MAX_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+    let whole = bytes.len() <= MAX_BYTES;
+    bytes.truncate(MAX_BYTES);
+    Ok((bytes, whole))
+}
+
+/// Lays `bytes` out as the reader does at `width`, and returns each line's text.
+pub(crate) fn lines(bytes: &[u8], width: u16) -> Vec<String> {
+    let reader = Reader::new(Vec::new(), bytes.to_vec(), true);
+    texts(&layout(&reader.text, usize::from(width), true, MAX_PARSE).0)
+}
+
+fn texts(lines: &[Line]) -> Vec<String> {
+    lines
+        .iter()
+        .map(|line| line.iter().map(|span| span.text.as_str()).collect())
+        .collect()
+}
+
 /// The reader: a file's text, laid out at the screen's width.
 pub(crate) struct Reader {
     title: Vec<u8>,
     text: String,
+    /// The whole file was read, so it is parsed as markdown.
+    whole: bool,
     width: u16,
     lines: Vec<Line>,
     widest: usize,
@@ -45,18 +96,24 @@ pub(crate) struct Reader {
 }
 
 impl Reader {
-    /// A reader titled `title` for the bytes of a file; invalid UTF-8 shows as `\xNN`.
-    pub(crate) fn new(title: Vec<u8>, bytes: &[u8]) -> Self {
-        let mut text = String::with_capacity(bytes.len());
-        for chunk in bytes.utf8_chunks() {
-            text.push_str(chunk.valid());
-            for byte in chunk.invalid() {
-                text.push_str(&format!("\\x{byte:02X}"));
+    /// A reader titled `title` for the bytes of a file, all of it if `whole`, or else its
+    /// start, which shows as plain text. Invalid UTF-8 shows as `\xNN`.
+    pub(crate) fn new(title: Vec<u8>, bytes: Vec<u8>, whole: bool) -> Self {
+        let text = String::from_utf8(bytes).unwrap_or_else(|error| {
+            let bytes = error.into_bytes();
+            let mut text = String::with_capacity(bytes.len());
+            for chunk in bytes.utf8_chunks() {
+                text.push_str(chunk.valid());
+                for byte in chunk.invalid() {
+                    text.push_str(&format!("\\x{byte:02X}"));
+                }
             }
-        }
+            text
+        });
         Self {
             title,
             text,
+            whole,
             width: 0,
             lines: Vec::new(),
             widest: 0,
@@ -76,7 +133,8 @@ impl Tool for Reader {
     fn draw(&mut self, screen: &mut Screen) {
         let (rows, columns) = screen.size();
         if columns != self.width {
-            (self.lines, self.widest) = layout(&self.text, usize::from(columns));
+            (self.lines, self.widest) =
+                layout(&self.text, usize::from(columns), self.whole, MAX_PARSE);
             self.width = columns;
         }
         self.page = usize::from(rows.saturating_sub(1)).max(1);
@@ -169,18 +227,72 @@ fn colour(fg: Color) -> Style {
     }
 }
 
-/// Lays `text` out at `width` columns, and returns the lines and the widest one's length.
-fn layout(text: &str, width: usize) -> (Vec<Line>, usize) {
-    let options = Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
+/// Lays `text` out at `width` columns, as markdown if `whole` for up to `budget` and as plain
+/// text after, and returns the lines and the widest one's length. A banner above says what
+/// any cap cut.
+fn layout(text: &str, width: usize, whole: bool, budget: Duration) -> (Vec<Line>, usize) {
+    let width = width.clamp(1, MAX_LINE);
     let mut layout = Layout {
-        width: width.max(1),
+        width,
         ..Layout::default()
     };
-    for event in Parser::new_ext(text, options) {
-        layout.event(event);
+    let mut notes = Vec::new();
+    if whole {
+        let options = Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
+        let started = Instant::now();
+        // shortcut: the time is checked between events, so pulldown-cmark's first pass over the
+        // blocks and any one slow event are not cut short; a parse thread with a deadline would
+        // be, if a hostile file is ever found to stall either.
+        // Where the text laid out so far ends: a start's range covers its whole element.
+        let mut done = 0;
+        for (event, range) in Parser::new_ext(text, options).into_offset_iter() {
+            if layout.full {
+                break;
+            }
+            if started.elapsed() > budget {
+                notes.push(format!(
+                    "Parsing took over {} s, so the rest shows as plain text.",
+                    MAX_PARSE.as_secs()
+                ));
+                let at = (done..text.len())
+                    .find(|&at| text.is_char_boundary(at))
+                    .unwrap_or(text.len());
+                layout.plain(&text[at..]);
+                break;
+            }
+            if !matches!(event, Event::Start(_)) {
+                done = done.max(range.end);
+            }
+            layout.event(event);
+        }
+    } else {
+        notes.push(format!(
+            "This file is over {} MB, so its first {0} MB shows as plain text.",
+            MAX_BYTES / 1_000_000
+        ));
+        layout.plain(text);
     }
     layout.flush();
-    (layout.lines, layout.widest)
+    if layout.long {
+        notes.push(format!("Lines over {MAX_LINE} characters are cut."));
+    }
+    if layout.full {
+        notes.push(format!("Only the first {MAX_LINES} lines show."));
+    }
+    if notes.is_empty() {
+        return (layout.lines, layout.widest);
+    }
+    let mut banner = Layout {
+        width,
+        ..Layout::default()
+    };
+    for note in notes {
+        banner.text(&note, colour(Color::Yellow));
+        banner.newline();
+    }
+    banner.newline();
+    banner.lines.append(&mut layout.lines);
+    (banner.lines, banner.widest.max(layout.widest))
 }
 
 #[derive(Default)]
@@ -206,6 +318,10 @@ struct Layout {
     gap: bool,
     code: bool,
     table: Option<Table>,
+    /// A line was cut at [`MAX_LINE`].
+    long: bool,
+    /// [`MAX_LINES`] are laid out, and the rest are dropped.
+    full: bool,
 }
 
 #[derive(Default)]
@@ -248,7 +364,7 @@ impl Layout {
         match event {
             Event::Start(tag) => self.start(tag),
             Event::End(tag) => self.end(tag),
-            Event::Text(text) if self.code => self.code_text(&text),
+            Event::Text(text) if self.code => self.code_text(&text, colour(Color::Cyan)),
             Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
                 self.text(&text, self.style());
             }
@@ -375,8 +491,7 @@ impl Layout {
         self.flush();
         if self.gap && !self.lines.is_empty() {
             let (prefix, _) = self.prefix(false);
-            self.lines
-                .push(vec![span(prefix.trim_end(), colour(Color::BrightBlack))]);
+            self.push(vec![span(prefix.trim_end(), colour(Color::BrightBlack))]);
         }
         self.gap = false;
     }
@@ -393,10 +508,33 @@ impl Layout {
     }
 
     fn newline(&mut self) {
-        self.widest = self.widest.max(self.used);
-        self.lines.push(std::mem::take(&mut self.line));
+        let line = std::mem::take(&mut self.line);
+        if !self.full {
+            self.widest = self.widest.max(self.used);
+        }
+        self.push(line);
         self.used = 0;
         self.space = false;
+    }
+
+    fn push(&mut self, line: Line) {
+        if self.lines.len() < MAX_LINES {
+            self.lines.push(line);
+        } else {
+            self.full = true;
+        }
+    }
+
+    /// Adds `text` as it is, line by line, outside any block.
+    fn plain(&mut self, text: &str) {
+        self.flush();
+        self.indents.clear();
+        self.marker = None;
+        self.styles.clear();
+        self.link = None;
+        self.code = false;
+        self.table = None;
+        self.code_text(text, Style::default());
     }
 
     /// The indents that start a line, with the list marker if `marker`, and its length. It is
@@ -477,16 +615,16 @@ impl Layout {
         }
     }
 
-    /// Adds a code block's text line by line, in one colour, cut at the edge rather than
+    /// Adds a code block's text line by line, in one style, cut at the edge rather than
     /// wrapped.
-    fn code_text(&mut self, text: &str) {
+    fn code_text(&mut self, text: &str, style: Style) {
         for line in text.split_inclusive('\n') {
+            if self.full {
+                return;
+            }
             self.start_line();
             let body = line.strip_suffix('\n').unwrap_or(line);
-            self.append(
-                &escape(body.replace('\t', "    ").as_bytes()),
-                colour(Color::Cyan),
-            );
+            self.append(&escape(body.replace('\t', "    ").as_bytes()), style);
             if line.ends_with('\n') {
                 self.newline();
             }
@@ -494,6 +632,14 @@ impl Layout {
     }
 
     fn append(&mut self, text: &str, style: Style) {
+        let room = MAX_LINE.saturating_sub(self.used);
+        let text = match text.char_indices().nth(room) {
+            Some((at, _)) => {
+                self.long = true;
+                &text[..at]
+            }
+            None => text,
+        };
         self.used += text.chars().count();
         match self.line.last_mut() {
             Some(last) if last.style == style && last.link == self.link => {
@@ -561,7 +707,11 @@ mod tests {
 
     /// The reader's screen at 80×24, as rows and style runs.
     fn shown(title: &str, markdown: impl AsRef<[u8]>) -> String {
-        let mut reader = Reader::new(title.as_bytes().to_vec(), markdown.as_ref());
+        shown_of(title, markdown.as_ref().to_vec(), true)
+    }
+
+    fn shown_of(title: &str, markdown: Vec<u8>, whole: bool) -> String {
+        let mut reader = Reader::new(title.as_bytes().to_vec(), markdown, whole);
         let mut screen = Screen::new(24, 80);
         reader.draw(&mut screen);
         screen.runs()
@@ -609,13 +759,10 @@ mod tests {
 
     #[test]
     fn long_words_and_lines_wrap_at_the_width() {
-        let (lines, widest) = layout(&format!("{} short words here", "x".repeat(25)), 10);
-        let text: Vec<String> = lines
-            .iter()
-            .map(|line| line.iter().map(|span| span.text.as_str()).collect())
-            .collect();
+        let text = format!("{} short words here", "x".repeat(25));
+        let (lines, widest) = layout(&text, 10, true, MAX_PARSE);
         assert_eq!(
-            text,
+            texts(&lines),
             ["xxxxxxxxxx", "xxxxxxxxxx", "xxxxx", "short", "words here"]
         );
         assert_eq!(widest, 10);
@@ -623,7 +770,7 @@ mod tests {
 
     #[test]
     fn deep_nesting_leaves_a_column_for_text() {
-        let (lines, _) = layout(&format!("{}deep", "> ".repeat(500)), 6);
+        let (lines, _) = layout(&format!("{}deep", "> ".repeat(500)), 6, true, MAX_PARSE);
         let first: String = lines[0].iter().map(|span| span.text.as_str()).collect();
         assert_eq!(first, "│ │ │d");
         assert!(
@@ -636,7 +783,7 @@ mod tests {
     #[test]
     fn keys_scroll_within_the_file_and_q_quits() {
         let markdown: String = (1..=50).map(|n| format!("line {n}\n\n")).collect();
-        let mut reader = Reader::new(b"long.md".to_vec(), markdown.as_bytes());
+        let mut reader = Reader::new(b"long.md".to_vec(), markdown.into_bytes(), true);
         let mut screen = Screen::new(11, 40);
         reader.draw(&mut screen);
         assert_eq!(reader.key(Key::Char('j')), Flow::Continue);
@@ -663,7 +810,7 @@ mod tests {
     #[test]
     fn h_and_l_scroll_sideways_to_a_cut_line() {
         let markdown = format!("```\n{}end\n```\n", "-".repeat(20));
-        let mut reader = Reader::new(b"wide.md".to_vec(), markdown.as_bytes());
+        let mut reader = Reader::new(b"wide.md".to_vec(), markdown.into_bytes(), true);
         let mut screen = Screen::new(3, 10);
         reader.draw(&mut screen);
         for _ in 0..5 {
@@ -673,5 +820,116 @@ mod tests {
         screen.clear();
         reader.draw(&mut screen);
         assert_eq!(screen.row(1), "-------end");
+    }
+
+    #[test]
+    fn a_file_is_read_up_to_the_byte_cap_and_no_further() {
+        let path = std::env::temp_dir().join(format!("pinfold-md-cap-{}", std::process::id()));
+        std::fs::write(&path, vec![b'x'; MAX_BYTES + 100]).unwrap();
+        let (bytes, whole) = read(&path).unwrap();
+        assert_eq!((bytes.len(), whole), (MAX_BYTES, false));
+        std::fs::write(&path, vec![b'x'; MAX_BYTES]).unwrap();
+        let (bytes, whole) = read(&path).unwrap();
+        assert_eq!((bytes.len(), whole), (MAX_BYTES, true));
+        std::fs::remove_file(&path).unwrap();
+        assert!(read(Path::new(".")).is_err(), "a directory is not read");
+    }
+
+    #[test]
+    fn a_fifo_is_refused_without_waiting_for_a_writer() {
+        let path = std::env::temp_dir().join(format!("pinfold-md-fifo-{}", std::process::id()));
+        let made = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let error = read(&path).unwrap_err();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn the_start_of_a_file_over_the_byte_cap_shows_as_plain_text_under_a_banner() {
+        let markdown = b"# Big\n\nSome **bold** text \x1b[2J.\n".to_vec();
+        insta::assert_snapshot!(shown_of("big.md", markdown, false));
+    }
+
+    #[test]
+    fn past_the_time_cap_the_rest_shows_as_plain_text() {
+        let markdown = "Some **bold** text.\n";
+        let (lines, _) = layout(markdown, 80, true, Duration::ZERO);
+        assert_eq!(
+            texts(&lines),
+            [
+                "Parsing took over 2 s, so the rest shows as plain text.",
+                "",
+                "Some **bold** text."
+            ]
+        );
+        let (lines, _) = layout(markdown, 80, true, MAX_PARSE);
+        assert_eq!(texts(&lines), ["Some bold text."]);
+    }
+
+    #[test]
+    fn lines_past_the_line_cap_are_dropped() {
+        let markdown = format!("```\n{}```\n", "x\n".repeat(MAX_LINES + 10));
+        let (lines, _) = layout(&markdown, 80, true, MAX_PARSE);
+        assert_eq!(lines.len(), MAX_LINES + 2);
+        assert_eq!(texts(&lines[..1]), ["Only the first 100000 lines show."]);
+    }
+
+    #[test]
+    fn a_line_past_the_length_cap_is_cut() {
+        let markdown = format!("```\n{}\n```\n", "y".repeat(MAX_LINE + 5));
+        let (lines, widest) = layout(&markdown, 80, true, MAX_PARSE);
+        assert_eq!(widest, MAX_LINE);
+        assert_eq!(texts(&lines[..1]), ["Lines over 10000 characters are cut."]);
+        assert_eq!(texts(&lines[2..])[0].len(), MAX_LINE);
+    }
+
+    #[test]
+    fn each_escape_in_file_content_shows_escaped_as_markdown_and_as_plain_text() {
+        let escapes: [(&[u8], &str); 14] = [
+            (b"\x07", "^G"),
+            (b"\x08", "^H"),
+            (b"\x1b", "^["),
+            (b"\x7f", "^?"),
+            ("\u{85}".as_bytes(), "<U+0085>"),
+            ("\u{9b}".as_bytes(), "<U+009B>"),
+            ("\u{61c}".as_bytes(), "<U+061C>"),
+            ("\u{200e}".as_bytes(), "<U+200E>"),
+            ("\u{200f}".as_bytes(), "<U+200F>"),
+            ("\u{202a}".as_bytes(), "<U+202A>"),
+            ("\u{202e}".as_bytes(), "<U+202E>"),
+            ("\u{2066}".as_bytes(), "<U+2066>"),
+            ("\u{2069}".as_bytes(), "<U+2069>"),
+            (b"\xff", "\\xFF"),
+        ];
+        for (raw, escaped) in escapes {
+            let markdown = [
+                b"a",
+                raw,
+                b"b\n\n```\nc",
+                raw,
+                b"d\n```\n\n| e",
+                raw,
+                b"f |\n| - |\n",
+            ]
+            .concat();
+            for whole in [true, false] {
+                let reader = Reader::new(Vec::new(), markdown.clone(), whole);
+                let shown = texts(&layout(&reader.text, 80, whole, MAX_PARSE).0).concat();
+                let raw_text = std::str::from_utf8(raw).unwrap_or("\u{fffd}");
+                assert!(!shown.contains(raw_text), "{raw:?} drawn raw");
+                for (before, after) in [("a", "b"), ("c", "d"), ("e", "f")] {
+                    // U+0085 is whitespace, so in a paragraph it only separates words.
+                    if whole && before == "a" && raw_text == "\u{85}" {
+                        continue;
+                    }
+                    let want = format!("{before}{escaped}{after}");
+                    assert!(shown.contains(&want), "{want} missing from {shown:?}");
+                }
+            }
+        }
     }
 }
