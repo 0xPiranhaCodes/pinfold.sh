@@ -1,0 +1,58 @@
+---
+source: crates/pinfold-tools/src/files.rs
+expression: "shown(&work, &[Key::Char('j'), Key::Enter])"
+---
+|files work/<U+202E>cod^G                                             1/1  ? keys|
+|docs/            a^[]0;x^G<U+0085>b^?                                           |
+|<U+202E>cod^G/                                                                  |
+|notes.txt                                                                       |
+|tool.bin                                                                        |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+0:0..24 Default Default bold
+0:24..69 Default Default
+0:69..80 BrightBlack Default
+1:0..15 Blue Default bold
+1:15..17 Default Default
+1:17..40 Black Blue
+1:40..80 Default Default
+2:0..15 Black BrightBlack bold
+2:15..80 Default Default
+3:0..80 Default Default
+4:0..80 Default Default
+5:0..80 Default Default
+6:0..80 Default Default
+7:0..80 Default Default
+8:0..80 Default Default
+9:0..80 Default Default
+10:0..80 Default Default
+11:0..80 Default Default
+12:0..80 Default Default
+13:0..80 Default Default
+14:0..80 Default Default
+15:0..80 Default Default
+16:0..80 Default Default
+17:0..80 Default Default
+18:0..80 Default Default
+19:0..80 Default Default
+20:0..80 Default Default
+21:0..80 Default Default
+22:0..80 Default Default
+23:0..80 Default Default

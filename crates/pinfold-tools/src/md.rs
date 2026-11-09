@@ -49,6 +49,18 @@ type Line = Vec<Span>;
 
 /// Reads at most [`MAX_BYTES`] of the regular file at `path`, and whether that was all of it.
 pub(crate) fn read(path: &Path) -> io::Result<(Vec<u8>, bool)> {
+    read_at_most(path, MAX_BYTES)
+}
+
+/// Reads at most `max` bytes of the regular file at `path`, and whether that was all of it.
+/// Anything else is refused, a device or FIFO before it is opened.
+pub(crate) fn read_at_most(path: &Path, max: usize) -> io::Result<(Vec<u8>, bool)> {
+    if !std::fs::metadata(path)?.is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a regular file",
+        ));
+    }
     let file = pinfold_sys::open_nonblocking(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
@@ -58,12 +70,12 @@ pub(crate) fn read(path: &Path) -> io::Result<(Vec<u8>, bool)> {
         ));
     }
     // The length is only a hint for the buffer: the file can change while it is read.
-    let hint = usize::try_from(metadata.len()).map_or(MAX_BYTES, |len| len.min(MAX_BYTES));
+    let hint = usize::try_from(metadata.len()).map_or(max, |len| len.min(max));
     let mut bytes = Vec::with_capacity(hint + 1);
     // One byte past the cap says whether there is more, and nothing further is read.
-    file.take(MAX_BYTES as u64 + 1).read_to_end(&mut bytes)?;
-    let whole = bytes.len() <= MAX_BYTES;
-    bytes.truncate(MAX_BYTES);
+    file.take(max as u64 + 1).read_to_end(&mut bytes)?;
+    let whole = bytes.len() <= max;
+    bytes.truncate(max);
     Ok((bytes, whole))
 }
 
@@ -219,8 +231,8 @@ impl Tool for Reader {
     }
 }
 
-/// Styles the layout uses.
-fn colour(fg: Color) -> Style {
+/// A style of just the colour `fg`.
+pub(crate) fn colour(fg: Color) -> Style {
     Style {
         fg,
         ..Style::default()
