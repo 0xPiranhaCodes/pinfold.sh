@@ -67,6 +67,13 @@ pub fn is_find(key: &Key, modifiers: ModifiersState) -> bool {
     is_shortcut(key, modifiers, "f")
 }
 
+/// Whether this is the shortcut that opens the command palette, Ctrl+Shift+P on every system as
+/// the design shows it.
+pub fn is_palette(key: &Key, modifiers: ModifiersState) -> bool {
+    modifiers == ModifiersState::CONTROL | ModifiersState::SHIFT
+        && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("p"))
+}
+
 /// Whether this is the shortcut that turns vi mode on and off.
 pub fn is_vi(key: &Key, modifiers: ModifiersState) -> bool {
     is_shortcut(key, modifiers, "x")
@@ -311,6 +318,10 @@ mod tests {
         assert!(!is_copy(&key("c"), CONTROL));
         assert!(!is_find(&key("f"), CONTROL));
         assert!(!is_copy(&key("c"), held | ALT));
+        // The palette is Ctrl+Shift+P on every system.
+        assert!(is_palette(&key("P"), CONTROL | SHIFT));
+        assert!(!is_palette(&key("p"), CONTROL));
+        assert!(!is_palette(&key("p"), ModifiersState::SUPER | SHIFT));
     }
 
     #[test]

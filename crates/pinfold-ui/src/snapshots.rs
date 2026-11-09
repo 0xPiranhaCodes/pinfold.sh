@@ -1,5 +1,5 @@
 //! Snapshots of the chrome as cells: pane borders, the bar with its status line, an approval
-//! prompt and the right-click menu.
+//! prompt, the right-click menu and the command palette.
 
 use std::fmt::Write as _;
 use std::time::Instant;
@@ -11,6 +11,7 @@ use pinfold_sys::LocalTime;
 use crate::approval::Queue;
 use crate::context_menu::Menu;
 use crate::link::Approval;
+use crate::palette::Palette;
 use crate::panes::{blank, blit, dividers};
 use crate::top_bar::{self, Bar};
 
@@ -225,5 +226,19 @@ fn the_right_click_menu_with_a_link() {
     let mut frame = pane('x', 14, 20);
     let menu = Menu::open((1, 2), (14, 20), Some("https://pinfold.sh".to_owned()));
     menu.draw(&mut frame);
+    insta::assert_snapshot!(cells(&frame));
+}
+
+#[test]
+fn the_command_palette_filtered_to_open() {
+    let mut frame = pane('x', 12, 60);
+    let mut palette = Palette::commands();
+    let open = winit::keyboard::Key::Character("open".into());
+    palette.key(
+        &open,
+        Some("open"),
+        winit::keyboard::ModifiersState::empty(),
+    );
+    palette.draw(&mut frame);
     insta::assert_snapshot!(cells(&frame));
 }

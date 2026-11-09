@@ -42,6 +42,7 @@ use crate::hyperlink::{self, Target};
 use crate::link::{self, Approval, Link, Screen, Tab};
 use crate::notify;
 use crate::outbox::{self, Inbox, Outbox, Request};
+use crate::palette::{self, Palette};
 use crate::paste::Prompt;
 use crate::prefix::{self, Command, Prefix};
 use crate::search_bar::{Bar, Step};
@@ -368,6 +369,8 @@ struct App {
     approvals: approval::Queue,
     /// The right-click menu, while open. Every key and press goes to it.
     menu: Option<Menu>,
+    /// The command palette, while open. Every key goes to it.
+    palette: Option<Palette>,
     /// The pane and cell the open menu asked the core for a hyperlink at.
     asking: Option<(u32, Position)>,
     prefix: Prefix,
@@ -456,6 +459,7 @@ impl App {
                 queue
             },
             menu: None,
+            palette: None,
             asking: None,
             flash: Flash::default(),
             unhardened: None,
@@ -723,6 +727,9 @@ impl App {
                 menu.draw(&mut self.composed);
                 self.composed.cursor = None;
             }
+            if let Some(palette) = &self.palette {
+                palette.draw(&mut self.composed);
+            }
             if self.ended {
                 flash::ended(&mut self.composed);
             } else if !self.approvals.is_empty() {
@@ -915,6 +922,12 @@ impl App {
     /// it did. These come before the prefix, so that an armed prefix cannot swallow a paste.
     fn window_key(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) -> bool {
         let key = &event.logical_key;
+        if input::is_palette(key, self.modifiers) {
+            self.menu = None;
+            self.palette = Some(Palette::commands());
+            self.redraw_soon();
+            return true;
+        }
         if input::is_vi(key, self.modifiers) {
             if !event.repeat {
                 self.toggle_vi();
@@ -940,6 +953,29 @@ impl App {
             self.command(event_loop, command);
         }
         true
+    }
+
+    /// Hands a key to the open palette, and returns the command it chose. Ctrl+Shift+P again
+    /// closes it.
+    fn palette_key(&mut self, key: &Key, text: Option<&str>) -> Option<Command> {
+        let palette = self.palette.as_mut()?;
+        let step = if input::is_palette(key, self.modifiers) {
+            palette::Step::Close
+        } else {
+            palette.key(key, text, self.modifiers)
+        };
+        self.redraw_soon();
+        match step {
+            palette::Step::Stay => None,
+            palette::Step::Close => {
+                self.palette = None;
+                None
+            }
+            palette::Step::Chose(index) => {
+                self.palette = None;
+                palette::COMMANDS.get(index).map(|&(_, command)| command)
+            }
+        }
     }
 
     /// Hands a key to the search bar or vi mode, and returns whether either took it.
@@ -1280,6 +1316,14 @@ impl App {
             _ => return None,
         };
         let down = state == ElementState::Pressed;
+        // shortcut: a press anywhere closes the palette, as Esc does; choose by click if missed.
+        if self.palette.is_some() {
+            if down {
+                self.palette = None;
+                self.redraw_soon();
+            }
+            return None;
+        }
         if let Some(menu) = self.menu.as_mut().filter(|_| down) {
             return Some(menu.click((!self.on_bar).then_some(self.pointer)));
         }
@@ -1493,6 +1537,7 @@ impl ApplicationHandler<Notice> for App {
                 }
                 self.prefix.cancel();
                 self.menu = None;
+                self.palette = None;
                 self.redraw_soon();
             }
             Notice::Exited => event_loop.exit(),
@@ -1517,6 +1562,7 @@ impl ApplicationHandler<Notice> for App {
             Notice::Command(command) if self.prompt.is_none() || command == Command::Detach => {
                 self.prefix.cancel();
                 self.menu = None;
+                self.palette = None;
                 self.command(event_loop, command);
             }
             Notice::Command(_) => {}
@@ -1555,6 +1601,14 @@ impl ApplicationHandler<Notice> for App {
                 if let Some(menu) = self.menu.as_mut().filter(|_| event.state.is_pressed()) {
                     let step = menu.key(&event.logical_key);
                     self.menu_step(step, event_loop);
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } if self.palette.is_some() => {
+                if event.state.is_pressed() {
+                    let text = event.text.as_ref().map(|text| text.as_str());
+                    if let Some(command) = self.palette_key(&event.logical_key, text) {
+                        self.command(event_loop, command);
+                    }
                 }
             }
             WindowEvent::KeyboardInput { event, .. } => {
@@ -1956,6 +2010,46 @@ mod tests {
             "{}",
             sent.len()
         );
+    }
+
+    #[test]
+    fn the_palette_opens_files_and_diff_and_runs_any_command() {
+        let (mut app, inbox, _poll) = app();
+        let text = |text: &str| Key::Character(text.into());
+        let enter = Key::Named(NamedKey::Enter);
+        for (query, tool) in [("files", proto::Tool::Files), ("diff", proto::Tool::Diff)] {
+            app.palette = Some(Palette::commands());
+            assert_eq!(app.palette_key(&text(query), Some(query)), None);
+            let command = app.palette_key(&enter, None).unwrap();
+            assert!(app.palette.is_none());
+            app.run(command);
+            let sent = inbox.take();
+            assert!(
+                matches!(
+                    sent[..],
+                    [Request::Core(proto::Request::OpenTool { pane: 1, tool: sent })] if sent == tool
+                ),
+                "{query}"
+            );
+        }
+        app.palette = Some(Palette::commands());
+        app.palette_key(&text("split d"), Some("split d"));
+        let command = app.palette_key(&enter, None).unwrap();
+        app.run(command);
+        let sent = inbox.take();
+        assert!(matches!(
+            sent[..],
+            [Request::Core(proto::Request::Split {
+                pane: 1,
+                way: proto::SplitWay::Down
+            })]
+        ));
+        // Ctrl+Shift+P again closes it, and nothing reaches the pane.
+        app.palette = Some(Palette::commands());
+        app.modifiers = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert_eq!(app.palette_key(&text("P"), Some("\u{10}")), None);
+        assert!(app.palette.is_none());
+        assert!(inbox.take().is_empty());
     }
 
     #[test]
