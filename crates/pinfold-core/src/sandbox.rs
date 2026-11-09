@@ -41,6 +41,17 @@ const SOCKET_VARS: [&str; 3] = [
     "DBUS_SESSION_BUS_ADDRESS",
 ];
 
+/// Words in the name of a variable that holds a secret, such as `GITHUB_TOKEN` or
+/// `AZURE_CLIENT_SECRET`, which a sandboxed agent does not get (ADR-0041).
+const SECRET_WORDS: [&str; 6] = [
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "CREDENTIAL",
+    "APIKEY",
+];
+
 /// The macOS rules: everything is allowed but the hidden directories, every terminal by name and
 /// TIOCSTI (`0x80017472`). A pane's own terminal is already open, and `/dev/tty` still reaches it.
 const PROFILE: &str = "(version 1)(allow default)\
@@ -405,8 +416,30 @@ fn resolve(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// Whether a variable's name looks like a secret's: it holds `TOKEN`, `SECRET`, `PASSWORD`,
+/// `PASSWD`, `CREDENTIAL` or `APIKEY`, ends in `_KEY` or `_PAT`, or starts with `AWS_`, in any
+/// case. A sandboxed agent does not get such a variable unless its profile keeps it.
+///
+/// ```
+/// use pinfold_core::sandbox::secret_name;
+/// for name in ["GITHUB_TOKEN", "OPENAI_API_KEY", "AWS_PROFILE", "db_password", "GH_PAT"] {
+///     assert!(secret_name(name.as_ref()), "{name}");
+/// }
+/// for name in ["PATH", "HOME", "LANG", "KEYBOARD", "TERM"] {
+///     assert!(!secret_name(name.as_ref()), "{name}");
+/// }
+/// ```
+pub fn secret_name(name: &OsStr) -> bool {
+    let name = name.to_string_lossy().to_ascii_uppercase();
+    name.starts_with("AWS_")
+        || name.ends_with("_KEY")
+        || name.ends_with("_PAT")
+        || SECRET_WORDS.iter().any(|word| name.contains(word))
+}
+
 /// Returns the command that runs `program` with `hidden` unreadable, only `work` and temporary
-/// directories writable and, of Unix sockets, only the API's at `api` reachable, for
+/// directories writable, no variable whose [`secret_name`] is not in `keep` and, of Unix
+/// sockets, only the API's at `api` reachable, for
 /// [`Reactor::spawn`](crate::io::Reactor::spawn). On Linux, given a `shadow` directory and a
 /// `work` with a `.git` directory, the agent's git uses [`shadow`] there. On Linux below Landlock ABI 6 abstract sockets
 /// stay reachable. Spawn it once: on Linux its seccomp filter is read to the end by the first
@@ -433,7 +466,7 @@ fn resolve(path: &Path) -> PathBuf {
 /// let work = sandbox::working_directory(&project, &[], "/usr/bin".as_ref())?;
 /// let program = ["/bin/echo".to_owned(), "hi".to_owned()];
 /// let api = std::env::temp_dir().join("pinfold/pinfold.sock");
-/// match sandbox::command(&program, &[], &work, &api, None) {
+/// match sandbox::command(&program, &[], &[], &work, &api, None) {
 ///     Ok(command) => assert_ne!(command.get_program(), "/bin/echo"),
 ///     // No bubblewrap here: the pane does not start.
 ///     Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
@@ -444,6 +477,7 @@ fn resolve(path: &Path) -> PathBuf {
 pub fn command(
     program: &[String],
     hidden: &[PathBuf],
+    keep: &[String],
     work: &WorkingDirectory,
     api: &Path,
     shadow: Option<&Path>,
@@ -501,6 +535,12 @@ pub fn command(
     }
     for name in SOCKET_VARS {
         command.env_remove(name);
+    }
+    // Names only: a value is never read here, nor logged.
+    for (name, _) in std::env::vars_os() {
+        if secret_name(&name) && !keep.iter().any(|kept| name == kept.as_str()) {
+            command.env_remove(name);
+        }
     }
     if let Some(dir) = &git.shadow {
         command
@@ -1526,6 +1566,7 @@ mod tests {
         let result = command(
             &["agent".to_owned()],
             &[],
+            &[],
             &work,
             Path::new("/nowhere/api.sock"),
             None,
@@ -1546,8 +1587,15 @@ mod tests {
     fn an_empty_program_or_an_option_is_refused() {
         for program in [&[][..], &[String::new()], &["-p".to_owned()]] {
             let work = WorkingDirectory(PathBuf::from("/nowhere"));
-            let error =
-                command(program, &[], &work, Path::new("/nowhere/api.sock"), None).unwrap_err();
+            let error = command(
+                program,
+                &[],
+                &[],
+                &work,
+                Path::new("/nowhere/api.sock"),
+                None,
+            )
+            .unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         }
     }

@@ -71,9 +71,11 @@ still welcome if it adds a case not listed here. Report bugs with the
   stores: `~/.aws`, `~/.azure`, `~/.docker`, `~/.gnupg`, `~/.kube`, `~/.netrc`,
   `~/.config/gcloud`, `~/.config/gh` and browser profiles
   ([configuration](../configuration.md#agent-profiles) lists them). A tool that needs one, such
-  as `aws`, `gh`, `docker login` or `kubectl`, fails inside the sandbox. The agent can read every
-  other file you can, gets your environment variables but the agent sockets', can read and
-  write the clipboard, and can reach the network
+  as `aws`, `gh`, `docker login` or `kubectl`, fails inside the sandbox. Nor does it get
+  variables whose names look like secrets, such as `*_TOKEN`, `*_KEY` and `AWS_*`, so an agent
+  CLI that reads its API key from the environment needs `keep_env` in its profile
+  ([configuration](../configuration.md#agent-profiles)). The agent can read every other file you
+  can, gets every other variable, can read and write the clipboard, and can reach the network
   ([ADR-0041](../adr/0041-sandbox-hides-writes-not-secrets.md),
   [#328](https://github.com/0xPiranhaCodes/pinfold.sh/issues/328)).
 

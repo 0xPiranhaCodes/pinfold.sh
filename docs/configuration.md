@@ -119,7 +119,16 @@ every 10 seconds in all. Linux marks the tab only. A plain shell pane never read
 [agents.claude]
 command = ["claude"]
 sandbox = true
+keep_env = ["ANTHROPIC_API_KEY"]
 ```
+
+A sandboxed agent does not get variables whose names look like secrets: any name that holds
+`TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `CREDENTIAL` or `APIKEY`, ends in `_KEY` or `_PAT`, or
+starts with `AWS_`, in any case. `keep_env` names the ones it still gets, such as its own API
+key: at most 16 exact names of letters, digits and `_`, not starting with a digit, and no
+patterns. It does nothing without `sandbox = true`. Other variables reach the agent as before,
+so a secret under a name that matches none of these, such as a password inside `DATABASE_URL`,
+is not stripped. PinFold never logs a variable's value.
 
 The sandbox hides `~/.ssh`, the directory of this file, PinFold's state directory, the common
 credential stores, and every other pane's terminal device, and where any of those, or this

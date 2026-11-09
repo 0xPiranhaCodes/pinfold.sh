@@ -66,7 +66,22 @@ pub struct Agent {
     /// panes' terminals from it.
     #[serde(default)]
     pub sandbox: bool,
+    /// Variables whose names look like secrets that a sandboxed agent still gets, such as its
+    /// own API key. The sandbox strips every other one (ADR-0041). At most [`MAX_KEEP_ENV`]
+    /// names of letters, digits and `_`, not starting with a digit.
+    ///
+    /// ```
+    /// let text = b"[agents.claude]\ncommand = [\"claude\"]\nsandbox = true\nkeep_env = [\"ANTHROPIC_API_KEY\"]";
+    /// let config = pinfold_config::parse(text)?;
+    /// assert_eq!(config.agents["claude"].keep_env, ["ANTHROPIC_API_KEY"]);
+    /// # Ok::<(), pinfold_config::Error>(())
+    /// ```
+    #[serde(default, deserialize_with = "keep_env")]
+    pub keep_env: Vec<String>,
 }
+
+/// The most variables an agent profile's `keep_env` names.
+pub const MAX_KEEP_ENV: usize = 16;
 
 /// The `[api]` table.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -176,6 +191,31 @@ fn command<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D:
         _ => Err(de::Error::custom(
             "command must start with a program, not be empty or start with -",
         )),
+    }
+}
+
+fn keep_env<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D::Error> {
+    let names = Vec::<String>::deserialize(deserializer)?;
+    let valid = |name: &String| {
+        let mut bytes = name.bytes();
+        let first = bytes.next();
+        first.is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+            && name.len() <= 128
+            && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    };
+    if names.len() > MAX_KEEP_ENV {
+        return Err(de::Error::custom(format!(
+            "keep_env names at most {MAX_KEEP_ENV} variables, not {}",
+            names.len()
+        )));
+    }
+    match names.iter().find(|name| !valid(name)) {
+        // Not quoted: the name may hold control characters.
+        Some(_) => Err(de::Error::custom(
+            "keep_env names must be letters, digits and _, not start with a digit, and be at \
+             most 128 bytes",
+        )),
+        None => Ok(names),
     }
 }
 
@@ -567,6 +607,33 @@ mod tests {
             );
         }
         assert!(message(b"[agents.a]\nsandbox = true\n").contains("command"));
+    }
+
+    #[test]
+    fn an_agent_keeps_a_few_named_variables() {
+        let profile = |keep: &str| format!("[agents.a]\ncommand = [\"a\"]\nkeep_env = {keep}\n");
+        assert!(
+            parse(b"[agents.a]\ncommand = [\"a\"]\n").unwrap().agents["a"]
+                .keep_env
+                .is_empty()
+        );
+        let config = parse(profile("[\"OPENAI_API_KEY\", \"_X1\"]").as_bytes()).unwrap();
+        assert_eq!(config.agents["a"].keep_env, ["OPENAI_API_KEY", "_X1"]);
+        let long = format!("[\"{}\"]", "A".repeat(129));
+        for keep in [
+            "[\"\"]",
+            "[\"1A\"]",
+            "[\"A-B\"]",
+            "[\"A*\"]",
+            "[\"A\\nB\"]",
+            &long,
+        ] {
+            let text = message(profile(keep).as_bytes());
+            assert!(text.contains("keep_env names must be"), "{keep}: {text}");
+        }
+        let many: Vec<String> = (0..=MAX_KEEP_ENV).map(|n| format!("\"V{n}\"")).collect();
+        let text = message(profile(&format!("[{}]", many.join(","))).as_bytes());
+        assert!(text.contains("at most 16 variables, not 17"), "{text}");
     }
 
     #[test]
