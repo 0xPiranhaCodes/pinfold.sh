@@ -11,6 +11,10 @@ publish.workspace = true
 
 [dependencies]
 pinfold-sys = { path = "../pinfold-sys", version = "0.1.0-beta.3" }
+pulldown-cmark = { version = "0.13.6", default-features = false }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+insta = { version = "1.49.0", default-features = false }

@@ -305,6 +305,38 @@ impl Screen {
         self.shown.clone_from(&self.cells);
         self.shown_links.clone_from(&self.links);
     }
+
+    /// Each row between bars, then each run of cells whose style or link differs from the cell
+    /// before it, as `row:start..end`, for snapshots.
+    #[cfg(test)]
+    pub(crate) fn runs(&self) -> String {
+        let mut shown = String::new();
+        for row in 0..self.rows {
+            let _ = writeln!(shown, "|{}|", self.row(row));
+        }
+        for row in 0..self.rows {
+            let cells = self.row_cells(&self.cells, row);
+            let mut start = 0;
+            while let Some(first) = cells.get(start) {
+                let look = |cell: &Cell| (cell.style, cell.link);
+                let length = cells[start..]
+                    .iter()
+                    .take_while(|cell| look(cell) == look(first))
+                    .count();
+                let Style { fg, bg, bold } = first.style;
+                let _ = write!(shown, "{row}:{start}..{} {fg:?} {bg:?}", start + length);
+                if bold {
+                    shown.push_str(" bold");
+                }
+                if let Some(target) = first.link.checked_sub(1) {
+                    let _ = write!(shown, " link {:?}", self.links[target as usize]);
+                }
+                shown.push('\n');
+                start += length;
+            }
+        }
+        shown
+    }
 }
 
 /// `write!` into a byte buffer.

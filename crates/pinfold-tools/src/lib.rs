@@ -5,6 +5,7 @@
 //! every string, and reads [`Key`]s. [`run`] owns the terminal around it.
 
 pub mod keys;
+mod md;
 pub mod screen;
 
 use std::io::{self, Read, Write};
@@ -83,10 +84,24 @@ impl Command {
     /// Returns an error if standard input or output is not a terminal, or writing to it fails.
     pub fn run(&self) -> io::Result<bool> {
         let (title, problem) = match self {
-            Self::Md { file } => (
-                format!("md {}", file.display()),
-                problem(file, Path::is_file),
-            ),
+            Self::Md { file } => {
+                // shortcut: reads the whole file; #315 caps it at 5 MB.
+                let read = problem(file, Path::is_file).map_or_else(
+                    || {
+                        std::fs::read(file)
+                            .map_err(|error| format!("cannot read {}: {error}", file.display()))
+                    },
+                    Err,
+                );
+                match read {
+                    Ok(bytes) => {
+                        let title = file.as_os_str().as_encoded_bytes().to_vec();
+                        run(&mut md::Reader::new(title, &bytes))?;
+                        return Ok(true);
+                    }
+                    Err(problem) => (format!("md {}", file.display()), Some(problem)),
+                }
+            }
             Self::Files { dir } => (
                 format!("files {}", dir.display()),
                 problem(dir, Path::is_dir),
@@ -131,7 +146,7 @@ pub trait Tool {
     fn key(&mut self, key: Key) -> Flow;
 }
 
-/// The screen a tool shows until its own slice lands, and the startup failure screen.
+/// The screen a tool shows until its own slice lands, and the screen of one that cannot start.
 struct Placeholder {
     title: String,
     problem: Option<String>,

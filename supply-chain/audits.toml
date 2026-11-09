@@ -109,6 +109,12 @@ criteria = "safe-to-deploy"
 version = "1.20.1"
 notes = "AI-assisted review (Claude Code) for the maintainer; not yet spot-checked by a person. Type-level integer arithmetic with forbid(unsafe_code) and build = false; src/gen is 12,355 lines of committed trait impls. Checked for unsafe, build scripts, include!, file, network, process and environment access and found none; did not read the generated impls line by line."
 
+[[audits.unicase]]
+who = "Satheesh Kumar <22219814+0xPiranhaCodes@users.noreply.github.com>"
+criteria = "safe-to-deploy"
+delta = "2.8.1 -> 2.10.0"
+notes = "AI-assisted review (Claude Code) for the maintainer; not yet spot-checked by a person. Read the whole delta from mozilla's 2.6.0 -> 2.8.1 audit: Unicode 17 case-fold table entries, Ascii ordering by bytes rather than chars, the third character of a three-character fold returned in order, and a hand-written UTF-8 encoder replaced by char::encode_utf8. No unsafe, build script, I/O or FFI."
+
 [[audits.vte]]
 who = "Satheesh Kumar <22219814+0xPiranhaCodes@users.noreply.github.com>"
 criteria = "safe-to-deploy"
