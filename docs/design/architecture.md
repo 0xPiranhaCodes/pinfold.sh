@@ -133,7 +133,7 @@ The tools follow [ADR-0045](../adr/0045-tools-are-programs-in-their-own-pane.md)
 
 - Miller columns: parent | current | preview. hjkl or arrow keys to move and `/` to filter by name, with a plain, hex or directory-stats preview. A preview reads at most 64 KiB, a hex one shows 4 KiB, a directory lists 10,000 entries and counts the rest on screen, a name with a control or bidi character or invalid UTF-8 shows escaped and red, and FIFOs, devices and sockets are never opened.
 - Git status badges (M, A, ?) and dimmed ignored files from `git status --porcelain=v1 -z --ignored`, run on its own thread and killed after 2 s so a slow repository never stalls the view, and a refresh when the directory's or the index's modification time changes, checked once a second.
-- Actions: open in `$EDITOR` in the tool's pane, copy / move / rename / trash with a confirmation, fuzzy jump, and bookmarks. Rename and trash never replace a name or follow a link, and trash refuses another file system rather than copying. Enter opens executables in the pager; there is no "run" action.
+- Actions: open in `$EDITOR` in the tool's pane, copy / move / rename / trash with a confirmation, fuzzy jump, and bookmarks. Rename, copy, move and trash never replace a name or follow a link; move and trash refuse another file system rather than copying, and a copy over 256 MiB or 10,000 entries is refused. Enter opens executables in the pager; there is no "run" action.
 - **For agents:** `@` inserts the selected path(s) into the last focused agent pane's prompt, as an approved cross-pane send.
 
 ### Git diff viewer (`pinfold diff`)

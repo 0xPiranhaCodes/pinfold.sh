@@ -1,18 +1,23 @@
-//! What `pinfold files` does to files: rename and trash (ADR-0045 section 4).
+//! What `pinfold files` does to files: rename, copy, move and trash (ADR-0045 section 4).
 //!
 //! Each acts on a link itself, never on what it points at, and never replaces an existing name.
-//! Trash is a rename, so it refuses to cross a file system rather than copy. Messages
+//! Move and trash are renames, so they refuse to cross a file system rather than copy. Messages
 //! name files escaped, as the screen shows them.
 
 use std::ffi::OsStr;
-use std::fs::{self, DirBuilder, OpenOptions};
+use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::screen::escape;
+
+/// Bytes a copy may hold in all; a larger one is refused before anything is written.
+pub(crate) const MAX_COPY: u64 = 256 * 1024 * 1024;
+/// Entries a copy may hold in all, as a directory lists at most.
+const MAX_COPY_ENTRIES: u64 = 10_000;
 
 /// Escaped, as every message shows a name.
 fn shown(path: &Path) -> String {
@@ -60,6 +65,101 @@ pub(crate) fn rename_to(from: &Path, name: &OsStr) -> Result<(), String> {
     check_name(name)?;
     let dir = from.parent().ok_or("cannot rename /")?;
     rename(from, &dir.join(name))
+}
+
+/// Moves `from` into `dir` under its own name.
+pub(crate) fn move_into(from: &Path, dir: &Path) -> Result<(), String> {
+    let name = from.file_name().ok_or("cannot move /")?;
+    inside(from, dir)?;
+    rename(from, &dir.join(name))
+}
+
+/// Refuses `dir` if it is `from` or under it.
+fn inside(from: &Path, dir: &Path) -> Result<(), String> {
+    let (from, dir) = (from.canonicalize(), dir.canonicalize());
+    match (from, dir) {
+        (Ok(from), Ok(dir)) if dir.starts_with(&from) => {
+            Err(format!("{} is inside {}", shown(&dir), shown(&from)))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Copies `from` into `dir` under its own name: a link as a link, a directory with what it
+/// holds. Refused past [`MAX_COPY`] bytes or 10,000 entries, before anything is written.
+pub(crate) fn copy_into(from: &Path, dir: &Path) -> Result<(), String> {
+    let name = from.file_name().ok_or("cannot copy /")?;
+    inside(from, dir)?;
+    let to = dir.join(name);
+    vacant(&to)?;
+    let (mut bytes, mut entries) = (0, 0);
+    size(from, &mut bytes, &mut entries)
+        .map_err(|error| format!("cannot read {}: {error}", shown(from)))?;
+    if bytes > MAX_COPY || entries > MAX_COPY_ENTRIES {
+        return Err(format!(
+            "{} is over the copy cap of 256 MiB or 10,000 entries",
+            shown(from)
+        ));
+    }
+    copy(from, &to).map_err(|error| format!("cannot copy {}: {error}", shown(from)))
+}
+
+/// Adds up the bytes and entries under `path`, stopping once past the caps.
+fn size(path: &Path, bytes: &mut u64, entries: &mut u64) -> io::Result<()> {
+    let meta = fs::symlink_metadata(path)?;
+    *bytes += meta.len();
+    *entries += 1;
+    if meta.is_dir() {
+        for entry in fs::read_dir(path)? {
+            if *bytes > MAX_COPY || *entries > MAX_COPY_ENTRIES {
+                break;
+            }
+            size(&entry?.path(), bytes, entries)?;
+        }
+    }
+    Ok(())
+}
+
+fn copy(from: &Path, to: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(from)?;
+    let kind = meta.file_type();
+    if kind.is_symlink() {
+        std::os::unix::fs::symlink(fs::read_link(from)?, to)
+    } else if kind.is_dir() {
+        // Private while it fills, then the source's mode, so no one else sees it half made.
+        DirBuilder::new().mode(0o700).create(to)?;
+        let made = fs::symlink_metadata(to)?;
+        // shortcut: a directory swapped for a link after the lstat above is listed through it;
+        // walk with openat(O_NOFOLLOW | O_DIRECTORY) in pinfold-sys if another user's race matters.
+        for entry in fs::read_dir(from)? {
+            let entry = entry?;
+            copy(&entry.path(), &to.join(entry.file_name()))?;
+        }
+        // Through a descriptor checked to be the directory made above, never a link put there.
+        let opened = File::open(to)?;
+        let found = opened.metadata()?;
+        if (found.dev(), found.ino()) != (made.dev(), made.ino()) {
+            return Err(io::Error::other("it changed while being copied"));
+        }
+        opened.set_permissions(fs::Permissions::from_mode(meta.mode() & 0o777))
+    } else if kind.is_file() {
+        let mut source = File::open(from)?;
+        let opened = source.metadata()?;
+        // A link swapped in after the check is opened through, so it is caught here.
+        if (opened.dev(), opened.ino()) != (meta.dev(), meta.ino()) {
+            return Err(io::Error::other("it changed while being copied"));
+        }
+        let mut target = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(meta.mode() & 0o777)
+            .open(to)?;
+        io::copy(&mut source, &mut target).map(drop)
+    } else {
+        Err(io::Error::other(
+            "only files, directories and links are copied",
+        ))
+    }
 }
 
 /// Where trash goes: `~/.Trash` on macOS, else the XDG home trash, `$XDG_DATA_HOME/Trash` or
@@ -218,6 +318,51 @@ mod tests {
             Path::new("b.txt")
         );
         assert_eq!(fs::read(root.join("b.txt")).unwrap(), b"b");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_move_takes_the_link_and_never_goes_into_itself() {
+        let root = scratch("move");
+        move_into(&root.join("link"), &root.join("dir")).unwrap();
+        assert!(
+            fs::symlink_metadata(root.join("dir/link"))
+                .unwrap()
+                .is_symlink()
+        );
+        assert!(root.join("b.txt").is_file(), "the link's target stayed");
+        assert!(move_into(&root.join("dir"), &root.join("dir/sub")).is_err());
+        fs::write(root.join("dir/b.txt"), "other").unwrap();
+        assert!(move_into(&root.join("b.txt"), &root.join("dir")).is_err());
+        assert_eq!(fs::read(root.join("dir/b.txt")).unwrap(), b"other");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_copy_keeps_links_as_links_and_stops_at_its_cap() {
+        let root = scratch("copy");
+        let into = root.join("into");
+        fs::create_dir(&into).unwrap();
+        fs::set_permissions(root.join("dir/sub"), fs::Permissions::from_mode(0o750)).unwrap();
+        copy_into(&root.join("dir"), &into).unwrap();
+        copy_into(&root.join("link"), &into).unwrap();
+        assert_eq!(fs::read(into.join("dir/sub/a.txt")).unwrap(), b"a");
+        let mode = fs::metadata(into.join("dir/sub")).unwrap().mode() & 0o777;
+        assert_eq!(mode, 0o750);
+        assert_eq!(
+            fs::read_link(into.join("link")).unwrap(),
+            Path::new("b.txt")
+        );
+        assert!(
+            copy_into(&root.join("b.txt"), &root).is_err(),
+            "onto itself"
+        );
+        assert!(copy_into(&root.join("dir"), &root.join("dir/sub")).is_err());
+        let big = root.join("big");
+        File::create(&big).unwrap().set_len(MAX_COPY + 1).unwrap();
+        let refused = copy_into(&big, &into).unwrap_err();
+        assert!(refused.contains("over the copy cap"), "{refused}");
+        assert!(!into.join("big").exists());
         fs::remove_dir_all(root).unwrap();
     }
 

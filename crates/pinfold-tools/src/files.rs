@@ -11,7 +11,7 @@
 //! directory and runs git again, one call at a time. A directory where git ran over its cap
 //! gets no more calls until it is left.
 //!
-//! Rename and trash (in [`ops`]) each wait on a confirmation drawn in the pane that
+//! Rename, copy, move and trash (in [`ops`]) each wait on a confirmation drawn in the pane that
 //! lists every name escaped. No API caller can answer it, as `pane.send` to a tool pane is
 //! refused (ADR-0045 section 4).
 
@@ -44,7 +44,7 @@ const POLL: Duration = Duration::from_secs(1);
 /// Matches the fuzzy jump shows.
 const MAX_JUMPS: usize = 100;
 
-const KEYS: [&str; 12] = [
+const KEYS: [&str; 13] = [
     "j k  ↓ ↑        down or up",
     "h l  ← →        the parent, or into a directory",
     "Enter           into a directory, or a file in the reader",
@@ -54,6 +54,7 @@ const KEYS: [&str; 12] = [
     "m x  ' x        bookmark this directory as x, or go to x",
     "Space           mark or unmark; the actions below take the marked, or else the selected",
     "r               rename",
+    "y x  p          copy or cut, then paste here",
     "d               move to the trash",
     "?               these keys",
     "q               quit",
@@ -265,18 +266,28 @@ struct Jump {
 /// What a confirmation will do once `y` answers it.
 enum Action {
     Rename(PathBuf, OsString),
+    /// Copy, or move if `true`, these into a directory.
+    Paste(bool, Vec<PathBuf>, PathBuf),
     Trash(Vec<PathBuf>),
 }
 
 impl Action {
-    /// The question, then the name of each entry it touches, all from one directory; every
-    /// name is shown escaped.
+    /// The question, then the name of each entry it touches. All of them come from one
+    /// directory, which a paste's question names; every name is shown escaped.
     fn lines(&self) -> (String, &[PathBuf]) {
         match self {
             Self::Rename(from, name) => (
                 format!("Rename to {}?", escape(name.as_bytes())),
                 std::slice::from_ref(from),
             ),
+            Self::Paste(cut, paths, dir) => {
+                let verb = if *cut { "Move" } else { "Copy" };
+                let shown = |dir: &Path| escape(dir.as_os_str().as_bytes());
+                let from = paths.first().and_then(|path| path.parent()).map(shown);
+                let from = from.unwrap_or_default();
+                let question = format!("{verb} {} from {from} into {}?", count(paths), shown(dir));
+                (question, paths)
+            }
             Self::Trash(paths) => (format!("Trash {}?", count(paths)), paths),
         }
     }
@@ -323,9 +334,10 @@ pub(crate) struct Files {
     /// Bookmarks for this run, and `m` or `'` waiting for a bookmark's name.
     marks: HashMap<char, PathBuf>,
     mark: Option<char>,
-    /// Names marked with Space in `dir`, the new name being typed, an open confirmation and
-    /// its scroll, and where trash goes.
+    /// Names marked with Space in `dir`, paths waiting for `p` and whether to move them, the
+    /// new name being typed, an open confirmation and its scroll, and where trash goes.
     marked: BTreeSet<OsString>,
+    register: Option<(bool, Vec<PathBuf>)>,
     naming: Option<String>,
     confirm: Option<(Action, usize)>,
     trash: Option<(PathBuf, bool)>,
@@ -357,6 +369,7 @@ impl Files {
             marks: HashMap::new(),
             mark: None,
             marked: BTreeSet::new(),
+            register: None,
             naming: None,
             confirm: None,
             trash: ops::trash_dir(),
@@ -578,6 +591,13 @@ impl Files {
     fn act(&mut self, action: Action) {
         let done = match &action {
             Action::Rename(from, name) => ops::rename_to(from, name),
+            Action::Paste(cut, paths, dir) => paths.iter().try_for_each(|path| {
+                if *cut {
+                    ops::move_into(path, dir)
+                } else {
+                    ops::copy_into(path, dir)
+                }
+            }),
             Action::Trash(paths) => match &self.trash {
                 Some((bin, xdg)) => paths
                     .iter()
@@ -839,6 +859,10 @@ impl Tool for Files {
                 format!("{mark} bookmark: a key"),
                 Style::default(),
             );
+        } else if let Some((cut, paths)) = &self.register {
+            let verb = if *cut { "move" } else { "copy" };
+            let note = format!("{} to {verb}: p pastes here", count(paths));
+            screen.put(status, 0, note, Style::default());
         } else if let Some(note) = &self.git_note {
             screen.put(status, 0, note, colour(Color::Yellow));
         } else if let Ok(Listing {
@@ -929,6 +953,15 @@ impl Tool for Files {
                 }
             }
             Key::Char('r') if self.entry().is_some() => self.naming = Some(String::new()),
+            Key::Char(kind @ ('y' | 'x')) if self.entry().is_some() => {
+                self.register = Some((kind == 'x', self.chosen()));
+                self.marked.clear();
+            }
+            Key::Char('p') => {
+                if let Some((cut, paths)) = self.register.take() {
+                    self.confirm = Some((Action::Paste(cut, paths, self.dir.clone()), 0));
+                }
+            }
             Key::Char('d') if self.entry().is_some() => {
                 self.confirm = Some((Action::Trash(self.chosen()), 0));
             }
@@ -1463,6 +1496,32 @@ mod tests {
             refused.ends_with("tool.bin exists; nothing was replaced"),
             "{refused}"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn copy_and_move_paste_the_marked_entries_into_another_directory() {
+        let (root, work) = work("paste");
+        let mut files = Files::new(b"work".to_vec(), work.clone());
+        // Mark notes.txt and tool.bin, copy them into docs, then move docs/a.md up.
+        press(&mut files, "j  y");
+        press(&mut files, "g\n");
+        press(&mut files, "py");
+        assert!(work.join("docs/notes.txt").exists() && work.join("notes.txt").exists());
+        assert!(work.join("docs/tool.bin").exists());
+        press(&mut files, "gjxhp");
+        assert!(files.confirm.is_some() && work.join("docs/a.md").exists());
+        press(&mut files, "y");
+        assert!(work.join("a.md").exists() && !work.join("docs/a.md").exists());
+        // Moving docs/tool.bin up would replace tool.bin, so nothing moves.
+        press(&mut files, "l");
+        press(&mut files, "Gxhpy");
+        let refused = files.problem.clone().unwrap_or_default();
+        assert!(
+            refused.ends_with("tool.bin exists; nothing was replaced"),
+            "{refused}"
+        );
+        assert!(work.join("docs/tool.bin").exists());
         std::fs::remove_dir_all(root).unwrap();
     }
 
