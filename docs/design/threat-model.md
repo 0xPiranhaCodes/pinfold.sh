@@ -100,6 +100,8 @@ with a top-level folder.
 | T4  | OSC 9 and 777 text never shown; their alerts rate-limited | The parser drops both and the core keeps no text, only a count of OSC 9. An agent pane's needs you alerts once per pane per 10 s | `a_flood_of_osc_9_and_777_notifications_only_moves_a_counter` (`vt.rs`), `a_flapping_agent_cli_raises_one_alert_in_ten_seconds` (`status.rs`) |
 | T4  | Window notifications: PinFold's text, one per tab per 60 s and one per 10 s in all | `pinfold-ui/src/notify.rs`, `pinfold-sys/src/notify.rs` (macOS; Linux has the tab mark only) | `a_flood_of_needs_you_notifies_once_a_tab_a_minute_and_once_in_ten_seconds`, `the_text_is_pinfolds_own`, `only_a_tab_that_just_needs_you_unseen_is_due` (`pinfold-ui/src/notify.rs`) |
 | T5  | Workspace trust prompt                      | `pinfold-api/src/trust.rs`, `pinfold-core/src/grants.rs`, `pinfold-config/src/workspace.rs` | `only_the_window_answers_a_trust_prompt_and_trusting_records_the_layout`, `up_runs_a_trusted_workspace_and_a_restore_runs_it_again_until_its_file_changes` (`session.rs`) |
+| T1  | `pane.send` to a tool pane is refused for every caller, before any prompt (ADR-0045) | `pinfold-core/src/io.rs` (`send`), `pinfold-core/src/tool.rs` (`NO_SEND`), `pinfold-cli/src/bin/pinfold-core.rs` (`decide`) | `a_tool_pane_is_listed_as_one_and_refuses_every_send` (`pinfold-core/src/tool.rs`), `an_agent_cannot_type_into_the_tool_it_opened` (`session.rs`) |
+| T6  | `tool.open` runs the sibling `pinfold` with a fixed argument list and the caller's values after `--`; `path` and `range` are checked before a process starts | `pinfold-api/src/tool.rs` (`params`, `revision`), `pinfold-core/src/tool.rs` (`command`), `pinfold-cli/src/bin/pinfold-core.rs` (`sibling`) | `a_range_is_revision_characters_and_one_separator_at_most`, `a_path_must_be_absolute_and_bounded`, `only_diff_takes_staged_and_range` (`pinfold-api/src/tool.rs`), `a_path_of_the_wrong_kind_starts_nothing` (`pinfold-core/src/tool.rs`), `an_agent_cannot_type_into_the_tool_it_opened` (`session.rs`) |
 | T5  | Hardened git invocation                     | Not built: no built-in tool runs git yet (M4)                                 | [#262](https://github.com/0xPiranhaCodes/pinfold.sh/issues/262) |
 | T6  | Escaped filenames, size and time caps       | Not built: `pinfold-tools` is empty (M4)                                      | [#263](https://github.com/0xPiranhaCodes/pinfold.sh/issues/263) |
 | T7  | Paste sanitizer                             | `pinfold-core/src/paste.rs`                                                   | `a_paste_cannot_end_its_brackets`, `control_characters_are_stripped` (`paste.rs`); fuzz target `paste`                                  |
@@ -299,7 +301,8 @@ records each sandboxed pane's working directory when it launches it, as OSC 7 fr
 agent cannot be trusted. Not a directory inside it: on Linux the agent could swap that
 for a symlink before bubblewrap binds it, but it cannot rename its own working directory or
 what is above it. `pane.send` without approval reaches only the caller's own pane
-and those it spawned, which are then sandboxed too. A send to any other pane needs the
+and those it spawned, which are then sandboxed too. A sandboxed agent cannot open a built-in tool
+(`tool.open`), as the tool would run outside its sandbox. A send to any other pane needs the
 person's approval in the window, so a grant the person gives a sandboxed agent lets it type
 outside its sandbox. `workspace.open`, `session.save`, workspace trust and grant
 administration need a caller in a terminal outside every pane, which a sandboxed agent

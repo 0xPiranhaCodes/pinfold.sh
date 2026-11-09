@@ -23,6 +23,7 @@ Every connection starts with `hello`:
 | `pane.wait`        | Version 2, a pane in reach  | [`pane.wait.schema.json`](pane.wait.schema.json)             |
 | `pane.spawn`       | Version 2 and its own pane  | [`pane.spawn.schema.json`](pane.spawn.schema.json)           |
 | `agent.launch`     | Version 2 and its own pane  | [`agent.launch.schema.json`](agent.launch.schema.json)       |
+| `tool.open`        | Version 2 and its own pane  | [`tool.open.schema.json`](tool.open.schema.json)             |
 | `pane.close`       | Version 2, a spawned pane   | [`pane.close.schema.json`](pane.close.schema.json)           |
 | `events.subscribe` | Version 2 and a terminal    | [`events.subscribe.schema.json`](events.subscribe.schema.json) |
 | `pane.status`      | Version 2 and its own pane  | [`pane.status.schema.json`](pane.status.schema.json)         |
@@ -48,6 +49,21 @@ program the caller names, and a program in that pane is that pane, not its paren
 by the caller and never described by it. In the first seconds after the core starts, a
 sandboxed launch may be refused while the core reads the user's shell `PATH`, with a message
 that says to try again; a caller may retry it, as `pinfold agent` does for up to 12 seconds.
+
+`tool.open` opens one running a built-in tool ([ADR-0045](../adr/0045-tools-are-programs-in-their-own-pane.md)).
+The core starts the `pinfold` binary in its own directory, never one found through `PATH`, with
+these arguments and no others:
+
+| `tool`  | Runs                                   | Starts in            |
+| ------- | -------------------------------------- | -------------------- |
+| `md`    | `pinfold md -- <path>`                 | the file's directory |
+| `files` | `pinfold files -- <path>`              | `path`               |
+| `diff`  | `pinfold diff [--staged] -- [<range>]` | `path`               |
+
+The `--` keeps a caller's value from being read as an option, so each subcommand must take
+what follows it as a value. `path`, `staged` and `range` are checked before any process starts.
+A tool pane takes keys from the window alone: `pane.send` to it is refused for every caller,
+including the one that opened it, before any approval prompt. A sandboxed caller cannot open one.
 
 `pane.read`, `pane.last_output` and `pane.send` on any other pane park the call for up to 60
 seconds and ask in trusted window chrome. `y` allows the batch once, `a` grants that caller,

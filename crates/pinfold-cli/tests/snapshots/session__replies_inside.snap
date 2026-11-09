@@ -21,7 +21,8 @@ expression: said
           "agent.launch",
           "pane.close",
           "events.subscribe",
-          "pane.status"
+          "pane.status",
+          "tool.open"
         ],
         "pane": 0,
         "version": 2
@@ -135,6 +136,16 @@ expression: said
       "id": 2,
       "jsonrpc": "2.0",
       "result": {}
+    }
+  },
+  {
+    "method": "tool.open",
+    "reply": {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {
+        "pane": 3
+      }
     }
   }
 ]

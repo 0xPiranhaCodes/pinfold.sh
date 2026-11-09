@@ -120,6 +120,7 @@ fn record(
         }
         Method::PaneSpawn(_) => ("pane.spawn", spawned(result), "children"),
         Method::AgentLaunch(_) => ("agent.launch", spawned(result), "children"),
+        Method::ToolOpen(_) => ("tool.open", spawned(result), "tool.open"),
         Method::PaneClose { pane } => ("pane.close", Some(*pane), scope(*pane)),
         Method::PaneStatus { pane, .. } => ("pane.status", Some(*pane), scope(*pane)),
         Method::AuditRead { pane, .. } => ("audit.read", *pane, "outside"),

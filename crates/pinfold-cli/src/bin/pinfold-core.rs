@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::sync::mpsc::{self, Receiver, TrySendError};
-use std::sync::{Arc, Once};
+use std::sync::{Arc, Once, OnceLock};
 use std::time::{Duration, Instant};
 use std::{env, thread};
 
@@ -27,7 +27,7 @@ use pinfold_core::snapshot::{self, Saver, Snapshot};
 use pinfold_core::status::Status;
 use pinfold_core::wait::{Outcome, Waits};
 use pinfold_core::workspace::Workspaces;
-use pinfold_core::{sandbox, shell};
+use pinfold_core::{sandbox, shell, tool};
 use pinfold_proto::link::{self, ApprovalAction, ApprovalAnswer};
 use serde_json::{Value, json};
 
@@ -50,13 +50,15 @@ fn empty_wait() -> Duration {
         .map_or(EMPTY_WAIT, Duration::from_millis)
 }
 
-/// Returns the window binary beside this one. It is resolved once, so nothing later can name
-/// another program.
-fn window_binary() -> io::Result<PathBuf> {
-    Ok(env::current_exe()?
-        .canonicalize()?
-        .with_file_name("pinfold-window"))
+/// Returns the binary called `name` beside this one. Each is resolved once, so nothing later
+/// can name another program, and never through `PATH`.
+fn sibling(name: &str) -> io::Result<PathBuf> {
+    Ok(env::current_exe()?.canonicalize()?.with_file_name(name))
 }
+
+/// The `pinfold` binary beside this one, which runs the built-in tools (ADR-0045). Set as the
+/// core starts, as the window binary is.
+static TOOLS: OnceLock<PathBuf> = OnceLock::new();
 
 /// Binds the control socket and answers it on the API thread (ADR-0007, ADR-0032). The
 /// reactor's thread makes every spawn and holds the panes, so every request crosses to it. The channel holds one request per peer the API thread serves.
@@ -170,6 +172,7 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                     "pane.close",
                     "events.subscribe",
                     "pane.status",
+                    "tool.open",
                 ],
                 (true, None) => &[
                     "window.open",
@@ -275,6 +278,16 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
             reactor.read_agent_signals(pane);
             Ok(json!({"pane": pane}))
         }
+        // A tool runs as the caller's child, so a sandboxed caller is refused as for any pane.
+        Method::ToolOpen(open) => {
+            let own = own.ok_or("tool.open needs a caller in a pane")?;
+            let of = open.of.unwrap_or(own);
+            let binary = TOOLS.get().ok_or("the tools' binary is not known")?;
+            let command = tool::command(binary, &open.run)?;
+            let pane = family.spawn_command(reactor, own, of, way(open.place), None, command)?;
+            reactor.set_tool(pane, open.run.clone());
+            Ok(json!({"pane": pane}))
+        }
         Method::PaneClose { pane } => {
             let closed = family.close(reactor, own, *pane);
             closed.map(|()| json!({})).map_err(str::to_owned)
@@ -283,9 +296,14 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
             let panes = reactor.list().map(|pane| {
                 // A message is the caller's own business: other panes' stay in the window.
                 let message = (pane.reported && own == Some(pane.id)).then_some(pane.message);
-                json!({"id": pane.id, "title": pane.title, "cwd": pane.cwd,
+                let mut listed = json!({"id": pane.id, "title": pane.title, "cwd": pane.cwd,
                        "command": pane.command, "status": pane.status.name(),
-                       "source": source(pane.reported), "message": message})
+                       "source": source(pane.reported), "message": message});
+                if let Some(run) = pane.tool {
+                    listed["kind"] = json!("tool");
+                    listed["tool"] = run.describe();
+                }
+                listed
             });
             Ok(json!({"panes": panes.collect::<Vec<_>>()}))
         }
@@ -550,6 +568,13 @@ fn decide(
     };
     if reactor.engine(target).is_none() {
         return audit::reply(log, reactor, request, Err("no such pane".to_owned()));
+    }
+    // Refused before any prompt, as no grant lets a caller type into a tool (ADR-0045).
+    let tool = reactor
+        .list()
+        .any(|pane| pane.id == target && pane.tool.is_some());
+    if tool && action == ApprovalAction::Send {
+        return audit::reply(log, reactor, request, Err(tool::NO_SEND.to_owned()));
     }
     if family.reach(reactor, own, target).is_ok() {
         // Text from any pane but the caller's own is redacted (threat model, Secret redaction).
@@ -834,7 +859,8 @@ fn daemon(
     restore: bool,
     unhardened: Option<bool>,
 ) -> io::Result<()> {
-    let binary = window_binary()?;
+    let binary = sibling("pinfold-window")?;
+    let _ = TOOLS.set(sibling("pinfold")?);
     let mut reactor = Reactor::new()?;
     if let Some(checked) = unhardened {
         reactor.set_unhardened(checked);
