@@ -51,7 +51,12 @@ fn each_tool_quits_on_q_and_restores_the_terminal() {
     ] {
         let pty = tool(args).unwrap();
         let mut text = String::new();
-        read_until(&pty, &mut text, "Press q to leave.");
+        let shown = if args.starts_with("md") {
+            "? keys"
+        } else {
+            "Press q to leave."
+        };
+        read_until(&pty, &mut text, shown);
         assert!(text.contains("\x1b[?1049h"), "{args}: the alternate screen");
         pty.master().write_all(b"jq").unwrap();
         read_until(&pty, &mut text, "exit 0");

@@ -601,6 +601,30 @@ pub fn open_no_follow(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
+/// Opens the file at `path` for reading, following symlinks. The caller checks that it got a
+/// regular file: O_NONBLOCK, so that a FIFO or device cannot hang the open, and O_NOCTTY, so
+/// that a terminal cannot become this process's controlling one.
+///
+/// # Errors
+///
+/// Returns an error if the file cannot be opened.
+///
+/// # Examples
+///
+/// ```
+/// let path = std::env::temp_dir().join(format!("pinfold-open-{}", std::process::id()));
+/// std::fs::write(&path, "text")?;
+/// assert!(pinfold_sys::open_nonblocking(&path)?.metadata()?.is_file());
+/// std::fs::remove_file(&path)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn open_nonblocking(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY)
+        .open(path)
+}
+
 /// A moment on the local clock.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct LocalTime {

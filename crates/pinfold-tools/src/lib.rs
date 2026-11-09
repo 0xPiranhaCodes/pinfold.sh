@@ -2,9 +2,12 @@
 //! own pane (ADR-0045).
 //!
 //! A tool draws into a [`Screen`], whose [`put`](screen::Screen::put) escapes
-//! every string, and reads [`Key`]s. [`run`] owns the terminal around it.
+//! every string, and reads [`Key`]s. [`run`] owns the terminal around it. Every git call goes
+//! through [`git::run`].
 
+pub mod git;
 pub mod keys;
+mod md;
 pub mod screen;
 
 use std::io::{self, Read, Write};
@@ -83,10 +86,23 @@ impl Command {
     /// Returns an error if standard input or output is not a terminal, or writing to it fails.
     pub fn run(&self) -> io::Result<bool> {
         let (title, problem) = match self {
-            Self::Md { file } => (
-                format!("md {}", file.display()),
-                problem(file, Path::is_file),
-            ),
+            Self::Md { file } => {
+                let read = problem(file, Path::is_file).map_or_else(
+                    || {
+                        md::read(file)
+                            .map_err(|error| format!("cannot read {}: {error}", file.display()))
+                    },
+                    Err,
+                );
+                match read {
+                    Ok((bytes, whole)) => {
+                        let title = file.as_os_str().as_encoded_bytes().to_vec();
+                        run(&mut md::Reader::new(title, bytes, whole))?;
+                        return Ok(true);
+                    }
+                    Err(problem) => (format!("md {}", file.display()), Some(problem)),
+                }
+            }
             Self::Files { dir } => (
                 format!("files {}", dir.display()),
                 problem(dir, Path::is_dir),
@@ -103,6 +119,13 @@ impl Command {
         run(&mut Placeholder { title, problem })?;
         Ok(started)
     }
+}
+
+/// Lays `markdown` out as `pinfold md` does at `width` columns, and returns each line's
+/// already-escaped text. For the `markdown` fuzz target.
+#[doc(hidden)]
+pub fn fuzz_markdown(markdown: &[u8], width: u16) -> Vec<String> {
+    md::lines(markdown, width)
 }
 
 /// Why `path` cannot be opened, if `kind` is not true of it.
@@ -131,7 +154,7 @@ pub trait Tool {
     fn key(&mut self, key: Key) -> Flow;
 }
 
-/// The screen a tool shows until its own slice lands, and the startup failure screen.
+/// The screen a tool shows until its own slice lands, and the screen of one that cannot start.
 struct Placeholder {
     title: String,
     problem: Option<String>,

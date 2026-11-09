@@ -546,6 +546,15 @@ Crate is sound, albeit leaky, and not actively malicious. Probably not the best
 crate to use in practice but it's suitable for testing dependencies.
 """
 
+[[audits.bytecode-alliance.audits.unicase]]
+who = "Alex Crichton <alex@alexcrichton.com>"
+criteria = "safe-to-deploy"
+version = "2.6.0"
+notes = """
+This crate contains no `unsafe` code and no unnecessary use of the standard
+library.
+"""
+
 [[audits.embark-studios.audits.cfg_aliases]]
 who = "Johan Andersson <opensource@embark-studios.com>"
 criteria = "safe-to-deploy"
@@ -1573,6 +1582,13 @@ who = "Alex Franchuk <afranchuk@mozilla.com>"
 criteria = "safe-to-deploy"
 delta = "0.1.34 -> 0.1.36"
 aggregated-from = "https://raw.githubusercontent.com/mozilla/cargo-vet/main/supply-chain/audits.toml"
+
+[[audits.mozilla.audits.unicase]]
+who = "Jan-Erik Rediger <jrediger@mozilla.com>"
+criteria = "safe-to-deploy"
+delta = "2.6.0 -> 2.8.1"
+notes = "Update to Unicode 15.0.0"
+aggregated-from = "https://raw.githubusercontent.com/mozilla/glean/main/supply-chain/audits.toml"
 
 [[audits.mozilla.audits.wait-timeout]]
 who = "Jan-Erik Rediger <jrediger@mozilla.com>"

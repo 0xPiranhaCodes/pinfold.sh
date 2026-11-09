@@ -150,11 +150,14 @@ impl Reactor {
             }
             Request::NewTab => {
                 let size = self.area.unwrap_or(FIRST_SIZE);
-                self.open_tab((self.shell)(), size.rows, size.cols)?;
+                let focused = self.session.active_tab().map(pinfold_mux::Tab::focused);
+                let command = self.shell_from(focused.map(|pane| pane as usize));
+                self.open_tab(command, size.rows, size.cols)?;
                 false
             }
             Request::Split { pane, way } => {
-                self.split(pane as usize, (self.shell)(), way)?;
+                let command = self.shell_from(Some(pane as usize));
+                self.split(pane as usize, command, way)?;
                 false
             }
             Request::ClosePane { pane } => {

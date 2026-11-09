@@ -24,5 +24,9 @@ a hang. Its seeds in `seeds/config/` are the examples in `docs/configuration.md`
 `tool_keys` decodes any bytes as the keys a tool reads, once whole and once a byte at a time.
 It fails on a panic or a hang, or if the two give different keys.
 
+`markdown` lays out any bytes as `pinfold md` does, at a width from 1 to 300 taken from the
+first two bytes. It fails on a panic or a hang, or if a laid-out line holds a control or bidi
+character that `escape` would change.
+
 `vt.dict` holds the escape sequences a mutator rarely writes by chance. It uses libFuzzer's
 format, which only knows the escapes `\\`, `\"` and `\xNN`.

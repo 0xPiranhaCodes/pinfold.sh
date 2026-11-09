@@ -405,6 +405,11 @@ criteria = "safe-to-deploy"
 version = "1.12.0"
 criteria = "safe-to-run"
 
+[[exemptions.pulldown-cmark]]
+version = "0.13.6"
+criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar because pinfold md (#314, ADR-0045) parses markdown with it, and the delta from the imported 0.9.3 audit is 13,647 added lines, too large to read in that PR; its only unsafe is behind the simd feature, which is off, so it builds under forbid(unsafe_code). Review in #302."
+
 [[exemptions.quick-xml]]
 version = "0.41.0"
 criteria = "safe-to-deploy"

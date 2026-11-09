@@ -1,0 +1,60 @@
+---
+source: crates/pinfold-tools/src/md.rs
+expression: "shown(\"links.md\", markdown)"
+---
+|md links.md                                                          1/5  ? keys|
+|See the ADR and https://pinfold.sh.                                             |
+|                                                                                |
+|[image: a diagram]                                                              |
+|                                                                                |
+|hostile                                                                         |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+0:0..11 Default Default bold
+0:11..69 Default Default
+0:69..80 BrightBlack Default
+1:0..3 Default Default
+1:3..11 Blue Default
+1:11..15 Default Default
+1:15..34 Blue Default link "https://pinfold.sh"
+1:34..80 Default Default
+2:0..80 Default Default
+3:0..18 BrightBlack Default
+3:18..80 Default Default
+4:0..80 Default Default
+5:0..7 Blue Default link "https://a%1B]8;;x%07"
+5:7..80 Default Default
+6:0..80 Default Default
+7:0..80 Default Default
+8:0..80 Default Default
+9:0..80 Default Default
+10:0..80 Default Default
+11:0..80 Default Default
+12:0..80 Default Default
+13:0..80 Default Default
+14:0..80 Default Default
+15:0..80 Default Default
+16:0..80 Default Default
+17:0..80 Default Default
+18:0..80 Default Default
+19:0..80 Default Default
+20:0..80 Default Default
+21:0..80 Default Default
+22:0..80 Default Default
+23:0..80 Default Default
