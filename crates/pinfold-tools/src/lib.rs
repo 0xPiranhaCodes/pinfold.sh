@@ -3,9 +3,10 @@
 //!
 //! A tool draws into a [`Screen`], whose [`put`](screen::Screen::put) escapes
 //! every string, and reads [`Key`]s. [`run`] owns the terminal around it. Every git call goes
-//! through [`git::run`].
+//! through [`git::run`], and the only other process a tool starts is the user's editor.
 
 mod diff;
+mod editor;
 mod files;
 pub mod git;
 pub mod keys;
@@ -196,6 +197,13 @@ pub trait Tool {
     fn key(&mut self, key: Key) -> Flow;
     /// Called before each draw, at least every 100 ms, for a tool that polls.
     fn tick(&mut self) {}
+    /// A file to open in the user's editor, asked for by the last key. [`run`] hands the
+    /// terminal to the editor until it exits, then redraws the whole screen.
+    fn edit(&mut self) -> Option<PathBuf> {
+        None
+    }
+    /// What became of the edit: `Err` says why it failed.
+    fn edited(&mut self, _result: Result<(), String>) {}
 }
 
 /// The screen of a tool that cannot start.
@@ -242,6 +250,15 @@ impl Drop for Terminal<'_> {
     }
 }
 
+/// Raw mode and the alternate screen on `stdin`'s terminal.
+fn enter(stdin: &io::Stdin) -> io::Result<Terminal<'_>> {
+    let terminal = Terminal {
+        _raw: pinfold_sys::tty::raw(stdin.as_fd())?,
+    };
+    io::stdout().write_all(ENTER)?;
+    Ok(terminal)
+}
+
 /// Runs `tool` full screen until it quits, redrawing after each key, read or 100 ms without one.
 ///
 /// # Errors
@@ -250,10 +267,7 @@ impl Drop for Terminal<'_> {
 pub fn run(tool: &mut dyn Tool) -> io::Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
-    let _terminal = Terminal {
-        _raw: pinfold_sys::tty::raw(stdin.as_fd())?,
-    };
-    stdout.write_all(ENTER)?;
+    let mut terminal = enter(&stdin)?;
     let mut screen = Screen::new(0, 0);
     let mut keys = Keys::default();
     let (mut out, mut input) = (Vec::new(), [0; 1024]);
@@ -275,6 +289,15 @@ pub fn run(tool: &mut dyn Tool) -> io::Result<()> {
         while let Some(key) = keys.next(read == 0) {
             if tool.key(key) == Flow::Quit {
                 return Ok(());
+            }
+            if let Some(path) = tool.edit() {
+                // The editor gets the terminal as it was; keys read past the one asking are dropped.
+                drop(terminal);
+                let result = editor::edit(&path);
+                terminal = enter(&stdin)?;
+                tool.edited(result);
+                (keys, screen) = (Keys::default(), Screen::new(0, 0));
+                break;
             }
         }
     }

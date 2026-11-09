@@ -98,7 +98,8 @@ where
 {
     let deadline = Instant::now() + timeout;
     let path = env::var_os("PATH").unwrap_or_default();
-    let git = find(&path).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no git"))?;
+    let git =
+        find(&path, "git").ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no git"))?;
     let listed = capture(
         command(&git, repo, &[]).args(["config", "--list", "-z"]),
         deadline,
@@ -130,14 +131,14 @@ where
     capture(command.args(args), deadline)
 }
 
-/// The first absolute `PATH` entry with an executable `git`. PATH is the user's choice of git,
+/// The first absolute `PATH` entry with an executable `name`, such as `git`. PATH is the user's choice of git,
 /// which a repository cannot change; a fixed path would pick Apple's `/usr/bin/git` shim over
 /// Homebrew's and miss git on NixOS. A relative entry, `.` or empty, would resolve against the
 /// repository, where a hostile `git` may wait, so it is skipped.
-fn find(path: &OsStr) -> Option<PathBuf> {
+pub(crate) fn find(path: &OsStr, name: &str) -> Option<PathBuf> {
     env::split_paths(path)
         .filter(|dir| dir.is_absolute())
-        .map(|dir| dir.join("git"))
+        .map(|dir| dir.join(name))
         .find(|git| {
             git.metadata()
                 .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
@@ -248,12 +249,14 @@ mod tests {
     use std::fs;
 
     #[test]
-    fn no_other_file_in_the_crate_starts_a_process() {
+    fn no_other_file_but_the_editors_starts_a_process() {
         let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
         // shortcut: reads src/ one level deep; recurse once a module directory appears.
         for entry in fs::read_dir(src).expect("src") {
             let path = entry.expect("entry").path();
-            if path.extension() == Some("rs".as_ref()) && !path.ends_with("git.rs") {
+            // editor.rs starts the user's editor, and nothing else (ADR-0045 section 4).
+            let allowed = path.ends_with("git.rs") || path.ends_with("editor.rs");
+            if path.extension() == Some("rs".as_ref()) && !allowed {
                 let text = fs::read_to_string(&path).expect("read");
                 // A test may make a fixture, as md.rs makes a FIFO.
                 let code = text.split("#[cfg(test)]").next().unwrap_or_default();
@@ -280,12 +283,12 @@ mod tests {
         fs::create_dir_all(&bin).expect("dir");
         let git = bin.join("git");
         fs::write(&git, "#!/bin/sh\n").expect("git");
-        assert_eq!(find(bin.as_os_str()), None, "not executable");
+        assert_eq!(find(bin.as_os_str(), "git"), None, "not executable");
         fs::set_permissions(&git, fs::Permissions::from_mode(0o755)).expect("chmod");
         let path = env::join_paths([Path::new(""), Path::new("."), &bin]).expect("join");
-        assert_eq!(find(&path), Some(git));
+        assert_eq!(find(&path, "git"), Some(git));
         // A relative entry is never searched, even when the current directory holds a git.
-        assert_eq!(find(OsStr::new(".:bin:")), None);
+        assert_eq!(find(OsStr::new(".:bin:"), "git"), None);
         fs::remove_dir_all(dir).expect("clean");
     }
 

@@ -44,7 +44,7 @@ const POLL: Duration = Duration::from_secs(1);
 /// Matches the fuzzy jump shows.
 const MAX_JUMPS: usize = 100;
 
-const KEYS: [&str; 13] = [
+const KEYS: [&str; 14] = [
     "j k  ↓ ↑        down or up",
     "h l  ← →        the parent, or into a directory",
     "Enter           into a directory, or a file in the reader",
@@ -53,6 +53,7 @@ const KEYS: [&str; 13] = [
     "f               jump to a path under the start by fuzzy match",
     "m x  ' x        bookmark this directory as x, or go to x",
     "Space           mark or unmark; the actions below take the marked, or else the selected",
+    "e               edit in $VISUAL or $EDITOR, in this pane",
     "r               rename",
     "y x  p          copy or cut, then paste here",
     "d               move to the trash",
@@ -341,6 +342,8 @@ pub(crate) struct Files {
     naming: Option<String>,
     confirm: Option<(Action, usize)>,
     trash: Option<(PathBuf, bool)>,
+    /// A file `e` asked to edit, until [`run`](crate::run) takes it.
+    editing: Option<PathBuf>,
 }
 
 impl Files {
@@ -373,6 +376,7 @@ impl Files {
             naming: None,
             confirm: None,
             trash: ops::trash_dir(),
+            editing: None,
         };
         files.go(dir, None);
         files
@@ -713,6 +717,16 @@ fn column<'a>(
 }
 
 impl Tool for Files {
+    fn edit(&mut self) -> Option<PathBuf> {
+        self.editing.take()
+    }
+
+    fn edited(&mut self, result: Result<(), String>) {
+        self.problem = result.err();
+        let name = self.entry().map(|entry| entry.name.clone());
+        self.go(self.dir.clone(), name.as_deref());
+    }
+
     fn tick(&mut self) {
         match &mut self.pager {
             Some(pager) => pager.tick(),
@@ -953,6 +967,11 @@ impl Tool for Files {
                 }
             }
             Key::Char('r') if self.entry().is_some() => self.naming = Some(String::new()),
+            Key::Char('e') => match self.entry() {
+                Some(entry) if !entry.dir => self.editing = Some(self.dir.join(&entry.name)),
+                Some(_) => self.problem = Some("e edits a file, not a directory".to_owned()),
+                None => {}
+            },
             Key::Char(kind @ ('y' | 'x')) if self.entry().is_some() => {
                 self.register = Some((kind == 'x', self.chosen()));
                 self.marked.clear();
