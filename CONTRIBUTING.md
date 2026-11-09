@@ -244,6 +244,14 @@ This adds a `Signed-off-by:` line, which certifies that you have the right to su
 the work under the project's licenses. CI rejects unsigned commits. If you forget,
 `git commit --amend -s` fixes the latest commit.
 
+Dependabot cannot sign off, so its commits skip this check, and every other check
+still applies. A commit is exempt only when the pull request was opened by
+`dependabot[bot]` and the commit's author email is
+`49699333+dependabot[bot]@users.noreply.github.com`. Anyone can forge an author
+email, but not who opened the pull request, so a commit you push onto a Dependabot
+pull request still needs your sign-off. `.github/scripts/test-check-dco.sh` tests
+these cases.
+
 AI assistants cannot certify the DCO. If a tool wrote part of your change, you are
 the one signing off for it, so review it as your own work.
 
