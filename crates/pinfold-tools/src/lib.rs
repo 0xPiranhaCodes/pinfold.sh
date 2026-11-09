@@ -1,8 +1,8 @@
 //! Markdown reader, file manager and diff viewer: full-screen programs that each run in their
 //! own pane (ADR-0045).
 //!
-//! A tool draws into a [`Screen`](screen::Screen), whose [`put`](screen::Screen::put) escapes
-//! every string, and reads [`Key`](keys::Key)s. [`run`] owns the terminal around it.
+//! A tool draws into a [`Screen`], whose [`put`](screen::Screen::put) escapes
+//! every string, and reads [`Key`]s. [`run`] owns the terminal around it.
 
 pub mod keys;
 pub mod screen;
