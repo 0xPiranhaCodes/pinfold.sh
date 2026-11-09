@@ -80,7 +80,17 @@ impl Clipboard {
         if self.x11 {
             return x11::text(limit, TIMEOUT);
         }
-        let text = self.provider.get_contents().map_err(|_| Unread::Empty)?;
+        // Wayland: the vendored smithay-clipboard stops reading an offer past 1 MiB (#310).
+        let text = self.provider.get_contents().map_err(|error| {
+            let kind = error
+                .downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind);
+            if kind == Some(std::io::ErrorKind::FileTooLarge) {
+                Unread::TooLarge
+            } else {
+                Unread::Empty
+            }
+        })?;
         if text.len() > limit {
             return Err(Unread::TooLarge);
         }
@@ -320,6 +330,36 @@ mod tests {
             }
             panic!("the owner never wrote the property");
         }
+    }
+
+    /// Gives what a Wayland read gave: smithay-clipboard's error past its limit, or text.
+    struct Offer(Result<String, std::io::ErrorKind>);
+
+    type Answer<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+    impl ClipboardProvider for Offer {
+        fn get_contents(&mut self) -> Answer<String> {
+            Ok(self.0.clone().map_err(std::io::Error::from)?)
+        }
+
+        fn set_contents(&mut self, _: String) -> Answer<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_wayland_offer_past_the_limit_is_too_large() {
+        let clipboard = |offer| Clipboard {
+            provider: Box::new(Offer(offer)),
+            x11: false,
+            _display: Box::new(()),
+        };
+        let too_large = Err(std::io::ErrorKind::FileTooLarge);
+        assert_eq!(clipboard(too_large).text(64), Err(Unread::TooLarge));
+        let dead = Err(std::io::ErrorKind::Other);
+        assert_eq!(clipboard(dead).text(64), Err(Unread::Empty));
+        assert_eq!(clipboard(Ok("fives".into())).text(4), Err(Unread::TooLarge));
+        assert_eq!(clipboard(Ok("four".into())).text(4), Ok("four".to_owned()));
     }
 
     /// Needs an X server: `tests/window/clipboard.sh` runs it under Xvfb.

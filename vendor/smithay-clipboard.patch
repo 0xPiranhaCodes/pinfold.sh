@@ -1,0 +1,36 @@
+diff -ruN a/src/state.rs b/src/state.rs
+--- a/src/state.rs	2006-07-24 06:51:28
++++ b/src/state.rs	2026-11-09 13:10:03
+@@ -39,6 +39,9 @@
+ 
+ use crate::mime::{normalize_to_lf, MimeType, ALLOWED_MIME_TYPES};
+ 
++/// PinFold: the most a load reads, past which it fails with `ErrorKind::FileTooLarge` (#310).
++const MAX_LOAD: usize = 1024 * 1024;
++
+ pub struct State {
+     pub primary_selection_manager_state: Option<PrimarySelectionManagerState>,
+     pub data_device_manager_state: Option<DataDeviceManagerState>,
+@@ -199,7 +202,8 @@
+         }
+ 
+         let mut reader_buffer = [0; 4096];
+-        let mut content = Vec::new();
++        // PinFold: room for the most it reads, so the buffer never grows (#310).
++        let mut content = Vec::with_capacity(MAX_LOAD);
+         let _ = self.loop_handle.insert_source(read_pipe, move |_, file, state| {
+             let file = unsafe { file.get_mut() };
+             loop {
+@@ -225,6 +229,12 @@
+                         };
+ 
+                         let _ = state.reply_tx.send(Ok(content));
++                        break PostAction::Remove;
++                    },
++                    // PinFold: the offer comes from another client, so stop at a limit (#310).
++                    Ok(n) if n > MAX_LOAD - content.len() => {
++                        let error = Error::new(ErrorKind::FileTooLarge, "selection is too large");
++                        let _ = state.reply_tx.send(Err(error));
+                         break PostAction::Remove;
+                     },
+                     Ok(n) => content.extend_from_slice(&reader_buffer[..n]),

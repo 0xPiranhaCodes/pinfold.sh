@@ -17,10 +17,12 @@ jobs:
         with:
           tool: cargo-audit
       - run: cargo audit
-      - name: Fail on an advisory for the vendored crate, which cargo audit cannot see
+      - name: Fail on an advisory for a vendored crate, which cargo audit cannot see
         run: |
-          test "$(curl -s -o /dev/null -w '%{http_code}' \
-            https://api.github.com/repos/rustsec/advisory-db/contents/crates/alacritty_terminal)" = 404
+          for crate in alacritty_terminal smithay-clipboard; do
+            test "$(curl -s -o /dev/null -w '%{http_code}' \
+              "https://api.github.com/repos/rustsec/advisory-db/contents/crates/$crate")" = 404
+          done
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
 
   fuzz:
