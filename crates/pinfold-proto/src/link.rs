@@ -39,7 +39,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 10;
+pub const VERSION: u16 = 11;
 
 /// The oldest version this side still speaks, one before [`VERSION`] (ADR-0043).
 pub const OLDEST: u16 = VERSION - 1;
@@ -147,6 +147,7 @@ const STATUS: u8 = 9;
 const APPROVAL: u8 = 10;
 const WAS_RUNNING: u8 = 11;
 const LINKED: u8 = 12;
+const UNHARDENED: u8 = 13;
 
 /// How many agent states there are. [`Notice::Status`] numbers them in the order of the
 /// contributor rule: needs you, running, done, error, idle.
@@ -645,6 +646,12 @@ pub enum Notice<'a> {
     },
     /// A cross-pane action waiting for a real window key.
     Approval(Approval<'a>),
+    /// The core lacks the hardened runtime on macOS, or could not tell, so a same-user process
+    /// may read its memory (ADR-0044). Sent once after the hello, and never by a hardened core.
+    Unhardened {
+        /// Whether the core read its own signing flags. False means the check failed.
+        checked: bool,
+    },
 }
 
 /// The session as the window draws it.
@@ -1052,6 +1059,7 @@ impl Notice<'_> {
     pub fn since(&self) -> u16 {
         match self {
             Self::Approval(approval) => approval.action.since(),
+            Self::Unhardened { .. } => 11,
             _ => OLDEST,
         }
     }
@@ -1099,6 +1107,10 @@ impl Notice<'_> {
                 LAYOUT
             }
             Self::Raise => RAISE,
+            Self::Unhardened { checked } => {
+                out.push(u8::from(*checked));
+                UNHARDENED
+            }
             Self::Activity { tabs, alerts } => put!(out, ACTIVITY, tabs, alerts),
             Self::Refused { reason } => {
                 out.push(*reason as u8);
@@ -1193,6 +1205,9 @@ impl Notice<'_> {
             },
             LAYOUT => Notice::Layout(read_layout(&mut body)?),
             RAISE => Notice::Raise,
+            UNHARDENED => Notice::Unhardened {
+                checked: body.tag("checked", &[false, true])?,
+            },
             ACTIVITY => Notice::Activity {
                 tabs: body.u32()?,
                 alerts: body.u32()?,
@@ -1866,7 +1881,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 10, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 11, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -2066,17 +2081,9 @@ mod tests {
 
     #[test]
     fn a_message_newer_than_the_spoken_version_ends_the_link() {
-        let approval = |action| {
+        let at_oldest = |notice: Notice<'_>| {
             let mut wire = raw(HELLO, &OLDEST.to_le_bytes());
-            Notice::Approval(Approval {
-                id: 1,
-                caller: 0,
-                target: 0,
-                action,
-                texts: vec!["session.save"],
-            })
-            .encode(&mut wire)
-            .unwrap();
+            notice.encode(&mut wire).unwrap();
             let mut decoder = Decoder::default();
             let mut input = wire.as_slice();
             decoder.next_notice(&mut input).unwrap();
@@ -2084,14 +2091,21 @@ mod tests {
                 .next_notice(&mut input)
                 .map(|notice| notice.is_some())
         };
-        assert_eq!(approval(ApprovalAction::Trust), Ok(true));
-        let since = ApprovalAction::Owner.since();
-        assert_eq!(since, 10);
+        let owner = Notice::Approval(Approval {
+            id: 1,
+            caller: 0,
+            target: 0,
+            action: ApprovalAction::Owner,
+            texts: vec!["session.save"],
+        });
+        assert_eq!(at_oldest(owner), Ok(true));
+        let unhardened = Notice::Unhardened { checked: true };
+        assert_eq!(unhardened.since(), 11);
         let newer = Error::Newer {
-            kind: APPROVAL,
-            since,
+            kind: UNHARDENED,
+            since: 11,
         };
-        assert_eq!(approval(ApprovalAction::Owner), Err(newer));
+        assert_eq!(at_oldest(unhardened), Err(newer));
     }
 
     #[test]
@@ -3066,6 +3080,12 @@ mod tests {
         #[test]
         fn raise_round_trips(chunk in chunks()) {
             prop_assert!(notice_survives(&Notice::Raise, chunk), "changed on the link");
+        }
+
+        #[test]
+        fn unhardened_round_trips(checked in any::<bool>(), chunk in chunks()) {
+            let notice = Notice::Unhardened { checked };
+            prop_assert!(notice_survives(&notice, chunk), "changed on the link");
         }
 
         #[test]

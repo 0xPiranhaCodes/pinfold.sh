@@ -1,7 +1,7 @@
 # ADR-0044: A macOS core without the hardened runtime warns and is marked
 
-- **Status:** Proposed
-- **Date:** 2026-11-07
+- **Status:** Accepted
+- **Date:** 2026-11-07, decided 2026-11-09 by the maintainer
 
 ## Context
 
@@ -138,7 +138,7 @@ hardened on macOS.
 
 ## Decision
 
-Proposed: **(c)**. The core logs at `warn`, with no pane text, when it lacks the runtime. The
+**(c)**, the maintainer's decision of 2026-11-09. The core logs at `warn`, with no pane text, when it lacks the runtime. The
 window shows the notice once with the `codesign` command and keeps the marker for the session.
 The threat model and `CONTRIBUTING.md` give the same command for source builds. Linux is
 unchanged.
@@ -149,15 +149,26 @@ safe. It would break every developer's first run and CI's session tests, and an 
 soon be set everywhere. (a) hides a lasting exposure after one click. (d) leaves the threat
 model's promise silently false for anyone who builds from source.
 
-The maintainer decides. This ADR changes no behaviour.
+**As built.** The core reports the flag over the link rather than the window reading the core's
+pid, so the window shows what the core found, including a failed check. Link version 11 adds
+`Notice::Unhardened { checked }`, which the core sends once to each window after its hello, and
+never when hardened; ADR-0043 gains its row. A failed `csops` is "unchecked": the core logs
+`hardened_runtime=unknown` with the error kind, and the window shows the same notice and marker
+with the word `unchecked`. The command is `codesign -f -s - -o runtime '<dir>'/pinfold-{core,window}`
+with the folder that holds both binaries, the short form of the one above. The notice sits in
+the row under the pane for 30 seconds, or until another note there replaces it, and each new
+window shows it again. The marker is `▲ unhardened` in violet `#C792EA` at the right end of the
+tabs' row, which fullscreen keeps too.
 
 ## Consequences
 
-- `pinfold-sys` gains `hardened_runtime` on macOS, with one `unsafe` block described above. The
-  core and window call it once at startup.
-- Implementation tests: a unit test of the flag decoding. A macOS session test that the
-  cargo-built core reports unhardened, and that a copy signed with `-o runtime` reports
-  hardened, as `runtime-flag.sh` does by hand. A window snapshot with the marker.
+- `pinfold-sys` gains `hardened_runtime` and `sign_command` on macOS, with one `unsafe` block
+  described above. The core calls it once in `serve`; the window takes the answer from the core.
+- Implementation tests: a unit test of the flag decoding with the flags `runtime-flag.sh`
+  printed, and that a `cargo test` binary reads its own as unhardened. The link's round trip and
+  version gate, the core telling each window once, the notice, the marker, a snapshot and a
+  golden image. That a copy signed with `-o runtime` reads hardened stays the manual
+  `runtime-flag.sh`.
 - The marker takes status-bar width on every unsigned session, developers' included.
 - Revisit if PinFold ships a source formula for macOS, or if Apple changes `csops` or the
   flag. If writes through the task port are shown to work, reconsider (b), as that makes the

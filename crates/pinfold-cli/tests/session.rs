@@ -572,7 +572,7 @@ fn a_new_core_keeps_the_last_log_and_a_running_one_keeps_its_own() {
     let previous = || fs::read_to_string(session.log().with_extension("log.1")).unwrap();
     for _ in 0..2 {
         assert!(session.launch().unwrap().status.success());
-        assert_eq!(session.read_log(), "this-core\n");
+        assert_eq!(unwarned(&session.read_log()), "this-core\n");
         assert_eq!(previous(), "an-older-core");
     }
 
@@ -592,8 +592,24 @@ fn a_new_core_keeps_the_last_log_and_a_running_one_keeps_its_own() {
     }
     fs::write(session.log(), panicked).unwrap();
     assert!(session.launch().unwrap().status.success());
-    assert_eq!(session.read_log(), "this-core\n");
+    assert_eq!(unwarned(&session.read_log()), "this-core\n");
     assert_eq!(previous(), panicked);
+}
+
+/// Returns `log` without its first line, which on macOS says the cargo-built core lacks the
+/// hardened runtime, as every one does (ADR-0044). Linux has no such line.
+fn unwarned(log: &str) -> &str {
+    if !cfg!(target_os = "macos") {
+        assert!(!log.contains("hardened_runtime"), "{log}");
+        return log;
+    }
+    let (warning, rest) = log.split_once('\n').unwrap_or_default();
+    assert!(
+        warning.starts_with("pinfold-core: warn hardened_runtime=no: ")
+            && warning.ends_with("/pinfold-{core,window}"),
+        "{log}"
+    );
+    rest
 }
 
 #[test]

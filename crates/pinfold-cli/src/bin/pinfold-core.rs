@@ -821,9 +821,17 @@ fn restore_session(reactor: &mut Reactor, workspaces: &mut Workspaces, state: &P
 /// Runs the saved session if `restore` and there is one, else `panes` shells, a tab each, until every pane has gone and no window is left to tell, or
 /// until SIGTERM or SIGHUP, saving the session on the way out, when the window closes and a
 /// minute after a change (ADR-0034). With a size, it opens a window for `cargo xtask mem-gate` and prints its pid.
-fn daemon(mut panes: usize, measured: Option<&str>, restore: bool) -> io::Result<()> {
+fn daemon(
+    mut panes: usize,
+    measured: Option<&str>,
+    restore: bool,
+    unhardened: Option<bool>,
+) -> io::Result<()> {
     let binary = window_binary()?;
     let mut reactor = Reactor::new()?;
+    if let Some(checked) = unhardened {
+        reactor.set_unhardened(checked);
+    }
     reactor.watch_signals()?;
     let state = pinfold_config::state_dir();
     let mut saver = state
@@ -1054,7 +1062,40 @@ fn updated(reactor: &Reactor, theirs: u16) -> Value {
 /// Hardens, then runs `panes` shells, the user's, unless it restores a session.
 fn serve(panes: usize) -> io::Result<()> {
     pinfold_sys::harden()?;
-    daemon(panes, None, true)
+    daemon(panes, None, true, unhardened())
+}
+
+/// Says in the log when this core lacks the hardened runtime, which only macOS has, or could
+/// not tell. Returns whether it could tell, or nothing for a hardened core (ADR-0044).
+fn unhardened() -> Option<bool> {
+    #[cfg(target_os = "macos")]
+    {
+        let sign = pinfold_sys::sign_command();
+        let checked = match pinfold_sys::hardened_runtime() {
+            Ok(true) => return None,
+            Ok(false) => {
+                let _ = writeln!(
+                    io::stderr(),
+                    "pinfold-core: warn hardened_runtime=no: a same-user process can read this \
+                     core's memory; sign this build with: {sign}"
+                );
+                true
+            }
+            Err(error) => {
+                let _ = writeln!(
+                    io::stderr(),
+                    "pinfold-core: warn hardened_runtime=unknown error={:?}: cannot read this \
+                     core's signing flags, so it may lack the hardened runtime; sign this build \
+                     with: {sign}",
+                    error.kind()
+                );
+                false
+            }
+        };
+        Some(checked)
+    }
+    #[cfg(not(target_os = "macos"))]
+    None
 }
 
 /// Plays `file` through a real pane, says so on stdout, then idles until killed.
@@ -1081,10 +1122,13 @@ fn run(args: &[&str]) -> io::Result<()> {
         // The daemon without hardening, which also leaves a way to attach a debugger
         // (ADR-0020). `cargo xtask mem-gate` measures these two, as /proc refuses a hardened one,
         // so they restore nothing, which would change what it measures.
-        ["--idle", panes] => daemon(panes.parse().map_err(io::Error::other)?, None, false),
-        ["--window", panes, size] => {
-            daemon(panes.parse().map_err(io::Error::other)?, Some(size), false)
-        }
+        ["--idle", panes] => daemon(panes.parse().map_err(io::Error::other)?, None, false, None),
+        ["--window", panes, size] => daemon(
+            panes.parse().map_err(io::Error::other)?,
+            Some(size),
+            false,
+            None,
+        ),
         ["--replay", file] => replay(file),
         _ => Err(io::Error::other(
             "usage: pinfold-core [--no-shell | --idle <panes> | --window <panes> <width>x<height> | --replay <file>]",

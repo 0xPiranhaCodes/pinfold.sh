@@ -49,6 +49,12 @@ broken message. For 9 and 10:
 
 Every other message is unchanged between 9 and 10 and flows both ways at either version.
 
+| Change in 11 | Spoken version 10 |
+|---|---|
+| `Notice::Unhardened` (ADR-0044) | the core never sends it: a window of 10 shows no notice or marker, and the core's log still says it. |
+
+From 11, `OLDEST` is 10, so a version 9 core from beta.1 restarts the session, as two apart does.
+
 **Raising the version.** A PR that changes the link raises `VERSION`, gives each new message or
 value a `since` of the new version, and adds a row to this table saying how the older version
 degrades. A change with no safe degradation, such as a new field every frame needs, says so

@@ -169,6 +169,8 @@ struct State {
     /// Copies asked for and not answered.
     copying: u32,
     raised: bool,
+    /// Set when the core lacks the hardened runtime: whether it could tell (ADR-0044).
+    unhardened: Option<bool>,
     refused: Option<Refusal>,
     /// Restored panes, whether Enter may run what each was running, and that command.
     was_running: Vec<(u32, bool, String)>,
@@ -235,6 +237,7 @@ impl State {
             }
             Notice::Linked { pane, at, uri } => self.linked = Some((pane, at, uri.to_owned())),
             Notice::Raise => self.raised = true,
+            Notice::Unhardened { checked } => self.unhardened = Some(checked),
             Notice::Activity { tabs, alerts } => {
                 (self.activity, self.alerts) = (tabs, alerts);
                 self.laid = true;
@@ -644,6 +647,12 @@ impl Link {
     /// Returns whether someone asked to bring this window to the front since the last call.
     pub fn take_raised(&mut self) -> bool {
         std::mem::take(&mut self.state.raised)
+    }
+
+    /// Returns whether the core said it lacks the hardened runtime since the last call, and if
+    /// so whether it could tell. A core says it once per window.
+    pub fn take_unhardened(&mut self) -> Option<bool> {
+        self.state.unhardened.take()
     }
 
     /// Returns whether the core has answered the version check.

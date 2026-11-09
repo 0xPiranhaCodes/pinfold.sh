@@ -86,6 +86,55 @@ pub fn harden() -> io::Result<()> {
     platform::harden()
 }
 
+/// Returns whether the kernel holds this process as signed with the hardened runtime and
+/// without the debugger entitlement, which together refuse a same-user task port (ADR-0044).
+/// A `cargo` build lacks it, as only `packaging/macos/bundle.sh` signs that way.
+///
+/// # Errors
+///
+/// Returns an error if the system will not say, which leaves it unknown.
+///
+/// # Examples
+///
+/// ```
+/// // A doctest is linked by cargo, which never signs with the hardened runtime.
+/// assert!(!pinfold_sys::hardened_runtime()?);
+/// # Ok::<(), std::io::Error>(())
+/// ```
+#[cfg(target_os = "macos")]
+pub fn hardened_runtime() -> io::Result<bool> {
+    platform::signing_flags().map(is_hardened)
+}
+
+/// Returns the command that signs this build with the hardened runtime, for a person to run:
+/// the core and window beside this binary, which starts or was started by the other
+/// (ADR-0028, ADR-0044). It is for macOS, and needs no Apple account.
+#[must_use]
+pub fn sign_command() -> String {
+    let dir = std::env::current_exe().and_then(|path| path.canonicalize());
+    let dir = dir.ok().and_then(|path| path.parent().map(Path::to_owned));
+    sign_command_in(&dir.unwrap_or_default())
+}
+
+fn sign_command_in(dir: &Path) -> String {
+    // Quoted for the shell, the braces outside the quotes, as zsh and bash expand them.
+    let dir = dir.display().to_string().replace('\'', r"'\''");
+    format!("codesign -f -s - -o runtime '{dir}'/pinfold-{{core,window}}")
+}
+
+/// xnu `bsd/sys/codesign.h`.
+#[cfg(target_os = "macos")]
+const CS_GET_TASK_ALLOW: u32 = 0x0000_0004;
+#[cfg(target_os = "macos")]
+const CS_RUNTIME: u32 = 0x0001_0000;
+
+/// Whether code-signing `flags` hold the hardened runtime and not the debugger entitlement,
+/// which opens the task port again under it.
+#[cfg(target_os = "macos")]
+const fn is_hardened(flags: u32) -> bool {
+    flags & CS_RUNTIME != 0 && flags & CS_GET_TASK_ALLOW == 0
+}
+
 /// Tries to attach to `pid` as a debugger and detaches again, to prove [`harden`] held.
 ///
 /// The caller is left alone: macOS answers an attach to a hardened process with `SIGSEGV` as well
@@ -764,6 +813,37 @@ mod platform {
         }
     }
 
+    unsafe extern "C" {
+        // xnu bsd/sys/codesign.h. libSystem exports it; the public SDK has no header.
+        fn csops(
+            pid: libc::pid_t,
+            ops: libc::c_uint,
+            useraddr: *mut libc::c_void,
+            usersize: libc::size_t,
+        ) -> libc::c_int;
+    }
+
+    /// CS_OPS_STATUS: the code-signing flags the kernel holds for a running process.
+    const CS_OPS_STATUS: libc::c_uint = 0;
+
+    pub fn signing_flags() -> io::Result<u32> {
+        let mut flags: u32 = 0;
+        // SAFETY: CS_OPS_STATUS writes at most `usersize` bytes, 4, into `flags`, which lives
+        // for the call. getpid cannot fail, and our own pid cannot name another process.
+        let status = unsafe {
+            csops(
+                libc::getpid(),
+                CS_OPS_STATUS,
+                (&raw mut flags).cast(),
+                size_of::<u32>(),
+            )
+        };
+        if status != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(flags)
+    }
+
     pub fn probe_attach(pid: u32) -> io::Result<()> {
         let pid = libc::pid_t::try_from(pid).map_err(io::Error::other)?;
         // SAFETY: SIG_IGN is a valid disposition, and the old one goes straight back below.
@@ -912,6 +992,31 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_hardened_runtime_needs_its_flag_without_the_debugger_entitlement() {
+        // From tests/hardening/runtime-flag.sh: ad hoc linker-signed, then `-o runtime`.
+        assert!(!is_hardened(0x2202_0201));
+        assert!(is_hardened(0x2201_1311));
+        assert!(!is_hardened(0x2201_1311 | CS_GET_TASK_ALLOW));
+        assert!(!is_hardened(0));
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_cargo_test_binary_lacks_the_hardened_runtime() {
+        assert!(!hardened_runtime().unwrap());
+    }
+
+    #[test]
+    fn the_sign_command_names_both_binaries_and_quotes_the_path() {
+        assert_eq!(
+            sign_command_in(Path::new("/Users/o'brien/my src/target/release")),
+            r"codesign -f -s - -o runtime '/Users/o'\''brien/my src/target/release'/pinfold-{core,window}"
+        );
+        assert!(sign_command().contains("/target/"));
+    }
 
     #[test]
     #[cfg(target_os = "macos")]
