@@ -24,3 +24,11 @@ use secondary text so the query remains the primary focus.
 These refinements use the existing cell renderer and rounded pill shapes, with
 no animation timers, extra buffers, or dependencies. Terminal colours and agent
 state glyphs, colours and words remain independent of the chrome palette.
+
+## New tabs and splits
+
+A new tab or split opened from the window, by key or palette, starts in the working
+directory of the pane that was focused, as Terminal, iTerm2 and Ghostty do. PinFold
+asks the system where that pane's shell is, never the pane's OSC 7 report, which any
+program's output can fake (T4). If that directory no longer exists or cannot be
+read, the new pane starts where it did before (home, on macOS) and shows no error.

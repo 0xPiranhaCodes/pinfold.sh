@@ -1788,6 +1788,49 @@ mod tests {
         assert_eq!(reactor.engine(first as usize).unwrap().size(), (24, 39));
     }
 
+    #[test]
+    fn a_split_or_tab_starts_where_the_shell_is_not_where_osc_7_says() {
+        let name = format!("pinfold-cwd-{}", std::process::id());
+        let directory = std::env::temp_dir().join(&name);
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut reactor = Reactor::new().unwrap();
+        // The source's shell is in `directory` and its output claims /tmp (T4).
+        let script = format!(
+            r"cd '{}' && printf '\033]7;file:///tmp\007'; echo ready; read line",
+            directory.display()
+        );
+        let source = reactor.open_tab(shell(&script), 24, 80).unwrap();
+        let mut peer = Peer::watching(&mut reactor, source);
+        serve(&mut reactor, &mut peer, |r, _| {
+            on_screen(r, source, "ready") && r.cwd(source).as_deref() == Some("/tmp")
+        });
+        reactor.shell = || shell(r#"echo "at-$(basename "$(pwd -P)")"; read line"#);
+        let here = format!("at-{name}");
+
+        peer.send(Request::Split {
+            pane: source as u32,
+            way: SplitWay::Right,
+        });
+        serve(&mut reactor, &mut peer, |_, p| p.shown.len() == 2);
+        let split = peer.shown[1].0 as usize;
+        assert!(turn_until(&mut reactor, |r| on_screen(r, split, &here)));
+
+        // The split is focused and its shell is in `directory` too.
+        peer.send(Request::NewTab);
+        serve(&mut reactor, &mut peer, |_, p| p.active == 1);
+        let tab = peer.focused as usize;
+        assert!(turn_until(&mut reactor, |r| on_screen(r, tab, &here)));
+
+        // A directory that is gone falls back to the shell's own start, with no error.
+        std::fs::remove_dir(&directory).unwrap();
+        peer.send(Request::NewTab);
+        serve(&mut reactor, &mut peer, |_, p| p.active == 2);
+        let fallback = peer.focused as usize;
+        let own = std::env::current_dir().unwrap().canonicalize().unwrap();
+        let own = format!("at-{}", own.file_name().unwrap().to_string_lossy());
+        assert!(turn_until(&mut reactor, |r| on_screen(r, fallback, &own)));
+    }
+
     fn reactor_shell() -> Command {
         shell("stty size; read line; exit 0")
     }
