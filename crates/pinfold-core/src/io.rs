@@ -203,6 +203,8 @@ pub struct Reactor {
     /// Answers accepted only from the inherited window link.
     pub(crate) approval_answers: Vec<(u64, ApprovalAnswer)>,
     pub(crate) protect: Protect,
+    /// Set when this core lacks the hardened runtime: whether it could tell (ADR-0044).
+    pub(crate) unhardened: Option<bool>,
 }
 
 impl Reactor {
@@ -231,7 +233,14 @@ impl Reactor {
             was_running: Vec::new(),
             approval_answers: Vec::new(),
             protect: Protect::default(),
+            unhardened: None,
         })
+    }
+
+    /// Tells every window from now on that this core lacks the hardened runtime, or with
+    /// `checked` false that it could not tell (ADR-0044).
+    pub fn set_unhardened(&mut self, checked: bool) {
+        self.unhardened = Some(checked);
     }
 
     /// Starts `command` on a new PTY and returns its pane number. The pane is in no tab, so it

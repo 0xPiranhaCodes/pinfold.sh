@@ -122,6 +122,8 @@ struct Session {
     activity_changed: bool,
     /// The latest command refused. Only the last matters, so a burst of them costs nothing.
     refused: Option<Refusal>,
+    /// Whether this window was told the core lacks the hardened runtime, if it does.
+    told_unhardened: bool,
 }
 
 impl Session {
@@ -543,6 +545,15 @@ impl Window {
             self.read(reactor)?;
         }
         if self.session.greeted {
+            if !mem::replace(&mut self.session.told_unhardened, true)
+                && let Some(checked) = reactor.unhardened
+            {
+                let notice = Notice::Unhardened { checked };
+                // A window a version older cannot show it, and the core's log said it anyway.
+                if self.decoder.version() >= Some(notice.since()) {
+                    self.session.notice(&notice)?;
+                }
+            }
             self.session.report(reactor)?;
             self.session.send_panes(reactor)
         } else {
@@ -748,6 +759,7 @@ impl Reactor {
                 alerts: 0,
                 activity_changed: false,
                 refused: None,
+                told_unhardened: false,
             },
         };
         let interest = Interest::READABLE | Interest::WRITABLE;
@@ -826,6 +838,7 @@ mod tests {
         shown: Vec<(u32, Rect)>,
         refused: Vec<Refusal>,
         was_running: Vec<(u32, bool, String)>,
+        unhardened: Vec<bool>,
     }
 
     impl Peer {
@@ -854,6 +867,7 @@ mod tests {
                 shown: Vec::new(),
                 refused: Vec::new(),
                 was_running: Vec::new(),
+                unhardened: Vec::new(),
             }
         }
 
@@ -935,6 +949,7 @@ mod tests {
                             command,
                         } => self.was_running.push((pane, runnable, command.to_owned())),
                         Notice::Approval(_) => {}
+                        Notice::Unhardened { checked } => self.unhardened.push(checked),
                     }
                 }
             }
@@ -1022,6 +1037,7 @@ mod tests {
     #[test]
     fn an_older_window_is_served_without_what_it_cannot_read() {
         let mut reactor = Reactor::new().unwrap();
+        reactor.set_unhardened(true);
         let pane = reactor
             .open_tab(shell("echo hi; sleep 30"), 24, 80)
             .unwrap();
@@ -1031,22 +1047,36 @@ mod tests {
         serve(&mut reactor, &mut peer, |r, p| p.matches(r, pane));
         assert!(reactor.is_window_ready());
         assert_eq!(reactor.take_other_version(), None);
-        assert!(reactor.can_ask(ApprovalAction::Trust));
-        assert!(!reactor.can_ask(ApprovalAction::Owner));
-        let owner = Prompt {
-            id: 1,
-            caller: 0,
-            target: 0,
-            action: ApprovalAction::Owner,
-            texts: vec!["session.save".to_owned()],
-        };
-        assert!(!reactor.ask_approval(&owner));
-        let trust = Prompt {
-            action: ApprovalAction::Trust,
-            ..owner
-        };
-        assert!(reactor.ask_approval(&trust));
+        assert!(reactor.can_ask(ApprovalAction::Owner));
+        assert!(
+            peer.unhardened.is_empty(),
+            "sent what version 10 cannot read"
+        );
         assert!(reactor.is_window_ready(), "the link ended");
+    }
+
+    #[test]
+    fn a_core_without_the_hardened_runtime_tells_each_window_once() {
+        let mut reactor = Reactor::new().unwrap();
+        let pane = reactor.open_tab(shell(ALIVE), 24, 80).unwrap();
+        let mut peer = Peer::watching(&mut reactor, pane);
+        serve(&mut reactor, &mut peer, |r, p| p.matches(r, pane));
+        assert!(peer.unhardened.is_empty(), "a hardened core said otherwise");
+        drop(peer);
+        assert!(turn_until(&mut reactor, |r| !r.has_window()));
+        reactor.set_unhardened(false);
+        for _ in 0..2 {
+            let mut peer = Peer::watching(&mut reactor, pane);
+            serve(&mut reactor, &mut peer, |r, p| p.matches(r, pane));
+            reactor.write(pane, b"more\n");
+            serve(&mut reactor, &mut peer, |r, _| {
+                on_screen(r, pane, "got-more")
+            });
+            peer.read();
+            assert_eq!(peer.unhardened, [false]);
+            drop(peer);
+            assert!(turn_until(&mut reactor, |r| !r.has_window()));
+        }
     }
 
     #[test]
