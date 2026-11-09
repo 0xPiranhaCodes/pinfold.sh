@@ -121,17 +121,27 @@ command = ["claude"]
 sandbox = true
 ```
 
-The sandbox hides `~/.ssh`, the directory of this file, PinFold's state directory, and every
-other pane's terminal device, and where any of those directories, or this file, lead
-through a symlink. On macOS it is `/usr/bin/sandbox-exec`, which denies reads and
-writes there. On Linux it is bubblewrap, which puts an empty directory over each one, gives the
-agent its own `/dev` and `/proc`, and needs unprivileged user namespaces. `bwrap` is taken from
+The sandbox hides `~/.ssh`, the directory of this file, PinFold's state directory, the common
+credential stores, and every other pane's terminal device, and where any of those, or this
+file, lead through a symlink ([ADR-0041](adr/0041-sandbox-hides-writes-not-secrets.md)). The
+credential stores are `~/.aws`, `~/.azure`, `~/.docker`, `~/.gnupg`, `~/.kube`, `~/.netrc`, and
+`gcloud` and `gh` in `~/.config` and in `$XDG_CONFIG_HOME`, and the browser profiles: on macOS
+Arc, Brave, Chromium, Firefox, Google Chrome and Microsoft Edge in `~/Library/Application
+Support`, and `~/Library/Safari`; on Linux `~/.mozilla`, `BraveSoftware`, `chromium`,
+`google-chrome` and `microsoft-edge` in the config directories, and the Snap and Flatpak
+profiles in `~/snap/firefox`, `~/snap/chromium` and `~/.var/app/` for Firefox, Chrome and
+Chromium. A store not on this list stays readable, and a tool that needs a hidden one, such as
+`aws` or `gh`, fails inside the sandbox. On macOS it is `/usr/bin/sandbox-exec`, which denies
+reads and writes there. On Linux it is bubblewrap, which puts an empty directory over each
+directory and `/dev/null` over each file, such as `~/.netrc`, gives the agent its own `/dev`
+and `/proc`, and needs unprivileged user namespaces. `bwrap` is taken from
 `/usr/bin`, `/usr/local/bin` or `/bin`, never `PATH`, and only if root alone can change it and
 the directories above it. It must be bubblewrap 0.8 or later, which can stop the agent making
 user namespaces of its own (`--disable-userns`); with an older one the launch fails and names
 the version found.
 If the tool is missing or refuses, the agent does not start: it never runs unsandboxed. A
-directory that does not exist when the agent starts is not hidden on Linux.
+path that does not exist when the agent starts is not mounted over on Linux, and the agent
+cannot make it, as it writes nowhere but its working and temporary directories.
 
 The agent stays in its pane's session with the pane as its controlling terminal, so the API
 still knows it as that pane, and its socket stays reachable. On macOS the sandbox denies typing

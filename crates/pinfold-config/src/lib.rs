@@ -263,10 +263,70 @@ fn data_dir_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathBu
     Some(base.join("pinfold"))
 }
 
-/// Returns what a sandboxed agent may not see: `~/.ssh`, the config file's directory and
-/// [`state_dir`], each also as it resolves through symlinks, so a config file linked from a
-/// dotfiles repo hides that repo's directory too. The runtime directory is not among them, as an
-/// agent needs its socket to call the API, which knows each caller by its terminal.
+/// Credential stores in the home folder, which a sandboxed agent may not read (ADR-0041).
+const STORES: [&str; 6] = [".aws", ".azure", ".docker", ".gnupg", ".kube", ".netrc"];
+
+/// Credential stores under the config directory, `~/.config` or `$XDG_CONFIG_HOME`.
+const CONFIG_STORES: [&str; 2] = ["gcloud", "gh"];
+
+/// Browser profiles, which hold cookies and saved passwords.
+#[cfg(target_os = "macos")]
+const BROWSERS: [&str; 7] = [
+    "Library/Application Support/Arc",
+    "Library/Application Support/BraveSoftware",
+    "Library/Application Support/Chromium",
+    "Library/Application Support/Firefox",
+    "Library/Application Support/Google/Chrome",
+    "Library/Application Support/Microsoft Edge",
+    "Library/Safari",
+];
+
+/// Browser profiles in the home folder, of distribution, Snap and Flatpak packages.
+#[cfg(not(target_os = "macos"))]
+const BROWSERS: [&str; 6] = [
+    ".mozilla",
+    "snap/chromium",
+    "snap/firefox",
+    ".var/app/com.google.Chrome",
+    ".var/app/org.chromium.Chromium",
+    ".var/app/org.mozilla.firefox",
+];
+
+/// Browser profiles under the config directory.
+#[cfg(not(target_os = "macos"))]
+const CONFIG_BROWSERS: [&str; 4] = [
+    "BraveSoftware",
+    "chromium",
+    "google-chrome",
+    "microsoft-edge",
+];
+#[cfg(target_os = "macos")]
+const CONFIG_BROWSERS: [&str; 0] = [];
+
+/// Returns the credential stores a sandboxed agent may not read, under `home` and the config
+/// directory `config`, whether they exist or not: `~/.aws`, `~/.azure`, `~/.docker`, `~/.gnupg`,
+/// `~/.kube`, `~/.netrc`, `gcloud` and `gh` in `config`, and this system's browser profiles.
+///
+/// ```
+/// use std::path::Path;
+/// let stores = pinfold_config::credential_stores(Path::new("/home/me"), Path::new("/home/me/.config"));
+/// assert!(stores.contains(&Path::new("/home/me/.aws").to_path_buf()));
+/// assert!(stores.contains(&Path::new("/home/me/.config/gh").to_path_buf()));
+/// ```
+pub fn credential_stores(home: &Path, config: &Path) -> Vec<PathBuf> {
+    let in_home = STORES.iter().chain(&BROWSERS).map(|store| home.join(store));
+    let in_config = CONFIG_STORES.iter().chain(&CONFIG_BROWSERS);
+    in_home
+        .chain(in_config.map(|store| config.join(store)))
+        .collect()
+}
+
+/// Returns what a sandboxed agent may not see: `~/.ssh`, the config file's directory,
+/// [`state_dir`] and the [`credential_stores`], under `~/.config` and `$XDG_CONFIG_HOME` both,
+/// each also as it resolves through symlinks, so a config file linked from a dotfiles repo hides
+/// that repo's directory too. Most are directories, but `~/.netrc` is a file. The runtime
+/// directory is not among them, as an agent needs its socket to call the API, which knows each
+/// caller by its terminal.
 ///
 /// ```
 /// for dir in pinfold_config::private_dirs() {
@@ -286,11 +346,20 @@ fn private_dirs_from(
     xdg_state: Option<OsString>,
     home: Option<OsString>,
 ) -> Vec<PathBuf> {
-    let ssh = home
+    let home_dir = home
         .clone()
         .map(PathBuf::from)
-        .filter(|home| home.is_absolute())
-        .map(|home| home.join(".ssh"));
+        .filter(|home| home.is_absolute());
+    let ssh = home_dir.as_ref().map(|home| home.join(".ssh"));
+    let mut stores = Vec::new();
+    if let Some(home) = &home_dir {
+        stores = credential_stores(home, &home.join(".config"));
+        // Tools that follow XDG keep their stores there instead; repeats are dropped below.
+        let xdg = xdg_config.clone().map(PathBuf::from);
+        if let Some(xdg) = xdg.filter(|xdg| xdg.is_absolute()) {
+            stores.extend(credential_stores(home, &xdg));
+        }
+    }
     let config = path_from(xdg_config, home.clone());
     // The file's own target, which may sit in another directory than the link.
     let target = config.as_ref().and_then(|path| fs::canonicalize(path).ok());
@@ -304,6 +373,7 @@ fn private_dirs_from(
     ]
     .into_iter()
     .flatten()
+    .chain(stores)
     {
         let real = fs::canonicalize(&dir).ok();
         for dir in [Some(dir), real].into_iter().flatten() {
@@ -652,6 +722,30 @@ mod tests {
                 .all(|dir| dirs.iter().filter(|other| *other == dir).count() == 1)
         );
         assert!(private_dirs_from(None, None, None).is_empty());
+    }
+
+    #[test]
+    fn private_dirs_hide_credential_stores_that_may_not_exist() {
+        let home = PathBuf::from("/nowhere/home");
+        let dirs = private_dirs_from(Some("/nowhere/xdg".into()), None, Some(home.clone().into()));
+        for store in [".aws", ".azure", ".docker", ".gnupg", ".kube", ".netrc"] {
+            assert!(dirs.contains(&home.join(store)), "{store} {dirs:?}");
+        }
+        for config in [home.join(".config"), PathBuf::from("/nowhere/xdg")] {
+            for store in ["gh", "gcloud"] {
+                assert!(dirs.contains(&config.join(store)), "{store} {dirs:?}");
+            }
+        }
+        let browser = if cfg!(target_os = "macos") {
+            home.join("Library/Application Support/Google/Chrome")
+        } else {
+            home.join(".config/google-chrome")
+        };
+        assert!(dirs.contains(&browser), "{dirs:?}");
+        assert!(
+            dirs.iter()
+                .all(|dir| dirs.iter().filter(|other| *other == dir).count() == 1)
+        );
     }
 
     #[test]

@@ -65,14 +65,17 @@ still welcome if it adds a case not listed here. Report bugs with the
 
 ## Sandboxed agents
 
-- **The sandbox does not keep secrets from the agent.** A sandboxed agent profile cannot write
-  outside its working and temporary directories, open another terminal or type with TIOCSTI,
-  and it cannot read `~/.ssh` or PinFold's config and state. It can read every other file you
-  can, such as `~/.aws`, `~/.config/gh`, `~/.netrc`, `~/.kube` and browser profiles, gets your
-  environment variables but the agent sockets', can read and write the clipboard, and can reach
-  the network. Hiding the common credential stores and the clipboard is proposed for v0.1
+- **The sandbox does not keep every secret from the agent.** A sandboxed agent profile cannot
+  write outside its working and temporary directories, open another terminal or type with
+  TIOCSTI, and it cannot read `~/.ssh`, PinFold's config and state, or the common credential
+  stores: `~/.aws`, `~/.azure`, `~/.docker`, `~/.gnupg`, `~/.kube`, `~/.netrc`,
+  `~/.config/gcloud`, `~/.config/gh` and browser profiles
+  ([configuration](../configuration.md#agent-profiles) lists them). A tool that needs one, such
+  as `aws`, `gh`, `docker login` or `kubectl`, fails inside the sandbox. The agent can read every
+  other file you can, gets your environment variables but the agent sockets', can read and
+  write the clipboard, and can reach the network
   ([ADR-0041](../adr/0041-sandbox-hides-writes-not-secrets.md),
-  [#216](https://github.com/0xPiranhaCodes/pinfold.sh/issues/216)).
+  [#328](https://github.com/0xPiranhaCodes/pinfold.sh/issues/328)).
 
 ## Not yet checked on an installed build
 

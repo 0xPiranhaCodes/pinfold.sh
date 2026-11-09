@@ -9,6 +9,10 @@ Entries are generated from Conventional Commits with git-cliff
 
 ## [Unreleased]
 
+### Security
+
+- A sandboxed agent can no longer read the common credential stores ([#328](https://github.com/0xPiranhaCodes/pinfold.sh/issues/328), [ADR-0041](docs/adr/0041-sandbox-hides-writes-not-secrets.md), now accepted by the maintainer's decision of 2026-11-09). `pinfold_config::credential_stores` lists `~/.aws`, `~/.azure`, `~/.docker`, `~/.gnupg`, `~/.kube`, `~/.netrc`, `gcloud` and `gh` in `~/.config` and `$XDG_CONFIG_HOME`, and this system's browser profiles (7 on macOS, 10 on Linux), and `private_dirs` adds them to what the sandbox hides. On macOS `sandbox-exec` denies reading each, resolving a missing one through its parent; on Linux bubblewrap mounts an empty directory over each directory and, new, `/dev/null` over each file, and skips a missing one. `a_sandboxed_agent_cannot_read_credential_stores` puts a secret in each store but one and runs the real `sandbox-exec` or bubblewrap; it fails with every secret printed when the stores are not hidden. A tool that needs a hidden store, such as `aws` or `gh`, now fails inside the sandbox. `pinfold-core` gains `pinfold-config` as a dev-dependency.
+
 ### Fixed
 
 - Dependabot's pull requests pass the DCO check. A commit skips the sign-off check only when its pull request was opened by `dependabot[bot]` and its author email is `49699333+dependabot[bot]@users.noreply.github.com`; the pull request's opener comes from the event, which a commit cannot forge. A forged Dependabot author on a human pull request, and a human commit without a sign-off on a Dependabot pull request, still fail. `.github/scripts/test-check-dco.sh` covers six cases and runs in the `dco` job.
