@@ -1376,6 +1376,7 @@ dependencies = [
  "pinfold-core",
  "pinfold-proto",
  "pinfold-sys",
+ "pinfold-tools",
  "pinfold-ui",
  "serde_json",
 ]
@@ -1472,6 +1473,9 @@ dependencies = [
 [[package]]
 name = "pinfold-tools"
 version = "0.1.0-beta.3"
+dependencies = [
+ "pinfold-sys",
+]
 
 [[package]]
 name = "pinfold-ui"

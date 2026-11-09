@@ -35,6 +35,9 @@ fn help_lists_every_command_and_option() {
         "ctl log",
         "ctl session save",
         "mcp",
+        "md <file>",
+        "files [dir]",
+        "diff [range]",
         "help [command]",
         "-h, --help",
         "-V, --version",
@@ -86,6 +89,9 @@ fn each_command_has_help_naming_its_arguments_and_flags() {
         ),
         (&["ctl", "session"], &["pinfold ctl session save"]),
         (&["mcp"], &["pinfold mcp"]),
+        (&["md"], &["<file>"]),
+        (&["files"], &["[dir]"]),
+        (&["diff"], &["--staged", "[range]"]),
     ];
     for (command, words) in commands {
         let text = stdout(&[command, &["--help"][..]].concat()).unwrap();
@@ -119,6 +125,12 @@ fn a_bad_argument_names_the_problem_in_one_line_and_exits_2() {
             "usage: pinfold ctl list [--json]",
         ),
         (&["agent", "a", "--left"], "usage: pinfold agent <name>"),
+        (&["md"], "usage: pinfold md <file>"),
+        (&["files", "a", "b"], "usage: pinfold files [dir]"),
+        (
+            &["diff", "--stat"],
+            "usage: pinfold diff [--staged] [range]",
+        ),
         (&["ctl", "send", "x", "y"], "the pane must be a number"),
         (&["ctl", "wait"], "'ctl wait' needs a pane"),
         (&["ctl", "wait", "2", "--until"], "'--until' needs a value"),

@@ -43,6 +43,9 @@ Commands:
   ctl log           Print or verify the audit log of API calls
   ctl session save  Save the session now and print the snapshot's path
   mcp               Serve PinFold's tools to a coding agent over MCP
+  md <file>         Read a markdown file
+  files [dir]       Browse a directory
+  diff [range]      View a git diff
   help [command]    Print this, or a command's help
 
 Options:
@@ -263,6 +266,53 @@ Example:
   claude mcp add pinfold -- pinfold mcp
 ";
 
+const MD: &str = "\
+pinfold md: read a markdown file, full screen.
+
+Usage: pinfold md <file>
+
+Arguments:
+  <file>  The markdown file. Put one whose name starts with - after --
+
+Keys: hjkl or the arrows move, / searches, ? lists the keys, q quits.
+
+Example:
+  pinfold md README.md
+";
+
+const FILES: &str = "\
+pinfold files: browse a directory, full screen.
+
+Usage: pinfold files [dir]
+
+Arguments:
+  [dir]  The directory (default: the current directory). Put one whose name starts with -
+         after --
+
+Keys: hjkl or the arrows move, / searches, ? lists the keys, q quits.
+
+Example:
+  pinfold files ~/src
+";
+
+const DIFF: &str = "\
+pinfold diff: view a git diff, full screen.
+
+Usage: pinfold diff [--staged] [range]
+
+Shows the work tree against the index, or a revision range such as main..HEAD. A range never
+starts with -.
+
+Options:
+  --staged  The index against HEAD instead
+
+Keys: hjkl or the arrows move, / searches, ? lists the keys, q quits.
+
+Examples:
+  pinfold diff --staged
+  pinfold diff main..HEAD
+";
+
 /// The help for `topic`, a command and its subcommand, if it names one.
 fn help(topic: &[&str]) -> Option<&'static str> {
     Some(match topic {
@@ -278,6 +328,9 @@ fn help(topic: &[&str]) -> Option<&'static str> {
         ["ctl", "log"] => LOG,
         ["ctl", "session"] | ["ctl", "session", "save"] => SESSION,
         ["mcp"] => MCP,
+        ["md"] => MD,
+        ["files"] => FILES,
+        ["diff"] => DIFF,
         _ => return None,
     })
 }
@@ -988,6 +1041,14 @@ fn main() -> ExitCode {
         ["ctl", "grants"] => grants(false),
         ["ctl", "grants", "--json"] => grants(true),
         ["ctl", "grants", "revoke", id] => revoke(id),
+        ["md" | "files" | "diff", ..] => match pinfold_tools::Command::parse(&words) {
+            Some(tool) => match tool.run() {
+                Ok(true) => Ok(()),
+                Ok(false) => return ExitCode::FAILURE,
+                Err(error) => Err(error.into()),
+            },
+            None => Err(misuse(wrong(&words))),
+        },
         _ => Err(misuse(wrong(&words))),
     };
     match result {
