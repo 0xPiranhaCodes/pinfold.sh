@@ -176,8 +176,9 @@ fn git(repo: &Path, args: &[&str]) -> io::Result<()> {
 }
 
 /// Fills the tools' caps in `dir`, outside any repository so the file manager runs no git:
-/// `reader.md` and `prose.md` of exactly 5 MB, an `empty` directory, `entries` of 10,000 files, a `repo` whose
-/// work tree's diff is over 8 MB, and `tool-screen.sh`, a window's shell that runs the reader.
+/// `reader.md`, `prose.md` and `defs.md` of exactly 5 MB, an `empty` directory, `entries` of
+/// 10,000 files, a `repo` whose work tree's diff is over 8 MB, and `tool-screen.sh`, a window's
+/// shell that runs the reader.
 fn write_tool_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -199,8 +200,12 @@ fn write_tool_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
              eighty columns and no markup at all.\n\n"
         )
     };
-    let parts: [(&str, &dyn Fn(usize) -> String); 2] =
-        [("reader.md", &markdown), ("prose.md", &prose)];
+    let defs = |definition: usize| format!("[a{definition}]: https://pinfold.sh/{definition}\n");
+    let parts: [(&str, &dyn Fn(usize) -> String); 3] = [
+        ("reader.md", &markdown),
+        ("prose.md", &prose),
+        ("defs.md", &defs),
+    ];
     for (name, part) in parts {
         let mut bytes = Vec::new();
         for at in 0.. {
@@ -270,9 +275,10 @@ fn mem_gate_task() -> ExitCode {
         return ExitCode::FAILURE;
     };
     let input = |name: &str| format!("{inputs_text}/{name}");
-    let (markdown, prose, empty, entries, repo) = (
+    let (markdown, prose, defs, empty, entries, repo) = (
         input("reader.md"),
         input("prose.md"),
+        input("defs.md"),
         input("empty"),
         input("entries"),
         input("repo"),
@@ -336,6 +342,7 @@ fn mem_gate_task() -> ExitCode {
     let idle_tool = ["--tool", "1", "files", empty.as_str()];
     let reader = ["--tool", "1", "md", markdown.as_str()];
     let prose_reader = ["--tool", "1", "md", prose.as_str()];
+    let defs_reader = ["--tool", "1", "md", defs.as_str()];
     let file_manager = ["--tool", "1", "files", entries.as_str()];
     let diff_viewer = ["--tool", "1", "diff", repo.as_str()];
     let readers = ["--tool", "8", "md", markdown.as_str()];
@@ -364,6 +371,12 @@ fn mem_gate_task() -> ExitCode {
             metric: "Markdown reader, a 5 MB file of plain prose",
             limit: mem_gate::READER_LIMIT,
             args: &prose_reader,
+            ..tool
+        },
+        mem_gate::Budget {
+            metric: "Markdown reader, a 5 MB file of link definitions",
+            limit: mem_gate::READER_LIMIT,
+            args: &defs_reader,
             ..tool
         },
         mem_gate::Budget {

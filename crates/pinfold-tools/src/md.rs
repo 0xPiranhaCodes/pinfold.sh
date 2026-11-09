@@ -29,6 +29,10 @@ const MAX_PARSE: Duration = Duration::from_secs(2);
 /// Bytes of markdown parsed at a time. pulldown-cmark builds a tree of all it is given before
 /// its first event, about 11 bytes for each byte of dense markdown (#380).
 const WINDOW: usize = 32 * 1024;
+/// Bytes of link reference definitions put above each window; later ones are not used across
+/// windows. Two windows' worth keeps each parse within three windows, and holds about a
+/// thousand definitions of a typical length.
+const MAX_DEFS: usize = 64 * 1024;
 /// Characters on a laid-out line. Code, table and plain-text lines are cut here.
 const MAX_LINE: usize = 10_000;
 /// Laid-out lines; the rest of the file is not shown.
@@ -860,7 +864,13 @@ fn layout(
         // shortcut: the time is checked between events, so pulldown-cmark's first pass over a
         // window and any one slow event are not cut short; a parse thread with a deadline would
         // be, if a hostile file is ever found to stall either.
-        let defs = definitions(text, WINDOW, || started.elapsed() <= budget);
+        let (defs, cut_defs) = definitions(text, WINDOW, || started.elapsed() <= budget);
+        if cut_defs {
+            notes.push(format!(
+                "Only the first {} KiB of link definitions are used.",
+                MAX_DEFS / 1024
+            ));
+        }
         // Where the text laid out so far ends: a start's range covers its whole element.
         let mut done = 0;
         let mut late = false;
@@ -937,35 +947,46 @@ fn layout(
 /// costs pulldown-cmark's tree of it; cutting inside blocks would bound that, if such files
 /// turn up.
 fn parse(text: &str, defs: &str, window: usize, each: impl FnMut(Event<'_>, Range<usize>) -> bool) {
-    windows(text, defs, window, each, |_| {});
+    windows(text, defs, window, each, |_| true);
 }
 
 /// The source of each link reference definition in `text`, a line each, as [`parse`] puts them
-/// above every window so a link can use a definition in a later one. It stops when `more` says.
+/// above every window so a link can use a definition in a later one, and whether
+/// [`MAX_DEFS`] cut them. It stops when `more` says.
 ///
 /// shortcut: a definition that spans lines inside a block quote keeps the `>` of its later lines,
 /// so a link before its window does not find it; such definitions are rare.
-fn definitions(text: &str, window: usize, mut more: impl FnMut() -> bool) -> String {
-    let mut spans = Vec::new();
-    if text.contains("]:") {
-        windows(text, "", window, |_, _| more(), |span| spans.push(span));
-    }
-    spans.sort_by_key(|span| span.start);
+fn definitions(text: &str, window: usize, more: impl Fn() -> bool) -> (String, bool) {
     let mut defs = String::new();
-    for span in spans {
-        defs.push_str(text.get(span).unwrap_or_default());
-        defs.push('\n');
+    let mut cut = false;
+    if text.contains("]:") {
+        windows(
+            text,
+            "",
+            window,
+            |_, _| more(),
+            |span| {
+                let def = text.get(span).unwrap_or_default();
+                cut = defs.len() + def.len() + 1 > MAX_DEFS;
+                if !cut {
+                    defs.push_str(def);
+                    defs.push('\n');
+                }
+                !cut && more()
+            },
+        );
     }
-    defs
+    (defs, cut)
 }
 
-/// [`parse`], which also passes `found` the span of each definition in the blocks it passed on.
+/// [`parse`], which also passes `found` the span of each definition in the blocks it passed on,
+/// in order, until it returns false.
 fn windows(
     text: &str,
     defs: &str,
     window: usize,
     mut each: impl FnMut(Event<'_>, Range<usize>) -> bool,
-    mut found: impl FnMut(Range<usize>),
+    mut found: impl FnMut(Range<usize>) -> bool,
 ) {
     let options = Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
     let (mut from, mut size) = (0, window.max(1));
@@ -1013,10 +1034,30 @@ fn windows(
             }
             held.push((event, range));
         }
+        let mut spans: Vec<_> = (parser.reference_definitions().iter())
+            .filter(|(_, def)| def.span.start >= skip)
+            .map(|(_, def)| place(def.span.clone()))
+            .collect();
+        spans.sort_by_key(|span| span.start);
+        // Definitions give no events, so a file of them would never split. One that starts a
+        // line ends every block before it: inside a list or quote it would be indented or quoted.
+        if let Some(span) = spans
+            .iter()
+            .rev()
+            .find(|span| span.start > block && text.as_bytes().get(span.start - 1) == Some(&b'\n'))
+            && !last
+        {
+            for (event, range) in held.drain(..) {
+                if !each(event, range) {
+                    return;
+                }
+            }
+            block = span.start;
+        }
         let kept = if last { end } else { block };
-        for (_, def) in parser.reference_definitions().iter() {
-            if def.span.start >= skip && place(def.span.clone()).start < kept {
-                found(place(def.span.clone()));
+        for span in spans.into_iter().filter(|span| span.start < kept) {
+            if !found(span) {
+                return;
             }
         }
         if last {
@@ -1776,6 +1817,8 @@ mod tests {
             "<!-- a comment\n\n# inside it\n\n-->\n\n<div>\nhtml\n</div>\n",
             "Hard  \nbreak and `code`, **bold *both***\n\n***\n",
             "[later]: https://pinfold.sh/later \"Title\"\n[x]:\n  <spaced dest>\n",
+            "[d1]: /one\n[d2]: /two\n\"titled\"\n[d3]: /three\ntext after [d1] [d4]\n\n",
+            "- [y]: /in-a-list\n  [w]: /indented\n\n> [q]: /quoted\n> [d4]: /four\n\n",
         ];
         let text = blocks.concat().repeat(4);
         let options = Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
@@ -1785,7 +1828,7 @@ mod tests {
             .collect();
         assert!(whole.iter().any(|event| event.contains("pinfold.sh/later")));
         for window in [1, 7, 64, 300, WINDOW] {
-            let defs = definitions(&text, window, || true);
+            let (defs, _) = definitions(&text, window, || true);
             let mut events = Vec::new();
             parse(&text, &defs, window, |event, range| {
                 events.push(format!("{event:?} {range:?}"));
@@ -1793,6 +1836,22 @@ mod tests {
             });
             assert_eq!(events, whole, "{window}-byte windows");
         }
+    }
+
+    #[test]
+    fn link_definitions_above_each_window_stop_at_their_cap() {
+        let text: String = (0..20_000).map(|n| format!("[a{n}]: x\n")).collect();
+        let (defs, cut) = definitions(&text, WINDOW, || true);
+        assert!(cut);
+        assert!(defs.len() <= MAX_DEFS && defs.len() > MAX_DEFS - 100);
+        assert!(defs.starts_with("[a0]: x\n[a1]: x\n"), "the first are kept");
+        let (lines, _, _) = layout(&text, 80, true, false, MAX_PARSE);
+        assert_eq!(
+            texts(&lines),
+            ["Only the first 64 KiB of link definitions are used.", ""]
+        );
+        let (_, cut) = definitions("[a]: x\n", WINDOW, || true);
+        assert!(!cut);
     }
 
     /// The median time to lay out each of `cargo xtask mem-gate`'s 5 MB files at 80 columns:
@@ -1814,8 +1873,13 @@ mod tests {
                  lines at eighty columns and no markup at all.\n\n"
             )
         };
-        let inputs: [(&str, &dyn Fn(usize) -> String); 2] =
-            [("markdown", &markdown), ("plain prose", &prose)];
+        let defs =
+            |definition: usize| format!("[a{definition}]: https://pinfold.sh/{definition}\n");
+        let inputs: [(&str, &dyn Fn(usize) -> String); 3] = [
+            ("markdown", &markdown),
+            ("plain prose", &prose),
+            ("link definitions", &defs),
+        ];
         for (name, part) in inputs {
             let mut bytes = Vec::new();
             for at in 0.. {
