@@ -260,6 +260,13 @@ Press the prefix, then one of these. The prefix pressed twice sends it to the pr
 | Alt+arrows         | Move a border 5 cells                                        |
 | `z`                | Zoom the pane                                                |
 | `d`                | Close the window. The session stays, and `pinfold` reopens it |
+| `f`                | Open the file manager, `pinfold files`, right of the pane     |
+| `g`                | Open the git diff viewer, `pinfold diff`, right of the pane   |
+
+`f` and `g` open the tool in the directory the system says the focused pane's shell is in,
+never one a program's output reported, as a new tab or split does. Tmux binds neither key,
+and behind the prefix no shell or program sees them. In a tool's pane the prefix and the
+window's own keys still work, and every other key goes to the tool.
 
 A tab closes with its last pane, and the session ends with its last tab.
 

@@ -35,7 +35,7 @@ use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
 use pinfold_proto::Frame;
 use pinfold_proto::link::{
-    ApprovalAction, Decoder, Error, Layout, MAX_DIMENSION, MAX_PANES, MAX_REQUEST, Notice,
+    ApprovalAction, Decoder, Error, Layout, MAX_DIMENSION, MAX_PANES, MAX_REQUEST, Notice, OLDEST,
     Position, Rect, Refusal, Request, Selection, VERSION,
 };
 
@@ -522,9 +522,13 @@ impl Link {
     }
 
     /// Queues a request and sends what it can. Returns false if it is over the limit of one
-    /// message, the core is too far behind, or the link has ended, and then queues none.
+    /// message, the core is too far behind, the link has ended, or the request is newer than
+    /// the version the link speaks (ADR-0043), and then queues none.
     pub fn send(&mut self, request: Request<'_>) -> bool {
-        let queued = self.stream.is_some() && self.state.queue(request);
+        // Before the core's hello this is the oldest version, so a newer request waits for none.
+        let spoken = self.decoder.version().unwrap_or(OLDEST);
+        let queued =
+            self.stream.is_some() && request.since() <= spoken && self.state.queue(request);
         self.flush();
         queued
     }
@@ -682,7 +686,7 @@ mod tests {
 
     use pinfold_proto::Cell;
     use pinfold_proto::link::{
-        Direction, MAX_MESSAGE, MAX_PASTE, OLDEST, Position, encode_frame, encode_layout,
+        Direction, MAX_MESSAGE, MAX_PASTE, Position, Tool, encode_frame, encode_layout,
     };
 
     use super::*;
@@ -852,6 +856,11 @@ mod tests {
             let hello = Request::Hello { version: spoken };
             assert_eq!(peer.requests(1), [shown(hello)]);
             assert_eq!(link.disconnected(), None);
+            let open = Request::OpenTool {
+                pane: 1,
+                tool: Tool::Files,
+            };
+            assert_eq!(link.send(open), spoken >= open.since());
         }
     }
 

@@ -811,6 +811,15 @@ impl App {
 
     /// Carries out what a prefix key or a Command key asked for.
     fn command(&mut self, event_loop: &ActiveEventLoop, command: Command) {
+        // The session stays in the core for the next window.
+        if command == Command::Detach {
+            return event_loop.exit();
+        }
+        self.run(command);
+    }
+
+    /// [`App::command`] for every command but detach, which needs the event loop.
+    fn run(&mut self, command: Command) {
         let pane = self.focused;
         let request = match command {
             Command::NewTab => proto::Request::NewTab,
@@ -830,8 +839,15 @@ impl App {
             Command::Focus(side) => proto::Request::MoveFocus { side },
             Command::Resize(side, cells) => proto::Request::MoveBorder { side, cells },
             Command::Zoom => proto::Request::Zoom,
-            // The session stays in the core for the next window.
-            Command::Detach => return event_loop.exit(),
+            Command::OpenFiles => proto::Request::OpenTool {
+                pane,
+                tool: proto::Tool::Files,
+            },
+            Command::OpenDiff => proto::Request::OpenTool {
+                pane,
+                tool: proto::Tool::Diff,
+            },
+            Command::Detach => return,
             // A program dies with its pane, so this asks first as tmux does.
             Command::ClosePane => {
                 let last = self.total == 1;
@@ -927,12 +943,10 @@ impl App {
     }
 
     /// Hands a key to the search bar or vi mode, and returns whether either took it.
-    fn shortcut(&mut self, event: &KeyEvent) -> bool {
-        let key = &event.logical_key;
-        let text = event.text.as_ref().map(|text| text.as_str());
+    fn shortcut(&mut self, key: &Key, text: Option<&str>) -> bool {
         let bar = self.bar.as_mut().filter(|_| self.preedit.0.is_empty());
         match bar.and_then(|bar| bar.key(key, text, self.modifiers)) {
-            None => return self.vi_key(event),
+            None => return self.vi_key(key),
             Some(Step::Stay) => {}
             Some(Step::Close) => self.bar = None,
             Some(step) => self.find(step),
@@ -952,29 +966,33 @@ impl App {
             self.prefix.cancel();
             return;
         }
+        let text = event.text.as_ref().map(|text| text.as_str());
+        if let Some(command) = self.pane_key(&event.logical_key, text, event.repeat) {
+            self.command(event_loop, command);
+        }
+    }
+
+    /// [`App::key`] from the prefix on, and the command the prefix ran. Every pane, a tool's
+    /// too, gets only what the prefix, the search bar and vi mode pass on (ADR-0045).
+    fn pane_key(&mut self, key: &Key, text: Option<&str>, repeat: bool) -> Option<Command> {
         let composing = !self.preedit.0.is_empty();
         if !composing {
-            match self
-                .prefix
-                .key(&event.logical_key, self.modifiers, event.repeat)
-            {
+            match self.prefix.key(key, self.modifiers, repeat) {
                 prefix::Step::Pass => {}
-                prefix::Step::Swallow => return,
-                prefix::Step::Run(command) => return self.command(event_loop, command),
+                prefix::Step::Swallow => return None,
+                prefix::Step::Run(command) => return Some(command),
             }
         }
-        if self.shortcut(event) || composing {
-            return;
+        if self.shortcut(key, text) || composing {
+            return None;
         }
-        let Some(pane) = find(&self.panes, self.focused) else {
-            return;
-        };
-        let text = event.text.as_ref().map(|text| text.as_str());
+        let pane = find(&self.panes, self.focused)?;
         let (app_cursor, alt) = (pane.frame.app_cursor, self.config.macos_option_as_alt);
-        let bytes = input::encode(&event.logical_key, text, self.modifiers, app_cursor, alt);
+        let bytes = input::encode(key, text, self.modifiers, app_cursor, alt);
         if !bytes.is_empty() {
             self.request(Request::Input(self.focused, bytes));
         }
+        None
     }
 
     /// Answers the focused pane's strip with any key: Enter, once armed and if offered, runs
@@ -1014,7 +1032,7 @@ impl App {
     }
 
     /// Hands a key to vi mode. Returns false if vi mode is off.
-    fn vi_key(&mut self, event: &KeyEvent) -> bool {
+    fn vi_key(&mut self, key: &Key) -> bool {
         let Some(vi) = &mut self.vi else {
             return false;
         };
@@ -1025,7 +1043,7 @@ impl App {
         if self.selecting.current.is_none() {
             vi.end_selection();
         }
-        let step = vi.key(&event.logical_key, self.modifiers, &view(screen));
+        let step = vi.key(key, self.modifiers, &view(screen));
         let (row, selection) = (vi.row(), vi.selection());
         match step {
             ViStep::Stay => return true,
@@ -1938,6 +1956,39 @@ mod tests {
             "{}",
             sent.len()
         );
+    }
+
+    #[test]
+    fn a_tool_pane_gets_no_window_key_and_f_and_g_open_tools() {
+        // Pane 1 runs a tool: keys route as for any pane, so the window's are taken first.
+        let (mut app, inbox, _poll) = app();
+        let text = |text: &str| Key::Character(text.into());
+        let prefixed = |app: &mut App, key: &Key, modifiers| {
+            app.modifiers = ModifiersState::CONTROL;
+            assert_eq!(app.pane_key(&text("a"), None, false), None);
+            app.modifiers = modifiers;
+            app.pane_key(key, None, false)
+        };
+        let left = Key::Named(NamedKey::ArrowLeft);
+        let resize = prefixed(&mut app, &left, ModifiersState::ALT);
+        assert_eq!(resize, Some(Command::Resize(proto::Side::Left, 5)));
+        assert!(inbox.take().is_empty());
+        for (key, tool) in [("f", proto::Tool::Files), ("g", proto::Tool::Diff)] {
+            let command = prefixed(&mut app, &text(key), ModifiersState::empty()).unwrap();
+            app.run(command);
+            let sent = inbox.take();
+            assert!(
+                matches!(
+                    sent[..],
+                    [Request::Core(proto::Request::OpenTool { pane: 1, tool: sent })] if sent == tool
+                ),
+                "{key}"
+            );
+        }
+        // Everything else is the tool's, as terminal input.
+        assert_eq!(app.pane_key(&text("q"), Some("q"), false), None);
+        let sent = inbox.take();
+        assert!(matches!(&sent[..], [Request::Input(1, bytes)] if bytes == b"q"));
     }
 
     #[test]

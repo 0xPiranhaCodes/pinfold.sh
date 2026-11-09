@@ -126,6 +126,45 @@ fn the_bar_shows_tabs_states_and_the_status_line() {
     });
 }
 
+/// A tool pane's tab, active beside a running one: its title, and no agent state, as the core
+/// says a tool pane is idle and never reported (ADR-0045).
+fn tool_bar() -> Frame {
+    let mut label = String::new();
+    top_bar::label("files pinfold", &mut label);
+    let tabs = ["work", label.as_str()];
+    // Running and idle, as `tab_state` numbers them.
+    let states = [1, 4];
+    let mut frame = pane(' ', 1, 60);
+    let bar = Bar {
+        tabs: &tabs,
+        active: 1,
+        activity: top_bar::marked(&states),
+        states: &states,
+        status: Some((4, false, "")),
+        hovered: None,
+        focused: true,
+        title: true,
+        time: None,
+        inset: 1,
+        unhardened: None,
+    };
+    top_bar::draw(&mut frame, &bar);
+    frame
+}
+
+#[test]
+fn a_tool_panes_tab_shows_its_title_and_no_agent_state() {
+    let frame = tool_bar();
+    let title: String = frame.cells[..60]
+        .iter()
+        .map(|cell| cell.character)
+        .collect();
+    assert_eq!(title.trim(), "files pinfold");
+    insta::with_settings!({snapshot_suffix => std::env::consts::OS}, {
+        insta::assert_snapshot!(cells(&frame));
+    });
+}
+
 /// A core without the hardened runtime: its notice under the pane and the bar's marker. Only
 /// macOS shows them, so only macOS has the snapshot and image.
 #[cfg(target_os = "macos")]

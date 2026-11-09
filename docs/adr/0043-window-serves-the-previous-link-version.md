@@ -55,6 +55,12 @@ Every other message is unchanged between 9 and 10 and flows both ways at either 
 
 From 11, `OLDEST` is 10, so a version 9 core from beta.1 restarts the session, as two apart does.
 
+| Change in 12 | Spoken version 11 |
+|---|---|
+| `Request::OpenTool` ([#313]) | the window never sends it: prefix `f` and `g` do nothing until the core is updated. Every other key works. |
+
+From 12, `OLDEST` is 11, so a version 10 core restarts the session.
+
 **Raising the version.** A PR that changes the link raises `VERSION`, gives each new message or
 value a `since` of the new version, and adds a row to this table saying how the older version
 degrades. A change with no safe degradation, such as a new field every frame needs, says so
@@ -79,3 +85,4 @@ here, and that update restarts the session.
 [#203]: https://github.com/0xPiranhaCodes/pinfold.sh/pull/203
 [#217]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/217
 [#238]: https://github.com/0xPiranhaCodes/pinfold.sh/pull/238
+[#313]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/313

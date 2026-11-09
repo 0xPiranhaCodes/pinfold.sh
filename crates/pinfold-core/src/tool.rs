@@ -96,8 +96,11 @@ mod tests {
     use std::time::Instant;
     use std::{env, fs};
 
+    use pinfold_proto::link::{self, Refusal};
+
     use super::*;
     use crate::io::Reactor;
+    use crate::status::Status;
 
     fn run(tool: Tool, path: &Path) -> Run {
         let path = path.to_str().unwrap().to_owned();
@@ -159,6 +162,51 @@ mod tests {
         assert_eq!(listed, [None, Some(&files)]);
         assert_eq!(reactor.tool_title(tool), Some("files /"));
         assert_eq!(reactor.tool_title(shell), None);
+    }
+
+    #[test]
+    fn a_window_opens_a_tool_where_the_focused_shell_is_with_no_agent_state() {
+        let directory = env::temp_dir().join(format!("pinfold-open-{}", std::process::id()));
+        fs::create_dir_all(&directory).unwrap();
+        let directory = directory.canonicalize().unwrap();
+        let mut reactor = Reactor::new().unwrap();
+        let mut sleep = Command::new("/bin/sleep");
+        sleep.arg("30").current_dir(&directory);
+        let shell = reactor.open_tab(sleep, 24, 80).unwrap();
+        let open = |tool| link::Request::OpenTool {
+            pane: shell as u32,
+            tool,
+        };
+        // With no tools' binary nothing starts.
+        assert_eq!(
+            reactor.command(open(link::Tool::Files)),
+            Err(Refusal::Spawn)
+        );
+        reactor.set_tools("/bin/sleep".into());
+        for tool in [link::Tool::Files, link::Tool::Diff] {
+            reactor.command(open(tool)).unwrap();
+        }
+        let path = directory.to_str().unwrap();
+        let tools: Vec<_> = reactor
+            .list()
+            .filter_map(|pane| pane.tool)
+            .cloned()
+            .collect();
+        assert_eq!(
+            tools,
+            [run(Tool::Files, &directory), run(Tool::Diff, &directory)]
+        );
+        assert!(tools.iter().all(|run| run.path == path));
+        let opened: Vec<_> = reactor
+            .list()
+            .filter(|pane| pane.tool.is_some())
+            .map(|pane| pane.id)
+            .collect();
+        for pane in opened {
+            assert_eq!(reactor.status(pane), Some((Status::Idle, false, "")));
+            assert!(!reactor.take_alert(pane));
+        }
+        fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]
