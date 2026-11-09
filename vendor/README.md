@@ -20,9 +20,20 @@ The patch does what history outside the grid needs (ADR-0006, #24):
 Upstream's `tests/` is left out because it is 46 MB of recordings, and its Cargo test targets
 go with it. The crate has `unsafe`, so it stays out of the workspace, whose crates forbid it.
 
-`./check.sh` proves the directory is the published crate plus the patch, and CI runs it. To
-change the fork, edit the crate, then run `./check.sh --update`.
+`smithay-clipboard/` is `smithay-clipboard` 0.7.2 from crates.io, MIT, plus
+[`smithay-clipboard.patch`](smithay-clipboard.patch), used the same way. It reads a Wayland
+selection offer from another client, and stock 0.7.2 and 0.7.3 append it all to a `Vec`, so a
+hostile client could grow the window without bound (#310). The patch stops reading past 1 MiB,
+the paste limit, and fails the load with `ErrorKind::FileTooLarge`, which `pinfold-sys` shows
+as a paste over the limit; its buffer is made that size once and never grows. Reading the
+offer ourselves would mean a second Wayland data device client, many times this patch. Drop
+the fork once upstream caps loads ([Smithay/smithay-clipboard#66](https://github.com/Smithay/smithay-clipboard/issues/66)). Its GitHub workflows,
+`.gitignore` and `doc_index.html` are left out.
+
+`./check.sh` proves each directory is the published crate plus its patch, and CI runs it. To
+change a fork, edit the crate, then run `./check.sh --update`, which rewrites every patch;
+keep only the one you meant to change.
 
 `cargo audit` and `cargo deny` cannot see a path crate, and `cargo update` cannot fix one. The
-Nightly workflow fails when RustSec lists an advisory for this crate. Bug fixes in later
+Nightly workflow fails when RustSec lists an advisory for either crate. Bug fixes in later
 upstream releases have to be watched for by hand.
