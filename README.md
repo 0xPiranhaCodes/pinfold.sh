@@ -90,6 +90,7 @@ on macOS `⌘T`, `⌘D` and `⇧⌘D` do the same.
 | `pinfold`                                   | Open a window, starting PinFold if it is not running          |
 | `pinfold up [dir]`                          | Open a project's `.pinfold/layout.toml` as tabs and panes     |
 | `pinfold agent <name>`                      | In a pane, open a split running an `[agents.<name>]` profile  |
+| `pinfold open <path>`                       | In a pane, open a file in the markdown reader or a directory in the file manager |
 | `pinfold ctl list`                          | List the session's panes                                      |
 | `pinfold ctl send <pane> <text>`            | Type text into a pane                                         |
 | `pinfold ctl wait <pane> --until <event> --timeout <seconds>` | Wait until a pane's command exits, it prints or it goes quiet |

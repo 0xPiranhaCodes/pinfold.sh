@@ -72,6 +72,27 @@ impl Run {
         args
     }
 
+    /// Reads what [`Run::describe`] wrote, such as from a session snapshot, with every check
+    /// `tool.open` makes of its shape.
+    ///
+    /// ```
+    /// use pinfold_api::tool::{Run, Tool};
+    ///
+    /// let run = Run { tool: Tool::Diff, path: "/r".into(), staged: true, range: Some("a..b".into()) };
+    /// assert_eq!(Run::from_described(&run.describe()), Some(run));
+    /// let bad = serde_json::json!({"name": "diff", "path": "/r", "range": "-p"});
+    /// assert_eq!(Run::from_described(&bad), None);
+    /// ```
+    #[must_use]
+    pub fn from_described(described: &Value) -> Option<Self> {
+        let mut described = described.as_object()?.clone();
+        let name = described.remove("name")?;
+        described.insert("tool".to_owned(), name);
+        params(Some(&Value::Object(described)))
+            .ok()
+            .map(|open| open.run)
+    }
+
     /// What `pane.list` shows of it.
     #[must_use]
     pub fn describe(&self) -> Value {

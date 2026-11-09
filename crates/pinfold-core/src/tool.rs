@@ -45,6 +45,51 @@ pub fn command(binary: &Path, run: &Run) -> Result<Command, &'static str> {
     Ok(command)
 }
 
+/// Returns a tool pane's title: the tool and its argument, the last name of `path` or the
+/// range, escaped. A C0 control shows as `^X`, DEL as `^?`, and a C1 or bidi control as
+/// `<U+202E>`, as the tools escape them (ADR-0045 section 4).
+///
+/// ```
+/// use pinfold_api::tool::{Run, Tool};
+///
+/// let run = Run { tool: Tool::Md, path: "/r/evil\u{202e}dm.md".into(), staged: false, range: None };
+/// assert_eq!(pinfold_core::tool::title(&run), "md evil<U+202E>dm.md");
+/// let run = Run { tool: Tool::Diff, path: "/r".into(), staged: true, range: Some("main..".into()) };
+/// assert_eq!(pinfold_core::tool::title(&run), "diff --staged main..");
+/// ```
+#[must_use]
+pub fn title(run: &Run) -> String {
+    let name = run.path.rsplit('/').find(|name| !name.is_empty());
+    let argument = match run.tool {
+        Tool::Diff => run.range.as_deref().or(name),
+        Tool::Md | Tool::Files => name,
+    };
+    let mut title = run.tool.name().to_owned();
+    if run.staged {
+        title.push_str(" --staged");
+    }
+    title.push(' ');
+    for character in argument.unwrap_or("/").chars() {
+        match character {
+            '\0'..='\u{1f}' => {
+                title.push('^');
+                title.push(char::from(character as u8 + 0x40));
+            }
+            '\u{7f}' => title.push_str("^?"),
+            '\u{80}'..='\u{9f}'
+            | '\u{61c}'
+            | '\u{200e}'
+            | '\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}' => {
+                title.push_str(&format!("<U+{:04X}>", u32::from(character)));
+            }
+            _ => title.push(character),
+        }
+    }
+    title
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsStr;
@@ -112,5 +157,22 @@ mod tests {
         assert_eq!(reactor.send(shell, "y\n", now), Ok(()));
         let listed: Vec<_> = reactor.list().map(|pane| pane.tool).collect();
         assert_eq!(listed, [None, Some(&files)]);
+        assert_eq!(reactor.tool_title(tool), Some("files /"));
+        assert_eq!(reactor.tool_title(shell), None);
+    }
+
+    #[test]
+    fn a_title_escapes_every_control_and_bidi_character() {
+        let named = |name: &str| title(&run(Tool::Files, Path::new(&format!("/r/{name}"))));
+        assert_eq!(named("a\u{1b}[2Jb"), "files a^[[2Jb");
+        assert_eq!(named("a\u{7f}\u{85}b"), "files a^?<U+0085>b");
+        for bidi in [
+            '\u{61c}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202e}', '\u{2066}', '\u{2069}',
+        ] {
+            let shown = named(&format!("a{bidi}b"));
+            assert_eq!(shown, format!("files a<U+{:04X}>b", u32::from(bidi)));
+        }
+        assert_eq!(named("src/"), "files src");
+        assert!(!title(&run(Tool::Diff, Path::new("/r"))).starts_with('/'));
     }
 }

@@ -21,7 +21,7 @@
             "additionalProperties": false,
             "properties": {
               "id": { "type": "integer", "minimum": 0, "description": "The pane's number, never reused in a session." },
-              "title": { "type": ["string", "null"], "description": "The last name of cwd, as the pane's tab shows it." },
+              "title": { "type": ["string", "null"], "description": "The last name of cwd, or for a tool pane the tool and its argument with control and bidi characters escaped, such as md README.md, as the pane's tab shows it." },
               "cwd": { "type": ["string", "null"], "description": "The last directory the pane reported with OSC 7. Program output can fake it." },
               "command": { "type": "string", "description": "The program the pane started, without its arguments." },
               "status": {

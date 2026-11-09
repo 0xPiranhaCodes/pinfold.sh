@@ -465,9 +465,12 @@ impl Session {
         if state.naming && (dirty || !state.named) {
             state.named = true;
             let engine = reactor.engine(pane);
+            // A tool pane's tab shows its title, which a window tells from a path by its lack
+            // of a leading `/`.
             let cwd = engine
                 .and_then(|engine| engine.cwd())
-                .map_or("", |cwd| cwd.path.as_str());
+                .map(|cwd| cwd.path.as_str());
+            let cwd = reactor.tool_title(pane).or(cwd).unwrap_or_default();
             if state.cwd != cwd {
                 cwd.clone_into(&mut state.cwd);
                 let (pane, path) = (pane as u32, state.cwd.as_str());

@@ -99,10 +99,15 @@ fn safe(character: char) -> bool {
 }
 
 /// Writes the label for a working directory into `label`, without allocating once it has
-/// room. An empty `cwd` means none was reported.
+/// room. An empty `cwd` means none was reported. Every OSC 7 directory starts with `/`, so one
+/// that does not is a tool pane's title from the core, such as `md README.md`, shown whole.
 pub fn label(cwd: &str, label: &mut String) {
     label.clear();
-    let name = Path::new(cwd).file_name().and_then(OsStr::to_str);
+    let name = if cwd.starts_with('/') {
+        Path::new(cwd).file_name().and_then(OsStr::to_str)
+    } else {
+        Some(cwd)
+    };
     let safe = name
         .unwrap_or_default()
         .chars()
@@ -1135,6 +1140,14 @@ mod tests {
         assert_eq!(named("/home/ada/"), "ada");
         assert_eq!(named("/"), "shell");
         assert_eq!(named(""), "shell");
+    }
+
+    #[test]
+    fn a_tool_panes_title_is_shown_whole_and_still_filtered() {
+        assert_eq!(named("md README.md"), "md README.md");
+        assert_eq!(named("diff --staged main.."), "diff --staged main..");
+        assert_eq!(named("files a<U+202E>b"), "files a<U+202E>b");
+        assert_eq!(named("md \u{202e}◆ x\u{1b}"), "md  x");
     }
 
     #[test]

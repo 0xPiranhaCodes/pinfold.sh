@@ -35,6 +35,7 @@ With no command, opens a PinFold window, and starts PinFold first if it is not r
 Commands:
   up [dir]          Open a project's .pinfold/layout.toml as tabs and panes
   agent <name>      Open a pane running an agent profile from your config
+  open <path>       Open a file in the markdown reader or a directory in the file manager
   ctl list          List the session's panes
   ctl send          Type text into a pane
   ctl wait          Wait until a pane's command exits, it prints or it goes quiet
@@ -93,6 +94,28 @@ Options:
 Examples:
   pinfold agent claude
   pinfold agent codex --tab
+";
+
+const OPEN: &str = "\
+pinfold open: open a file or directory in a built-in tool.
+
+Usage: pinfold open <path> [--right | --down | --tab]
+
+Run it in a PinFold pane. It opens a pane beside that one: a directory in the file manager
+(pinfold files), anything else in the markdown reader (pinfold md). No program can type into
+that pane; only your keys reach it.
+
+Arguments:
+  <path>   The file or directory, relative to the current directory
+
+Options:
+  --right  Split to the right (the default)
+  --down   Split below
+  --tab    Open a new tab
+
+Examples:
+  pinfold open README.md
+  pinfold open . --tab
 ";
 
 const CTL: &str = "\
@@ -319,6 +342,7 @@ fn help(topic: &[&str]) -> Option<&'static str> {
         [] => HELP,
         ["up"] => UP,
         ["agent"] => AGENT,
+        ["open"] => OPEN,
         ["ctl"] => CTL,
         ["ctl", "list"] => LIST,
         ["ctl", "send"] => SEND,
@@ -751,6 +775,19 @@ fn agent(name: &str, place: &str) -> Result<(), Box<dyn Error>> {
     }
 }
 
+/// `pinfold open <path> [--right | --down | --tab]`: opens a directory in the file manager and
+/// anything else in the markdown reader, in a pane beside the caller's. The core checks the path.
+fn open_tool(path: &str, place: &str) -> Result<(), Box<dyn Error>> {
+    let path = std::path::absolute(path)?;
+    let tool = if path.is_dir() { "files" } else { "md" };
+    let path = path
+        .to_str()
+        .ok_or_else(|| misuse("the path is not UTF-8"))?;
+    let params = json!({"tool": tool, "path": path, "place": place});
+    control::ask(&running()?, "tool.open", &params)?;
+    Ok(())
+}
+
 /// Whether the core refused a launch only because it has not yet read the user's `PATH`, which
 /// it does once, in the first seconds after it starts.
 fn reading_path(error: &control::Error) -> bool {
@@ -1013,6 +1050,9 @@ fn main() -> ExitCode {
         ["agent", name] | ["agent", name, "--right"] => agent(name, "right"),
         ["agent", name, "--down"] => agent(name, "down"),
         ["agent", name, "--tab"] => agent(name, "tab"),
+        ["open", path] | ["open", path, "--right"] => open_tool(path, "right"),
+        ["open", path, "--down"] => open_tool(path, "down"),
+        ["open", path, "--tab"] => open_tool(path, "tab"),
         ["ctl", "list"] => list(false),
         ["ctl", "list", "--json"] => list(true),
         ["ctl", "send", pane, text] => send(pane, text),
