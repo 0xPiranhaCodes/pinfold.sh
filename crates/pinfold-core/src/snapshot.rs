@@ -14,11 +14,13 @@ use std::time::{Duration, Instant};
 
 use pinfold_api::control::{self, MAX_SEND};
 use pinfold_api::redact;
+use pinfold_api::tool::Run;
 use pinfold_mux::{LayoutTree, PaneId, Session, SessionTree, SplitDirection, TabTree};
 use serde::{Deserialize, Serialize};
 
 use crate::io::{Reactor, Waker};
 use crate::tabs::FIRST_SIZE;
+use crate::tool;
 
 /// The snapshot format this core writes.
 pub const VERSION: u32 = 1;
@@ -123,6 +125,10 @@ pub struct Pane {
     pub cwd: Option<String>,
     /// The program the pane started, without arguments, redacted and at most 4,096 bytes.
     pub command: Option<String>,
+    /// The built-in tool it ran, as `pane.list` shows it, which a restore runs again once it
+    /// passes `tool.open`'s checks (ADR-0045).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool: Option<serde_json::Value>,
 }
 
 impl Pane {
@@ -136,6 +142,7 @@ impl Pane {
             command: Some(command)
                 .filter(|command| !command.is_empty())
                 .map(str::to_owned),
+            tool: None,
         }
     }
 }
@@ -589,8 +596,9 @@ impl Reactor {
         let (tree, ids): (SessionTree, _) = self.session.to_tree();
         let panes = ids.iter().map(|id| {
             let listed = self.list().find(|pane| pane.id == *id as usize);
-            listed.map_or_else(Pane::default, |pane| {
-                Pane::new(self.cwd(pane.id).as_deref(), pane.command)
+            listed.map_or_else(Pane::default, |pane| Pane {
+                tool: pane.tool.map(Run::describe),
+                ..Pane::new(self.cwd(pane.id).as_deref(), pane.command)
             })
         });
         let tabs = tree.tabs.iter().map(|tab| Tab {
@@ -630,6 +638,17 @@ impl Reactor {
             if let Some(directory) = start_in(saved) {
                 command.current_dir(directory);
             }
+            // A tool runs again if its saved arguments pass `tool.open`'s checks, else a shell.
+            let run = saved.and_then(|pane| pane.tool.as_ref());
+            let run = run.and_then(Run::from_described);
+            let tool = run.and_then(|run| {
+                let started = tool::command(self.tools()?, &run).ok()?;
+                Some((started, run))
+            });
+            let run = tool.map(|(started, run)| {
+                command = started;
+                run
+            });
             // shortcut: a pane records only its program (#145), so a shell pane shows nothing.
             // OSC 133 carries no command line, so recording one needs the shell to report it.
             let shell = Path::new(command.get_program())
@@ -638,7 +657,10 @@ impl Reactor {
             let ran = saved.and_then(|pane| pane.command.clone());
             let ran = ran.filter(|ran| Path::new(ran).file_name() != shell.as_deref());
             match self.spawn(command, FIRST_SIZE.rows, FIRST_SIZE.cols) {
-                Ok(pane) => was_running.extend(ran.map(|ran| (pane, ran))),
+                Ok(pane) => match run {
+                    Some(run) => self.set_tool(pane, run),
+                    None => was_running.extend(ran.map(|ran| (pane, ran))),
+                },
                 Err(error) => {
                     for started in first as usize..self.next_pane {
                         self.drop_pane(started);
@@ -857,6 +879,61 @@ mod tests {
         assert_eq!(start_in(Some(&Pane::new(Some("/no/such"), ""))), home);
         assert_eq!(start_in(Some(&Pane::new(Some("/"), ""))), Some("/".into()));
         fs::remove_dir_all(&state).unwrap();
+    }
+
+    #[test]
+    fn a_tool_pane_runs_the_same_tool_again_and_a_bad_one_a_shell() {
+        use pinfold_api::tool::Tool;
+
+        let files = Run {
+            tool: Tool::Files,
+            path: "/".to_owned(),
+            staged: false,
+            range: None,
+        };
+        let gone = Run {
+            tool: Tool::Md,
+            path: "/no/such/README.md".to_owned(),
+            ..files.clone()
+        };
+        let saved = |tool: serde_json::Value| Pane {
+            tool: Some(tool),
+            ..Pane::new(Some("/"), "/opt/pinfold")
+        };
+        let range = serde_json::json!({"name": "diff", "path": "/", "range": "--output=/x"});
+        let tab = |pane| Tab {
+            root: Layout::Pane(pane),
+            focus: pane,
+            zoomed: false,
+        };
+        let snapshot = Snapshot {
+            version: VERSION,
+            tabs: vec![tab(0), tab(1), tab(2)],
+            active: 0,
+            panes: vec![
+                saved(files.describe()),
+                saved(gone.describe()),
+                saved(range),
+            ],
+            workspaces: Vec::new(),
+        };
+        let mut reactor = Reactor::new().unwrap();
+        reactor.shell = || Command::new("cat");
+        reactor.set_tools(PathBuf::from("/bin/echo"));
+        reactor.restore(&snapshot).unwrap();
+        let listed: Vec<_> = reactor
+            .list()
+            .map(|pane| (pane.command, pane.tool))
+            .collect();
+        assert_eq!(
+            listed,
+            [("/bin/echo", Some(&files)), ("cat", None), ("cat", None)]
+        );
+        // The tool pane asks nothing: it is running what it ran.
+        assert!(reactor.was_running.iter().all(|(pane, _)| *pane != 0));
+        let again = reactor.snapshot();
+        assert_eq!(again.panes[0].tool, Some(files.describe()));
+        assert_eq!(again.panes[1].tool, None);
     }
 
     #[test]

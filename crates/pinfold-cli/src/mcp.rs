@@ -50,7 +50,7 @@ const EVENTS_NEXT: &str = r#"{
 }"#;
 
 /// Each tool, the API method it calls, and that method's schema.
-const TOOLS: [(&str, &str, &str); 8] = [
+const TOOLS: [(&str, &str, &str); 9] = [
     (
         "pane_list_v1",
         "pane.list",
@@ -85,6 +85,11 @@ const TOOLS: [(&str, &str, &str); 8] = [
         "pane_wait_v1",
         "pane.wait",
         include_str!("../../../docs/api/pane.wait.schema.json"),
+    ),
+    (
+        "tool_open_v1",
+        "tool.open",
+        include_str!("../../../docs/api/tool.open.schema.json"),
     ),
     ("events_next_v1", "events.subscribe", EVENTS_NEXT),
 ];
@@ -301,6 +306,7 @@ mod tests {
             "pane_spawn_v1",
             "pane_close_v1",
             "pane_wait_v1",
+            "tool_open_v1",
             "events_next_v1",
         ];
         assert_eq!(names, expected);
@@ -315,7 +321,8 @@ mod tests {
             tools[6]["inputSchema"]["required"],
             json!(["pane", "until", "timeout_ms"])
         );
-        assert_eq!(tools[7]["inputSchema"]["required"], json!(["events"]));
+        assert_eq!(tools[7]["inputSchema"]["required"], json!(["tool", "path"]));
+        assert_eq!(tools[8]["inputSchema"]["required"], json!(["events"]));
     }
 
     #[test]

@@ -27,6 +27,7 @@ fn help_lists_every_command_and_option() {
     for word in [
         "up [dir]",
         "agent <name>",
+        "open <path>",
         "ctl list",
         "ctl send",
         "ctl wait",
@@ -48,6 +49,7 @@ fn each_command_has_help_naming_its_arguments_and_flags() {
     let commands: &[(&[&str], &[&str])] = &[
         (&["up"], &["[dir]"]),
         (&["agent"], &["<name>", "--right", "--down", "--tab"]),
+        (&["open"], &["<path>", "--right", "--down", "--tab"]),
         (
             &["ctl"],
             &[
@@ -119,6 +121,8 @@ fn a_bad_argument_names_the_problem_in_one_line_and_exits_2() {
             "usage: pinfold ctl list [--json]",
         ),
         (&["agent", "a", "--left"], "usage: pinfold agent <name>"),
+        (&["open"], "usage: pinfold open <path>"),
+        (&["open", "a", "--left"], "usage: pinfold open <path>"),
         (&["ctl", "send", "x", "y"], "the pane must be a number"),
         (&["ctl", "wait"], "'ctl wait' needs a pane"),
         (&["ctl", "wait", "2", "--until"], "'--until' needs a value"),

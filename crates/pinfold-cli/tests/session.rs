@@ -1518,6 +1518,13 @@ fn tool_process() {
     let highest = list["result"]["panes"].as_array().unwrap().iter();
     let highest = highest.filter_map(|pane| pane["id"].as_u64()).max();
     writeln!(heard, "{}", serde_json::json!({"highest": highest})).unwrap();
+    // `pinfold open` from the pane, with a path relative to where it runs.
+    let mut open = Command::new(directory.join("pinfold"));
+    let opened = open.args(["open", "note.md", "--tab"]).current_dir(&root);
+    let opened = opened.output().unwrap();
+    let stderr = String::from_utf8_lossy(&opened.stderr);
+    let opened = serde_json::json!({"open": opened.status.code(), "stderr": stderr});
+    writeln!(heard, "{opened}").unwrap();
     // Gone already if this `pinfold` has no `files` yet (#311): then the close finds no pane.
     let _ = ask("pane.close", serde_json::json!({"pane": 2})).unwrap();
     ask(
@@ -1571,6 +1578,7 @@ fn an_agent_cannot_type_into_the_tool_it_opened() {
     }
     // No refused call opened a pane.
     assert!(replies[9]["highest"].as_u64() <= Some(2), "{heard}");
+    assert_eq!(replies[10]["open"], 0, "{heard}");
     assert!(heard.ends_with("read\n"), "{heard}");
     let audit = fs::read_to_string(session.log()).unwrap_or_default();
     assert!(!audit.contains("note.md"), "a path reached the log");
@@ -1777,6 +1785,7 @@ fn mcp_lists_tools_calls_the_core_as_its_pane_and_reports_a_refusal_as_a_tool_er
             "pane_spawn_v1",
             "pane_close_v1",
             "pane_wait_v1",
+            "tool_open_v1",
             "events_next_v1",
         ]
     );

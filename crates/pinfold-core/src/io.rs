@@ -7,6 +7,7 @@
 use std::io::{self, ErrorKind, Read, Write};
 use std::mem;
 use std::os::fd::{AsFd, AsRawFd};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -135,8 +136,8 @@ struct Pane {
     message: String,
     /// Whether it raised a "needs you" alert that no window has taken yet.
     alerted: bool,
-    /// The built-in tool it runs, which no API caller may type into (ADR-0045).
-    tool: Option<Run>,
+    /// The built-in tool it runs, which no API caller may type into (ADR-0045), and its title.
+    tool: Option<(Run, String)>,
 }
 
 impl Pane {
@@ -155,7 +156,7 @@ impl Pane {
 pub struct Listed<'a> {
     /// The pane's number.
     pub id: usize,
-    /// The last name of `cwd`, as its tab shows it.
+    /// The last name of `cwd`, or a tool and its escaped argument, as its tab shows it.
     pub title: Option<&'a str>,
     /// The last OSC 7 directory, which is only a hint.
     pub cwd: Option<&'a str>,
@@ -210,6 +211,8 @@ pub struct Reactor {
     pub(crate) protect: Protect,
     /// Set when this core lacks the hardened runtime: whether it could tell (ADR-0044).
     pub(crate) unhardened: Option<bool>,
+    /// The `pinfold` binary that runs the built-in tools.
+    tools: Option<PathBuf>,
 }
 
 impl Reactor {
@@ -239,6 +242,7 @@ impl Reactor {
             approval_answers: Vec::new(),
             protect: Protect::default(),
             unhardened: None,
+            tools: None,
         })
     }
 
@@ -631,15 +635,17 @@ impl Reactor {
         self.panes.iter().map(|pane| {
             let (status, reported, message) = pane_status(pane);
             let cwd = pane.engine.cwd().map(|cwd| cwd.path.as_str());
+            let named = cwd.and_then(|cwd| cwd.rsplit('/').next().filter(|name| !name.is_empty()));
+            let titled = pane.tool.as_ref().map(|(_, title)| title.as_str());
             Listed {
                 id: pane.number,
-                title: cwd.and_then(|cwd| cwd.rsplit('/').next().filter(|name| !name.is_empty())),
+                title: titled.or(named),
                 cwd,
                 command: &pane.program,
                 status,
                 reported,
                 message,
-                tool: pane.tool.as_ref(),
+                tool: pane.tool.as_ref().map(|(run, _)| run),
             }
         })
     }
@@ -648,8 +654,29 @@ impl Reactor {
     /// `pane.send` from now on.
     pub fn set_tool(&mut self, pane: usize, run: Run) {
         if let Some(pane) = pane_mut(&mut self.panes, pane) {
-            pane.tool = Some(run);
+            let title = tool::title(&run);
+            pane.tool = Some((run, title));
         }
+    }
+
+    /// The title of the tool `pane` runs, which its tab shows in place of a directory. It never
+    /// starts with `/`, which every OSC 7 directory does.
+    #[must_use]
+    pub fn tool_title(&self, pane: usize) -> Option<&str> {
+        let (_, title) = self.pane(pane)?.tool.as_ref()?;
+        Some(title)
+    }
+
+    /// Sets the `pinfold` binary that runs the built-in tools, found beside the core and never
+    /// through `PATH`. Until it is set, no tool starts.
+    pub fn set_tools(&mut self, binary: PathBuf) {
+        self.tools = Some(binary);
+    }
+
+    /// The `pinfold` binary that runs the built-in tools, once [`Reactor::set_tools`] set it.
+    #[must_use]
+    pub fn tools(&self) -> Option<&Path> {
+        self.tools.as_deref()
     }
 
     /// What would end if the pane started again, as a restored session starts it: a program in

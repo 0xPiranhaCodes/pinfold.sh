@@ -168,7 +168,7 @@ and never from the snapshot.
 `pinfold mcp` is an MCP server over stdio (protocol version 2025-06-18) and a thin client of
 this API. Its stdout carries only newline-delimited JSON-RPC, and a line over 1,000,000 bytes is
 refused. Its tools are `pane_list_v1`, `pane_read_v1`, `pane_last_output_v1`, `pane_send_v1`,
-`pane_spawn_v1`, `pane_close_v1` and `pane_wait_v1`, named with their version as ADR-0009 asks,
+`pane_spawn_v1`, `pane_close_v1`, `pane_wait_v1` and `tool_open_v1`, named with their version as ADR-0009 asks,
 each taking its method's params and returning the method's result as JSON text.
 `events_next_v1` takes `events.subscribe`'s `events` and an optional `timeout_ms` (default
 30,000, at most 600,000), and returns the next such event, or `{"timeout": true}`. MCP

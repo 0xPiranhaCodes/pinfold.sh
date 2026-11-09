@@ -5,7 +5,7 @@ use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::sync::mpsc::{self, Receiver, TrySendError};
-use std::sync::{Arc, Once, OnceLock};
+use std::sync::{Arc, Once};
 use std::time::{Duration, Instant};
 use std::{env, thread};
 
@@ -55,10 +55,6 @@ fn empty_wait() -> Duration {
 fn sibling(name: &str) -> io::Result<PathBuf> {
     Ok(env::current_exe()?.canonicalize()?.with_file_name(name))
 }
-
-/// The `pinfold` binary beside this one, which runs the built-in tools (ADR-0045). Set as the
-/// core starts, as the window binary is.
-static TOOLS: OnceLock<PathBuf> = OnceLock::new();
 
 /// Binds the control socket and answers it on the API thread (ADR-0007, ADR-0032). The
 /// reactor's thread makes every spawn and holds the panes, so every request crosses to it. The channel holds one request per peer the API thread serves.
@@ -282,7 +278,7 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
         Method::ToolOpen(open) => {
             let own = own.ok_or("tool.open needs a caller in a pane")?;
             let of = open.of.unwrap_or(own);
-            let binary = TOOLS.get().ok_or("the tools' binary is not known")?;
+            let binary = reactor.tools().ok_or("the tools' binary is not known")?;
             let command = tool::command(binary, &open.run)?;
             let pane = family.spawn_command(reactor, own, of, way(open.place), None, command)?;
             reactor.set_tool(pane, open.run.clone());
@@ -860,8 +856,9 @@ fn daemon(
     unhardened: Option<bool>,
 ) -> io::Result<()> {
     let binary = sibling("pinfold-window")?;
-    let _ = TOOLS.set(sibling("pinfold")?);
     let mut reactor = Reactor::new()?;
+    // The built-in tools (ADR-0045), resolved before a restore runs them again.
+    reactor.set_tools(sibling("pinfold")?);
     if let Some(checked) = unhardened {
         reactor.set_unhardened(checked);
     }
