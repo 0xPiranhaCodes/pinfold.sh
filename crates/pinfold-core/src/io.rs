@@ -717,13 +717,18 @@ impl Reactor {
     /// shell (T4). A directory that is gone or unreadable leaves the shell's own start.
     pub(crate) fn shell_from(&self, source: Option<usize>) -> Command {
         let mut command = (self.shell)();
-        let pane = source.and_then(|source| self.pane(source));
-        let cwd =
-            pane.and_then(|pane| pinfold_sys::foreground::cwd(pane.pty.terminal().session).ok());
-        if let Some(cwd) = cwd.filter(|cwd| cwd.is_dir()) {
+        if let Some(cwd) = source.and_then(|source| self.shell_cwd(source)) {
             command.current_dir(cwd);
         }
         command
+    }
+
+    /// The directory the system says `pane`'s shell is in, if it is one. Never the OSC 7 one,
+    /// which output can fake (T4).
+    pub(crate) fn shell_cwd(&self, pane: usize) -> Option<PathBuf> {
+        let pane = self.pane(pane)?;
+        let cwd = pinfold_sys::foreground::cwd(pane.pty.terminal().session).ok()?;
+        cwd.is_dir().then_some(cwd)
     }
 
     /// Returns a pane's status, whether its agent reported it, and the reported message.
@@ -735,7 +740,9 @@ impl Reactor {
     /// Returns whether a pane raised a "needs you" alert since the last call, and clears that.
     /// A window takes it to mark the pane's tab while it is hidden.
     pub fn take_alert(&mut self, pane: usize) -> bool {
-        pane_mut(&mut self.panes, pane).is_some_and(|pane| mem::take(&mut pane.alerted))
+        // A tool pane has no agent state (ADR-0045), so it never asks for you either.
+        pane_mut(&mut self.panes, pane)
+            .is_some_and(|pane| mem::take(&mut pane.alerted) && pane.tool.is_none())
     }
 
     /// Returns what `pane.wait` watches in a pane, or nothing once it has closed.
@@ -863,6 +870,8 @@ fn newest_text(engine: &dyn VtEngine, selection: Selection) -> (String, bool) {
 fn pane_status(pane: &Pane) -> (Status, bool, &str) {
     if pane.closed {
         (Status::Done, false, "")
+    } else if pane.tool.is_some() {
+        (Status::Idle, false, "")
     } else if pane.status.from_output() {
         (pane.status.status(), false, "")
     } else {

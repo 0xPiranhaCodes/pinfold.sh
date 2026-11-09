@@ -10,10 +10,12 @@
 
 use std::process::Command;
 
+use pinfold_api::tool::{Run, Tool};
 use pinfold_mux::{Direction, PaneId, Placement, Size, SplitDirection};
-use pinfold_proto::link::{MAX_PANES, MAX_TABS, Rect, Refusal, Request, Side, SplitWay};
+use pinfold_proto::link::{self, MAX_PANES, MAX_TABS, Rect, Refusal, Request, Side, SplitWay};
 
 use crate::io::Reactor;
+use crate::tool;
 
 /// The size of a pane opened before any window has said how much room it has.
 pub(crate) const FIRST_SIZE: Size = Size { cols: 80, rows: 24 };
@@ -139,6 +141,31 @@ impl Reactor {
         true
     }
 
+    /// Opens `tool` right of `pane`, in the directory the system says `pane`'s shell is in, as
+    /// a split's shell starts there.
+    fn open_tool(&mut self, pane: usize, tool: link::Tool) -> Result<(), Refusal> {
+        let cwd = self.shell_cwd(pane).ok_or(Refusal::Spawn)?;
+        let path = cwd
+            .into_os_string()
+            .into_string()
+            .map_err(|_| Refusal::Spawn)?;
+        let tool = match tool {
+            link::Tool::Files => Tool::Files,
+            link::Tool::Diff => Tool::Diff,
+        };
+        let run = Run {
+            tool,
+            path,
+            staged: false,
+            range: None,
+        };
+        let binary = self.tools().ok_or(Refusal::Spawn)?;
+        let command = tool::command(binary, &run).map_err(|_| Refusal::Spawn)?;
+        let opened = self.split(pane, command, SplitWay::Right)?;
+        self.set_tool(opened, run);
+        Ok(())
+    }
+
     /// Carries out a window's command, and does nothing for the other requests. A pane or tab
     /// that does not exist also does nothing, as a window can be one step behind.
     pub(crate) fn command(&mut self, request: Request<'_>) -> Result<(), Refusal> {
@@ -158,6 +185,10 @@ impl Reactor {
             Request::Split { pane, way } => {
                 let command = self.shell_from(Some(pane as usize));
                 self.split(pane as usize, command, way)?;
+                false
+            }
+            Request::OpenTool { pane, tool } => {
+                self.open_tool(pane as usize, tool)?;
                 false
             }
             Request::ClosePane { pane } => {

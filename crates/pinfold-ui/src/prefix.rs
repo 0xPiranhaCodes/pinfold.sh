@@ -16,9 +16,13 @@
 //! | Alt+arrows          | Resize by 5 cells       | tmux                       |
 //! | `z`                 | Zoom                    | tmux                       |
 //! | `d`                 | Detach                  | tmux                       |
+//! | `f`                 | Open files here         | the design doc             |
+//! | `g`                 | Open the git diff here  | the design doc             |
 //!
 //! Alt+arrows matter on macOS, where the desktop takes Ctrl+arrows. `h` `j` `k` `l` stay free,
-//! because the design keeps `l` for the audit log, as it keeps `u`, `A`, `f` and `g`.
+//! because the design keeps `l` for the audit log, as it keeps `u` and `A`. `f` and `g` open a
+//! tool (ADR-0045) right of the focused pane, in its shell's directory; tmux binds neither, and
+//! behind the prefix no shell or program ever sees them.
 //!
 //! The prefix pressed twice passes the second press through, so the pane gets it as it would
 //! any key. Any other key after the prefix cancels and is swallowed. There is no timeout: the
@@ -85,6 +89,10 @@ pub enum Command {
     OpenConfig,
     /// Open the documentation in the browser.
     OpenDocs,
+    /// Open `pinfold files` beside the focused pane, in its shell's directory.
+    OpenFiles,
+    /// Open `pinfold diff` beside the focused pane, in its shell's directory.
+    OpenDiff,
 }
 
 impl Command {
@@ -116,7 +124,9 @@ impl Command {
             Self::FontReset => "Actual Size",
             Self::OpenConfig => "Settings…",
             Self::OpenDocs => "PinFold Help",
-            Self::Tab(_) | Self::Focus(_) | Self::Resize(..) => "",
+            Self::Tab(_) | Self::Focus(_) | Self::Resize(..) | Self::OpenFiles | Self::OpenDiff => {
+                ""
+            }
         }
     }
 }
@@ -192,6 +202,8 @@ fn command(key: &Key, modifiers: ModifiersState) -> Option<Command> {
             b"-" | b"\"" => Some(Command::SplitDown),
             b"z" => Some(Command::Zoom),
             b"d" => Some(Command::Detach),
+            b"f" => Some(Command::OpenFiles),
+            b"g" => Some(Command::OpenDiff),
             _ => None,
         },
         _ => None,
@@ -335,6 +347,8 @@ mod tests {
             ("\"", Command::SplitDown),
             ("z", Command::Zoom),
             ("d", Command::Detach),
+            ("f", Command::OpenFiles),
+            ("g", Command::OpenDiff),
         ] {
             assert_after_prefix(&text(key), NONE, Step::Run(command));
         }

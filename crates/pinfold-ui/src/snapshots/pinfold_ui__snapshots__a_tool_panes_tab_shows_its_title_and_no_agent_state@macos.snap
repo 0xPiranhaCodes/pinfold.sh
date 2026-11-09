@@ -1,0 +1,35 @@
+---
+source: crates/pinfold-ui/src/snapshots.rs
+expression: cells(&frame)
+---
+| files pinfold                                              |
+| ● work ⌘1  files pinfold ⌘2 +                    |
+|                                                            |
+0:0..1 fg e2e5ea bg 121212
+0:1..14 fg 9ba5b3 bg 121212
+0:14..60 fg e2e5ea bg 121212
+1:0..1 fg 1c2026 bg 121212 tall
+1:1..2 fg e2e5ea bg 1c2026
+1:2..3 fg 7aa7ff bg 1c2026
+1:3..4 fg e2e5ea bg 1c2026
+1:4..8 fg b0b8c4 bg 1c2026
+1:8..9 fg e2e5ea bg 1c2026
+1:9..10 fg 121212 bg 1c2026
+1:10..12 fg 909ba9 bg 121212
+1:12..13 fg 121212 bg 1c2026
+1:13..14 fg 1c2026 bg 121212 tall
+1:14..15 fg e2e5ea bg 121212
+1:15..16 fg 253c3b bg 121212 tall
+1:16..17 fg e2e5ea bg 253c3b
+1:17..30 fg 5cd6cb bg 253c3b bold
+1:30..31 fg e2e5ea bg 253c3b
+1:31..32 fg 121212 bg 253c3b
+1:32..34 fg b0b8c4 bg 121212
+1:34..35 fg 121212 bg 253c3b
+1:35..36 fg 253c3b bg 121212 tall
+1:36..37 fg e2e5ea bg 121212
+1:37..38 fg 1c2026 bg 121212 tall
+1:38..39 fg b0b8c4 bg 1c2026
+1:39..40 fg 1c2026 bg 121212 tall
+1:40..60 fg e2e5ea bg 121212
+2:0..60 fg e2e5ea bg 121212

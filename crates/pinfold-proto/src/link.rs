@@ -39,7 +39,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 11;
+pub const VERSION: u16 = 12;
 
 /// The oldest version this side still speaks, one before [`VERSION`] (ADR-0043).
 pub const OLDEST: u16 = VERSION - 1;
@@ -134,6 +134,7 @@ const ZOOM: u8 = 18;
 const APPROVAL_ANSWER: u8 = 19;
 const WAS_RUNNING_ANSWER: u8 = 20;
 const LINK: u8 = 21;
+const OPEN_TOOL: u8 = 22;
 
 const FRAME: u8 = 1;
 const CWD: u8 = 2;
@@ -280,6 +281,16 @@ pub struct Selection {
     pub focus: Position,
 }
 
+/// A built-in tool a window opens by key (ADR-0045). `md` needs a file, which no window
+/// request names yet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tool {
+    /// `pinfold files`, the file manager.
+    Files,
+    /// `pinfold diff`, the git diff viewer.
+    Diff,
+}
+
 /// Which way a search runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
@@ -397,8 +408,8 @@ pub enum Refusal {
     /// The tab has no room for another pane.
     #[error("No room for another pane here")]
     Room,
-    /// The shell would not start.
-    #[error("The shell would not start")]
+    /// The shell or tool would not start.
+    #[error("The shell or tool would not start")]
     Spawn,
     /// Input found no room: in the pane's queue, for a program that has stopped reading, or in
     /// the window, for a core that has.
@@ -546,6 +557,15 @@ pub enum Request<'a> {
     },
     /// Toggles whether the focused pane fills its tab.
     Zoom,
+    /// Opens a tool in a new pane right of `pane`, in the directory the system says `pane`'s
+    /// shell is in, never its OSC 7 report (T4). Like a shell, the window names no program or
+    /// path. Since version 12.
+    OpenTool {
+        /// The pane.
+        pane: u32,
+        /// Which tool.
+        tool: Tool,
+    },
     /// Answers [`Notice::WasRunning`] for a pane: with `run`, the core types the command and a
     /// newline into the pane's shell, if it offered that. Either way it forgets the command.
     WasRunningAnswer {
@@ -865,6 +885,16 @@ impl FrameUpdate<'_> {
 }
 
 impl Request<'_> {
+    /// The first link version that carries this message, so a window sends it only to a core
+    /// that speaks that version (ADR-0043).
+    #[must_use]
+    pub fn since(&self) -> u16 {
+        match self {
+            Self::OpenTool { .. } => 12,
+            _ => OLDEST,
+        }
+    }
+
     /// Appends this message to `out`. On an error `out` is as it was.
     ///
     /// # Errors
@@ -944,6 +974,11 @@ impl Request<'_> {
                 put!(out, MOVE_BORDER, cells)
             }
             Self::Zoom => ZOOM,
+            Self::OpenTool { pane, tool } => {
+                put!(out; pane);
+                out.push(tool as u8);
+                OPEN_TOOL
+            }
             Self::WasRunningAnswer { pane, run } => {
                 put!(out; pane);
                 out.push(u8::from(run));
@@ -1030,6 +1065,10 @@ impl Request<'_> {
                 Request::MoveBorder { side, cells }
             }
             ZOOM => Request::Zoom,
+            OPEN_TOOL => Request::OpenTool {
+                pane: body.u32()?,
+                tool: body.tag("tool", &[Tool::Files, Tool::Diff])?,
+            },
             WAS_RUNNING_ANSWER => Request::WasRunningAnswer {
                 pane: body.u32()?,
                 run: body.tag("run", &[false, true])?,
@@ -1054,12 +1093,11 @@ impl Request<'_> {
 
 impl Notice<'_> {
     /// The first link version that carries this message, so the core sends it only to a window
-    /// that speaks that version (ADR-0043). No request changed since [`OLDEST`].
+    /// that speaks that version (ADR-0043).
     #[must_use]
     pub fn since(&self) -> u16 {
         match self {
             Self::Approval(approval) => approval.action.since(),
-            Self::Unhardened { .. } => 11,
             _ => OLDEST,
         }
     }
@@ -1447,7 +1485,7 @@ impl Decoder {
     /// Any error ends the link, and every later call returns it.
     pub fn next_request(&mut self, input: &mut &[u8]) -> Result<Option<Request<'_>>, Error> {
         // A window answers at the lower version, so never above the core's.
-        self.next(input, MAX_REQUEST, VERSION, Request::decode, |_| OLDEST)
+        self.next(input, MAX_REQUEST, VERSION, Request::decode, Request::since)
     }
 
     /// Reads the next message the core sent, as [`Decoder::next_request`] does.
@@ -1881,7 +1919,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 11, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 12, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -2099,13 +2137,21 @@ mod tests {
             texts: vec!["session.save"],
         });
         assert_eq!(at_oldest(owner), Ok(true));
-        let unhardened = Notice::Unhardened { checked: true };
-        assert_eq!(unhardened.since(), 11);
-        let newer = Error::Newer {
-            kind: UNHARDENED,
-            since: 11,
+        let open = Request::OpenTool {
+            pane: 1,
+            tool: Tool::Files,
         };
-        assert_eq!(at_oldest(unhardened), Err(newer));
+        assert_eq!(open.since(), 12);
+        let mut wire = raw(HELLO, &OLDEST.to_le_bytes());
+        open.encode(&mut wire).unwrap();
+        let mut decoder = Decoder::default();
+        let mut input = wire.as_slice();
+        decoder.next_request(&mut input).unwrap();
+        let newer = Error::Newer {
+            kind: OPEN_TOOL,
+            since: 12,
+        };
+        assert_eq!(decoder.next_request(&mut input), Err(newer));
     }
 
     #[test]
@@ -2953,6 +2999,7 @@ mod tests {
                 Request::MoveFocus { side },
                 Request::MoveBorder { side, cells },
                 Request::Zoom,
+                Request::OpenTool { pane, tool: if forward { Tool::Files } else { Tool::Diff } },
                 Request::WasRunningAnswer { pane, run: forward },
             ] {
                 prop_assert!(request_survives(command, chunk), "changed on the link");
