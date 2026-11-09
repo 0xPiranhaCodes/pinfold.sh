@@ -176,8 +176,9 @@ fn git(repo: &Path, args: &[&str]) -> io::Result<()> {
 }
 
 /// Fills the tools' caps in `dir`, outside any repository so the file manager runs no git:
-/// `reader.md` of exactly 5 MB, an `empty` directory, `entries` of 10,000 files, a `repo` whose
-/// work tree's diff is over 8 MB, and `tool-screen.sh`, a window's shell that runs the reader.
+/// `reader.md`, `prose.md` and `defs.md` of exactly 5 MB, an `empty` directory, `entries` of
+/// 10,000 files, a `repo` whose work tree's diff is over 8 MB, and `tool-screen.sh`, a window's
+/// shell that runs the reader.
 fn write_tool_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -185,20 +186,38 @@ fn write_tool_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
     fs::create_dir_all(dir.join("empty"))?;
     fs::create_dir_all(dir.join("entries"))?;
     fs::create_dir_all(dir.join("repo"))?;
-    let mut markdown = Vec::new();
-    for section in 0.. {
-        if markdown.len() as u64 >= mem_gate::MARKDOWN_CAP {
-            break;
-        }
-        markdown.extend(format!(
+    // `layout_time_at_the_byte_cap` in `md.rs` lays out the same two files.
+    let markdown = |section: usize| {
+        format!(
             "## Section {section}\n\n見出し 日本語 中文 한국어\n\nSome *emphasis*, **bold**, `code` \
              and a [link](https://pinfold.sh/{section}).\n\n- one\n- two\n\n\
              | a | b |\n| --- | --- |\n| 1 | 2 |\n\n```\nfn main() {{}}\n```\n\n"
-        ).bytes());
+        )
+    };
+    let prose = |paragraph: usize| {
+        format!(
+            "Paragraph {paragraph} of plain prose, with words enough to wrap across two lines at \
+             eighty columns and no markup at all.\n\n"
+        )
+    };
+    let defs = |definition: usize| format!("[a{definition}]: https://pinfold.sh/{definition}\n");
+    let parts: [(&str, &dyn Fn(usize) -> String); 3] = [
+        ("reader.md", &markdown),
+        ("prose.md", &prose),
+        ("defs.md", &defs),
+    ];
+    for (name, part) in parts {
+        let mut bytes = Vec::new();
+        for at in 0.. {
+            if bytes.len() as u64 >= mem_gate::MARKDOWN_CAP {
+                break;
+            }
+            bytes.extend(part(at).bytes());
+        }
+        // Cut at the cap, which may split a character; the reader shows that as hex.
+        bytes.truncate(mem_gate::MARKDOWN_CAP as usize);
+        fs::write(dir.join(name), bytes)?;
     }
-    // Cut at the cap, which may split a character; the reader shows that as hex.
-    markdown.truncate(mem_gate::MARKDOWN_CAP as usize);
-    fs::write(dir.join("reader.md"), markdown)?;
     for entry in 0..mem_gate::ENTRY_CAP {
         fs::write(dir.join(format!("entries/{entry:05}.txt")), "")?;
     }
@@ -256,8 +275,10 @@ fn mem_gate_task() -> ExitCode {
         return ExitCode::FAILURE;
     };
     let input = |name: &str| format!("{inputs_text}/{name}");
-    let (markdown, empty, entries, repo) = (
+    let (markdown, prose, defs, empty, entries, repo) = (
         input("reader.md"),
+        input("prose.md"),
+        input("defs.md"),
         input("empty"),
         input("entries"),
         input("repo"),
@@ -320,6 +341,8 @@ fn mem_gate_task() -> ExitCode {
     // ADR-0045 section 5. Each tool runs in a pane of a core, which prints the tool's pid.
     let idle_tool = ["--tool", "1", "files", empty.as_str()];
     let reader = ["--tool", "1", "md", markdown.as_str()];
+    let prose_reader = ["--tool", "1", "md", prose.as_str()];
+    let defs_reader = ["--tool", "1", "md", defs.as_str()];
     let file_manager = ["--tool", "1", "files", entries.as_str()];
     let diff_viewer = ["--tool", "1", "diff", repo.as_str()];
     let readers = ["--tool", "8", "md", markdown.as_str()];
@@ -339,9 +362,21 @@ fn mem_gate_task() -> ExitCode {
     budgets.extend([
         mem_gate::Budget { ..tool },
         mem_gate::Budget {
-            metric: mem_gate::READER,
+            metric: "Markdown reader, a 5 MB file",
             limit: mem_gate::READER_LIMIT,
             args: &reader,
+            ..tool
+        },
+        mem_gate::Budget {
+            metric: "Markdown reader, a 5 MB file of plain prose",
+            limit: mem_gate::READER_LIMIT,
+            args: &prose_reader,
+            ..tool
+        },
+        mem_gate::Budget {
+            metric: "Markdown reader, a 5 MB file of link definitions",
+            limit: mem_gate::READER_LIMIT,
+            args: &defs_reader,
             ..tool
         },
         mem_gate::Budget {
