@@ -85,18 +85,17 @@ impl Command {
     pub fn run(&self) -> io::Result<bool> {
         let (title, problem) = match self {
             Self::Md { file } => {
-                // shortcut: reads the whole file; #315 caps it at 5 MB.
                 let read = problem(file, Path::is_file).map_or_else(
                     || {
-                        std::fs::read(file)
+                        md::read(file)
                             .map_err(|error| format!("cannot read {}: {error}", file.display()))
                     },
                     Err,
                 );
                 match read {
-                    Ok(bytes) => {
+                    Ok((bytes, whole)) => {
                         let title = file.as_os_str().as_encoded_bytes().to_vec();
-                        run(&mut md::Reader::new(title, &bytes))?;
+                        run(&mut md::Reader::new(title, bytes, whole))?;
                         return Ok(true);
                     }
                     Err(problem) => (format!("md {}", file.display()), Some(problem)),
@@ -118,6 +117,13 @@ impl Command {
         run(&mut Placeholder { title, problem })?;
         Ok(started)
     }
+}
+
+/// Lays `markdown` out as `pinfold md` does at `width` columns, and returns each line's
+/// already-escaped text. For the `markdown` fuzz target.
+#[doc(hidden)]
+pub fn fuzz_markdown(markdown: &[u8], width: u16) -> Vec<String> {
+    md::lines(markdown, width)
 }
 
 /// Why `path` cannot be opened, if `kind` is not true of it.
