@@ -8,7 +8,7 @@ use std::ffi::OsStr;
 use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write as _};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -126,12 +126,15 @@ fn copy(from: &Path, to: &Path) -> io::Result<()> {
     if kind.is_symlink() {
         std::os::unix::fs::symlink(fs::read_link(from)?, to)
     } else if kind.is_dir() {
-        fs::create_dir(to)?;
+        // Private while it fills, then the source's mode, so no one else sees it half made.
+        DirBuilder::new().mode(0o700).create(to)?;
+        // shortcut: a directory swapped for a link after the lstat above is listed through it;
+        // walk with openat(O_NOFOLLOW | O_DIRECTORY) in pinfold-sys if another user's race matters.
         for entry in fs::read_dir(from)? {
             let entry = entry?;
             copy(&entry.path(), &to.join(entry.file_name()))?;
         }
-        Ok(())
+        fs::set_permissions(to, fs::Permissions::from_mode(meta.mode() & 0o777))
     } else if kind.is_file() {
         let mut source = File::open(from)?;
         let opened = source.metadata()?;
@@ -333,9 +336,12 @@ mod tests {
         let root = scratch("copy");
         let into = root.join("into");
         fs::create_dir(&into).unwrap();
+        fs::set_permissions(root.join("dir/sub"), fs::Permissions::from_mode(0o750)).unwrap();
         copy_into(&root.join("dir"), &into).unwrap();
         copy_into(&root.join("link"), &into).unwrap();
         assert_eq!(fs::read(into.join("dir/sub/a.txt")).unwrap(), b"a");
+        let mode = fs::metadata(into.join("dir/sub")).unwrap().mode() & 0o777;
+        assert_eq!(mode, 0o750);
         assert_eq!(
             fs::read_link(into.join("link")).unwrap(),
             Path::new("b.txt")
