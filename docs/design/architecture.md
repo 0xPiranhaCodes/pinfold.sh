@@ -131,7 +131,7 @@ The tools follow [ADR-0045](../adr/0045-tools-are-programs-in-their-own-pane.md)
 
 ### File manager (`pinfold files`), ranger-style
 
-- Miller columns: parent | current | preview. hjkl or arrow keys to move and `/` to filter by name, with a plain, hex or directory-stats preview. A preview reads at most 64 KiB, a hex one shows 4 KiB, and FIFOs, devices and sockets are never opened.
+- Miller columns: parent | current | preview. hjkl or arrow keys to move and `/` to filter by name, with a plain, hex or directory-stats preview. A preview reads at most 64 KiB, a hex one shows 4 KiB, a directory lists 10,000 entries and counts the rest on screen, a name with a control or bidi character or invalid UTF-8 shows escaped and red, and FIFOs, devices and sockets are never opened.
 - Git status badges (M, A, ?) and ignored files from `git status`, and a refresh when the directory's modification time changes, checked once a second.
 - Actions: open in `$EDITOR` in the tool's pane, copy / move / rename / trash with a confirmation, fuzzy jump, and bookmarks. Enter opens executables in the pager; there is no "run" action.
 - **For agents:** `@` inserts the selected path(s) into the last focused agent pane's prompt, as an approved cross-pane send.

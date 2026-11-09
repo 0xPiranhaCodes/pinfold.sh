@@ -2,7 +2,7 @@
 //!
 //! Three columns: the parent directory, the current one and a preview of the selected entry.
 //! Names and contents are untrusted, so all of them reach the screen through
-//! [`Screen::put`], which escapes them. Enter opens a file in the reader, executables
+//! [`Screen::put`], which escapes them, and a name that needed escaping is flagged red. Enter opens a file in the reader, executables
 //! included; nothing is ever run.
 
 use std::ffi::{OsStr, OsString};
@@ -102,6 +102,12 @@ fn preview(path: &Path, dir: bool) -> Preview {
 fn text(bytes: &[u8]) -> bool {
     !bytes.contains(&0)
         && std::str::from_utf8(bytes).map_or_else(|e| e.error_len().is_none(), |_| true)
+}
+
+/// Whether `name` holds a control or bidi character or invalid UTF-8: anything [`escape`]
+/// changes, so the list of what is hostile lives in one place.
+fn flagged(name: &[u8]) -> bool {
+    std::str::from_utf8(name).map_or(true, |name| escape(name.as_bytes()) != name)
 }
 
 /// `name` escaped and cut to `width` characters.
@@ -255,7 +261,10 @@ fn column<'a>(
         if entry.dir {
             name.push(b'/');
         }
-        let fg = if entry.dir {
+        let flag = flagged(entry.name.as_bytes());
+        let fg = if flag {
+            Color::Red
+        } else if entry.dir {
             Color::Blue
         } else {
             Color::Default
@@ -266,7 +275,7 @@ fn column<'a>(
         };
         if let Some((_, bg)) = selected.filter(|&(selected, _)| selected == at) {
             style.fg = Color::Black;
-            style.bg = bg;
+            style.bg = if flag { Color::Red } else { bg };
         }
         let name = clip(&name, width.saturating_sub(1));
         screen.put(
@@ -519,6 +528,80 @@ mod tests {
         let name = OsStr::from_bytes(b"a\x1b]0;x\x07\xc2\x85b\x7f");
         std::fs::write(dir.join(name), "").unwrap();
         insta::assert_snapshot!(shown(&work, &[Key::Char('j'), Key::Enter]));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_newline_an_esc_and_a_bidi_override_in_a_name_are_flagged() {
+        let (root, work) = work("flagged");
+        for name in ["new\nline", "esc\x1b[2Jape", "cat\u{202e}gnp.exe"] {
+            assert!(flagged(name.as_bytes()), "{name:?}");
+            std::fs::write(work.join(name), "").unwrap();
+        }
+        insta::assert_snapshot!(shown(&work, &[]));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn only_a_name_escape_changes_is_flagged() {
+        for name in [
+            &b"a\x7f"[..],
+            b"\xc2\x85",
+            "\u{61c}".as_bytes(),
+            b"\xff",
+            b"\0",
+        ] {
+            assert!(flagged(name), "{name:?}");
+        }
+        for name in ["notes.txt", "^[ not ESC", "<U+202E>", "é 漢 ✕"] {
+            assert!(!flagged(name.as_bytes()), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn entries_past_the_cap_are_counted_on_screen() {
+        let (root, work) = work("entries");
+        let many = work.join("many");
+        std::fs::create_dir(&many).unwrap();
+        for at in 0..MAX_ENTRIES + 3 {
+            std::fs::write(many.join(format!("{at:05}")), "").unwrap();
+        }
+        let listing = list(&many).unwrap();
+        assert_eq!((listing.entries.len(), listing.more), (10_000, 3));
+        // Which entries are kept follows the directory's order, so only the first and last rows.
+        let screen = shown(&many, &[]);
+        let lines: Vec<&str> = screen.lines().collect();
+        let (rows, runs) = lines.split_at(24);
+        let mut kept = vec![rows[0], rows[23]];
+        kept.extend(
+            runs.iter()
+                .filter(|run| run.starts_with("0:") || run.starts_with("23:")),
+        );
+        insta::assert_snapshot!(kept.join("\n"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_text_preview_reads_up_to_its_cap() {
+        let (root, work) = work("preview-cap");
+        let path = work.join("long.txt");
+        std::fs::write(&path, "line\n".repeat(MAX_PREVIEW)).unwrap();
+        let Preview::Text(text) = preview(&path, false) else {
+            panic!("not text")
+        };
+        assert_eq!(text.len(), 64 * 1024);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_hex_preview_shows_up_to_its_cap() {
+        let (root, work) = work("hex-cap");
+        let path = work.join("long.bin");
+        std::fs::write(&path, vec![0; MAX_PREVIEW]).unwrap();
+        let Preview::Hex(bytes) = preview(&path, false) else {
+            panic!("not hex")
+        };
+        assert_eq!(bytes.len(), 4 * 1024);
         std::fs::remove_dir_all(root).unwrap();
     }
 
