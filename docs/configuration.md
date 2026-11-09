@@ -290,6 +290,13 @@ it.
 Bigger and Smaller last until the file is next saved. Elsewhere, Ctrl+Shift+C, V and F copy,
 paste and find.
 
+Ctrl+Shift+P, on every system, opens the command palette over the panes: type to filter
+the window's commands, Up and Down choose, Enter runs one, and Esc, a click or Ctrl+Shift+P
+again closes it. It offers Open Files and Open Diff, which open the tools as `f` and `g` do,
+and every command in the menus above. Labels whose start matches what you typed come first,
+then those containing it, then those with its letters in order. While it is open every key
+goes to it, and none to the program, which cannot draw over it.
+
 Right-click in a pane opens a menu of the same commands, or Shift+right-click when the
 program reports the mouse. On an OSC 8 hyperlink it also offers Open Link and Copy Link.
 Plain URLs that are not OSC 8 links get neither. Open Link opens an `http` or `https` link

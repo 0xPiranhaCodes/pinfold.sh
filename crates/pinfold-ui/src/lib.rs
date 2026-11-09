@@ -15,6 +15,7 @@ mod menu_bar;
 mod mouse;
 mod notify;
 mod outbox;
+mod palette;
 mod panes;
 mod paste;
 pub mod prefix;

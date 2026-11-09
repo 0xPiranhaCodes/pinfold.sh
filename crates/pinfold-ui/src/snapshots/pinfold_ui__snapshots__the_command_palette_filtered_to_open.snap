@@ -1,0 +1,47 @@
+---
+source: crates/pinfold-ui/src/snapshots.rs
+expression: cells(&frame)
+---
+|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
+|xxxxxx┌──────────────────────────────────────────────┐xxxxxx|
+|xxxxxx│ ❯ open                             esc close │xxxxxx|
+|xxxxxx│ Open Files                                   │xxxxxx|
+|xxxxxx│ Open Diff                                    │xxxxxx|
+|xxxxxx└──────────────────────────────────────────────┘xxxxxx|
+|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
+|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
+|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
+|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
+|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
+|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
+0:0..60 fg e2e5ea bg 121212
+1:0..6 fg e2e5ea bg 121212
+1:6..54 fg 343a44 bg 151920
+1:54..60 fg e2e5ea bg 121212
+2:0..6 fg e2e5ea bg 121212
+2:6..8 fg 343a44 bg 151920
+2:8..10 fg 5cd6cb bg 151920
+2:10..14 fg e2e5ea bg 151920
+2:14..43 fg 343a44 bg 151920
+2:43..52 fg 9aa1ac bg 151920
+2:52..54 fg 343a44 bg 151920
+2:54..60 fg e2e5ea bg 121212
+3:0..6 fg e2e5ea bg 121212
+3:6..7 fg 343a44 bg 151920
+3:7..53 fg 5cd6cb bg 253c3b
+3:53..54 fg 343a44 bg 151920
+3:54..60 fg e2e5ea bg 121212
+4:0..6 fg e2e5ea bg 121212
+4:6..7 fg 343a44 bg 151920
+4:7..53 fg e2e5ea bg 151920
+4:53..54 fg 343a44 bg 151920
+4:54..60 fg e2e5ea bg 121212
+5:0..6 fg e2e5ea bg 121212
+5:6..54 fg 343a44 bg 151920
+5:54..60 fg e2e5ea bg 121212
+6:0..60 fg e2e5ea bg 121212
+7:0..60 fg e2e5ea bg 121212
+8:0..60 fg e2e5ea bg 121212
+9:0..60 fg e2e5ea bg 121212
+10:0..60 fg e2e5ea bg 121212
+11:0..60 fg e2e5ea bg 121212
