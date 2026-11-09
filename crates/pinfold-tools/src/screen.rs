@@ -52,6 +52,8 @@ pub struct Style {
 struct Cell {
     character: char,
     style: Style,
+    /// One more than the index of the cell's OSC 8 target in [`Screen::links`], or 0.
+    link: u32,
 }
 
 const BLANK: Cell = Cell {
@@ -61,6 +63,7 @@ const BLANK: Cell = Cell {
         bg: Color::Default,
         bold: false,
     },
+    link: 0,
 };
 
 /// Returns `text` with nothing that could act on the terminal or reorder what is shown: C0
@@ -102,6 +105,46 @@ pub fn escape(text: &[u8]) -> String {
     escaped
 }
 
+/// Longest link target, after encoding, as the core's `pinfold_proto::link::MAX_URI`.
+pub const MAX_LINK: usize = 2048;
+
+/// `target` as an OSC 8 link target, or `None` if it is not an `http`, `https` or `file` URI
+/// or is longer than [`MAX_LINK`] once encoded. Every byte outside printable ASCII is
+/// percent-encoded, so no control, ESC, BEL or ST can end the sequence early.
+///
+/// # Examples
+///
+/// ```
+/// use pinfold_tools::screen::link_target;
+///
+/// assert_eq!(link_target(b"https://a/\x1b\\b c").as_deref(), Some("https://a/%1B\\b%20c"));
+/// assert_eq!(link_target(b"javascript:alert(1)"), None);
+/// assert_eq!(link_target(b"notes.md"), None);
+/// ```
+pub fn link_target(target: &[u8]) -> Option<String> {
+    let scheme = target.iter().position(|&byte| byte == b':')?;
+    let scheme = &target[..scheme];
+    if !["http", "https", "file"]
+        .iter()
+        .any(|allowed| scheme.eq_ignore_ascii_case(allowed.as_bytes()))
+    {
+        return None;
+    }
+    let mut encoded = String::with_capacity(target.len());
+    for &byte in target {
+        if encoded.len() > MAX_LINK {
+            return None;
+        }
+        match byte {
+            b'!'..=b'~' => encoded.push(char::from(byte)),
+            _ => {
+                let _ = write!(encoded, "%{byte:02X}");
+            }
+        }
+    }
+    (encoded.len() <= MAX_LINK).then_some(encoded)
+}
+
 /// The cells a tool draws, and those the terminal shows, so a frame sends only changed rows.
 ///
 /// # Examples
@@ -123,8 +166,11 @@ pub struct Screen {
     rows: u16,
     columns: u16,
     cells: Vec<Cell>,
+    /// The escaped OSC 8 targets the cells point into.
+    links: Vec<String>,
     /// What the terminal shows, or nothing before the first frame.
     shown: Vec<Cell>,
+    shown_links: Vec<String>,
 }
 
 impl Screen {
@@ -134,7 +180,9 @@ impl Screen {
             rows,
             columns,
             cells: vec![BLANK; usize::from(rows) * usize::from(columns)],
+            links: Vec::new(),
             shown: Vec::new(),
+            shown_links: Vec::new(),
         }
     }
 
@@ -146,22 +194,52 @@ impl Screen {
     /// Blanks every cell.
     pub fn clear(&mut self) {
         self.cells.fill(BLANK);
+        self.links.clear();
     }
 
     /// Draws `text`, escaped by [`escape`], at `row` and `column`, cut at the right edge, and
-    /// returns the column after it. This is the only way text reaches the screen. Each
+    /// returns the column after it. This and [`put_link`](Self::put_link) are the only ways text
+    /// reaches the screen. Each
     /// character takes one cell.
     pub fn put(&mut self, row: u16, column: u16, text: impl AsRef<[u8]>, style: Style) -> u16 {
+        self.draw(row, column, text.as_ref(), style, 0)
+    }
+
+    /// [`put`](Self::put), with the text an OSC 8 link to `target` if [`link_target`] allows
+    /// it, and plain text if not.
+    pub fn put_link(
+        &mut self,
+        row: u16,
+        column: u16,
+        text: impl AsRef<[u8]>,
+        style: Style,
+        target: &[u8],
+    ) -> u16 {
+        let target = link_target(target);
+        let Some(target) = target.filter(|_| row < self.rows && column < self.columns) else {
+            return self.put(row, column, text, style);
+        };
+        // At most one link per cell, so the count fits.
+        self.links.push(target);
+        let link = u32::try_from(self.links.len()).unwrap_or(0);
+        self.draw(row, column, text.as_ref(), style, link)
+    }
+
+    fn draw(&mut self, row: u16, column: u16, text: &[u8], style: Style, link: u32) -> u16 {
         let mut column = column;
         if row >= self.rows {
             return column;
         }
-        for character in escape(text.as_ref()).chars() {
+        for character in escape(text).chars() {
             if column >= self.columns {
                 break;
             }
             let index = usize::from(row) * usize::from(self.columns) + usize::from(column);
-            self.cells[index] = Cell { character, style };
+            self.cells[index] = Cell {
+                character,
+                style,
+                link,
+            };
             column += 1;
         }
         column
@@ -186,17 +264,27 @@ impl Screen {
     /// update, and nothing at all if none did.
     pub fn frame(&mut self, out: &mut Vec<u8>) {
         let start = out.len();
+        // Link numbers mean other targets once the targets change, so every row is redrawn.
+        let relinked = self.links != self.shown_links;
         for row in 0..self.rows {
             let cells = self.row_cells(&self.cells, row);
-            if self.row_cells(&self.shown, row) == cells {
+            if !relinked && self.row_cells(&self.shown, row) == cells {
                 continue;
             }
             if out.len() == start {
                 out.extend_from_slice(b"\x1b[?2026h");
             }
             let _ = write!(Bytes(out), "\x1b[{};1H", row + 1);
-            let mut current = None;
+            let (mut current, mut link) = (None, 0);
             for cell in cells {
+                if cell.link != link {
+                    let target = cell
+                        .link
+                        .checked_sub(1)
+                        .and_then(|at| self.links.get(usize::try_from(at).ok()?));
+                    let _ = write!(Bytes(out), "\x1b]8;;{}\x1b\\", target.map_or("", |t| t));
+                    link = cell.link;
+                }
                 if current != Some(cell.style) {
                     let Style { fg, bg, bold } = cell.style;
                     let bold = if bold { ";1" } else { "" };
@@ -206,12 +294,16 @@ impl Screen {
                 let mut utf8 = [0; 4];
                 out.extend_from_slice(cell.character.encode_utf8(&mut utf8).as_bytes());
             }
+            if link != 0 {
+                out.extend_from_slice(b"\x1b]8;;\x1b\\");
+            }
             out.extend_from_slice(b"\x1b[0m");
         }
         if out.len() != start {
             out.extend_from_slice(b"\x1b[?2026l");
         }
         self.shown.clone_from(&self.cells);
+        self.shown_links.clone_from(&self.links);
     }
 }
 
@@ -329,6 +421,72 @@ mod tests {
         assert_eq!(
             out,
             "\x1b[?2026h\x1b[2;1H\x1b[0;39;49m  \x1b[0;31;49m✕\x1b[0;39;49m     \x1b[0m\x1b[?2026l"
+        );
+    }
+
+    #[test]
+    fn a_link_is_opened_and_closed_within_its_row() {
+        let mut screen = Screen::new(1, 4);
+        screen.put_link(0, 2, "ab", Style::default(), b"https://a");
+        let mut out = Vec::new();
+        screen.frame(&mut out);
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "\x1b[?2026h\x1b[1;1H\x1b[0;39;49m  \x1b]8;;https://a\x1b\\ab\x1b]8;;\x1b\\\x1b[0m\x1b[?2026l"
+        );
+        let mut again = Vec::new();
+        screen.clear();
+        screen.put_link(0, 2, "ab", Style::default(), b"https://b");
+        screen.frame(&mut again);
+        let again = String::from_utf8(again).unwrap();
+        assert!(again.contains("https://b"), "a new target redraws");
+    }
+
+    #[test]
+    fn controls_del_and_sequence_ends_in_a_link_are_percent_encoded() {
+        let target = b"https://a/\0\x07\x1b\\\x1f \x7f\xc2\x9c\xe2\x80\xae\xff";
+        assert_eq!(
+            link_target(target).as_deref(),
+            Some("https://a/%00%07%1B\\%1F%20%7F%C2%9C%E2%80%AE%FF")
+        );
+    }
+
+    #[test]
+    fn only_http_https_and_file_links_are_drawn_as_links() {
+        for allowed in ["http://a", "HTTPS://a", "file:///etc/hosts"] {
+            assert!(link_target(allowed.as_bytes()).is_some(), "{allowed}");
+        }
+        for refused in [
+            "javascript:x",
+            "ssh://a",
+            "x-man-page://ls",
+            "notes.md",
+            "",
+            ":a",
+        ] {
+            assert_eq!(link_target(refused.as_bytes()), None, "{refused}");
+        }
+        let mut screen = Screen::new(1, 4);
+        screen.put_link(0, 0, "ab", Style::default(), b"javascript:x");
+        let mut out = Vec::new();
+        screen.frame(&mut out);
+        assert!(!String::from_utf8(out).unwrap().contains("\x1b]8"));
+        assert_eq!(screen.row(0), "ab  ");
+    }
+
+    #[test]
+    fn a_link_longer_than_the_cap_is_plain_text() {
+        let fits = format!("https://{}", "a".repeat(MAX_LINK - 8));
+        assert_eq!(
+            link_target(fits.as_bytes()).map(|t| t.len()),
+            Some(MAX_LINK)
+        );
+        assert_eq!(link_target(format!("{fits}a").as_bytes()), None);
+        let encoded = format!("https://{}", " ".repeat(MAX_LINK / 3));
+        assert_eq!(
+            link_target(encoded.as_bytes()),
+            None,
+            "measured once encoded"
         );
     }
 
