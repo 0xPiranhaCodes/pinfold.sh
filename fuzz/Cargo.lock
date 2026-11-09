@@ -399,6 +399,7 @@ dependencies = [
  "pinfold-core",
  "pinfold-mux",
  "pinfold-proto",
+ "pinfold-tools",
 ]
 
 [[package]]
@@ -423,6 +424,10 @@ dependencies = [
  "libc",
  "signal-hook",
 ]
+
+[[package]]
+name = "pinfold-tools"
+version = "0.1.0-beta.3"
 
 [[package]]
 name = "piper"

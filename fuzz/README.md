@@ -21,5 +21,8 @@ rebuild into a session.
 `config` parses any bytes as the user config file. It fails on a panic, an out-of-memory or
 a hang. Its seeds in `seeds/config/` are the examples in `docs/configuration.md`.
 
+`tool_keys` decodes any bytes as the keys a tool reads, once whole and once a byte at a time.
+It fails on a panic or a hang, or if the two give different keys.
+
 `vt.dict` holds the escape sequences a mutator rarely writes by chance. It uses libFuzzer's
 format, which only knows the escapes `\\`, `\"` and `\xNN`.
