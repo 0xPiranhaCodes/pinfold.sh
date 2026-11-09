@@ -5,7 +5,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use pinfold_proto::{BOLD, ITALIC, LEFT_CAP, RIGHT_CAP, TALL};
 use swash::scale::{Render, ScaleContext, Scaler, Source};
-use swash::zeno::{Format, Transform};
+use swash::zeno::{Format, Point, Transform};
 use unicode_width::UnicodeWidthChar;
 
 use crate::font::{Font, Fonts};
@@ -118,7 +118,17 @@ fn render(
     })
 }
 
-/// The pixels an outline covers, as `(width, height)`, without rendering it.
+/// Whether zeno can rasterize `points`. It converts each with `to_int_unchecked`, which is
+/// undefined behaviour for NaN or out of `i32` range. It first shifts points by their bounds,
+/// so a finite outline whose extent the callers cap stays in range, but `bounds` skips NaN.
+fn finite(points: &[Point]) -> bool {
+    points
+        .iter()
+        .all(|point| point.x.is_finite() && point.y.is_finite())
+}
+
+/// The pixels an outline covers, as `(width, height)`, without rendering it. `None` if the
+/// outline is missing or not finite, and every render is measured here first.
 fn extent(
     context: &mut ScaleContext,
     font: &Font,
@@ -133,6 +143,7 @@ fn extent(
     let mut outline = scaler.scale_outline(id)?;
     outline.embolden(bold, bold);
     outline.transform(&transform);
+    finite(outline.points()).then_some(())?;
     let bounds = outline.bounds();
     let (min, max) = (bounds.min, bounds.max);
     Some((max.x.ceil() - min.x.floor(), max.y.ceil() - min.y.floor()))
@@ -589,6 +600,16 @@ mod tests {
             && glyph.left as usize + glyph.width <= span * metrics.cell_width
             && above >= 0
             && above + rows <= metrics.cell_height as i32
+    }
+
+    #[test]
+    fn only_finite_outlines_reach_the_rasterizer() {
+        let fine = [Point::new(0.0, 0.0), Point::new(-3.5e6, 1e6)];
+        assert!(finite(&fine));
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            assert!(!finite(&[Point::new(0.0, 0.0), Point::new(bad, 1.0)]));
+            assert!(!finite(&[Point::new(1.0, bad)]));
+        }
     }
 
     #[test]

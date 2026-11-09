@@ -644,7 +644,7 @@ notes = "Kept by Satheesh Kumar because it has no unsafe, but swash uses it to i
 [[exemptions.zeno]]
 version = "0.3.3"
 criteria = "safe-to-deploy"
-notes = "Kept by Satheesh Kumar because raster.rs to_fixed calls f32::to_int_unchecked, which is undefined behaviour for NaN, infinite or out-of-range values, and the outline callers that feed it were not traced. Review in #302."
+notes = "Kept by Satheesh Kumar because raster.rs to_fixed calls f32::to_int_unchecked, which is undefined behaviour for NaN, infinite or out-of-range values. Mask shifts points by their bounds before to_fixed, so only the extent and non-finite points matter; pinfold-render measures every glyph first and rejects non-finite outlines and extents past its cells (glyphs.rs finite, #310). Review in #302."
 
 [[exemptions.zerocopy]]
 version = "0.8.63"
