@@ -10,6 +10,7 @@ mod files;
 pub mod git;
 pub mod keys;
 mod md;
+mod ops;
 pub mod screen;
 
 use std::io::{self, Read, Write};
@@ -243,9 +244,10 @@ impl Tool for Failed {
     }
 }
 
-/// Alternate screen, cursor hidden, no autowrap, SGR mouse reports; and their undoing.
-const ENTER: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1006h";
-const LEAVE: &[u8] = b"\x1b[?1006l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l";
+/// Alternate screen, cursor hidden, no autowrap, SGR mouse reports, bracketed paste (whose text
+/// [`Keys`] drops); and their undoing.
+const ENTER: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1006h\x1b[?2004h";
+const LEAVE: &[u8] = b"\x1b[?2004l\x1b[?1006l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l";
 
 /// The terminal in raw mode and the alternate screen, restored when dropped.
 struct Terminal<'fd> {

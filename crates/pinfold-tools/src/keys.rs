@@ -43,6 +43,8 @@ pub struct Mouse {
 
 enum Step {
     Key(Key, usize),
+    /// A bracketed paste starts after this many bytes.
+    Paste(usize),
     Skip(usize),
     Wait,
 }
@@ -64,7 +66,13 @@ enum Step {
 #[derive(Debug, Default)]
 pub struct Keys {
     pending: Vec<u8>,
+    /// Inside a bracketed paste, whose bytes are dropped: pasted text never answers a tool's
+    /// confirmation (ADR-0045 section 2).
+    pasting: bool,
 }
+
+/// Ends a bracketed paste.
+const PASTE_END: &[u8] = b"\x1b[201~";
 
 impl Keys {
     /// Adds bytes read from the terminal.
@@ -76,12 +84,30 @@ impl Keys {
     /// `quiet`, input has gone quiet, so a lone ESC is the Esc key and other parts are dropped.
     pub fn next(&mut self, quiet: bool) -> Option<Key> {
         loop {
+            if self.pasting {
+                let end = self
+                    .pending
+                    .windows(PASTE_END.len())
+                    .position(|w| w == PASTE_END);
+                let Some(end) = end else {
+                    // Keep what may be the start of the end marker.
+                    let keep = self.pending.len().saturating_sub(PASTE_END.len() - 1);
+                    self.pending.drain(..keep);
+                    return None;
+                };
+                self.pending.drain(..end + PASTE_END.len());
+                self.pasting = false;
+            }
             match step(&self.pending) {
                 Step::Key(key, length) => {
                     self.pending.drain(..length);
                     return Some(key);
                 }
                 Step::Skip(length) => drop(self.pending.drain(..length)),
+                Step::Paste(length) => {
+                    self.pending.drain(..length);
+                    self.pasting = true;
+                }
                 Step::Wait if quiet && !self.pending.is_empty() => {
                     if self.pending.remove(0) == 0x1b {
                         return Some(Key::Esc);
@@ -171,6 +197,7 @@ fn csi(input: &[u8]) -> Step {
         (b'M' | b'm', parameters) if parameters.starts_with('<') => {
             mouse(&parameters[1..], input[end] == b'M')
         }
+        (b'~', "200") => return Step::Paste(end + 1),
         (b'~', parameters) => match parameters.split(';').next() {
             Some("1" | "7") => Some(Key::Home),
             Some("4" | "8") => Some(Key::End),
@@ -210,6 +237,19 @@ mod tests {
         let mut keys = Keys::default();
         keys.push(bytes);
         std::iter::from_fn(|| keys.next(true)).collect()
+    }
+
+    #[test]
+    fn pasted_text_is_dropped_even_split_across_reads() {
+        assert_eq!(
+            decode(b"j\x1b[200~ dy\r\x1b[201~k"),
+            [Key::Char('j'), Key::Char('k')]
+        );
+        let mut keys = Keys::default();
+        keys.push(b"\x1b[200~y\x1b[20");
+        assert_eq!(keys.next(true), None);
+        keys.push(b"1~q");
+        assert_eq!(keys.next(true), Some(Key::Char('q')));
     }
 
     #[test]
