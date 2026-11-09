@@ -16,7 +16,7 @@ const cmds = {
   keys: () => "⌘T new tab\n⌘D split right\n⇧⌘D split down\nCtrl+a, then c · | · -   tab · right · down",
   states: () => '<span class="st-needs">◆ needs you</span>  <span class="st-run">● running</span>  <span class="st-done">✓ done</span>  <span class="st-err">✕ error</span>  <span class="st-idle">○ idle</span>',
   mem: () => [...document.querySelectorAll("#memory tbody tr")].map((tr) => { const c = tr.cells; return `${c[0].textContent.padEnd(26)}${c[2].textContent.padStart(9)} / ${c[3].textContent.padEnd(9)} (${c[1].textContent})`; }).join("\n") + "\nreproduce: cargo xtask mem-gate",
-  install: () => "macOS beta: PinFold.dmg from github.com/0xPiranhaCodes/pinfold.sh/releases/tag/v0.1.0-beta.2\nfrom source: cargo build --release -p pinfold-cli",
+  install: () => "macOS beta: PinFold.dmg from github.com/0xPiranhaCodes/pinfold.sh/releases/tag/v0.1.0-beta.3\nfrom source: cargo build --release -p pinfold-cli",
   about: () => "PinFold: a memory-first terminal for agentic coding, written in Rust.",
   ls: () => "why/  memory/  agents/  try/  install/",
   whoami: () => "you, the one the ◆ prompt is for",
