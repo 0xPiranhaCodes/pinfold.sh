@@ -1,0 +1,65 @@
+---
+source: crates/pinfold-tools/src/diff.rs
+expression: "shown(parse(format!(\"{CHANGE}{FILES}\").into()), &keys)"
+---
+|diff main..HEAD                                                      5/5  ? keys|
+|src/main.rs          new file mode 100644                                       |
+|run.sh               --- /dev/null                                              |
+|logo.png             +++ "b/x\033[2J"                                           |
+|old.txt → new.txt    @@ -0,0 +1 @@                                              |
+|x^[[2J               +    gnp<U+202E>.exe^[]0;x^G                               |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+0:0..15 Default Default bold
+0:15..69 Default Default
+0:69..80 BrightBlack Default
+1:0..21 Default Default
+1:21..41 BrightBlack Default
+1:41..80 Default Default
+2:0..21 Default Default
+2:21..34 BrightBlack Default
+2:34..80 Default Default
+3:0..21 Default Default
+3:21..37 BrightBlack Default
+3:37..80 Default Default
+4:0..21 Default Default
+4:21..34 Cyan Default
+4:34..80 Default Default
+5:0..19 Black Blue
+5:19..21 Default Default
+5:21..49 Green Default
+5:49..80 Default Default
+6:0..80 Default Default
+7:0..80 Default Default
+8:0..80 Default Default
+9:0..80 Default Default
+10:0..80 Default Default
+11:0..80 Default Default
+12:0..80 Default Default
+13:0..80 Default Default
+14:0..80 Default Default
+15:0..80 Default Default
+16:0..80 Default Default
+17:0..80 Default Default
+18:0..80 Default Default
+19:0..80 Default Default
+20:0..80 Default Default
+21:0..80 Default Default
+22:0..80 Default Default
+23:0..80 Default Default

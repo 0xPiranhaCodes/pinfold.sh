@@ -102,7 +102,7 @@ impl Command {
                         run(&mut md::Reader::new(title, bytes, whole))?;
                         return Ok(true);
                     }
-                    Err(problem) => (format!("md {}", file.display()), Some(problem)),
+                    Err(problem) => (format!("md {}", file.display()), problem),
                 }
             }
             Self::Files { dir } => {
@@ -119,20 +119,28 @@ impl Command {
                         run(&mut files::Files::new(title, path))?;
                         return Ok(true);
                     }
-                    Err(problem) => (format!("files {}", dir.display()), Some(problem)),
+                    Err(problem) => (format!("files {}", dir.display()), problem),
                 }
             }
             Self::Diff { staged, range } => {
-                let staged = if *staged { " --staged" } else { "" };
-                (
-                    format!("diff{staged} {}", range.as_deref().unwrap_or("")),
-                    None,
-                )
+                let mut title = "diff".to_owned();
+                if *staged {
+                    title.push_str(" --staged");
+                }
+                if let Some(range) = range {
+                    title = format!("{title} {range}");
+                }
+                match diff::load(Path::new("."), *staged, range.as_deref()) {
+                    Ok(diff) => {
+                        run(&mut diff::Viewer::new(title.into_bytes(), diff))?;
+                        return Ok(true);
+                    }
+                    Err(problem) => (title, problem),
+                }
             }
         };
-        let started = problem.is_none();
-        run(&mut Placeholder { title, problem })?;
-        Ok(started)
+        run(&mut Failed { title, problem })?;
+        Ok(false)
     }
 }
 
@@ -185,42 +193,30 @@ pub trait Tool {
     fn key(&mut self, key: Key) -> Flow;
 }
 
-/// The screen a tool shows until its own slice lands, and the screen of one that cannot start.
-struct Placeholder {
+/// The screen of a tool that cannot start.
+struct Failed {
     title: String,
-    problem: Option<String>,
+    problem: String,
 }
 
-impl Tool for Placeholder {
+impl Tool for Failed {
     fn draw(&mut self, screen: &mut Screen) {
         let bold = Style {
             bold: true,
             ..Style::default()
         };
         screen.put(0, 0, format!("pinfold {}", self.title), bold);
-        if let Some(problem) = &self.problem {
-            let red = Style {
-                fg: Color::Red,
-                ..Style::default()
-            };
-            let column = screen.put(2, 0, "✕ error", red);
-            screen.put(2, column + 1, problem, Style::default());
-            screen.put(4, 0, "Press any key to leave.", Style::default());
-        } else {
-            screen.put(
-                2,
-                0,
-                "This tool is not built yet. Press q to leave.",
-                Style::default(),
-            );
-        }
+        let red = Style {
+            fg: Color::Red,
+            ..Style::default()
+        };
+        let column = screen.put(2, 0, "✕ error", red);
+        screen.put(2, column + 1, &self.problem, Style::default());
+        screen.put(4, 0, "Press any key to leave.", Style::default());
     }
 
-    fn key(&mut self, key: Key) -> Flow {
-        match (key, &self.problem) {
-            (_, Some(_)) | (Key::Char('q'), None) => Flow::Quit,
-            _ => Flow::Continue,
-        }
+    fn key(&mut self, _: Key) -> Flow {
+        Flow::Quit
     }
 }
 
@@ -335,23 +331,13 @@ mod tests {
 
     #[test]
     fn a_tool_that_cannot_start_shows_the_reason_in_red_and_leaves_on_any_key() {
-        let mut tool = Placeholder {
+        let mut tool = Failed {
             title: "md gone.md".into(),
-            problem: problem(Path::new("gone.md"), Path::is_file),
+            problem: problem(Path::new("gone.md"), Path::is_file).unwrap(),
         };
         let mut screen = Screen::new(6, 60);
         tool.draw(&mut screen);
         assert!(screen.row(2).starts_with("✕ error cannot open gone.md: "));
         assert_eq!(tool.key(Key::Char('j')), Flow::Quit);
-    }
-
-    #[test]
-    fn a_placeholder_quits_on_q_only() {
-        let mut tool = Placeholder {
-            title: "files .".into(),
-            problem: None,
-        };
-        assert_eq!(tool.key(Key::Char('j')), Flow::Continue);
-        assert_eq!(tool.key(Key::Char('q')), Flow::Quit);
     }
 }

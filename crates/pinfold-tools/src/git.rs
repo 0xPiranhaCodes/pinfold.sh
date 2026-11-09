@@ -15,11 +15,11 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 /// Bytes of standard output kept; git is cut short past them.
-const MAX_OUTPUT: usize = 8_000_000;
+pub(crate) const MAX_OUTPUT: usize = 8_000_000;
 /// Bytes of standard error kept, enough for any message git prints.
 const MAX_ERRORS: usize = 64 * 1024;
 /// Time git may run before it is killed.
-const TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Overrides on every call. `-c` beats every configuration file. With every transport refused,
 /// `core.sshCommand`, credential helpers and `core.askPass` cannot be reached; they are emptied
