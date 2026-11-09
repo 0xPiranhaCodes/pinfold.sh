@@ -241,6 +241,9 @@ fn layout(text: &str, width: usize, whole: bool, budget: Duration) -> (Vec<Line>
     if whole {
         let options = Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
         let started = Instant::now();
+        // shortcut: the time is checked between events, so pulldown-cmark's first pass over the
+        // blocks and any one slow event are not cut short; a parse thread with a deadline would
+        // be, if a hostile file is ever found to stall either.
         // Where the text laid out so far ends: a start's range covers its whole element.
         let mut done = 0;
         for (event, range) in Parser::new_ext(text, options).into_offset_iter() {
