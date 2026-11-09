@@ -244,6 +244,9 @@ impl Reactor {
     /// Sizes each pane the active tab shows, and marks the layout new for the window.
     pub(crate) fn lay_out(&mut self) {
         self.revision += 1;
+        if let Some(pane) = self.session.active_tab().map(pinfold_mux::Tab::focused) {
+            self.note_focus(pane as usize);
+        }
         for (pane, rect) in self.shown() {
             let pane = pane as usize;
             let size = self.engine(pane).map(|engine| engine.size());

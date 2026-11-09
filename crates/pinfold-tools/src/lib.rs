@@ -5,6 +5,7 @@
 //! every string, and reads [`Key`]s. [`run`] owns the terminal around it. Every git call goes
 //! through [`git::run`], and the only other process a tool starts is the user's editor.
 
+mod at;
 mod diff;
 mod editor;
 mod files;

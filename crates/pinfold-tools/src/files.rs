@@ -24,12 +24,12 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 use std::{io, thread};
 
-use crate::git;
 use crate::keys::Key;
 use crate::md::{self, Reader, colour};
 use crate::ops;
 use crate::screen::{Color, Screen, Style, escape};
 use crate::{Flow, Tool};
+use crate::{at, git};
 
 /// Entries listed per directory; the rest are counted.
 const MAX_ENTRIES: usize = 10_000;
@@ -44,7 +44,7 @@ const POLL: Duration = Duration::from_secs(1);
 /// Matches the fuzzy jump shows.
 const MAX_JUMPS: usize = 100;
 
-const KEYS: [&str; 14] = [
+const KEYS: [&str; 15] = [
     "j k  ↓ ↑        down or up",
     "h l  ← →        the parent, or into a directory",
     "Enter           into a directory, or a file in the reader",
@@ -55,6 +55,7 @@ const KEYS: [&str; 14] = [
     "Space           mark or unmark; the actions below take the marked, or else the selected",
     "e               edit in $VISUAL or $EDITOR, in this pane",
     "r               rename",
+    "@               type the paths into the last focused agent pane, as the window allows",
     "y x  p          copy or cut, then paste here",
     "d               move to the trash",
     "?               these keys",
@@ -135,7 +136,7 @@ fn text(bytes: &[u8]) -> bool {
 
 /// Whether `name` holds a control or bidi character or invalid UTF-8: anything [`escape`]
 /// changes, so the list of what is hostile lives in one place.
-fn flagged(name: &[u8]) -> bool {
+pub(crate) fn flagged(name: &[u8]) -> bool {
     std::str::from_utf8(name).map_or(true, |name| escape(name.as_bytes()) != name)
 }
 
@@ -344,6 +345,9 @@ pub(crate) struct Files {
     trash: Option<(PathBuf, bool)>,
     /// A file `e` asked to edit, until [`run`](crate::run) takes it.
     editing: Option<PathBuf>,
+    /// An `@` waiting on the window's approval, and what the last one came to.
+    sending: Option<Receiver<Result<String, String>>>,
+    note: Option<String>,
 }
 
 impl Files {
@@ -377,6 +381,8 @@ impl Files {
             confirm: None,
             trash: ops::trash_dir(),
             editing: None,
+            sending: None,
+            note: None,
         };
         files.go(dir, None);
         files
@@ -728,6 +734,14 @@ impl Tool for Files {
     }
 
     fn tick(&mut self) {
+        if let Some(sending) = &self.sending {
+            match sending.try_recv() {
+                Err(TryRecvError::Empty) => {}
+                Ok(Ok(sent)) => (self.note, self.sending) = (Some(sent), None),
+                Ok(Err(problem)) => (self.problem, self.sending) = (Some(problem), None),
+                Err(TryRecvError::Disconnected) => self.sending = None,
+            }
+        }
         match &mut self.pager {
             Some(pager) => pager.tick(),
             None => self.poll(),
@@ -866,6 +880,11 @@ impl Tool for Files {
         } else if let Some(problem) = &self.problem {
             let at = screen.put(status, 0, "✕ error", red);
             screen.put(status, at + 1, problem, Style::default());
+        } else if self.sending.is_some() {
+            let note = "@ waits for the window's approval";
+            screen.put(status, 0, note, colour(Color::Yellow));
+        } else if let Some(note) = &self.note {
+            screen.put(status, 0, note, colour(Color::Green));
         } else if let Some(mark) = self.mark {
             screen.put(
                 status,
@@ -895,7 +914,7 @@ impl Tool for Files {
             }
             return Flow::Continue;
         }
-        self.problem = None;
+        (self.problem, self.note) = (None, None);
         if let Some((action, scroll)) = self.confirm.take() {
             match key {
                 Key::Char('y') => self.act(action),
@@ -967,6 +986,16 @@ impl Tool for Files {
                 }
             }
             Key::Char('r') if self.entry().is_some() => self.naming = Some(String::new()),
+            Key::Char('@') if self.sending.is_none() && self.entry().is_some() => {
+                match at::text(&self.chosen()) {
+                    Ok(text) => {
+                        let (send, receive) = mpsc::channel();
+                        thread::spawn(move || send.send(at::send(&text)));
+                        (self.sending, self.marked) = (Some(receive), BTreeSet::new());
+                    }
+                    Err(problem) => self.problem = Some(problem),
+                }
+            }
             Key::Char('e') => match self.entry() {
                 Some(entry) if !entry.dir => self.editing = Some(self.dir.join(&entry.name)),
                 Some(_) => self.problem = Some("e edits a file, not a directory".to_owned()),

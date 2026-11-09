@@ -138,6 +138,8 @@ struct Pane {
     alerted: bool,
     /// The built-in tool it runs, which no API caller may type into (ADR-0045), and its title.
     tool: Option<(Run, String)>,
+    /// The focus clock's reading when it last took focus, or 0.
+    focused: u64,
 }
 
 impl Pane {
@@ -171,6 +173,9 @@ pub struct Listed<'a> {
     pub message: &'a str,
     /// The built-in tool it runs, or nothing for any other program.
     pub tool: Option<&'a Run>,
+    /// When it last took its tab's focus in the active tab, as an ordering hint: larger is more
+    /// recent, and 0 is never. Not a time.
+    pub focused: u64,
 }
 
 /// What `pane.wait` watches in a pane, with nothing from its screen.
@@ -197,6 +202,8 @@ pub struct Reactor {
     pub(crate) area: Option<Size>,
     /// Counts changes to what a window should show.
     pub(crate) revision: u64,
+    /// Counts focus changes, so `pane.list` can say which pane had focus last.
+    focus_clock: u64,
     /// Starts the shell of each pane a window opens.
     pub(crate) shell: fn() -> Command,
     buffer: Vec<u8>,
@@ -233,6 +240,7 @@ impl Reactor {
             session: Session::default(),
             area: None,
             revision: 0,
+            focus_clock: 0,
             shell: shell::command,
             buffer: vec![0; READ_BUDGET],
             host: Host::default(),
@@ -289,6 +297,7 @@ impl Reactor {
             message: String::new(),
             alerted: false,
             tool: None,
+            focused: 0,
         });
         Ok(pane)
     }
@@ -646,8 +655,20 @@ impl Reactor {
                 reported,
                 message,
                 tool: pane.tool.as_ref().map(|(run, _)| run),
+                focused: pane.focused,
             }
         })
+    }
+
+    /// Stamps `pane` with the next focus reading, unless it already had the last one.
+    pub(crate) fn note_focus(&mut self, pane: usize) {
+        let clock = self.focus_clock;
+        if let Some(pane) = pane_mut(&mut self.panes, pane)
+            && (pane.focused == 0 || pane.focused != clock)
+        {
+            self.focus_clock += 1;
+            pane.focused = self.focus_clock;
+        }
     }
 
     /// Records that `pane` runs `run`, so it is listed as a tool pane and refuses every
@@ -1006,6 +1027,7 @@ mod tests {
             reported: false,
             message: "",
             tool: None,
+            focused: 0,
         };
         assert_eq!(reactor.list().collect::<Vec<_>>(), [expected]);
     }

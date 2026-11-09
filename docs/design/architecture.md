@@ -157,7 +157,7 @@ The daemon listens on a per-user socket and speaks newline-delimited JSON-RPC 2.
 
 | Method                             | Purpose                                                            | Agent-friendly detail                                             |
 | ---------------------------------- | ------------------------------------------------------------------ | ----------------------------------------------------------------- |
-| `pane.list`                        | Panes with id, kind, title, cwd, command and status                | Small JSON, no screen contents                                    |
+| `pane.list`                        | Panes with id, kind, title, cwd, command, status and focus order   | Small JSON, no screen contents                                    |
 | `pane.spawn`                       | Split or new tab, with command, cwd, env and agent profile         | Returns the pane id at once                                       |
 | `pane.send`                        | Send text or keys (`"C-c"`, `"Enter"`)                             | Option to wait until the shell is at a prompt first               |
 | `pane.read`                        | Visible screen or a scrollback range                               | Plain text, ANSI stripped, trailing blanks trimmed, by default    |

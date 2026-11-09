@@ -118,6 +118,9 @@ events for it than it can queue, so a subscriber that was closed may have missed
 `error` or `idle`, with a message of at most 200 characters. A report outranks the pane's OSC 133
 marks, which output can fake, so `pane.list` and `pane.status` events carry `source`: `marks` or
 `reported`. From marks, a command that finished shows `done` or `error` until the next one runs.
+`pane.list` also carries `focused`, an ordering hint rather than a time: larger means the pane
+took focus in the active tab more recently, and 0 means never. `@` in `pinfold files` uses it to
+find the last focused agent pane, as an ordinary caller whose `pane.send` the window approves.
 In a pane `agent.launch` opened, `marks` also covers the CLI's OSC 7501 states and OSC 9
 notifications, which can say `needs-you` ([ADR-0046](../adr/0046-agent-panes-read-needs-you-from-output.md)).
 The window shows the state as glyph, colour and word, and the message only in its own chrome. `pinfold
