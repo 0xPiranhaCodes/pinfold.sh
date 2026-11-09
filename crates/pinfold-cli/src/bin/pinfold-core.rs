@@ -14,6 +14,7 @@ use pinfold_api::control::{
     self, Control, Method, Request, Subscriber, Topics, Until, Wait, Workspace,
 };
 use pinfold_api::spawn::Place;
+use pinfold_api::tool::{Run, Tool};
 use pinfold_api::trust::{self, State};
 use pinfold_api::{KEY_CONTEXT, redact, redact_last_lines};
 use pinfold_cli::audit;
@@ -1145,6 +1146,48 @@ fn replay(file: &str) -> io::Result<()> {
     }
 }
 
+/// Opens `panes` tabs of the built-in tool `name` on `path`, as `tool.open` starts one, says the
+/// first one's pid on stdout, then idles until killed. With `close`, it closes them after a
+/// second and says the pid of a tool that is gone. `cargo xtask mem-gate` measures this.
+fn tool_panes(panes: usize, name: &str, path: &str, close: bool) -> io::Result<()> {
+    let tool = [Tool::Md, Tool::Files, Tool::Diff]
+        .into_iter()
+        .find(|tool| tool.name() == name)
+        .ok_or_else(|| io::Error::other("no such tool"))?;
+    let run = Run {
+        tool,
+        path: path.to_owned(),
+        staged: false,
+        range: None,
+    };
+    let binary = sibling("pinfold")?;
+    let mut reactor = Reactor::new()?;
+    let mut opened = Vec::new();
+    for _ in 0..panes {
+        let command = tool::command(&binary, &run).map_err(io::Error::other)?;
+        opened.push(
+            reactor
+                .open_tab(command, ROWS, COLUMNS)
+                .map_err(io::Error::other)?,
+        );
+    }
+    let pid = (opened.first().and_then(|&pane| reactor.pid(pane)))
+        .ok_or_else(|| io::Error::other("no tool pane"))?;
+    if close {
+        let until = Instant::now() + Duration::from_secs(1);
+        while let Some(left) = until.checked_duration_since(Instant::now()) {
+            reactor.turn(Some(left))?;
+        }
+        for pane in opened {
+            reactor.close_pane(pane);
+        }
+    }
+    writeln!(io::stdout(), "{pid}")?;
+    loop {
+        reactor.turn(Some(IDLE))?;
+    }
+}
+
 fn run(args: &[&str]) -> io::Result<()> {
     match *args {
         [] => serve(1),
@@ -1161,8 +1204,12 @@ fn run(args: &[&str]) -> io::Result<()> {
             None,
         ),
         ["--replay", file] => replay(file),
+        ["--tool", panes, name, path] => {
+            tool_panes(panes.parse().map_err(io::Error::other)?, name, path, false)
+        }
+        ["--tool-closed", name, path] => tool_panes(1, name, path, true),
         _ => Err(io::Error::other(
-            "usage: pinfold-core [--no-shell | --idle <panes> | --window <panes> <width>x<height> | --replay <file>]",
+            "usage: pinfold-core [--no-shell | --idle <panes> | --window <panes> <width>x<height> | --replay <file> | --tool <panes> <md|files|diff> <path> | --tool-closed <md|files|diff> <path>]",
         )),
     }
 }

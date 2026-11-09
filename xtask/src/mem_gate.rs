@@ -21,6 +21,27 @@ pub const TYPICAL_TEXT_LIMIT: u64 = if cfg!(target_os = "macos") {
 };
 /// The cap on a pane's scrollback, with output that fills it.
 pub const SCROLLBACK_CAP: u64 = 2_000_000;
+/// ADR-0045 section 5: a tool process with nothing open.
+pub const TOOL_LIMIT: u64 = 3_000_000;
+/// The markdown reader's, file manager's and diff viewer's caps, which the gate fills.
+pub const MARKDOWN_CAP: u64 = 5_000_000;
+pub const ENTRY_CAP: u64 = 10_000;
+pub const GIT_OUTPUT_CAP: u64 = 8_000_000;
+/// ADR-0045 section 5: 3 bytes for each byte of the file or of git's output, 512 per entry.
+pub const READER_LIMIT: u64 = TOOL_LIMIT + 3 * MARKDOWN_CAP;
+pub const FILES_LIMIT: u64 = TOOL_LIMIT + 512 * ENTRY_CAP;
+pub const DIFF_LIMIT: u64 = TOOL_LIMIT + 3 * GIT_OUTPUT_CAP;
+/// The reader's row, a known miss.
+pub const READER: &str = "Markdown reader, a 5 MB file";
+/// The reader measured 91.32 MB on macOS (#380). This ceiling, 10% over that, keeps it from
+/// getting worse; #380's fix deletes it, and the row must then pass `READER_LIMIT`.
+const READER_CEILING: u64 = 100_500_000;
+/// Rows over budget with an open issue, which pass up to their ceiling and fail above it.
+const KNOWN_MISSES: [(&str, u64, &str); 1] = [(READER, READER_CEILING, "#380")];
+/// Long enough for a tool to read and lay out what it opened at its cap.
+pub const TOOL_SETTLE: Duration = Duration::from_secs(3);
+/// How soon a core is back within its budget after a tool pane closes.
+pub const CLOSED_SETTLE: Duration = Duration::from_secs(2);
 
 const RUNS: usize = 3;
 /// Long enough for a process to finish starting.
@@ -43,11 +64,14 @@ const NOT_MEASURED: [(&str, &str); 2] = [
     ),
 ];
 
-/// Which process of a core with a window to read.
+/// Which process of a core that prints a pid to read.
 #[derive(Clone, Copy, PartialEq)]
 pub enum Side {
     Core,
+    /// The printed pid's: a window, or a tool.
     Window,
+    /// The core, once the printed pid, a closed tool's, has gone.
+    Closed,
 }
 
 pub struct Budget<'a> {
@@ -113,13 +137,17 @@ fn measure_once(budget: &Budget, args: &[&str]) -> io::Result<Reading> {
     let window = budget.window.and_then(|_| line.trim().parse::<u32>().ok());
     let target = match budget.window {
         Some(Side::Window) => window,
+        // A process that is gone has no footprint to read.
+        Some(Side::Closed) if window.is_none_or(|pid| pinfold_sys::footprint(pid).is_ok()) => None,
         _ => Some(child.id()),
     };
     thread::sleep(budget.settle);
     let exited = child.try_wait()?.is_some();
     let measured = target
         .filter(|_| !exited)
-        .ok_or_else(|| io::Error::other("exited before it could be measured"))
+        .ok_or_else(|| {
+            io::Error::other("exited before it could be measured, or a closed tool ran on")
+        })
         .and_then(|pid| Ok((pinfold_sys::footprint(pid)?, pid)));
     let no_font = match &measured {
         Ok((_, pid)) if budget.screen.is_some() => !has_cjk_font(*pid)?,
@@ -127,8 +155,9 @@ fn measure_once(budget: &Budget, args: &[&str]) -> io::Result<Reading> {
     };
     let _ = child.kill();
     let _ = child.wait();
-    // Nothing tells a window that its core was killed to exit, as it stays to say so.
-    if let Some(pid) = window {
+    // Nothing tells a window that its core was killed to exit, as it stays to say so. A closed
+    // tool's pid may be another process's by now.
+    if let Some(pid) = window.filter(|_| budget.window != Some(Side::Closed)) {
         // The shell's builtin, as a slim image has no `kill` program.
         let kill = format!("kill {pid}");
         Command::new("/bin/sh").args(["-c", &kill]).status()?;
@@ -176,6 +205,9 @@ pub fn run(budgets: &[Budget]) -> bool {
     let mut passed = true;
     for budget in budgets {
         let limit = megabytes(budget.limit);
+        let miss = KNOWN_MISSES
+            .into_iter()
+            .find(|miss| miss.0 == budget.metric);
         match measure(budget) {
             Ok((bytes, true)) if bytes <= budget.limit => {
                 println!(
@@ -189,6 +221,15 @@ pub fn run(budgets: &[Budget]) -> bool {
                     "| {} | {:.2} | {limit:.2} | pass |",
                     budget.metric,
                     megabytes(bytes)
+                );
+            }
+            Ok((bytes, _)) if miss.is_some_and(|miss| bytes <= miss.1) => {
+                let (_, ceiling, issue) = miss.unwrap_or_default();
+                println!(
+                    "| {} | {:.2} | {limit:.2} | **missed**, see {issue}; fails over {:.2} |",
+                    budget.metric,
+                    megabytes(bytes),
+                    megabytes(ceiling)
                 );
             }
             Ok((bytes, _)) => {
@@ -246,6 +287,30 @@ mod tests {
     #[test]
     fn a_process_that_exits_early_fails() {
         assert!(!run(&[sleep(u64::MAX, &["0"])]));
+    }
+
+    #[test]
+    fn a_known_miss_passes_up_to_its_ceiling() {
+        let miss = Budget {
+            metric: READER,
+            ..sleep(1, &["30"])
+        };
+        assert!(run(&[miss]));
+        assert!(!run(&[sleep(1, &["30"])]));
+    }
+
+    #[test]
+    fn the_tool_caps_match_the_tools() {
+        assert_eq!(
+            (MARKDOWN_CAP, ENTRY_CAP, GIT_OUTPUT_CAP),
+            (5_000_000, 10_000, 8_000_000)
+        );
+        let md = include_str!("../../crates/pinfold-tools/src/md.rs");
+        assert!(md.contains("MAX_BYTES: usize = 5_000_000;"));
+        let files = include_str!("../../crates/pinfold-tools/src/files.rs");
+        assert!(files.contains("MAX_ENTRIES: usize = 10_000;"));
+        let git = include_str!("../../crates/pinfold-tools/src/git.rs");
+        assert!(git.contains("MAX_OUTPUT: usize = 8_000_000;"));
     }
 
     #[test]

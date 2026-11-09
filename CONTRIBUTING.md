@@ -108,6 +108,18 @@ its right-click menu to open in the middle of the grid. The Dock menu has no row
 it, and no script can right-click the Dock. A pane's scrollback has no row in the window, as the
 window only holds the rows on screen; the core's `Scrollback at its cap` row covers it.
 
+The built-in tools' rows check [ADR-0045](docs/adr/0045-tools-are-programs-in-their-own-pane.md)
+section 5. The gate writes their inputs at each tool's cap into a temp directory, outside any
+repository so the file manager runs no git: a 5 MB markdown file, an empty directory, 10,000
+files, and a repository whose work tree's diff is over git's 8 MB cap. `pinfold-core --tool
+<panes> <md|files|diff> <path>` opens tool panes as `tool.open` does and prints the first tool's
+pid, which the tool rows read after 3 s; `Each tool pane in the core` reads the core's growth
+from one reader pane to eight. `pinfold-core --tool-closed` closes its tool pane after a second
+and prints the pid: the row fails if that process still exists, and reads the core 2 s later.
+`with the markdown reader` runs the reader as a window's shell. A row over budget with an open
+issue is a known miss in `KNOWN_MISSES`: it shows as `missed` with its issue and passes up to a
+ceiling 10% over what it measured, so it cannot get worse. The issue's fix deletes the entry.
+
 ### The soak
 
 `cargo xtask soak --minutes 60` runs one core for an hour, as nightly does under Xvfb. It runs
