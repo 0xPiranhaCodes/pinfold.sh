@@ -119,19 +119,39 @@ every 10 seconds in all. Linux marks the tab only. A plain shell pane never read
 [agents.claude]
 command = ["claude"]
 sandbox = true
+keep_env = ["ANTHROPIC_API_KEY"]
 ```
 
-The sandbox hides `~/.ssh`, the directory of this file, PinFold's state directory, and every
-other pane's terminal device, and where any of those directories, or this file, lead
-through a symlink. On macOS it is `/usr/bin/sandbox-exec`, which denies reads and
-writes there. On Linux it is bubblewrap, which puts an empty directory over each one, gives the
-agent its own `/dev` and `/proc`, and needs unprivileged user namespaces. `bwrap` is taken from
+A sandboxed agent does not get variables whose names look like secrets: any name that holds
+`TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `CREDENTIAL` or `APIKEY`, ends in `_KEY` or `_PAT`, or
+starts with `AWS_`, in any case. `keep_env` names the ones it still gets, such as its own API
+key: at most 16 exact names of letters, digits and `_`, not starting with a digit, and no
+patterns. It does nothing without `sandbox = true`. Other variables reach the agent as before,
+so a secret under a name that matches none of these, such as a password inside `DATABASE_URL`,
+is not stripped. PinFold never logs a variable's value.
+
+The sandbox hides `~/.ssh`, the directory of this file, PinFold's state directory, the common
+credential stores, and every other pane's terminal device, and where any of those, or this
+file, lead through a symlink ([ADR-0041](adr/0041-sandbox-hides-writes-not-secrets.md)). The
+credential stores are `~/.aws`, `~/.azure`, `~/.docker`, `~/.gnupg`, `~/.kube`, `~/.netrc`,
+`~/.Xauthority`, and `gcloud` and `gh` in `~/.config` and in `$XDG_CONFIG_HOME`, and the
+browser profiles: on macOS
+Arc, Brave, Chromium, Firefox, Google Chrome and Microsoft Edge in `~/Library/Application
+Support`, and `~/Library/Safari`; on Linux `~/.mozilla`, `BraveSoftware`, `chromium`,
+`google-chrome` and `microsoft-edge` in the config directories, and the Snap and Flatpak
+profiles in `~/snap/firefox`, `~/snap/chromium` and `~/.var/app/` for Firefox, Chrome and
+Chromium. A store not on this list stays readable, and a tool that needs a hidden one, such as
+`aws` or `gh`, fails inside the sandbox. On macOS it is `/usr/bin/sandbox-exec`, which denies
+reads and writes there. On Linux it is bubblewrap, which puts an empty directory over each
+directory and `/dev/null` over each file, such as `~/.netrc`, gives the agent its own `/dev`
+and `/proc`, and needs unprivileged user namespaces. `bwrap` is taken from
 `/usr/bin`, `/usr/local/bin` or `/bin`, never `PATH`, and only if root alone can change it and
 the directories above it. It must be bubblewrap 0.8 or later, which can stop the agent making
 user namespaces of its own (`--disable-userns`); with an older one the launch fails and names
 the version found.
 If the tool is missing or refuses, the agent does not start: it never runs unsandboxed. A
-directory that does not exist when the agent starts is not hidden on Linux.
+path that does not exist when the agent starts is not mounted over on Linux, and the agent
+cannot make it, as it writes nowhere but its working and temporary directories.
 
 The agent stays in its pane's session with the pane as its controlling terminal, so the API
 still knows it as that pane, and its socket stays reachable. On macOS the sandbox denies typing
@@ -202,9 +222,16 @@ them, so review an agent's changes before you run git or the project's tools. Th
 keeps git from running the agent's code on its own; it does not try to guard every file in the
 working directory that you might later run, and such cases stay limits of this kind (#161).
 
-The agent gets no `SSH_AUTH_SOCK`, `GPG_AGENT_INFO` or `DBUS_SESSION_BUS_ADDRESS`, and reaches no
-Unix socket but PinFold's API socket, so it cannot sign with your ssh-agent without reading
-`~/.ssh`. On macOS the system's name lookup socket also stays reachable. On Linux the agent's
+The agent gets no `SSH_AUTH_SOCK`, `GPG_AGENT_INFO`, `DBUS_SESSION_BUS_ADDRESS`, `DISPLAY`,
+`WAYLAND_DISPLAY`, `WAYLAND_SOCKET` or `XAUTHORITY`, and reaches no Unix socket but PinFold's API socket, so
+it cannot sign with your ssh-agent without reading `~/.ssh`. Direct access to the clipboard is
+blocked: on macOS the sandbox denies looking up the pasteboard service (`com.apple.pasteboard.1`, which
+`pboard` serves) and Universal Clipboard's, so `pbcopy` and `pbpaste` fail, and on Linux the X11
+and Wayland sockets in `/tmp/.X11-unix` and `$XDG_RUNTIME_DIR` are out of reach, and so is
+`~/.Xauthority`, X11's cookie. An X server's abstract socket stays reachable below Landlock ABI
+6 (see below), so there an X server that lets your user in without a cookie, as `xhost
++si:localuser:` does, still serves the agent its clipboard. The network
+stays open: the agent can connect to any host over TCP or UDP. On macOS the system's name lookup socket also stays reachable. On Linux the agent's
 `$XDG_RUNTIME_DIR` and `/tmp` are empty but for the API socket's directory, which is read-only.
 The agent keeps the network, so abstract sockets, such as X11's `@/tmp/.X11-unix/X0` or a
 session bus on `unix:abstract=`, are not hidden by a mount. On Linux 6.12 and later, with
