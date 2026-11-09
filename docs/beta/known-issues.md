@@ -24,6 +24,11 @@ still welcome if it adds a case not listed here. Report bugs with the
 
 ## Install
 
+- **Updating the app does not restart the running session.** The new window keeps using a
+  session started by the previous beta when the two are one link version apart, and quitting the
+  window (⌘Q) leaves the session running, so agents keep starting with the old version's sandbox.
+  After replacing the app, run `pkill -x pinfold-core` in Terminal.app. The session saves itself
+  before it exits, and the next launch restores its layout under the new version.
 - **In `0.1.0-beta.1`, opening PinFold from the disk image breaks it once the image is ejected**
   ([#279](https://github.com/0xPiranhaCodes/pinfold.sh/issues/279)). Its session keeps running
   from the image, a copy in Applications uses that session, and after the eject the session
