@@ -316,6 +316,62 @@ fn a_sandboxed_agent_cannot_open_a_new_terminal() {
     assert!(!output.contains("new=/dev/"), "{output}");
 }
 
+/// No credential store of ADR-0041 can be read, and a missing one breaks nothing.
+#[test]
+fn a_sandboxed_agent_cannot_read_credential_stores() {
+    let home = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("pinfold-stores-{}", std::process::id()));
+    let _removed = Removed(home.clone());
+    let work = home.join("work");
+    fs::create_dir_all(&work).unwrap();
+    let stores = pinfold_config::credential_stores(&home, &home.join(".config"));
+    // The last store is left missing.
+    let (_, present) = stores.split_last().unwrap();
+    let mut script = String::new();
+    for (index, store) in present.iter().enumerate() {
+        let file = if store.ends_with(".netrc") {
+            fs::create_dir_all(&home).unwrap();
+            store.clone()
+        } else {
+            fs::create_dir_all(store).unwrap();
+            store.join("credentials")
+        };
+        fs::write(&file, format!("SECRET-STORE-{index}\n")).unwrap();
+        script += &format!("cat '{}' 2>/dev/null; echo tried={index}; ", file.display());
+    }
+    script += "echo end=reached";
+    for dir in [&home, &work] {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let work = sandbox::working_directory(&work, &stores, LAUNCHD_PATH.as_ref()).unwrap();
+    let api = work.path().join("api.sock");
+    let program = ["/bin/sh".to_owned(), "-c".to_owned(), script];
+    let Some(command) = sandboxed(&program, &stores, &work, &api).unwrap() else {
+        return;
+    };
+    let output = read_until(&Pty::spawn(command, 24, 80).unwrap(), "end=reached");
+    assert!(output.contains("end=reached"), "{output}");
+    assert_eq!(output.matches("tried=").count(), present.len(), "{output}");
+    assert!(!output.contains("SECRET-STORE"), "{output}");
+}
+
+/// The sandboxed command, or nothing on a machine without bwrap, which CI never is (#106).
+fn sandboxed(
+    program: &[String],
+    hidden: &[PathBuf],
+    work: &sandbox::WorkingDirectory,
+    api: &Path,
+) -> std::io::Result<Option<Command>> {
+    match sandbox::command(program, hidden, work, api, None) {
+        Err(error) if cfg!(target_os = "linux") && error.kind() == ErrorKind::NotFound => {
+            assert!(std::env::var_os("CI").is_none(), "{error}");
+            eprintln!("skipped: no bwrap");
+            Ok(None)
+        }
+        command => command.map(Some),
+    }
+}
+
 #[test]
 fn a_bwrap_planted_on_path_is_ignored() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))

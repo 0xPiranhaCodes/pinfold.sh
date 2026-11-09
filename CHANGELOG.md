@@ -9,6 +9,10 @@ Entries are generated from Conventional Commits with git-cliff
 
 ## [Unreleased]
 
+### Security
+
+- A sandboxed agent can no longer read the common credential stores ([#328](https://github.com/0xPiranhaCodes/pinfold.sh/issues/328), [ADR-0041](docs/adr/0041-sandbox-hides-writes-not-secrets.md), now accepted by the maintainer's decision of 2026-11-09). `pinfold_config::credential_stores` lists `~/.aws`, `~/.azure`, `~/.docker`, `~/.gnupg`, `~/.kube`, `~/.netrc`, `gcloud` and `gh` in `~/.config` and `$XDG_CONFIG_HOME`, and this system's browser profiles (7 on macOS, 10 on Linux), and `private_dirs` adds them to what the sandbox hides. On macOS `sandbox-exec` denies reading each, resolving a missing one through its parent; on Linux bubblewrap mounts an empty directory over each directory and, new, `/dev/null` over each file, and skips a missing one. `a_sandboxed_agent_cannot_read_credential_stores` puts a secret in each store but one and runs the real `sandbox-exec` or bubblewrap; it fails with every secret printed when the stores are not hidden. A tool that needs a hidden store, such as `aws` or `gh`, now fails inside the sandbox. `pinfold-core` gains `pinfold-config` as a dev-dependency.
+
 ### Fixed
 
 - A damaged font can no longer reach undefined behaviour in `zeno`, the rasterizer under `swash` ([#310](https://github.com/0xPiranhaCodes/pinfold.sh/issues/310)). zeno converts each outline point with `to_int_unchecked`, which is undefined for NaN and values outside `i32`. It first shifts points by the outline's bounds, and `pinfold-render` already measures every glyph and refuses one wider or taller than its cells allow, so finite points stay in range; but `bounds` skips NaN points. `extent` now refuses an outline with a NaN or infinite point, as it refuses one too large for its cells: from the chosen font such a glyph draws blank, from a fallback font the missing-glyph box shows instead, and a font with one in ASCII is not used. Outlines come from integer font data scaled by a size of 4 to 256 pixels, and no font is known to produce one. `only_finite_outlines_reach_the_rasterizer` covers the check.

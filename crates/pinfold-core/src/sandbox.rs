@@ -677,10 +677,9 @@ fn macos_args(
     }
     for (index, path) in hidden.iter().enumerate() {
         profile += &format!("(deny file-read* file-write* (subpath (param \"H{index}\")))");
-        // The rules match resolved paths, such as /private/var for /var.
-        let path = path.canonicalize().unwrap_or_else(|_| path.clone());
+        // The rules match resolved paths, such as /private/var for /var, even of a missing one.
         let mut define = OsString::from(format!("H{index}="));
-        define.push(path);
+        define.push(resolve(path));
         args.extend([OsString::from("-D"), define]);
     }
     let mut all = vec![OsString::from("-p"), profile.into()];
@@ -693,8 +692,9 @@ fn macos_args(
 /// `/tmp` and IPC, an
 /// empty `runtime` directory but for the API socket's, `work` writable but its `.git` and its
 /// submodules' `modules`, the seccomp filter on fd `filter`, an empty directory over each
-/// hidden one, and the shadow git directory writable over that. A missing directory is skipped, as bwrap would make it outside the sandbox, and so
-/// is one inside another hidden directory, which that one's mount already covers.
+/// hidden directory and `/dev/null` over each hidden file, and the shadow git directory writable
+/// over that. A missing path is skipped, as bwrap would make it outside the sandbox, and so is one
+/// inside another hidden directory, which that one's mount already covers.
 fn linux_args(
     hidden: &[PathBuf],
     program: &[String],
@@ -747,7 +747,7 @@ fn linux_args(
         }
     }
     args.extend(["--seccomp".into(), filter.to_string().into()]);
-    let mounted: Vec<&PathBuf> = hidden.iter().filter(|path| path.is_dir()).collect();
+    let mounted: Vec<&PathBuf> = hidden.iter().filter(|path| path.exists()).collect();
     for path in &mounted {
         if mounted
             .iter()
@@ -755,7 +755,12 @@ fn linux_args(
         {
             continue;
         }
-        args.extend([OsString::from("--tmpfs"), path.into()]);
+        if path.is_dir() {
+            args.extend([OsString::from("--tmpfs"), path.into()]);
+        } else {
+            // A file, such as `~/.netrc`, reads as empty.
+            args.extend(["--ro-bind".into(), "/dev/null".into(), path.into()]);
+        }
     }
     // After the hidden directories, so none of them covers it.
     if let Some(shadow) = &git.shadow {
@@ -1026,8 +1031,16 @@ mod tests {
         for path in [inner.clone(), work.join(".git")] {
             fs::create_dir_all(path).unwrap();
         }
+        // A hidden file, such as `~/.netrc`, outside the temporary directory.
+        let netrc = work.join("netrc");
+        fs::write(&netrc, "machine example.com password secret\n").unwrap();
         // A directory inside another hidden one, before or after it, needs no mount of its own.
-        let hidden = [inner.clone(), root.clone(), PathBuf::from("/nowhere/.ssh")];
+        let hidden = [
+            netrc.clone(),
+            inner.clone(),
+            root.clone(),
+            PathBuf::from("/nowhere/.ssh"),
+        ];
         let api = Path::new("/run/user/7/pinfold/pinfold.sock");
         let runtime = Some(Path::new("/run/user/7"));
         let module = work.join("sub/.git");
@@ -1071,6 +1084,7 @@ mod tests {
         let (work, git) = (work.to_str().unwrap(), work.join(".git"));
         let (git, module) = (git.to_str().unwrap(), module.to_str().unwrap());
         assert!(has(&["--ro-bind", module, module]));
+        assert!(has(&["--ro-bind", "/dev/null", netrc.to_str().unwrap()]));
         assert!(has(&["--tmpfs", "/tmp"]));
         assert!(has(&["--tmpfs", "/run/user/7"]));
         let dir = "/run/user/7/pinfold";
