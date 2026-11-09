@@ -685,6 +685,20 @@ impl Reactor {
         })
     }
 
+    /// Returns the shell for a pane opened from `source`, in the directory the system says
+    /// `source`'s shell is in. Never the OSC 7 one, which output can fake to steer the next
+    /// shell (T4). A directory that is gone or unreadable leaves the shell's own start.
+    pub(crate) fn shell_from(&self, source: Option<usize>) -> Command {
+        let mut command = (self.shell)();
+        let pane = source.and_then(|source| self.pane(source));
+        let cwd =
+            pane.and_then(|pane| pinfold_sys::foreground::cwd(pane.pty.terminal().session).ok());
+        if let Some(cwd) = cwd.filter(|cwd| cwd.is_dir()) {
+            command.current_dir(cwd);
+        }
+        command
+    }
+
     /// Returns a pane's status, whether its agent reported it, and the reported message.
     #[must_use]
     pub fn status(&self, pane: usize) -> Option<(Status, bool, &str)> {
