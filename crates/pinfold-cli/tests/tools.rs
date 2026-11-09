@@ -44,6 +44,10 @@ fn each_tool_quits_on_q_and_restores_the_terminal() {
         "files src",
         "diff",
         "diff --staged main..HEAD",
+        // As the core starts them (#312).
+        "md -- Cargo.toml",
+        "files -- src",
+        "diff --staged -- main..HEAD",
     ] {
         let pty = tool(args).unwrap();
         let mut text = String::new();

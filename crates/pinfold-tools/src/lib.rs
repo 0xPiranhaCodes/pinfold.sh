@@ -49,23 +49,28 @@ impl Command {
     /// assert_eq!(Command::parse(&["diff", "--stat"]), None);
     /// ```
     pub fn parse(words: &[&str]) -> Option<Self> {
-        let not_option = |word: &&str| !word.starts_with('-');
-        Some(match *words {
-            ["md", file] if not_option(&file) => Self::Md { file: file.into() },
-            ["files"] => Self::Files { dir: ".".into() },
-            ["files", dir] if not_option(&dir) => Self::Files { dir: dir.into() },
-            ["diff", ref rest @ ..] => {
-                let (staged, rest) = match rest {
-                    ["--staged", rest @ ..] => (true, rest),
-                    rest => (false, rest),
-                };
-                let range = match rest {
-                    [] => None,
-                    [range] if not_option(range) => Some((*range).to_owned()),
-                    _ => return None,
-                };
-                Self::Diff { staged, range }
-            }
+        let (&tool, rest) = words.split_first()?;
+        let (staged, rest) = match (tool, rest) {
+            ("diff", ["--staged", rest @ ..]) => (true, rest),
+            (_, rest) => (false, rest),
+        };
+        // After `--`, as the core passes it, a path that starts with `-` is still a path.
+        let argument = match rest {
+            [] | ["--"] => None,
+            ["--", word] => Some(*word),
+            [word] if !word.starts_with('-') => Some(*word),
+            _ => return None,
+        };
+        Some(match (tool, argument) {
+            ("md", Some(file)) => Self::Md { file: file.into() },
+            ("files", dir) => Self::Files {
+                dir: dir.unwrap_or(".").into(),
+            },
+            // A range is never an option, even after `--` (ADR-0045 section 4).
+            ("diff", range) if !range.is_some_and(|range| range.starts_with('-')) => Self::Diff {
+                staged,
+                range: range.map(str::to_owned),
+            },
             _ => return None,
         })
     }
@@ -170,11 +175,11 @@ const ENTER: &[u8] = b"\x1b[?1049h\x1b[?25l\x1b[?7l\x1b[?1000h\x1b[?1006h";
 const LEAVE: &[u8] = b"\x1b[?1006l\x1b[?1000l\x1b[?7h\x1b[?25h\x1b[?1049l";
 
 /// The terminal in raw mode and the alternate screen, restored when dropped.
-struct Terminal {
-    _raw: pinfold_sys::tty::Raw,
+struct Terminal<'fd> {
+    _raw: pinfold_sys::tty::Raw<'fd>,
 }
 
-impl Drop for Terminal {
+impl Drop for Terminal<'_> {
     fn drop(&mut self) {
         let mut out = io::stdout();
         let _ = out.write_all(LEAVE).and_then(|()| out.flush());
@@ -241,8 +246,30 @@ mod tests {
             Command::parse(&["diff", "--staged", "main..HEAD"]),
             Some(diff)
         );
+        let dashed = Command::Md {
+            file: "-notes.md".into(),
+        };
+        assert_eq!(Command::parse(&["md", "--", "-notes.md"]), Some(dashed));
+        let dashed = Command::Files { dir: "-x".into() };
+        assert_eq!(Command::parse(&["files", "--", "-x"]), Some(dashed));
+        let staged = Command::Diff {
+            staged: true,
+            range: Some("a..b".to_owned()),
+        };
+        assert_eq!(
+            Command::parse(&["diff", "--staged", "--", "a..b"]),
+            Some(staged)
+        );
+        let plain = Command::Diff {
+            staged: false,
+            range: None,
+        };
+        assert_eq!(Command::parse(&["diff", "--"]), Some(plain));
         for wrong in [
             &["md"][..],
+            &["md", "--"],
+            &["diff", "--", "--output=x"],
+            &["files", "--", "a", "b"],
             &["md", "-x"],
             &["files", "a", "b"],
             &["diff", "--x"],

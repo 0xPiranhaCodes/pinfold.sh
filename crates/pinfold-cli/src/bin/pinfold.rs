@@ -272,7 +272,7 @@ pinfold md: read a markdown file, full screen.
 Usage: pinfold md <file>
 
 Arguments:
-  <file>  The markdown file
+  <file>  The markdown file. Put one whose name starts with - after --
 
 Keys: hjkl or the arrows move, / searches, ? lists the keys, q quits.
 
@@ -286,7 +286,8 @@ pinfold files: browse a directory, full screen.
 Usage: pinfold files [dir]
 
 Arguments:
-  [dir]  The directory (default: the current directory)
+  [dir]  The directory (default: the current directory). Put one whose name starts with -
+         after --
 
 Keys: hjkl or the arrows move, / searches, ? lists the keys, q quits.
 
@@ -299,7 +300,8 @@ pinfold diff: view a git diff, full screen.
 
 Usage: pinfold diff [--staged] [range]
 
-Shows the work tree against the index, or a revision range such as main..HEAD.
+Shows the work tree against the index, or a revision range such as main..HEAD. A range never
+starts with -.
 
 Options:
   --staged  The index against HEAD instead
