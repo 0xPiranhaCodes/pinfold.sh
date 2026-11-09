@@ -369,6 +369,9 @@ fn a_sandboxed_agent_gets_no_secret_variables_but_those_it_keeps() {
         .env("OPENAI_API_KEY", "SECRET-KEY")
         .env("ANTHROPIC_API_KEY", "KEPT-KEY")
         .env("PINFOLD_PLAIN", "VISIBLE")
+        // The display servers', which hold the clipboard.
+        .env("DISPLAY", ":0-SECRET-X11")
+        .env("WAYLAND_DISPLAY", "wayland-SECRET")
         .status()
         .unwrap();
     assert!(status.success());
@@ -397,6 +400,128 @@ fn secrets_child() {
     assert!(output.contains("ANTHROPIC_API_KEY=KEPT-KEY"), "{output}");
     assert!(output.contains("PINFOLD_PLAIN=VISIBLE"), "{output}");
     assert!(!output.contains("SECRET-"), "{output}");
+}
+
+/// The agent cannot reach the clipboard: on macOS the pasteboard service, on Linux an X11 or
+/// Wayland socket where the display servers keep them.
+#[test]
+fn a_sandboxed_agent_cannot_reach_the_clipboard() {
+    let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("pinfold-clipboard-{}", std::process::id()));
+    fs::create_dir_all(&work).unwrap();
+    let _removed = Removed(work.clone());
+    fs::set_permissions(&work, fs::Permissions::from_mode(0o700)).unwrap();
+    let work = sandbox::working_directory(&work, &[], LAUNCHD_PATH.as_ref()).unwrap();
+    let api = work.path().join("api.sock");
+    let mark = format!("pinfold-clipboard-{}", std::process::id());
+    let sh = |script: &str| {
+        let output = Command::new("/bin/sh")
+            .args(["-c", script])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    let (script, _planted) = if cfg!(target_os = "macos") {
+        let before = sh("pbpaste");
+        sh(&format!("printf %s '{mark}' | pbcopy"));
+        if sh("pbpaste") != mark {
+            eprintln!("skipped: no pasteboard outside the sandbox, as in a session with no GUI");
+            return;
+        }
+        let script = "pbpaste; echo paste=$?; echo inside | pbcopy; echo copy=$?; echo end=reached";
+        let Some(command) = sandboxed(&script_program(script), &[], &[], &work, &api).unwrap()
+        else {
+            return;
+        };
+        let output = read_until(&Pty::spawn(command, 24, 80).unwrap(), "end=reached");
+        let after = sh("pbpaste");
+        // Put back what the person had, as text.
+        let mut copy = Command::new("pbcopy")
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::io::Write::write_all(&mut copy.stdin.take().unwrap(), before.as_bytes()).unwrap();
+        copy.wait().unwrap();
+        assert!(output.contains("end=reached"), "{output}");
+        assert!(!output.contains(&mark), "{output}");
+        assert!(
+            !output.contains("paste=0") && !output.contains("copy=0"),
+            "{output}"
+        );
+        assert_eq!(after, mark);
+        return;
+    } else {
+        // Where X11 and Wayland servers listen, as far as this user can make one there.
+        let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+        let x11 = Path::new("/tmp/.X11-unix");
+        let paths: Vec<PathBuf> = [
+            runtime.map(|dir| dir.join(format!("wayland-{mark}"))),
+            x11.is_dir()
+                .then(|| x11.join(format!("X{}", std::process::id()))),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let planted: Vec<(UnixListener, Removed)> = paths
+            .iter()
+            .filter_map(|path| Some((UnixListener::bind(path).ok()?, Removed(path.clone()))))
+            .collect();
+        let quoted: Vec<String> = paths
+            .iter()
+            .map(|path| format!("'{}'", path.display()))
+            .collect();
+        eprintln!("display sockets planted: {}", planted.len());
+        let script = format!(
+            "perl -MSocket -e 'for (@ARGV) {{ socket(my $s, PF_UNIX, SOCK_STREAM, 0) or die; \
+             print connect($s, pack_sockaddr_un($_)) ? \"display=open\\n\" : \"display=closed\\n\" }}' \
+             {}; echo end=reached",
+            quoted.join(" ")
+        );
+        (script, planted)
+    };
+    let Some(command) = sandboxed(&script_program(&script), &[], &[], &work, &api).unwrap() else {
+        return;
+    };
+    let output = read_until(&Pty::spawn(command, 24, 80).unwrap(), "end=reached");
+    assert!(output.contains("end=reached"), "{output}");
+    assert!(!output.contains("display=open"), "{output}");
+}
+
+/// The network stays open (ADR-0041): the agent reaches a host that the test itself reaches.
+#[test]
+fn a_sandboxed_agent_keeps_the_network() {
+    use std::net::{TcpStream, ToSocketAddrs};
+    let reachable = ("example.com", 443)
+        .to_socket_addrs()
+        .ok()
+        .and_then(|mut addresses| {
+            let address = addresses.next()?;
+            TcpStream::connect_timeout(&address, Duration::from_secs(5)).ok()
+        });
+    if reachable.is_none() {
+        eprintln!("skipped: example.com:443 is not reachable outside the sandbox either");
+        return;
+    }
+    let work = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("pinfold-network-{}", std::process::id()));
+    fs::create_dir_all(&work).unwrap();
+    let _removed = Removed(work.clone());
+    fs::set_permissions(&work, fs::Permissions::from_mode(0o700)).unwrap();
+    let work = sandbox::working_directory(&work, &[], LAUNCHD_PATH.as_ref()).unwrap();
+    let api = work.path().join("api.sock");
+    let script = "perl -MIO::Socket::INET -e 'print IO::Socket::INET->new(PeerAddr => \
+                  \"example.com:443\", Timeout => 5) ? \"net=open\\n\" : \"net=closed\\n\"'; \
+                  echo end=reached";
+    let Some(command) = sandboxed(&script_program(script), &[], &[], &work, &api).unwrap() else {
+        return;
+    };
+    let output = read_until(&Pty::spawn(command, 24, 80).unwrap(), "end=reached");
+    assert!(output.contains("net=open"), "{output}");
+}
+
+/// `/bin/sh -c script`.
+fn script_program(script: &str) -> [String; 3] {
+    ["/bin/sh", "-c", script].map(str::to_owned)
 }
 
 /// The sandboxed command, or nothing on a machine without bwrap, which CI never is (#106).
