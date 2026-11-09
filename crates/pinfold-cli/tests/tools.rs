@@ -77,3 +77,46 @@ fn a_tool_that_cannot_start_shows_the_error_until_a_key_and_exits_1() {
     read_until(&pty, &mut text, "exit 1");
     assert!(text.contains("restored"), "{text:?}");
 }
+
+#[test]
+fn e_hands_the_terminal_to_the_editor_as_it_was_then_redraws() {
+    let root = std::env::temp_dir().join(format!("pinfold-edit-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("dir")).unwrap();
+    // The tool shows the directory as the system resolves it, /private/var on macOS.
+    let root = root.canonicalize().unwrap();
+    let dir = root.join("dir");
+    // A name that a shell would run, and that an editor would take for an option.
+    let file = dir.join("-rf; touch ran 'q'.txt");
+    std::fs::write(&file, "").unwrap();
+    let (editor, out) = (root.join("editor.sh"), root.join("out"));
+    std::fs::write(
+        &editor,
+        "#!/bin/sh\n[ \"$(stty -g)\" = \"$MODE\" ] && echo cooked >> \"$OUT\"\n\
+         printf '%s\\n' \"$@\" >> \"$OUT\"\n",
+    )
+    .unwrap();
+    let script = "MODE=$(stty -g); export MODE; \"$PINFOLD\" files -- \"$DIR\"; status=$?; \
+                  [ \"$MODE\" = \"$(stty -g)\" ] && echo restored; echo \"exit $status\"";
+    let mut command = Command::new("/bin/sh");
+    command
+        .args(["-c", script])
+        .env("PINFOLD", env!("CARGO_BIN_EXE_pinfold"))
+        .env("VISUAL", format!("/bin/sh '{}' -x", editor.display()))
+        .env("OUT", &out)
+        .env("DIR", &dir)
+        .current_dir(&root);
+    let pty = Pty::spawn(command, 24, 80).unwrap();
+    let mut text = String::new();
+    read_until(&pty, &mut text, "? keys");
+    pty.master().write_all(b"e").unwrap();
+    let mut redrawn = String::new();
+    read_until(&pty, &mut redrawn, "? keys");
+    let edited = std::fs::read_to_string(&out).unwrap();
+    assert_eq!(edited, format!("cooked\n-x\n{}\n", file.display()));
+    assert!(!root.join("ran").exists() && !dir.join("ran").exists());
+    pty.master().write_all(b"q").unwrap();
+    read_until(&pty, &mut redrawn, "exit 0");
+    assert!(redrawn.contains("restored"), "{redrawn:?}");
+    std::fs::remove_dir_all(root).unwrap();
+}
