@@ -45,6 +45,12 @@ objc2-foundation = { version = "0.3.2", optional = true }
 objc2-metal = { version = "0.3.2", optional = true }
 objc2-quartz-core = { version = "0.3.2", optional = true }
 
+# Only `appkit_reads_a_whole_pasteboard`, which measures what the clipboard avoids.
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+objc2 = "0.6.5"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPasteboard"] }
+objc2-foundation = "0.3.2"
+
 [[test]]
 name = "dock_menu"
 harness = false

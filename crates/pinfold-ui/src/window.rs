@@ -16,12 +16,12 @@ use std::time::Instant;
 
 use mio::Waker;
 use pinfold_config::{Config, MAX_FONT_SIZE, MIN_FONT_SIZE};
-use pinfold_proto::link::{self as proto, MAX_DIMENSION, Position, Rect, Selection};
+use pinfold_proto::link::{self as proto, MAX_DIMENSION, MAX_PASTE, Position, Rect, Selection};
 use pinfold_proto::{Frame, MouseMode};
 use pinfold_render::cpu::{CpuRenderer, Renderer};
 use pinfold_render::font::{Font, FontError};
 use pinfold_render::padding::Padding;
-use pinfold_sys::clipboard::Clipboard;
+use pinfold_sys::clipboard::{Clipboard, Unread};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::error::{EventLoopError, OsError};
@@ -788,8 +788,14 @@ impl App {
     }
 
     fn paste(&mut self) {
-        let Some(text) = self.clipboard().and_then(Clipboard::text) else {
-            return;
+        // The limit bounds the read itself, so a huge clipboard costs the window nothing.
+        let text = match self.clipboard().map(|clipboard| clipboard.text(MAX_PASTE)) {
+            Some(Ok(text)) => text,
+            Some(Err(Unread::TooLarge)) => {
+                self.prompt = Some(Prompt::TooLarge);
+                return self.redraw_soon();
+            }
+            Some(Err(Unread::Empty)) | None => return,
         };
         if self.type_in_bar(&text) || self.vi.is_some() {
             return;
