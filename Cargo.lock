@@ -1402,6 +1402,7 @@ dependencies = [
  "lz4_flex",
  "mio",
  "pinfold-api",
+ "pinfold-config",
  "pinfold-mux",
  "pinfold-proto",
  "pinfold-sys",

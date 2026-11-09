@@ -24,9 +24,11 @@ session from another pane.
 **The API controls are guardrails, not a security boundary.** An unsandboxed agent runs
 as your user. It can read your files, edit your config, and use its own shell instead
 of the API. The controls here stop injected instructions that use Pinfold's API, and
-they make misuse visible. **Only a sandboxed agent is contained**, and in the beta only in
-what it writes and which terminals it reaches: it can still read your credentials and reach
-the network (see Sandbox below).
+they make misuse visible. **Only a sandboxed agent is contained**: in what it writes, which terminals it
+reaches, and the credential stores, secret-looking variables and direct clipboard access it
+is denied. It
+can still read your other files and reach the network, and on macOS read your other
+processes' environment (see Sandbox below).
 
 ## What we protect
 
@@ -259,21 +261,38 @@ MB per pane by default, because hostile output can defeat a line limit.
 
 **Sandbox.** An agent profile may set `sandbox`, which launches the agent under
 bubblewrap or Landlock on Linux and `sandbox-exec` on macOS, or under the agent CLI's own
-sandbox mode. The sandbox hides `~/.ssh`, `~/.config/pinfold`, `~/.local/state/pinfold`
-and other users' panes.
+sandbox mode. The sandbox hides `~/.ssh`, `~/.config/pinfold`, `~/.local/state/pinfold`,
+other users' panes and the common credential stores: `~/.aws`, `~/.azure`, `~/.docker`,
+`~/.gnupg`, `~/.kube`, `~/.netrc`, `gcloud` and `gh` in the config directory, and browser
+profiles (`pinfold_config::credential_stores`, [ADR-0041](../adr/0041-sandbox-hides-writes-not-secrets.md)).
+Before exec it strips every variable whose name looks like a secret (`*_TOKEN`, `*_KEY`,
+`*_SECRET`, `AWS_*` and similar, `sandbox::secret_name`) but those the profile's `keep_env`
+names. It blocks direct access to the clipboard: macOS denies `mach-lookup` of the pasteboard services, and on
+Linux the X11 and Wayland sockets and `~/.Xauthority` are out of reach and `DISPLAY`,
+`WAYLAND_DISPLAY` and `XAUTHORITY` are unset. Below Landlock ABI 6 an X server's abstract
+socket stays reachable (ADR-0038), so an X server that admits the user without a cookie still
+serves the clipboard there. Tests in `crates/pinfold-core/tests/sandbox.rs` run the real `sandbox-exec` and bubblewrap
+for each: `a_sandboxed_agent_cannot_read_credential_stores`,
+`a_sandboxed_agent_gets_no_secret_variables_but_those_it_keeps` and
+`a_sandboxed_agent_cannot_reach_the_clipboard`.
 
-**What the sandbox does not hide.** In the beta the sandbox limits writes, terminals and
-TIOCSTI, and hides only the directories above. It does not keep your credentials, the macOS
-clipboard or the network from the agent ([ADR-0041](../adr/0041-sandbox-hides-writes-not-secrets.md)).
-The macOS profile starts from `(allow default)` and the Linux one from `--ro-bind / /`, so a
-sandboxed agent can read `~/.aws`, `~/.config/gh`, `~/.netrc`, `~/.kube`, browser profiles and
-any other file you can, outside the hidden directories. It inherits every environment variable
-but `SSH_AUTH_SOCK`, `GPG_AGENT_INFO` and `DBUS_SESSION_BUS_ADDRESS`, so a token in your
-environment reaches it. On macOS it can read and write the clipboard. Only Unix sockets are
-limited: it can connect anywhere over TCP or UDP, so it can send what it reads off the machine.
-Do not give a sandboxed agent a home folder whose credentials it must not see. Hiding the
-common credential stores and the clipboard is proposed for v0.1. Sandboxed agents run inside their pane's session, so they keep
-their identity. Everything a sandboxed agent starts stays sandboxed: it, and every pane
+**What the sandbox does not hide.** The macOS profile starts from `(allow default)` and the
+Linux one from `--ro-bind / /`, so a sandboxed agent can read any file you can outside the
+hidden paths, such as a credential store not on the list. A secret in a variable whose name
+matches no pattern, such as a password inside `DATABASE_URL`, reaches it. On macOS it can also
+read the environment of your other processes that are not platform binaries, `pinfold-core`
+and every pane's shell among them, through `sysctl(KERN_PROCARGS2)`, so stripping keeps a
+secret only out of its own environment there. No sandbox rule stops that read without stopping
+the agent's own programs: `(deny process-info* (target others))` and `sysctl-read` rules let it
+through, and an unconditional `(deny process-info*)` stops `python3` from running
+(`tests/macos/sandbox-procargs.sh`, [ADR-0047](../adr/0047-macos-sandbox-reads-other-processes-environment.md),
+Proposed). Linux is not affected, as the agent has its own PID namespace and `/proc`. The
+network is open: the agent can connect anywhere over TCP or UDP, so it can send what it reads
+off the machine (`a_sandboxed_agent_keeps_the_network`). A host allowlist needs its own ADR.
+Do not give a sandboxed agent a home folder whose other credentials it must not see, and on
+macOS do not export secrets in the shells of a user who runs sandboxed agents.
+
+Sandboxed agents run inside their pane's session, so they keep their identity. Everything a sandboxed agent starts stays sandboxed: it, and every pane
 under it, may start only sandboxed agent profiles (`agent.launch`) in its own working
 directory, and `pane.spawn`, which runs the user's plain shell, is refused. The core
 records each sandboxed pane's working directory when it launches it, as OSC 7 from the

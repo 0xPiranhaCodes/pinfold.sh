@@ -247,7 +247,14 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                     data.join("agents").join(name).join(&key[..16])
                 });
                 let shadow = shadow.as_deref();
-                let command = sandbox::command(&agent.command, &hidden, &work, &api, shadow);
+                let command = sandbox::command(
+                    &agent.command,
+                    &hidden,
+                    &agent.keep_env,
+                    &work,
+                    &api,
+                    shadow,
+                );
                 if cfg!(target_os = "linux") {
                     log_abstract_socket_gap();
                 }

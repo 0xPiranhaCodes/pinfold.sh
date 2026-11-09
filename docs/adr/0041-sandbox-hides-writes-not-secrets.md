@@ -1,6 +1,6 @@
-# ADR-0041: For the beta the sandbox limits writes, not reads or the network
+# ADR-0041: The sandbox hides credential stores, secret variables and the clipboard, not the network
 
-- **Status:** Proposed
+- **Status:** Accepted, by the maintainer's decision of 2026-11-09 (#328)
 - **Date:** 2026-11-05
 
 ## Context
@@ -29,44 +29,35 @@ credentials".
 
 ## Decision
 
-For the macOS beta the sandbox stays as it is, and the docs say what it does not do. The threat
-model, the README and `docs/beta/known-issues.md` state that a sandboxed agent can read
-credential stores outside the hidden directories, see the variables it inherits, use the macOS
-clipboard and reach the network.
+For the macOS beta the sandbox stays as it is, and the docs say what it does not do.
 
-For v0.1 we propose that the sandbox hide the common credential stores and the macOS clipboard,
-with a test for each on both platforms that runs the real `sandbox-exec` and bubblewrap. The
-choices to make then:
+For v0.1 I decided on 2026-11-09 (#328):
 
-1. **Denylist or allowlist for reads.**
-   - A denylist adds named stores to `private_dirs`: `~/.aws`, `~/.config/gh`, `~/.netrc`,
-     `~/.kube`, `~/.docker`, `~/.gnupg`, `~/.config/gcloud`, `~/.azure`, and the browser
-     profile directories. It is a small change to code that exists and keeps every tool
-     working, but it misses each store not on the list, and the list needs keeping.
-   - An allowlist lets the agent read only the system, its working directory, its toolchains
-     and named dotfiles. It hides stores nobody listed, but every agent CLI and toolchain needs
-     its own entries, the failures are confusing, and on Linux it replaces `--ro-bind / /` with
-     many binds. We lean to the denylist for v0.1 and an allowlist as an opt-in later.
-2. **Environment.** Strip variables whose names look like secrets (`*_TOKEN`, `*_KEY`,
-   `*_SECRET`, `AWS_*`), or pass only an allowlist. The agent CLI needs its own API key, so the
-   profile would name the variables it keeps.
-3. **Clipboard.** On macOS deny `mach-lookup` of the pasteboard service. On Linux the clipboard is an X11 or
-   Wayland socket, and the tests must show the agent cannot reach either.
-4. **Network.**
-   - Leave it open, as now: agents need their model's API, package registries and git hosts.
-   - Cut it (`--unshare-net`, `(deny network*)`): safe, but no agent CLI that calls a remote
-     model works, so the sandbox becomes useless for them.
-   - Allow named hosts through a proxy the core runs: the only option that keeps agents working
-     and stops exfiltration, but it adds a long-lived network component to the core, which has
-     no async runtime (ADR-0007), and TLS hides the paths. We propose leaving the network open
-     in v0.1, stated plainly, and deciding on a proxy in its own ADR.
+1. **Reads: a denylist.** The sandbox hides the common credential stores, which
+   `pinfold_config::credential_stores` lists and `private_dirs` adds to the hidden set:
+   `~/.aws`, `~/.azure`, `~/.docker`, `~/.gnupg`, `~/.kube`, `~/.netrc`, `gcloud` and `gh` in
+   `~/.config` and `$XDG_CONFIG_HOME`, and the browser profile directories of this system. On
+   macOS `sandbox-exec` denies reading each; on Linux bubblewrap mounts an empty directory over
+   each directory and `/dev/null` over each file. A store that does not exist breaks nothing.
+   A store not on the list stays readable; an allowlist may come later as an opt-in.
+2. **Environment: strip secret-looking variables.** Before exec the core removes every
+   variable whose name looks like a secret, such as `*_TOKEN`, `*_KEY`, `*_SECRET` and `AWS_*`.
+   The agent profile names the few variables it keeps, such as its own API key. The core never
+   logs a variable's value.
+3. **Clipboard: blocked.** On macOS the profile denies `mach-lookup` of the pasteboard service.
+   On Linux the agent cannot reach the X11 or Wayland sockets, nor gets the variables that name
+   them.
+4. **Network: open**, and the docs say so plainly. Agents need their model's API, package
+   registries and git hosts. A proxy that allows named hosts needs its own ADR.
+
+Each control has a test that runs the real `sandbox-exec` and bubblewrap.
 
 ## Consequences
 
-The beta ships no sandbox change, so no new failure for testers, and nobody is told the sandbox
-keeps secrets it does not. A sandboxed agent remains able to read and send credentials the
-person keeps outside `~/.ssh`; a person who needs that kept from an agent must run it without
-those files, or as another user, until v0.1. Hiding more paths later can break an agent that
-used them, so each hidden store needs a known-issues entry when it lands. We would revisit the
-network choice if a proxy that fits ADR-0007 is found, or if agent CLIs gain a mode that talks
-only to their own API.
+A sandboxed agent can no longer read the listed stores, see secret-looking variables the
+profile does not keep, or use the clipboard directly. An agent CLI that read one of those stores, or
+needs a stripped variable, breaks until the profile keeps the variable or the person runs it
+unsandboxed; each hidden store has a known-issues entry. Stores not on the list, and anything
+the agent can reach over the network, are not protected: an agent a prompt injection steers can
+still send what it can read off the machine. We would revisit the network choice if a proxy
+that fits ADR-0007 is found, or if agent CLIs gain a mode that talks only to their own API.

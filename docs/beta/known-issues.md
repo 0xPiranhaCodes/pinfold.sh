@@ -65,14 +65,28 @@ still welcome if it adds a case not listed here. Report bugs with the
 
 ## Sandboxed agents
 
-- **The sandbox does not keep secrets from the agent.** A sandboxed agent profile cannot write
-  outside its working and temporary directories, open another terminal or type with TIOCSTI,
-  and it cannot read `~/.ssh` or PinFold's config and state. It can read every other file you
-  can, such as `~/.aws`, `~/.config/gh`, `~/.netrc`, `~/.kube` and browser profiles, gets your
-  environment variables but the agent sockets', can read and write the clipboard, and can reach
-  the network. Hiding the common credential stores and the clipboard is proposed for v0.1
+- **The sandbox does not keep every secret from the agent.** A sandboxed agent profile cannot
+  write outside its working and temporary directories, open another terminal or type with
+  TIOCSTI, and it cannot read `~/.ssh`, PinFold's config and state, or the common credential
+  stores: `~/.aws`, `~/.azure`, `~/.docker`, `~/.gnupg`, `~/.kube`, `~/.netrc`,
+  `~/.config/gcloud`, `~/.config/gh` and browser profiles
+  ([configuration](../configuration.md#agent-profiles) lists them). A tool that needs one, such
+  as `aws`, `gh`, `docker login` or `kubectl`, fails inside the sandbox. Nor does it get
+  variables whose names look like secrets, such as `*_TOKEN`, `*_KEY` and `AWS_*`, so an agent
+  CLI that reads its API key from the environment needs `keep_env` in its profile
+  ([configuration](../configuration.md#agent-profiles)). Direct access to the clipboard is
+  blocked; on Linux below Landlock ABI 6 an X server that admits you without a cookie still
+  serves it. The agent
+  can read every other file you can, gets every other variable, and can reach the network
   ([ADR-0041](../adr/0041-sandbox-hides-writes-not-secrets.md),
-  [#216](https://github.com/0xPiranhaCodes/pinfold.sh/issues/216)).
+  [#328](https://github.com/0xPiranhaCodes/pinfold.sh/issues/328)).
+- **On macOS a sandboxed agent can read your other processes' environment.** Through
+  `sysctl(KERN_PROCARGS2)` it reads the variables of `pinfold-core`, every pane's shell and other
+  programs you run that are not part of macOS, so a token you exported in a shell reaches it even
+  though its own environment is stripped. No sandbox rule stops this without stopping the agent's
+  own programs (`tests/macos/sandbox-procargs.sh`). Do not export secrets in your shells while
+  you run sandboxed agents. Linux is not affected
+  ([ADR-0047](../adr/0047-macos-sandbox-reads-other-processes-environment.md), Proposed).
 
 ## Not yet checked on an installed build
 

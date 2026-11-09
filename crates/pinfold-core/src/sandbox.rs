@@ -15,6 +15,11 @@
 //! programs' Unix sockets, such as ssh-agent's, it reaches only PinFold's API socket, and on
 //! Linux with Landlock ABI 6 no abstract socket bound outside the sandbox (ADR-0038).
 //!
+//! It cannot read the common credential stores, gets no variable whose name looks like a secret
+//! but those its profile keeps, and cannot reach the clipboard: macOS denies the pasteboard
+//! service, and on Linux the X11 and Wayland sockets are out of reach. The network stays open
+//! (ADR-0041).
+//!
 //! A missing tool is an error: a pane that asked for a sandbox never runs without one.
 
 use std::ffi::{OsStr, OsString};
@@ -34,11 +39,28 @@ const BWRAP: [&str; 3] = ["/usr/bin/bwrap", "/usr/local/bin/bwrap", "/bin/bwrap"
 /// The oldest bubblewrap with `--disable-userns`.
 const BWRAP_OLDEST: (u32, u32) = (0, 8);
 
-/// Variables that name other programs' sockets, which the agent does not get.
-const SOCKET_VARS: [&str; 3] = [
+/// Variables that name other programs' sockets, which the agent does not get: agents', the
+/// session bus's, and the X11 and Wayland displays', which hold the clipboard, with X11's cookie
+/// file (ADR-0041).
+const SOCKET_VARS: [&str; 7] = [
     "SSH_AUTH_SOCK",
     "GPG_AGENT_INFO",
     "DBUS_SESSION_BUS_ADDRESS",
+    "DISPLAY",
+    "WAYLAND_DISPLAY",
+    "WAYLAND_SOCKET",
+    "XAUTHORITY",
+];
+
+/// Words in the name of a variable that holds a secret, such as `GITHUB_TOKEN` or
+/// `AZURE_CLIENT_SECRET`, which a sandboxed agent does not get (ADR-0041).
+const SECRET_WORDS: [&str; 6] = [
+    "TOKEN",
+    "SECRET",
+    "PASSWORD",
+    "PASSWD",
+    "CREDENTIAL",
+    "APIKEY",
 ];
 
 /// The macOS rules: everything is allowed but the hidden directories, every terminal by name and
@@ -46,6 +68,15 @@ const SOCKET_VARS: [&str; 3] = [
 const PROFILE: &str = "(version 1)(allow default)\
 (deny file-read* file-write* (regex #\"^/dev/ttys[0-9]+$\"))\
 (deny file-ioctl (ioctl-command 2147578994))";
+
+/// The macOS clipboard rule (ADR-0041): no lookup of the pasteboard server's services,
+/// `com.apple.pasteboard.1` and `com.apple.coreservices.uauseractivitypasteboardclient.xpc`,
+/// which `/System/Library/LaunchAgents/com.apple.pboard.plist` lists for `/usr/libexec/pboard`,
+/// nor of Universal Clipboard's `com.apple.coreservices.uasharedpasteboard*`, as `launchctl
+/// print gui/$UID` lists them on macOS 27.
+const CLIPBOARD: &str = "(deny mach-lookup (global-name \"com.apple.pasteboard.1\")\
+(global-name \"com.apple.coreservices.uauseractivitypasteboardclient.xpc\")\
+(global-name-prefix \"com.apple.coreservices.uasharedpasteboard\"))";
 
 /// The macOS write rule: nowhere but the working directory `W`, the user's temporary directory
 /// `T`, `/private/tmp` and `/dev`.
@@ -405,8 +436,30 @@ fn resolve(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// Whether a variable's name looks like a secret's: it holds `TOKEN`, `SECRET`, `PASSWORD`,
+/// `PASSWD`, `CREDENTIAL` or `APIKEY`, ends in `_KEY` or `_PAT`, or starts with `AWS_`, in any
+/// case. A sandboxed agent does not get such a variable unless its profile keeps it.
+///
+/// ```
+/// use pinfold_core::sandbox::secret_name;
+/// for name in ["GITHUB_TOKEN", "OPENAI_API_KEY", "AWS_PROFILE", "db_password", "GH_PAT"] {
+///     assert!(secret_name(name.as_ref()), "{name}");
+/// }
+/// for name in ["PATH", "HOME", "LANG", "KEYBOARD", "TERM"] {
+///     assert!(!secret_name(name.as_ref()), "{name}");
+/// }
+/// ```
+pub fn secret_name(name: &OsStr) -> bool {
+    let name = name.to_string_lossy().to_ascii_uppercase();
+    name.starts_with("AWS_")
+        || name.ends_with("_KEY")
+        || name.ends_with("_PAT")
+        || SECRET_WORDS.iter().any(|word| name.contains(word))
+}
+
 /// Returns the command that runs `program` with `hidden` unreadable, only `work` and temporary
-/// directories writable and, of Unix sockets, only the API's at `api` reachable, for
+/// directories writable, no variable whose [`secret_name`] is not in `keep` and, of Unix
+/// sockets, only the API's at `api` reachable, for
 /// [`Reactor::spawn`](crate::io::Reactor::spawn). On Linux, given a `shadow` directory and a
 /// `work` with a `.git` directory, the agent's git uses [`shadow`] there. On Linux below Landlock ABI 6 abstract sockets
 /// stay reachable. Spawn it once: on Linux its seccomp filter is read to the end by the first
@@ -433,7 +486,7 @@ fn resolve(path: &Path) -> PathBuf {
 /// let work = sandbox::working_directory(&project, &[], "/usr/bin".as_ref())?;
 /// let program = ["/bin/echo".to_owned(), "hi".to_owned()];
 /// let api = std::env::temp_dir().join("pinfold/pinfold.sock");
-/// match sandbox::command(&program, &[], &work, &api, None) {
+/// match sandbox::command(&program, &[], &[], &work, &api, None) {
 ///     Ok(command) => assert_ne!(command.get_program(), "/bin/echo"),
 ///     // No bubblewrap here: the pane does not start.
 ///     Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
@@ -444,6 +497,7 @@ fn resolve(path: &Path) -> PathBuf {
 pub fn command(
     program: &[String],
     hidden: &[PathBuf],
+    keep: &[String],
     work: &WorkingDirectory,
     api: &Path,
     shadow: Option<&Path>,
@@ -501,6 +555,12 @@ pub fn command(
     }
     for name in SOCKET_VARS {
         command.env_remove(name);
+    }
+    // Names only: a value is never read here, nor logged.
+    for (name, _) in std::env::vars_os() {
+        if secret_name(&name) && !keep.iter().any(|kept| name == kept.as_str()) {
+            command.env_remove(name);
+        }
     }
     if let Some(dir) = &git.shadow {
         command
@@ -649,7 +709,7 @@ fn macos_args(
     api: &Path,
     found: &Git,
 ) -> Vec<OsString> {
-    let mut profile = format!("{PROFILE}{WRITES}{GIT}{SOCKETS}");
+    let mut profile = format!("{PROFILE}{CLIPBOARD}{WRITES}{GIT}{SOCKETS}");
     let temp = std::env::temp_dir();
     let temp = temp.canonicalize().unwrap_or(temp);
     let git = work.join(".git");
@@ -677,10 +737,9 @@ fn macos_args(
     }
     for (index, path) in hidden.iter().enumerate() {
         profile += &format!("(deny file-read* file-write* (subpath (param \"H{index}\")))");
-        // The rules match resolved paths, such as /private/var for /var.
-        let path = path.canonicalize().unwrap_or_else(|_| path.clone());
+        // The rules match resolved paths, such as /private/var for /var, even of a missing one.
         let mut define = OsString::from(format!("H{index}="));
-        define.push(path);
+        define.push(resolve(path));
         args.extend([OsString::from("-D"), define]);
     }
     let mut all = vec![OsString::from("-p"), profile.into()];
@@ -693,8 +752,9 @@ fn macos_args(
 /// `/tmp` and IPC, an
 /// empty `runtime` directory but for the API socket's, `work` writable but its `.git` and its
 /// submodules' `modules`, the seccomp filter on fd `filter`, an empty directory over each
-/// hidden one, and the shadow git directory writable over that. A missing directory is skipped, as bwrap would make it outside the sandbox, and so
-/// is one inside another hidden directory, which that one's mount already covers.
+/// hidden directory and `/dev/null` over each hidden file, and the shadow git directory writable
+/// over that. A missing path is skipped, as bwrap would make it outside the sandbox, and so is one
+/// inside another hidden directory, which that one's mount already covers.
 fn linux_args(
     hidden: &[PathBuf],
     program: &[String],
@@ -747,7 +807,7 @@ fn linux_args(
         }
     }
     args.extend(["--seccomp".into(), filter.to_string().into()]);
-    let mounted: Vec<&PathBuf> = hidden.iter().filter(|path| path.is_dir()).collect();
+    let mounted: Vec<&PathBuf> = hidden.iter().filter(|path| path.exists()).collect();
     for path in &mounted {
         if mounted
             .iter()
@@ -755,7 +815,12 @@ fn linux_args(
         {
             continue;
         }
-        args.extend([OsString::from("--tmpfs"), path.into()]);
+        if path.is_dir() {
+            args.extend([OsString::from("--tmpfs"), path.into()]);
+        } else {
+            // A file, such as `~/.netrc`, reads as empty.
+            args.extend(["--ro-bind".into(), "/dev/null".into(), path.into()]);
+        }
     }
     // After the hidden directories, so none of them covers it.
     if let Some(shadow) = &git.shadow {
@@ -981,7 +1046,7 @@ mod tests {
         let args = macos_args(&hidden, &program, work, api, &found);
         let args = strings(&args);
         assert_eq!(args[0], "-p");
-        assert!(args[1].starts_with(&format!("{PROFILE}{WRITES}{GIT}{SOCKETS}")));
+        assert!(args[1].starts_with(&format!("{PROFILE}{CLIPBOARD}{WRITES}{GIT}{SOCKETS}")));
         assert!(args[1].ends_with(
             "(deny file-write* (literal (param \"K0\")))\
              (deny file-write* (subpath (param \"C1\")))\
@@ -1026,8 +1091,16 @@ mod tests {
         for path in [inner.clone(), work.join(".git")] {
             fs::create_dir_all(path).unwrap();
         }
+        // A hidden file, such as `~/.netrc`, outside the temporary directory.
+        let netrc = work.join("netrc");
+        fs::write(&netrc, "machine example.com password secret\n").unwrap();
         // A directory inside another hidden one, before or after it, needs no mount of its own.
-        let hidden = [inner.clone(), root.clone(), PathBuf::from("/nowhere/.ssh")];
+        let hidden = [
+            netrc.clone(),
+            inner.clone(),
+            root.clone(),
+            PathBuf::from("/nowhere/.ssh"),
+        ];
         let api = Path::new("/run/user/7/pinfold/pinfold.sock");
         let runtime = Some(Path::new("/run/user/7"));
         let module = work.join("sub/.git");
@@ -1071,6 +1144,7 @@ mod tests {
         let (work, git) = (work.to_str().unwrap(), work.join(".git"));
         let (git, module) = (git.to_str().unwrap(), module.to_str().unwrap());
         assert!(has(&["--ro-bind", module, module]));
+        assert!(has(&["--ro-bind", "/dev/null", netrc.to_str().unwrap()]));
         assert!(has(&["--tmpfs", "/tmp"]));
         assert!(has(&["--tmpfs", "/run/user/7"]));
         let dir = "/run/user/7/pinfold";
@@ -1512,6 +1586,7 @@ mod tests {
         let result = command(
             &["agent".to_owned()],
             &[],
+            &[],
             &work,
             Path::new("/nowhere/api.sock"),
             None,
@@ -1532,8 +1607,15 @@ mod tests {
     fn an_empty_program_or_an_option_is_refused() {
         for program in [&[][..], &[String::new()], &["-p".to_owned()]] {
             let work = WorkingDirectory(PathBuf::from("/nowhere"));
-            let error =
-                command(program, &[], &work, Path::new("/nowhere/api.sock"), None).unwrap_err();
+            let error = command(
+                program,
+                &[],
+                &[],
+                &work,
+                Path::new("/nowhere/api.sock"),
+                None,
+            )
+            .unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
         }
     }
