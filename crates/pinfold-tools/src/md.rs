@@ -6,7 +6,6 @@
 //! Each cap is a constant (ADR-0045 section 4), and the reader says above the file when one
 //! cut it.
 
-use std::fs::File;
 use std::io::{self, Read};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -50,7 +49,7 @@ type Line = Vec<Span>;
 
 /// Reads at most [`MAX_BYTES`] of the regular file at `path`, and whether that was all of it.
 pub(crate) fn read(path: &Path) -> io::Result<(Vec<u8>, bool)> {
-    let file = File::open(path)?;
+    let file = pinfold_sys::open_nonblocking(path)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() {
         return Err(io::Error::new(
@@ -834,6 +833,19 @@ mod tests {
         assert_eq!((bytes.len(), whole), (MAX_BYTES, true));
         std::fs::remove_file(&path).unwrap();
         assert!(read(Path::new(".")).is_err(), "a directory is not read");
+    }
+
+    #[test]
+    fn a_fifo_is_refused_without_waiting_for_a_writer() {
+        let path = std::env::temp_dir().join(format!("pinfold-md-fifo-{}", std::process::id()));
+        let made = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let error = read(&path).unwrap_err();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
     }
 
     #[test]
