@@ -1,5 +1,5 @@
-//! `@` in the file manager: the chosen paths typed into the last focused agent pane's prompt
-//! (ADR-0045 section 4). The tool is an ordinary API caller with no extra rights, so this is a
+//! `@` in the file manager and `a` in the diff viewer: the chosen paths, or a hunk with a
+//! comment, typed into the last focused agent pane's prompt (ADR-0045 section 4). The tool is an ordinary API caller with no extra rights, so this is a
 //! `pane.send` to another pane, which the window approves as any cross-pane send is.
 
 use std::os::unix::ffi::OsStrExt;

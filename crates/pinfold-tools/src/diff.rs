@@ -6,8 +6,13 @@
 //! bytes without panicking, keeps each line as a range into them, and caps each structure;
 //! [`Diff::notes`] says which cap cut it, and the viewer shows them above the diff. Every name
 //! and line reaches the screen through [`Screen::put`], which escapes it.
+//!
+//! `a` sends the hunk at the top with a typed comment to the last focused agent pane through
+//! [`at::send`], a `pane.send` the window approves as any cross-pane send (ADR-0045 section 4).
+//! The hunk goes escaped as on screen, capped, and with no trailing newline, so nothing submits.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::iter;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -15,12 +20,13 @@ use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use pinfold_api::control::MAX_SEND;
 use similar::{Algorithm, DiffTag};
 
 use crate::keys::Key;
 use crate::md::colour;
 use crate::screen::{Color, Screen, Style, escape};
-use crate::{Flow, Tool, git};
+use crate::{Flow, Tool, at, git};
 
 /// Files kept; the rest of the diff is dropped.
 const MAX_FILES: usize = 10_000;
@@ -38,6 +44,11 @@ const WORDS_DEADLINE: Duration = Duration::from_millis(50);
 const WATCH_EVERY: Duration = Duration::from_secs(2);
 /// Times the last run's duration that watch mode waits, if longer than [`WATCH_EVERY`].
 const WATCH_TIMES: u32 = 20;
+/// Lines of a hunk sent to an agent; the rest are cut, and the text says how many.
+const MAX_FEEDBACK_LINES: usize = 200;
+/// Bytes of a comment, escaped, sent with a hunk; the rest of `pane.send`'s
+/// [`MAX_SEND`] is the hunk's.
+const MAX_COMMENT: usize = 512;
 
 /// A parsed `git diff`, which owns the bytes its ranges point into.
 pub(crate) struct Diff {
@@ -78,10 +89,11 @@ impl File {
     }
 }
 
-const KEYS: [&str; 10] = [
+const KEYS: [&str; 11] = [
     "n p                 the next or previous file",
     "s                   stage the hunk at the top, after y",
     "r                   revert the hunk at the top, after y",
+    "a                   send the hunk at the top to an agent",
     "v                   unified or side by side",
     "w                   watch: run git again every 2 s or more",
     "j k  ↓ ↑            a line down or up",
@@ -221,6 +233,30 @@ impl Diff {
             .unwrap_or(self.bytes.len());
         let body = self.bytes.get(start..end).filter(|_| self.whole)?;
         Some([header, body].concat())
+    }
+
+    /// File `file`'s hunk `hunk` as an agent is sent it: the file's name, the hunk header and
+    /// its lines, each escaped as the screen shows them, as they are the repository's untrusted
+    /// text. Past [`MAX_FEEDBACK_LINES`] lines, or what fits in [`MAX_SEND`] beside a
+    /// [`MAX_COMMENT`], the rest is cut and a last line says so. It ends with no newline.
+    fn feedback(&self, file: usize, hunk: usize) -> Option<String> {
+        let this = self.files.get(file)?;
+        let hunk = this.hunks.get(hunk)?;
+        let line = |range: &Range<usize>| escape(&text(&self.bytes, range));
+        let mut message = format!("{}\n{}", escape(&this.label()), line(&hunk.header));
+        // Room for the comment, the blank line after it and the note of what is cut.
+        let room = MAX_SEND - MAX_COMMENT - 2 - 32;
+        for (at, range) in hunk.lines.iter().enumerate() {
+            let next = line(range);
+            if at == MAX_FEEDBACK_LINES || message.len() + 1 + next.len() > room {
+                let cut = hunk.lines.len() - at;
+                let _ = write!(message, "\n[{cut} more lines cut]");
+                break;
+            }
+            message.push('\n');
+            message.push_str(&next);
+        }
+        (message.len() <= room + 32).then_some(message)
     }
 }
 
@@ -500,8 +536,13 @@ pub(crate) struct Viewer {
     watch: Option<Watch>,
     /// A stage or revert waiting for `y`.
     confirm: Option<Confirm>,
-    /// Why the last stage or revert did not happen, until the next key.
+    /// Why the last stage, revert or send did not happen, until the next key.
     notice: Option<String>,
+    /// The comment typed for a hunk `a` sends, and the hunk as [`Diff::feedback`] gives it.
+    comment: Option<(String, String)>,
+    /// The send waiting on the window's approval, then where it went until the next key.
+    sending: Option<Receiver<Result<String, String>>>,
+    sent: Option<String>,
 }
 
 /// A stage (`git apply --cached`) or revert (`git apply -R`) of one hunk, drawn in the pane until
@@ -529,6 +570,9 @@ impl Viewer {
             watch: None,
             confirm: None,
             notice: None,
+            comment: None,
+            sending: None,
+            sent: None,
         }
     }
 
@@ -646,6 +690,47 @@ impl Viewer {
         });
     }
 
+    /// Starts a comment for the hunk at the top of the view.
+    fn ask_comment(&mut self) {
+        let found = self.hunk_at_top();
+        let hunk = found.and_then(|hunk| self.diff.feedback(self.selected, hunk));
+        match hunk {
+            Some(hunk) => self.comment = Some((String::new(), hunk)),
+            None => self.notice = Some("No hunk to send here, or its name is too long.".into()),
+        }
+    }
+
+    /// Takes a key while a comment is typed. Pasted text never arrives, as [`crate::keys`]
+    /// drops it, so only typed keys reach it and only Enter sends.
+    fn comment_key(&mut self, key: Key) {
+        let Some((comment, hunk)) = &mut self.comment else {
+            return;
+        };
+        match key {
+            Key::Char(character) => {
+                let mut longer = comment.clone();
+                longer.push(character);
+                if escape(longer.as_bytes()).len() <= MAX_COMMENT {
+                    comment.push(character);
+                }
+            }
+            Key::Backspace => {
+                comment.pop();
+            }
+            Key::Enter => {
+                let text = match escape(comment.as_bytes()) {
+                    comment if comment.is_empty() => hunk.clone(),
+                    comment => format!("{comment}\n\n{hunk}"),
+                };
+                let (send, receive) = mpsc::channel();
+                thread::spawn(move || send.send(at::send(&text)));
+                (self.sending, self.comment) = (Some(receive), None);
+            }
+            Key::Esc => self.comment = None,
+            _ => {}
+        }
+    }
+
     /// Applies `confirm` with `git apply`, then runs `git diff` again once no run is in progress.
     fn apply(&mut self, confirm: &Confirm) {
         let Some(watch) = &mut self.watch else {
@@ -721,6 +806,14 @@ fn line_styles(line: &[u8]) -> (Style, Style) {
 
 impl Tool for Viewer {
     fn tick(&mut self) {
+        if let Some(sending) = &self.sending {
+            match sending.try_recv() {
+                Err(TryRecvError::Empty) => {}
+                Ok(Ok(sent)) => (self.sent, self.sending) = (Some(sent), None),
+                Ok(Err(problem)) => (self.notice, self.sending) = (Some(problem), None),
+                Err(TryRecvError::Disconnected) => self.sending = None,
+            }
+        }
         let Some(watch) = &mut self.watch else {
             return;
         };
@@ -803,11 +896,36 @@ impl Tool for Viewer {
             screen.put(5, 4, "y yes, any other key no", dim);
             return;
         }
+        if let Some((comment, hunk)) = &self.comment {
+            let column = screen.put(2, 2, "◆ ", colour(Color::Yellow));
+            screen.put(
+                2,
+                column,
+                "Send this hunk to the agent pane, with a comment:",
+                bold,
+            );
+            let mut lines = hunk.lines();
+            screen.put(3, 4, lines.next().unwrap_or_default(), bold);
+            screen.put(4, 4, lines.next().unwrap_or_default(), colour(Color::Cyan));
+            let column = screen.put(6, 4, "> ", dim);
+            screen.put(6, column, format!("{comment}▏"), Style::default());
+            let note = "Enter asks the window to send it, Esc drops it";
+            screen.put(8, 4, note, dim);
+            return;
+        }
         let mut top = 1;
         let failed = self.watch.as_ref().and_then(|watch| watch.failed.as_ref());
         for failed in self.notice.iter().chain(failed) {
             let column = screen.put(top, 0, "✕ error", colour(Color::Red));
             screen.put(top, column + 1, failed, Style::default());
+            top += 1;
+        }
+        if self.sending.is_some() {
+            let note = "The hunk waits for the window's approval.";
+            screen.put(top, 0, note, colour(Color::Yellow));
+            top += 1;
+        } else if let Some(sent) = &self.sent {
+            screen.put(top, 0, sent, colour(Color::Green));
             top += 1;
         }
         for note in &self.diff.notes {
@@ -912,7 +1030,11 @@ impl Tool for Viewer {
                 Flow::Continue
             };
         }
-        self.notice = None;
+        (self.notice, self.sent) = (None, None);
+        if self.comment.is_some() {
+            self.comment_key(key);
+            return Flow::Continue;
+        }
         if let Some(confirm) = self.confirm.take() {
             if key == Key::Char('y') {
                 self.apply(&confirm);
@@ -926,6 +1048,7 @@ impl Tool for Viewer {
             Key::Char('v') => self.side = !self.side,
             Key::Char('s') => self.ask(false),
             Key::Char('r') => self.ask(true),
+            Key::Char('a') if self.sending.is_none() => self.ask_comment(),
             Key::Char('w') => {
                 if let Some(watch) = &mut self.watch {
                     watch.on = !watch.on;
@@ -1050,6 +1173,64 @@ mod tests {
         // Any key but `y` drops it, and nothing runs.
         viewer.key(Key::Char('n'));
         assert!(viewer.confirm.is_none() && viewer.notice.is_none());
+    }
+
+    #[test]
+    fn a_hunk_sent_to_an_agent_is_escaped_and_never_ends_a_line() {
+        let diff = parse(format!("{CHANGE}{FILES}").into());
+        let hostile = diff.feedback(4, 0).unwrap();
+        assert_eq!(hostile, "x^[[2J\n@@ -0,0 +1 @@\n+^Ignp<U+202E>.exe^[]0;x^G");
+        let first = diff.feedback(0, 0).unwrap();
+        assert!(first.starts_with("src/main.rs\n@@ -1,3 +1,3 @@ fn main() {\n fn main() {"));
+        assert!(first.ends_with("\n }"), "{first:?}");
+        assert_eq!(diff.feedback(1, 0), None, "a mode change has no hunk");
+    }
+
+    #[test]
+    fn a_hunk_sent_to_an_agent_is_cut_at_200_lines_or_what_pane_send_takes() {
+        let hunk = |lines: usize, line: &str| {
+            let body = format!("+{line}\n").repeat(lines);
+            parse(format!("diff --git a/f b/f\n@@ -0,0 +1,{lines} @@\n{body}").into())
+        };
+        let many = hunk(300, "x").feedback(0, 0).unwrap();
+        assert_eq!(many.lines().count(), 2 + 200 + 1);
+        assert!(many.ends_with("\n+x\n[100 more lines cut]"), "{many:?}");
+        // Each escape is four bytes, so bytes run out before lines do.
+        let long = hunk(100, &"\x1b".repeat(20)).feedback(0, 0).unwrap();
+        assert!(long.len() + MAX_COMMENT + 2 <= MAX_SEND, "{}", long.len());
+        let kept = long.lines().filter(|line| line.starts_with('+')).count();
+        assert!(kept < 100 && long.ends_with(&format!("[{} more lines cut]", 100 - kept)));
+        // The longest comment fits beside it.
+        let comment = "\u{202e}".repeat(MAX_COMMENT / 8);
+        assert_eq!(escape(comment.as_bytes()).len(), MAX_COMMENT);
+    }
+
+    #[test]
+    fn a_comment_takes_typed_keys_and_never_pasted_text() {
+        let diff = parse(format!("{CHANGE}{FILES}").into());
+        let mut viewer = Viewer::new(b"diff".to_vec(), diff);
+        let mut keys = crate::keys::Keys::default();
+        keys.push(b"aok\x1b[200~ evil\r\x1b[201~?\x7f!\r");
+        // Stop short of Enter, which would send.
+        for _ in 0..6 {
+            viewer.key(keys.next(true).unwrap());
+        }
+        assert_eq!(keys.next(true), Some(Key::Enter));
+        let (comment, hunk) = viewer.comment.as_ref().unwrap();
+        assert_eq!(comment, "ok!");
+        assert!(hunk.starts_with("src/main.rs\n"));
+        assert!(viewer.sending.is_none());
+        let mut screen = Screen::new(24, 80);
+        viewer.draw(&mut screen);
+        insta::assert_snapshot!(screen.runs());
+        // A typed comment is capped at its escaped length.
+        for _ in 0..MAX_COMMENT {
+            viewer.key(Key::Char('\u{202e}'));
+        }
+        let (comment, _) = viewer.comment.as_ref().unwrap();
+        assert!(escape(comment.as_bytes()).len() <= MAX_COMMENT);
+        viewer.key(Key::Esc);
+        assert!(viewer.comment.is_none() && viewer.sending.is_none());
     }
 
     #[test]
