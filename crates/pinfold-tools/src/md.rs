@@ -6,9 +6,12 @@
 //! Each cap is a constant (ADR-0045 section 4), and the reader says above the file when one
 //! cut it.
 
+use std::ffi::OsString;
 use std::io::{self, Read};
-use std::path::Path;
-use std::time::{Duration, Instant};
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
+use std::os::unix::fs::MetadataExt;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
 
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
@@ -28,11 +31,15 @@ const MAX_LINES: usize = 100_000;
 const MAX_HEADINGS: usize = 10_000;
 /// Lines a search finds; later ones are not found.
 const MAX_MATCHES: usize = 10_000;
+/// Files Backspace goes back through; older ones are forgotten.
+const MAX_BACK: usize = 100;
+/// How often follow mode checks the file.
+const FOLLOW: Duration = Duration::from_secs(1);
 
 /// Columns `h` and `l` move by.
 const SIDEWAYS: usize = 8;
 
-const KEYS: [&str; 10] = [
+const KEYS: [&str; 13] = [
     "j k  ↓ ↑              a line down or up",
     "h l  ← →              sideways",
     "space b  PgDn PgUp    a page down or up",
@@ -41,6 +48,9 @@ const KEYS: [&str; 10] = [
     "o                     the outline; Enter goes to a heading",
     "/                     search; Enter finds, Esc clears",
     "n N                   the next or the previous match",
+    "Tab Enter  click      the next link, and follow it",
+    "Backspace             back to the file before",
+    "F                     follow: re-read the file when it changes",
     "?                     these keys",
     "q                     quit",
 ];
@@ -113,8 +123,84 @@ fn folded(text: &str) -> String {
     text.to_ascii_lowercase()
 }
 
+/// What follow mode compares: the file's modification time, length and inode.
+type Stamp = (SystemTime, u64, u64);
+
+fn stamp(path: &Path) -> Option<Stamp> {
+    let metadata = std::fs::metadata(path).ok()?;
+    Some((metadata.modified().ok()?, metadata.len(), metadata.ino()))
+}
+
+/// The file a link points at, if it is relative or a `file:` URI, without its `#fragment`.
+/// A relative link is relative to the directory of `file`.
+fn local(file: &Path, target: &str) -> Option<PathBuf> {
+    let target = target.split(['#', '?']).next().unwrap_or_default();
+    let scheme = target.find(':').filter(|&at| {
+        let scheme = &target[..at];
+        scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c))
+    });
+    let path = match scheme {
+        None => target,
+        Some(at) if target[..at].eq_ignore_ascii_case("file") => {
+            let rest = target[at + 1..].strip_prefix("//")?;
+            let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+            rest.starts_with('/').then_some(rest)?
+        }
+        Some(_) => return None,
+    };
+    if path.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(OsString::from_vec(unpercent(path)));
+    Some(file.parent().unwrap_or(Path::new("")).join(path))
+}
+
+/// `text` with each `%XX` decoded.
+fn unpercent(text: &str) -> Vec<u8> {
+    let bytes = text.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while let Some(&byte) = bytes.get(at) {
+        let hex = bytes
+            .get(at + 1..at + 3)
+            .filter(|hex| hex.iter().all(u8::is_ascii_hexdigit))
+            .and_then(|hex| u8::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok());
+        match (byte, hex) {
+            (b'%', Some(hex)) => {
+                decoded.push(hex);
+                at += 3;
+            }
+            _ => {
+                decoded.push(byte);
+                at += 1;
+            }
+        }
+    }
+    decoded
+}
+
+/// `bytes` as text, with invalid UTF-8 as `\xNN`.
+fn decode(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes).unwrap_or_else(|error| {
+        let bytes = error.into_bytes();
+        let mut text = String::with_capacity(bytes.len());
+        for chunk in bytes.utf8_chunks() {
+            text.push_str(chunk.valid());
+            for byte in chunk.invalid() {
+                text.push_str(&format!("\\x{byte:02X}"));
+            }
+        }
+        text
+    })
+}
+
 /// The reader: a file's text, laid out at the screen's width.
 pub(crate) struct Reader {
+    /// The file, which links are relative to and follow mode reads again.
+    pub(crate) path: PathBuf,
     title: Vec<u8>,
     text: String,
     /// The whole file was read, so it is parsed as markdown if `markdown`.
@@ -136,26 +222,24 @@ pub(crate) struct Reader {
     /// The lines the search found, and the one shown.
     matches: Vec<usize>,
     current: usize,
+    /// The link Tab picked, as its line and span.
+    focus: Option<(usize, usize)>,
+    /// A message on the last row until the next key.
+    status: Option<String>,
+    /// The files links came from, with their titles and where they were scrolled to.
+    back: Vec<(PathBuf, Vec<u8>, usize)>,
+    /// Follow mode: what the file was when last read, and when it was last checked.
+    follow: Option<(Option<Stamp>, Instant)>,
 }
 
 impl Reader {
     /// A reader titled `title` for the bytes of a file, all of it if `whole`, or else its
     /// start, which shows as plain text. Invalid UTF-8 shows as `\xNN`.
     pub(crate) fn new(title: Vec<u8>, bytes: Vec<u8>, whole: bool) -> Self {
-        let text = String::from_utf8(bytes).unwrap_or_else(|error| {
-            let bytes = error.into_bytes();
-            let mut text = String::with_capacity(bytes.len());
-            for chunk in bytes.utf8_chunks() {
-                text.push_str(chunk.valid());
-                for byte in chunk.invalid() {
-                    text.push_str(&format!("\\x{byte:02X}"));
-                }
-            }
-            text
-        });
         Self {
+            path: PathBuf::new(),
             title,
-            text,
+            text: decode(bytes),
             whole,
             markdown: true,
             width: 0,
@@ -171,6 +255,10 @@ impl Reader {
             typing: false,
             matches: Vec::new(),
             current: 0,
+            focus: None,
+            status: None,
+            back: Vec::new(),
+            follow: None,
         }
     }
 
@@ -178,6 +266,96 @@ impl Reader {
     pub(crate) fn plain(mut self) -> Self {
         self.markdown = false;
         self
+    }
+
+    /// Shows `bytes` as the file's text, laid out again at the next draw.
+    fn reload(&mut self, bytes: Vec<u8>, whole: bool) {
+        self.text = decode(bytes);
+        self.whole = whole;
+        self.width = 0;
+        self.focus = None;
+    }
+
+    /// Opens the file at `path` in place of this one, scrolled to `top`.
+    fn open(&mut self, path: PathBuf, title: Vec<u8>, top: usize) -> io::Result<()> {
+        let (bytes, whole) = read(&path)?;
+        self.reload(bytes, whole);
+        (self.path, self.title, self.top, self.left) = (path, title, top, 0);
+        self.query.clear();
+        self.matches.clear();
+        self.follow = self.follow.map(|_| (stamp(&self.path), Instant::now()));
+        Ok(())
+    }
+
+    /// Opens a relative or `file:` link in the reader; shows any other link's target.
+    fn follow_link(&mut self, target: &str) {
+        let Some(path) = local(&self.path, target) else {
+            self.status = Some(format!("Not a file, so open it from the text: {target}"));
+            return;
+        };
+        let from = (self.path.clone(), self.title.clone(), self.top);
+        let title = path.as_os_str().as_bytes().to_vec();
+        match self.open(path, title, 0) {
+            Ok(()) => {
+                if self.back.len() == MAX_BACK {
+                    self.back.remove(0);
+                }
+                self.back.push(from);
+            }
+            Err(error) => self.status = Some(format!("Cannot open {target}: {error}")),
+        }
+    }
+
+    /// The first span of each link, as its line and span, in the order of the text.
+    fn links(&self) -> Vec<(usize, usize)> {
+        let mut starts = Vec::new();
+        let mut last = None;
+        for (at, line) in self.lines.iter().enumerate() {
+            for (index, span) in line.iter().enumerate() {
+                // A link wrapped or restyled across spans is one link.
+                if span.link.is_some() && span.link.as_ref() != last {
+                    starts.push((at, index));
+                }
+                last = span.link.as_ref();
+            }
+        }
+        starts
+    }
+
+    fn link(&self, (line, span): (usize, usize)) -> Option<String> {
+        self.lines.get(line)?.get(span)?.link.clone()
+    }
+
+    /// Picks the next link after the one picked, wrapping, and scrolls to it.
+    fn next_link(&mut self) {
+        let links = self.links();
+        let next = links
+            .iter()
+            .find(|&&link| match self.focus {
+                Some(focus) => link > focus,
+                None => link.0 >= self.top,
+            })
+            .or(links.first());
+        self.focus = next.copied();
+        if let Some((line, _)) = self.focus
+            && (line < self.top || line >= self.top + self.page)
+        {
+            self.top = line;
+        }
+    }
+
+    /// The span under a click at `row` and `column` of the screen.
+    fn clicked(&self, row: u16, column: u16) -> Option<(usize, usize)> {
+        let line = (self.top + usize::from(row)).checked_sub(1)?;
+        let mut x = self.left + usize::from(column);
+        for (index, span) in self.lines.get(line)?.iter().enumerate() {
+            let length = span.text.chars().count();
+            if x < length {
+                return Some((line, index));
+            }
+            x -= length;
+        }
+        None
     }
 
     fn last_top(&self) -> usize {
@@ -318,6 +496,7 @@ impl Tool for Reader {
                 MAX_PARSE,
             );
             self.width = columns;
+            self.focus = None;
             self.find();
         }
         self.page = usize::from(rows.saturating_sub(1)).max(1);
@@ -338,8 +517,13 @@ impl Tool for Reader {
             (false, 0) => "no match  ".to_owned(),
             (false, count) => format!("match {}/{count}  ", self.current + 1),
         };
+        let follow = if self.follow.is_some() {
+            "follow  "
+        } else {
+            ""
+        };
         let place = format!(
-            "{found}{}/{}  ? keys",
+            "{follow}{found}{}/{}  ? keys",
             self.top + 1,
             self.lines.len().max(1)
         );
@@ -355,20 +539,31 @@ impl Tool for Reader {
             self.draw_outline(screen, selected);
             return;
         }
-        for (row, line) in (1..rows).zip(self.lines.iter().skip(self.top)) {
+        let lines = self.lines.iter().enumerate().skip(self.top);
+        for (row, (at, line)) in (1..rows).zip(lines) {
             let mut x = 0;
-            for span in line {
+            for (index, span) in line.iter().enumerate() {
                 let length = span.text.chars().count();
+                let focused = Style {
+                    fg: Color::Black,
+                    bg: Color::Blue,
+                    ..span.style
+                };
+                let style = if self.focus == Some((at, index)) {
+                    focused
+                } else {
+                    span.style
+                };
                 if x + length > self.left {
                     let skip = self.left.saturating_sub(x);
                     let column = u16::try_from(x + skip - self.left).unwrap_or(u16::MAX);
-                    let at = span.text.char_indices().nth(skip).map_or(0, |(at, _)| at);
-                    let text = &span.text[at..];
+                    let from = span.text.char_indices().nth(skip).map_or(0, |(at, _)| at);
+                    let text = &span.text[from..];
                     match &span.link {
                         Some(target) => {
-                            screen.put_link(row, column, text, span.style, target.as_bytes())
+                            screen.put_link(row, column, text, style, target.as_bytes())
                         }
-                        None => screen.put(row, column, text, span.style),
+                        None => screen.put(row, column, text, style),
                     };
                 }
                 x += length;
@@ -377,11 +572,31 @@ impl Tool for Reader {
                 self.mark_matches(screen, row, line);
             }
         }
+        let last = rows.saturating_sub(1);
+        let pad = " ".repeat(usize::from(columns));
         if self.typing {
             let prompt = format!("/{}", self.query);
-            let pad = " ".repeat(usize::from(columns));
-            screen.put(rows.saturating_sub(1), 0, prompt + &pad, Style::default());
+            screen.put(last, 0, prompt + &pad, Style::default());
+        } else if let Some(status) = &self.status {
+            screen.put(last, 0, format!("{status}{pad}"), colour(Color::Yellow));
         }
+    }
+
+    fn tick(&mut self) {
+        let Some((seen, checked)) = self.follow else {
+            return;
+        };
+        if checked.elapsed() < FOLLOW {
+            return;
+        }
+        let now = stamp(&self.path);
+        // A file that is gone or is not a regular file keeps showing what was read last.
+        if now != seen
+            && let Ok((bytes, whole)) = read(&self.path)
+        {
+            self.reload(bytes, whole);
+        }
+        self.follow = Some((now, Instant::now()));
     }
 
     fn key(&mut self, key: Key) -> Flow {
@@ -394,6 +609,7 @@ impl Tool for Reader {
             };
         }
         let page = self.page;
+        self.status = None;
         let open = self.typing || self.outline.is_some();
         if self.typing {
             self.type_query(key);
@@ -405,6 +621,7 @@ impl Tool for Reader {
         } else if key == Key::Esc {
             self.query.clear();
             self.matches.clear();
+            self.focus = None;
         }
         if open {
             self.top = self.top.min(self.last_top());
@@ -431,6 +648,32 @@ impl Tool for Reader {
             Key::Char('N') if count > 0 => {
                 self.current = (self.current + count - 1) % count;
                 self.show_match();
+            }
+            Key::Tab => self.next_link(),
+            Key::Enter => {
+                if let Some(target) = self.focus.and_then(|focus| self.link(focus)) {
+                    self.follow_link(&target);
+                }
+            }
+            Key::Backspace => {
+                if let Some((path, title, top)) = self.back.pop()
+                    && let Err(error) = self.open(path, title, top)
+                {
+                    self.status = Some(format!("Cannot go back: {error}"));
+                }
+            }
+            Key::Char('F') => {
+                self.follow = match self.follow {
+                    Some(_) => None,
+                    None => Some((stamp(&self.path), Instant::now())),
+                };
+            }
+            Key::Mouse(mouse) if mouse.pressed && mouse.button == 0 => {
+                let clicked = self.clicked(mouse.row, mouse.column);
+                if let Some(target) = clicked.and_then(|span| self.link(span)) {
+                    self.focus = clicked;
+                    self.follow_link(&target);
+                }
             }
             Key::Char('j') | Key::Down => self.top += 1,
             Key::Char('k') | Key::Up => self.top = self.top.saturating_sub(1),
@@ -1294,6 +1537,159 @@ mod tests {
         let (lines, _, headings) = layout(&markdown, 80, true, false, MAX_PARSE);
         assert_eq!(headings.len(), 1);
         assert_eq!(texts(&lines)[headings[0].line], "# Title");
+    }
+
+    /// A new empty directory for one test.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("pinfold-md-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn reader_of(path: &Path) -> (Reader, Screen) {
+        let (bytes, whole) = read(path).unwrap();
+        let mut reader = Reader::new(b"r.md".to_vec(), bytes, whole);
+        reader.path = path.to_path_buf();
+        let mut screen = Screen::new(24, 80);
+        reader.draw(&mut screen);
+        (reader, screen)
+    }
+
+    #[test]
+    fn relative_and_file_links_are_files_and_others_are_not() {
+        let file = Path::new("/docs/adr/README.md");
+        for (target, want) in [
+            ("0045.md", Some("/docs/adr/0045.md")),
+            ("../design/x.md#caps", Some("/docs/adr/../design/x.md")),
+            ("a%20b%2Fc.md?raw=1", Some("/docs/adr/a b/c.md")),
+            ("%zz%4", Some("/docs/adr/%zz%4")),
+            ("/etc/hosts", Some("/etc/hosts")),
+            ("file:///tmp/a%20b.md", Some("/tmp/a b.md")),
+            ("FILE://localhost/tmp/x", Some("/tmp/x")),
+            ("file://host/x", None),
+            ("file:x.md", None),
+            ("#caps", None),
+            ("", None),
+            ("https://pinfold.sh/a.md", None),
+            ("mailto:a@b", None),
+            ("javascript:alert(1)", None),
+        ] {
+            assert_eq!(local(file, target), want.map(PathBuf::from), "{target}");
+        }
+    }
+
+    #[test]
+    fn a_link_opens_in_the_reader_and_backspace_goes_back() {
+        let dir = scratch("links");
+        let start = dir.join("a.md");
+        let markdown =
+            "See [the web](<https://pinfold.sh/\x1b[2J>) or [b](b.md) or [gone](c.md).\n";
+        std::fs::write(&start, markdown).unwrap();
+        std::fs::write(dir.join("b.md"), "# B\n").unwrap();
+        let (mut reader, mut screen) = reader_of(&start);
+        reader.key(Key::Tab);
+        reader.key(Key::Enter);
+        redraw(&mut reader, &mut screen);
+        assert_eq!(
+            screen.row(23).trim_end(),
+            "Not a file, so open it from the text: https://pinfold.sh/^[[2J"
+        );
+        reader.key(Key::Tab);
+        reader.key(Key::Enter);
+        assert_eq!(
+            (reader.text.as_str(), &reader.path),
+            ("# B\n", &dir.join("b.md"))
+        );
+        reader.key(Key::Backspace);
+        assert_eq!(reader.path, start);
+        reader.key(Key::Tab);
+        reader.key(Key::Tab);
+        reader.key(Key::Tab);
+        reader.key(Key::Enter);
+        redraw(&mut reader, &mut screen);
+        assert!(
+            screen.row(23).starts_with("Cannot open c.md: "),
+            "{}",
+            screen.row(23)
+        );
+        assert_eq!(reader.path, start);
+        reader.key(Key::Tab);
+        assert_eq!(reader.focus, Some((0, 1)), "past the last link, the first");
+        redraw(&mut reader, &mut screen);
+        let at = screen.row(1).find(" b ").unwrap() + 1;
+        let click = crate::keys::Mouse {
+            button: 0,
+            column: u16::try_from(screen.row(1)[..at].chars().count()).unwrap(),
+            row: 1,
+            pressed: true,
+        };
+        reader.key(Key::Mouse(click));
+        assert_eq!(reader.path, dir.join("b.md"), "a click follows a link");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn backspace_remembers_at_most_its_cap_of_files() {
+        let dir = scratch("back");
+        let path = dir.join("self.md");
+        std::fs::write(&path, "[again](self.md)\n").unwrap();
+        let (mut reader, _) = reader_of(&path);
+        for _ in 0..MAX_BACK + 5 {
+            reader.follow_link("self.md");
+        }
+        assert_eq!(reader.back.len(), MAX_BACK);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn follow_mode_reads_a_changed_file_again_and_keeps_the_place() {
+        let dir = scratch("follow");
+        let path = dir.join("log.md");
+        let numbered = |count: usize| {
+            (0..count)
+                .map(|n| format!("line {n}\n\n"))
+                .collect::<String>()
+        };
+        std::fs::write(&path, numbered(40)).unwrap();
+        let (mut reader, mut screen) = reader_of(&path);
+        reader.key(Key::Char('F'));
+        reader.top = 10;
+        let check = |reader: &mut Reader, screen: &mut Screen| {
+            reader.follow = reader
+                .follow
+                .map(|(seen, _)| (seen, Instant::now() - FOLLOW));
+            reader.tick();
+            redraw(reader, screen);
+        };
+        std::fs::write(&path, numbered(60)).unwrap();
+        check(&mut reader, &mut screen);
+        assert_eq!(reader.lines.len(), 119, "a write");
+        assert_eq!((reader.top, screen.row(1).trim_end()), (10, "line 5"));
+        assert!(screen.row(0).contains("follow"));
+        std::fs::write(&path, "").unwrap();
+        check(&mut reader, &mut screen);
+        assert_eq!((reader.lines.len(), reader.top), (0, 0), "truncated");
+        let new = dir.join("new.md");
+        std::fs::write(&new, "replaced\n").unwrap();
+        std::fs::rename(&new, &path).unwrap();
+        check(&mut reader, &mut screen);
+        assert_eq!(screen.row(1).trim_end(), "replaced", "replaced by a rename");
+        std::fs::remove_file(&path).unwrap();
+        let made = std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        check(&mut reader, &mut screen);
+        assert_eq!(
+            screen.row(1).trim_end(),
+            "replaced",
+            "a FIFO is not read, nor waited on"
+        );
+        reader.key(Key::Char('F'));
+        assert!(reader.follow.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

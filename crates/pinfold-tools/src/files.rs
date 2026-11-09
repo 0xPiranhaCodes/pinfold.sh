@@ -213,7 +213,8 @@ impl Files {
         match md::read(&path) {
             Ok((bytes, whole)) => {
                 let title = path.as_os_str().as_bytes().to_vec();
-                let reader = Reader::new(title, bytes, whole);
+                let mut reader = Reader::new(title, bytes, whole);
+                reader.path.clone_from(&path);
                 let markdown = path.extension().is_some_and(|extension| extension == "md");
                 self.pager = Some(if markdown { reader } else { reader.plain() });
             }
@@ -278,6 +279,12 @@ fn column<'a>(
 }
 
 impl Tool for Files {
+    fn tick(&mut self) {
+        if let Some(pager) = &mut self.pager {
+            pager.tick();
+        }
+    }
+
     fn draw(&mut self, screen: &mut Screen) {
         if let Some(pager) = &mut self.pager {
             pager.draw(screen);
