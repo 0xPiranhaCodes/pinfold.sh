@@ -241,6 +241,8 @@ impl State {
             Notice::Markdown { pane, names } => self.markdown = Some((pane, names.to_owned())),
             Notice::Raise => self.raised = true,
             Notice::Unhardened { checked } => self.unhardened = Some(checked),
+            // shortcut: dropped, so OSC 11 stays opaque cells and OSC 12 undrawn, until #400.
+            Notice::Colours { .. } => {}
             Notice::Activity { tabs, alerts } => {
                 (self.activity, self.alerts) = (tabs, alerts);
                 self.laid = true;

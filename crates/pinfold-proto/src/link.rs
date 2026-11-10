@@ -36,10 +36,10 @@
 
 use std::ops::{Range, RangeInclusive};
 
-use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode};
+use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode, Palette};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 13;
+pub const VERSION: u16 = 14;
 
 /// The oldest version this side still speaks, one before [`VERSION`] (ADR-0043).
 pub const OLDEST: u16 = VERSION - 1;
@@ -137,6 +137,7 @@ const LINK: u8 = 21;
 const OPEN_TOOL: u8 = 22;
 const LIST_MARKDOWN: u8 = 23;
 const OPEN_MARKDOWN: u8 = 24;
+const PALETTE: u8 = 25;
 
 const FRAME: u8 = 1;
 const CWD: u8 = 2;
@@ -152,6 +153,7 @@ const WAS_RUNNING: u8 = 11;
 const LINKED: u8 = 12;
 const UNHARDENED: u8 = 13;
 const MARKDOWN: u8 = 14;
+const COLOURS: u8 = 15;
 
 /// How many agent states there are. [`Notice::Status`] numbers them in the order of the
 /// contributor rule: needs you, running, done, error, idle.
@@ -599,6 +601,9 @@ pub enum Request<'a> {
         /// The key's meaning.
         answer: ApprovalAnswer,
     },
+    /// The colours every pane's named and indexed colours resolve through from now on, history
+    /// included (ADR-0049). Sent after the hello and after each change. Since version 14.
+    Palette(Palette),
 }
 
 /// A message from the core to a window. Text borrows from the decoder's buffer.
@@ -697,6 +702,16 @@ pub enum Notice<'a> {
         /// One name a line, with control and bidi characters escaped, so none holds a line
         /// break. Empty if there are none.
         names: &'a str,
+    },
+    /// The colours a pane's program set with OSC 12 and OSC 11, sent when either changes or is
+    /// reset (ADR-0049). Since version 14.
+    Colours {
+        /// The pane.
+        pane: u32,
+        /// The cursor's colour, or nothing for the window's own.
+        cursor: Option<u32>,
+        /// The pane's default background, or nothing for the palette's.
+        background: Option<u32>,
     },
 }
 
@@ -918,6 +933,7 @@ impl Request<'_> {
         match self {
             Self::OpenTool { .. } => 12,
             Self::ListMarkdown { .. } | Self::OpenMarkdown { .. } => 13,
+            Self::Palette(_) => 14,
             _ => OLDEST,
         }
     }
@@ -926,9 +942,17 @@ impl Request<'_> {
     ///
     /// # Errors
     ///
-    /// [`Error::TooLarge`] past [`MAX_REQUEST`], and [`Error::OutOfBounds`] for a resize or a
-    /// border's move outside 1 to [`MAX_DIMENSION`], or a tab past [`MAX_TABS`].
+    /// [`Error::TooLarge`] past [`MAX_REQUEST`], [`Error::OutOfBounds`] for a resize or a
+    /// border's move outside 1 to [`MAX_DIMENSION`], or a tab past [`MAX_TABS`], and
+    /// [`Error::BadColour`] for a palette colour above `0xFFFFFF`.
     pub fn encode(&self, out: &mut Vec<u8>) -> Result<(), Error> {
+        if let Self::Palette(palette) = *self {
+            let named = [palette.background, palette.foreground];
+            named
+                .iter()
+                .chain(&palette.ansi)
+                .try_for_each(check_colour)?;
+        }
         if let Self::Resize { rows, columns } = *self {
             check("rows", rows, 1..=MAX_DIMENSION)?;
             check("columns", columns, 1..=MAX_DIMENSION)?;
@@ -1024,6 +1048,13 @@ impl Request<'_> {
                 put!(out; id);
                 out.push(answer as u8);
                 APPROVAL_ANSWER
+            }
+            Self::Palette(palette) => {
+                put!(out; palette.background, palette.foreground);
+                for colour in palette.ansi {
+                    put!(out; colour);
+                }
+                PALETTE
             }
         };
         finish(out, start, MAX_REQUEST, kind)
@@ -1125,6 +1156,18 @@ impl Request<'_> {
                     ],
                 )?,
             },
+            PALETTE => {
+                let (background, foreground) = (body.colour()?, body.colour()?);
+                let mut ansi = [0; 16];
+                for colour in &mut ansi {
+                    *colour = body.colour()?;
+                }
+                Request::Palette(Palette {
+                    background,
+                    foreground,
+                    ansi,
+                })
+            }
             kind => return Err(Error::UnknownKind { kind }),
         };
         body.end()?;
@@ -1140,6 +1183,7 @@ impl Notice<'_> {
         match self {
             Self::Approval(approval) => approval.action.since(),
             Self::Markdown { .. } => 13,
+            Self::Colours { .. } => 14,
             _ => OLDEST,
         }
     }
@@ -1148,11 +1192,32 @@ impl Notice<'_> {
     ///
     /// # Errors
     ///
-    /// [`Error::TooLarge`] past [`MAX_MESSAGE`].
+    /// [`Error::TooLarge`] past [`MAX_MESSAGE`], and [`Error::BadColour`] for a pane colour above
+    /// `0xFFFFFF`.
     pub fn encode(&self, out: &mut Vec<u8>) -> Result<(), Error> {
+        if let Self::Colours {
+            cursor, background, ..
+        } = self
+        {
+            cursor.iter().chain(background).try_for_each(check_colour)?;
+        }
         let start = begin(out);
         let kind = match self {
             Self::Hello { version } => put!(out, HELLO, version),
+            Self::Colours {
+                pane,
+                cursor,
+                background,
+            } => {
+                put!(out; pane);
+                for colour in [cursor, background] {
+                    out.push(u8::from(colour.is_some()));
+                    if let Some(colour) = colour {
+                        put!(out; colour);
+                    }
+                }
+                COLOURS
+            }
             Self::Frame(update) => {
                 if let Err(error) = update.check().and_then(|()| update.check_records()) {
                     out.truncate(start);
@@ -1291,6 +1356,11 @@ impl Notice<'_> {
             MARKDOWN => Notice::Markdown {
                 pane: body.u32()?,
                 names: body.text()?,
+            },
+            COLOURS => Notice::Colours {
+                pane: body.u32()?,
+                cursor: body.optional_colour()?,
+                background: body.optional_colour()?,
             },
             UNHARDENED => Notice::Unhardened {
                 checked: body.tag("checked", &[false, true])?,
@@ -1737,6 +1807,10 @@ fn check_colours(foreground: u32, background: u32) -> Result<(), Error> {
     Ok(())
 }
 
+fn check_colour(colour: &u32) -> Result<(), Error> {
+    check_colours(0, *colour)
+}
+
 fn read_cell(bytes: &[u8; CELL]) -> Result<Cell, Error> {
     let mut cell = Reader(bytes);
     let character = char::from_u32(cell.u32()?).ok_or(Error::BadCharacter)?;
@@ -1926,6 +2000,18 @@ impl<'a> Reader<'a> {
         })
     }
 
+    fn colour(&mut self) -> Result<u32, Error> {
+        let colour = self.u32()?;
+        check_colour(&colour).map(|()| colour)
+    }
+
+    fn optional_colour(&mut self) -> Result<Option<u32>, Error> {
+        match self.tag("colour", &[false, true])? {
+            true => self.colour().map(Some),
+            false => Ok(None),
+        }
+    }
+
     fn side(&mut self) -> Result<Side, Error> {
         self.tag("side", &[Side::Left, Side::Right, Side::Up, Side::Down])
     }
@@ -1968,7 +2054,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 13, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 14, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -2186,31 +2272,81 @@ mod tests {
             texts: vec!["session.save"],
         });
         assert_eq!(at_oldest(owner), Ok(true));
-        let open = Request::OpenTool {
-            pane: 1,
-            tool: Tool::Files,
-        };
-        assert_eq!(open.since(), OLDEST);
         let markdown = Notice::Markdown {
             pane: 1,
             names: "a.md",
         };
+        assert_eq!(at_oldest(markdown), Ok(true));
         let newer = Error::Newer {
-            kind: MARKDOWN,
-            since: 13,
+            kind: COLOURS,
+            since: 14,
         };
-        assert_eq!(at_oldest(markdown), Err(newer));
-        let list = Request::ListMarkdown { pane: 1 };
+        assert_eq!(at_oldest(COLOURS_SEED), Err(newer));
         let mut wire = raw(HELLO, &OLDEST.to_le_bytes());
-        list.encode(&mut wire).unwrap();
+        PALETTE_SEED.encode(&mut wire).unwrap();
         let mut decoder = Decoder::default();
         let mut input = wire.as_slice();
         decoder.next_request(&mut input).unwrap();
         let newer = Error::Newer {
-            kind: LIST_MARKDOWN,
-            since: 13,
+            kind: PALETTE,
+            since: 14,
         };
         assert_eq!(decoder.next_request(&mut input), Err(newer));
+    }
+
+    const PALETTE_SEED: Request<'static> = Request::Palette(Palette::GRAPHITE_GRID);
+    const COLOURS_SEED: Notice<'static> = Notice::Colours {
+        pane: 1,
+        cursor: Some(0x00f5_b544),
+        background: None,
+    };
+
+    /// The `link` fuzz target reads a chunk size, then what follows a hello.
+    #[test]
+    fn the_fuzz_seeds_are_the_two_colour_messages() {
+        let mut wire = vec![7];
+        PALETTE_SEED.encode(&mut wire).unwrap();
+        let seed: &[u8] = include_bytes!("../../../fuzz/seeds/link/palette");
+        assert_eq!(seed, wire);
+        wire.truncate(1);
+        COLOURS_SEED.encode(&mut wire).unwrap();
+        let seed: &[u8] = include_bytes!("../../../fuzz/seeds/link/colours");
+        assert_eq!(seed, wire);
+    }
+
+    #[test]
+    fn a_colour_above_ffffff_is_refused_both_ways() {
+        let mut out = vec![1];
+        for at in 0..18 {
+            let mut palette = Palette::GRAPHITE_GRID;
+            let colours = [&mut palette.background, &mut palette.foreground];
+            *colours
+                .into_iter()
+                .chain(&mut palette.ansi)
+                .nth(at)
+                .unwrap() = 0x0100_0000;
+            assert_eq!(
+                Request::Palette(palette).encode(&mut out),
+                Err(Error::BadColour)
+            );
+            let mut wire = Vec::new();
+            PALETTE_SEED.encode(&mut wire).unwrap();
+            wire[PREFIX + KIND + 4 * at + 3] = 1;
+            assert_eq!(request_error(&wire), Err(Error::BadColour), "{at}");
+            let short = raw(PALETTE, &wire[PREFIX + KIND..PREFIX + KIND + 4 * at]);
+            assert_eq!(request_error(&short), Err(Error::Truncated), "{at}");
+        }
+        for (cursor, background) in [(Some(u32::MAX), None), (None, Some(0x0100_0000))] {
+            let notice = Notice::Colours {
+                pane: 0,
+                cursor,
+                background,
+            };
+            assert_eq!(notice.encode(&mut out), Err(Error::BadColour));
+        }
+        assert_eq!(out, [1]);
+        let body = [0, 0, 0, 0, 1, 0, 0, 0, 1, 0];
+        assert_eq!(notice_error(&raw(COLOURS, &body)), Err(Error::BadColour));
     }
 
     #[test]
@@ -3226,6 +3362,22 @@ mod tests {
             chunk in chunks(),
         ) {
             let notice = Notice::Status { pane, state, reported, message: &message };
+            prop_assert!(notice_survives(&notice, chunk), "changed on the link");
+        }
+
+        #[test]
+        fn palette_and_colours_round_trip(
+            pane in any::<u32>(),
+            colours in proptest::array::uniform18(0..=COLOUR),
+            cursor in proptest::option::of(0..=COLOUR),
+            background in proptest::option::of(0..=COLOUR),
+            chunk in chunks(),
+        ) {
+            let mut ansi = [0; 16];
+            ansi.copy_from_slice(&colours[2..]);
+            let palette = Palette { background: colours[0], foreground: colours[1], ansi };
+            prop_assert!(request_survives(Request::Palette(palette), chunk), "changed on the link");
+            let notice = Notice::Colours { pane, cursor, background };
             prop_assert!(notice_survives(&notice, chunk), "changed on the link");
         }
 
