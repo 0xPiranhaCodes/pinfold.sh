@@ -90,6 +90,11 @@ fn styles() -> Frame {
 /// Draws every row of `frame` as the CPU renderer does, the bar with a window's gaps around
 /// its row of tabs, whose pills reach into them.
 fn draw(frame: &Frame, bar: bool) -> (Vec<u32>, usize) {
+    draw_on(frame, bar, DEFAULT_BACKGROUND)
+}
+
+/// [`draw`] in a window whose theme has the background `ground`.
+fn draw_on(frame: &Frame, bar: bool, ground: u32) -> (Vec<u32>, usize) {
     let mut painter = Painter::new(Fonts::alone(Font::bundled().unwrap()), FONT_PIXELS);
     let (cell_width, cell_height) = painter.cell_size();
     let window = if bar {
@@ -111,7 +116,7 @@ fn draw(frame: &Frame, bar: bool) -> (Vec<u32>, usize) {
     let mut canvas = Canvas::new(&mut pixels, width, height)
         .unwrap()
         .inset(padding);
-    canvas.clear(DEFAULT_BACKGROUND);
+    canvas.clear(ground);
     let mut cells = Vec::new();
     cells_with_cursor(frame, &mut cells, None);
     for (row, cells) in cells.chunks(columns).enumerate() {
@@ -269,5 +274,111 @@ fn golden_tools() {
         .zip(tools())
     {
         check(name, draw(&frame, false));
+    }
+}
+
+/// A window under a bundled theme: the bar with a tab in each state, a pane's text in the 16
+/// colours, and an approval prompt over a pane of muted text.
+fn themed(file: &str) -> (Frame, u32) {
+    use pinfold_config::theme::{Colors, parse};
+    use pinfold_proto::link::ApprovalAction;
+
+    use crate::top_bar::{self, Bar};
+
+    let (theme, _) = parse(file.as_bytes(), Colors::default()).unwrap();
+    let on = theme.background;
+    let mut frame = Frame::default();
+    crate::panes::clear(&mut frame, 4, 80, on);
+    line(&mut frame, (1, 0), "$ cargo test", (theme.foreground, on));
+    let names = [
+        "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+    ];
+    let ansi = [
+        [
+            theme.black,
+            theme.red,
+            theme.green,
+            theme.yellow,
+            theme.blue,
+            theme.magenta,
+            theme.cyan,
+            theme.white,
+        ],
+        [
+            theme.bright_black,
+            theme.bright_red,
+            theme.bright_green,
+            theme.bright_yellow,
+            theme.bright_blue,
+            theme.bright_magenta,
+            theme.bright_cyan,
+            theme.bright_white,
+        ],
+    ];
+    for (row, colours) in ansi.iter().enumerate() {
+        for (column, (name, colour)) in names.iter().zip(colours).enumerate() {
+            line(&mut frame, (2 + row, column * 10), name, (*colour, on));
+        }
+    }
+    // Running, idle, needs you, done and error, as `tab_state` numbers them.
+    let (tabs, states) = (["work", "logs", "agent", "done", "bad"], [1, 4, 0, 2, 3]);
+    let bar = Bar {
+        theme: &theme,
+        tabs: &tabs,
+        active: 2,
+        activity: top_bar::marked(&states),
+        states: &states,
+        status: Some((0, true, "approve the diff?")),
+        hovered: Some(1),
+        focused: true,
+        title: true,
+        time: None,
+        inset: 1,
+        unhardened: None,
+    };
+    top_bar::draw(&mut frame, &bar);
+
+    let mut queue = crate::approval::Queue::default();
+    let send = crate::link::Approval {
+        id: 7,
+        caller: 2,
+        target: 0,
+        action: ApprovalAction::Send,
+        texts: vec!["cargo test\n".to_owned()],
+    };
+    assert_eq!(queue.add(send), None);
+    let mut pane = Frame::default();
+    crate::panes::clear(&mut pane, 6, 80, on);
+    line(
+        &mut pane,
+        (0, 0),
+        "$ pane text under a prompt",
+        (theme.foreground, on),
+    );
+    queue.draw(&mut pane, std::time::Instant::now(), &theme);
+    frame.rows += pane.rows;
+    frame.cells.append(&mut pane.cells);
+    (frame, on)
+}
+
+/// One light and one dark bundled theme (ADR-0049, section 7).
+#[test]
+fn golden_bundled_themes() {
+    for (name, file) in [
+        (
+            "theme-github-light",
+            include_str!("../../pinfold-config/themes/GitHub Light.toml"),
+        ),
+        (
+            "theme-dracula",
+            include_str!("../../pinfold-config/themes/Dracula.toml"),
+        ),
+    ] {
+        let (frame, ground) = themed(file);
+        // A tab's key hint differs by system, so each has its own image, as for `bar`.
+        check(
+            &format!("{name}@{}", std::env::consts::OS),
+            draw_on(&frame, true, ground),
+        );
     }
 }

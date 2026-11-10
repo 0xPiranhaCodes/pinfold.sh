@@ -1,0 +1,27 @@
+# Catppuccin Latte, a theme bundled with PinFold. Written by convert.py: do not edit.
+# Source: `ghostty/Catppuccin Latte` in mbadolato/iTerm2-Color-Schemes, which has it from catppuccin/palette
+# Commit: bc5531d8ec26e6031c698c61eb7d82c9a9cd092d
+# Licence: MIT, in LICENSE-Catppuccin.txt and LICENSE-iTerm2-Color-Schemes.txt
+# Copyright (c) 2021 Catppuccin; Copyright (c) 2011 to Present Mark Badolato
+background = "#eff1f5"
+foreground = "#4c4f69"
+black = "#bcc0cc"
+red = "#d20f39"
+green = "#40a02b"
+yellow = "#df8e1d"
+blue = "#1e66f5"
+magenta = "#ea76cb"
+cyan = "#179299"
+white = "#5c5f77"
+bright_black = "#acb0be"
+bright_red = "#e7103f"
+bright_green = "#46b02f"
+bright_yellow = "#e49931"
+bright_blue = "#3878f6"
+bright_magenta = "#ef95d7"
+bright_cyan = "#19a1a8"
+bright_white = "#6c6f85"
+cursor = "#dc8a78"
+cursor_text = "#eff1f5"
+selection_background = "#dc8a78"
+selection_foreground = "#eff1f5"

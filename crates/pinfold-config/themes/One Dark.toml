@@ -1,0 +1,27 @@
+# One Dark, a theme bundled with PinFold. Written by convert.py: do not edit.
+# Source: `ghostty/Atom One Dark` in mbadolato/iTerm2-Color-Schemes, which has it from atom/atom packages/one-dark-ui
+# Commit: bc5531d8ec26e6031c698c61eb7d82c9a9cd092d
+# Licence: MIT, in LICENSE-One-Dark.txt and LICENSE-iTerm2-Color-Schemes.txt
+# Copyright (c) 2011-2022 GitHub Inc.; Copyright (c) 2011 to Present Mark Badolato
+background = "#21252b"
+foreground = "#abb2bf"
+black = "#21252b"
+red = "#e06c75"
+green = "#98c379"
+yellow = "#e5c07b"
+blue = "#61afef"
+magenta = "#c678dd"
+cyan = "#56b6c2"
+white = "#abb2bf"
+bright_black = "#767676"
+bright_red = "#e06c75"
+bright_green = "#98c379"
+bright_yellow = "#e5c07b"
+bright_blue = "#61afef"
+bright_magenta = "#c678dd"
+bright_cyan = "#56b6c2"
+bright_white = "#abb2bf"
+cursor = "#abb2bf"
+cursor_text = "#21252b"
+selection_background = "#323844"
+selection_foreground = "#abb2bf"

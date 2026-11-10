@@ -1,0 +1,23 @@
+# Tokyo Night, a theme bundled with PinFold. Written by convert.py: do not edit.
+# Source: `themes/tokyo-night-color-theme.json` in tokyo-night/tokyo-night-vscode-theme
+# Commit: 7c0f11eaef322f293621ca7befe462214b7ea468
+# Licence: MIT, in LICENSE-Tokyo-Night.txt
+# Copyright (c) 2018-present Enkia
+background = "#16161e"
+foreground = "#787c99"
+black = "#363b54"
+red = "#f7768e"
+green = "#73daca"
+yellow = "#e0af68"
+blue = "#7aa2f7"
+magenta = "#bb9af7"
+cyan = "#7dcfff"
+white = "#787c99"
+bright_black = "#363b54"
+bright_red = "#f7768e"
+bright_green = "#73daca"
+bright_yellow = "#e0af68"
+bright_blue = "#7aa2f7"
+bright_magenta = "#bb9af7"
+bright_cyan = "#7dcfff"
+bright_white = "#acb0d0"

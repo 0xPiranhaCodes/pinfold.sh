@@ -77,6 +77,8 @@ jobs:
           install -m 0755 target/release-core/pinfold-core package/
           install -m 0644 LICENSE-MIT LICENSE-APACHE README.md package/
           install -m 0644 crates/pinfold-render/fonts/OFL.txt package/
+          mkdir package/theme-licenses
+          install -m 0644 crates/pinfold-config/themes/LICENSE-*.txt package/theme-licenses/
           tar -czf "$archive" -C package .
           sha256sum "$archive" > "$archive.sha256"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2

@@ -24,7 +24,7 @@ class Pinfold < Formula
 
   def install
     bin.install "pinfold", "pinfold-core", "pinfold-window"
-    doc.install "README.md", "LICENSE-MIT", "LICENSE-APACHE", "OFL.txt"
+    doc.install "README.md", "LICENSE-MIT", "LICENSE-APACHE", "OFL.txt", "theme-licenses"
   end
 
   test do

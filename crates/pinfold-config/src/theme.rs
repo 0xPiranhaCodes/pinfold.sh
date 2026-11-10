@@ -112,6 +112,18 @@ pub const GRAPHITE: Theme = Theme {
     },
 };
 
+/// The bundled themes by name (ADR-0049, section 7). `themes/convert.py` writes each from its
+/// MIT source, and the licence texts sit beside them. Only the theme in use is parsed.
+const BUNDLED: [(&str, &str); 11] = {
+    macro_rules! bundled {
+        ($($name:literal)*) => {
+            [$(($name, include_str!(concat!("../themes/", $name, ".toml")))),*]
+        };
+    }
+    bundled!("Catppuccin Latte" "Catppuccin Mocha" "Dracula" "GitHub Dark" "GitHub Light"
+        "Gruvbox Dark" "Nord" "One Dark" "Solarized Dark" "Solarized Light" "Tokyo Night")
+};
+
 /// How far each chrome text added with the window (#399) sits from the foreground towards the
 /// background, and each surface from the background towards the foreground, where a theme
 /// leaves the key out. Each is inside the range of Graphite Grid's own colour, by channel.
@@ -135,7 +147,7 @@ pub enum Error {
         "a theme name is 1 to 64 letters, digits, spaces and `-_+.`, and does not start with `.`"
     )]
     Name,
-    /// No file in the themes directory and no built-in theme has the name.
+    /// No file in the themes directory and no bundled theme has the name.
     #[error("there is no theme of that name")]
     NotFound,
     /// The theme file was refused, as `pinfold.toml` would be, or lacks a required key.
@@ -459,7 +471,7 @@ struct Chosen {
 /// `themes/<name>.toml` beside `config`, then `themes/<name>.itermcolors`
 /// ([`crate::itermcolors::parse`]), then `themes/<name>` as a Ghostty theme file
 /// ([`crate::ghostty::parse`]), each read with the checks of [`crate::load`], and then a
-/// built-in theme.
+/// bundled theme or Graphite Grid.
 ///
 /// This reads `config` itself, and [`crate::Config`] holds neither key, so the core, which
 /// never calls this, carries no theme code.
@@ -493,6 +505,9 @@ fn named(
     }
     if let Some(bytes) = crate::read(&ghostty)? {
         return Ok(crate::ghostty::parse(&bytes, overrides)?);
+    }
+    if let Some((_, text)) = BUNDLED.iter().find(|(bundled, _)| *bundled == name) {
+        return Ok(parse(text.as_bytes(), overrides)?);
     }
     if name != "Graphite Grid" {
         return Err(Error::NotFound);
@@ -837,6 +852,16 @@ mod tests {
         assert_eq!(theme.background, 0x0028_2a36);
         let missing = named(&config, Some("Other"), Colors::default());
         assert!(matches!(missing, Err(Error::NotFound)));
+        // A bundled theme is found after the user's files, so a file of its name is used.
+        let (nord, _) = named(&config, Some("Nord"), Colors::default()).unwrap();
+        assert_eq!(nord.background, 0x002e_3440);
+        fs::rename(
+            config.with_file_name("themes/My Theme-1.toml"),
+            config.with_file_name("themes/Nord.toml"),
+        )
+        .unwrap();
+        let (mine, _) = named(&config, Some("Nord"), Colors::default()).unwrap();
+        assert_eq!(mine.background, 0x0028_2a36);
     }
 
     /// ADR-0049, section 2: a save of either file loads the theme again, once, and a broken
@@ -896,6 +921,60 @@ mod tests {
         let text = file(0x0028_2a36, 0x00f8_f8f2, 0x008b_e9fd);
         fs::write(path.with_extension("toml"), text).unwrap();
         assert_eq!(load(&config).unwrap().0.background, 0x0028_2a36);
+    }
+
+    /// ADR-0049, sections 5 to 7: each bundled theme is found by name, keeps its own chrome
+    /// and states, and holds the rules of the states and of prompts.
+    #[test]
+    fn every_bundled_theme_is_legible_and_none_takes_the_fallback() {
+        // The contrast of each one's text, as `docs/configuration.md` lists it. Two are under
+        // 4.5, which is only reported.
+        let texts = [
+            "7.06", "11.34", "13.11", "6.10", "15.80", "10.75", "9.25", "7.22", "4.75", "4.13",
+            "4.40",
+        ];
+        for ((name, text), ratio) in BUNDLED.into_iter().zip(texts) {
+            let config = Path::new("/nowhere/pinfold.toml");
+            let (theme, notes) = named(config, Some(name), Colors::default()).unwrap();
+            let (faintest, closest) = (theme.faintest(), theme.closest());
+            let measured = contrast(theme.foreground, theme.background);
+            assert_eq!(format!("{measured:.2}"), ratio, "{name}");
+            let warns = ["Solarized Light", "Tokyo Night"].contains(&name);
+            assert_eq!(notes.len(), usize::from(warns), "{name}: {notes:?}");
+            assert_eq!(measured < LEGIBLE, warns, "{name}");
+            assert!(theme.chrome != GRAPHITE.chrome, "{name}: {notes:?}");
+            assert!(faintest.0 >= LEGIBLE, "{name}: {faintest:?}");
+            assert!(closest.0 >= APART, "{name}: {closest:?}");
+            // A prompt: its text and its rule read on the overlay, over muted pane text.
+            let overlay = theme.chrome.overlay;
+            assert!(contrast(theme.prompt_text(), overlay) >= LEGIBLE, "{name}");
+            assert!(
+                contrast(theme.states.needs_you, overlay) >= LEGIBLE,
+                "{name}"
+            );
+            assert!(
+                contrast(theme.chrome.muted, theme.background) < 3.0,
+                "{name}"
+            );
+            // The header names where the file comes from, and each licence text it names sits
+            // beside the file.
+            for line in [
+                "# Source: ",
+                "# Commit: ",
+                "# Licence: MIT",
+                "# Copyright (c) ",
+            ] {
+                assert!(text.contains(line), "{name}: {line}");
+            }
+            let beside = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/themes"));
+            let licences = text
+                .split_whitespace()
+                .filter(|word| word.starts_with("LICENSE-"));
+            for licence in licences.clone() {
+                assert!(beside.join(licence).is_file(), "{name}: {licence}");
+            }
+            assert!(licences.count() >= 1, "{name}");
+        }
     }
 
     #[test]
