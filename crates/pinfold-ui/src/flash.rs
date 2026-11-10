@@ -4,12 +4,13 @@
 //! That row is outside pane text, so program output cannot fake or hide it. It says blocked
 //! because the core drops OSC 52 writes, and a paste prompt in that row takes priority.
 
+use pinfold_config::theme::Theme;
 use std::time::{Duration, Instant};
 
 use pinfold_proto::Frame;
 use pinfold_proto::link::Refusal;
 
-use crate::paste::{self, AMBER, RED, TEXT};
+use crate::paste;
 use crate::top_bar::{UNHARDENED, VIOLET, unhardened_word};
 
 const SHOWN: Duration = Duration::from_secs(2);
@@ -67,14 +68,19 @@ impl Flash {
     }
 
     /// Adds the flash's row under the pane in `frame`, if it is shown.
-    pub fn banner(&self, frame: &mut Frame) {
+    pub fn banner(&self, frame: &mut Frame, theme: &Theme) {
+        let (text, states) = (theme.prompt_text(), theme.states);
         if self.until.is_none() {
             return;
         }
         match &self.said {
             Said::Refused(reason) => paste::row(
                 frame,
-                &[(" ✕ error  ".to_owned(), RED), (reason.to_string(), TEXT)],
+                &[
+                    (" ✕ error  ".to_owned(), states.error),
+                    (reason.to_string(), text),
+                ],
+                theme,
             ),
             Said::Unhardened(checked, command) => paste::row(
                 frame,
@@ -83,34 +89,39 @@ impl Flash {
                         format!(" {UNHARDENED} {}  ", unhardened_word(*checked)),
                         VIOLET,
                     ),
-                    (format!("Sign this build: {command}"), TEXT),
+                    (format!("Sign this build: {command}"), text),
                 ],
+                theme,
             ),
             Said::Blocked => paste::row(
                 frame,
                 &[
-                    (" ◆ blocked  ".to_owned(), AMBER),
-                    ("A program tried to write the clipboard".to_owned(), TEXT),
+                    (" ◆ blocked  ".to_owned(), states.needs_you),
+                    ("A program tried to write the clipboard".to_owned(), text),
                 ],
+                theme,
             ),
         }
     }
 }
 
 /// Adds the row under the pane in `frame` that says the core has gone, and the panes with it.
-pub fn ended(frame: &mut Frame) {
+pub fn ended(frame: &mut Frame, theme: &Theme) {
+    let (text, states) = (theme.prompt_text(), theme.states);
     paste::row(
         frame,
         &[
-            (" ✕ session ended  ".to_owned(), RED),
-            ("The panes are gone. Close this window".to_owned(), TEXT),
+            (" ✕ session ended  ".to_owned(), states.error),
+            ("The panes are gone. Close this window".to_owned(), text),
         ],
+        theme,
     );
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pinfold_config::theme::GRAPHITE;
 
     #[test]
     fn a_write_shows_the_flash_until_it_is_due() {
@@ -134,7 +145,7 @@ mod tests {
             ..Frame::default()
         };
         flash.refused(Refusal::Tabs, start);
-        flash.banner(&mut frame);
+        flash.banner(&mut frame, &GRAPHITE);
         let text: String = frame.cells.iter().map(|cell| cell.character).collect();
         assert!(text.starts_with(" ✕ error  This session has as many tabs"));
     }
@@ -149,7 +160,7 @@ mod tests {
         };
         flash.unhardened(true, "codesign x".to_owned(), start);
         flash.tick(start + SHOWN);
-        flash.banner(&mut frame);
+        flash.banner(&mut frame, &GRAPHITE);
         let text: String = frame.cells.iter().map(|cell| cell.character).collect();
         assert!(
             text.starts_with(" ▲ unhardened  Sign this build: codesign x"),
@@ -167,11 +178,11 @@ mod tests {
             columns: 60,
             ..Frame::default()
         };
-        ended(&mut frame);
+        ended(&mut frame, &GRAPHITE);
         assert_eq!(frame.rows, 2);
         let text: String = frame.cells.iter().map(|cell| cell.character).collect();
         assert!(text.starts_with(" ✕ session ended  The panes are gone"));
-        assert_eq!(frame.cells[1].foreground, RED);
+        assert_eq!(frame.cells[1].foreground, GRAPHITE.states.error);
     }
 
     #[test]
@@ -182,13 +193,13 @@ mod tests {
             columns: 60,
             ..Frame::default()
         };
-        flash.banner(&mut frame);
+        flash.banner(&mut frame, &GRAPHITE);
         assert_eq!(frame.rows, 1);
         flash.blocked(start);
-        flash.banner(&mut frame);
+        flash.banner(&mut frame, &GRAPHITE);
         assert_eq!(frame.rows, 2);
         let text: String = frame.cells.iter().map(|cell| cell.character).collect();
         assert!(text.starts_with(" ◆ blocked  A program tried to write the clipboard"));
-        assert_eq!(frame.cells[1].foreground, AMBER);
+        assert_eq!(frame.cells[1].foreground, GRAPHITE.states.needs_you);
     }
 }

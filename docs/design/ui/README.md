@@ -59,6 +59,9 @@ is the design's:
 | `chrome.tab_hover` | `#2B323B` | `chrome.tab_active` | `#253C3B` |
 | `chrome.overlay` | `#12151A` | `chrome.border` | `#343A44` |
 | `chrome.dim` | `#9AA1AC` | `chrome.muted` | `#555A63` |
+| `chrome.tab_text` | `#B0B8C4` | `chrome.key` | `#909BA9` |
+| `chrome.title` | `#9BA5B3` | `chrome.title_unfocused` | `#87909E` |
+| `chrome.rule` | `#262B33` | `chrome.palette` | `#151920` |
 | `states.needs_you` ◆ | `#F5B544` | `states.running` ● | `#7AA7FF` |
 | `states.done` ✓ | `#63D29A` | `states.error` ✕ | `#FF8A8A` |
 | `states.idle` ○ | `#9AA1AC` | | |

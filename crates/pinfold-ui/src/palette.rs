@@ -5,19 +5,12 @@
 //! labels by what is typed and returns the index of the one chosen, so the window decides what
 //! that runs.
 
+use pinfold_config::theme::Theme;
 use pinfold_proto::{Cell, Frame};
 use unicode_width::UnicodeWidthChar;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 use crate::prefix::Command;
-
-/// The palette's surfaces, from `docs/design/ui/Foundations.dc.html`.
-const GROUND: u32 = 0x0015_1920;
-const BORDER: u32 = 0x0034_3a44;
-const TEXT: u32 = 0x00e2_e5ea;
-const HINT: u32 = 0x009a_a1ac;
-const SELECTED: u32 = 0x0025_3c3b;
-const ACCENT: u32 = 0x005c_d6cb;
 
 /// The widest the palette draws, border included.
 const WIDTH: u16 = 48;
@@ -164,7 +157,9 @@ impl Palette {
 
     /// Draws the palette near the top of the panes' grid in `frame`, centred, with the cursor
     /// after the query. Rows that do not fit are cut off, the selected one kept in view.
-    pub fn draw(&self, frame: &mut Frame) {
+    pub fn draw(&self, frame: &mut Frame, theme: &Theme) {
+        let (text, chrome) = (theme.foreground, theme.chrome);
+        let (ground, dim) = (chrome.palette, chrome.dim);
         let width = WIDTH.min(frame.columns);
         if width < 4 || frame.rows < 3 {
             return;
@@ -188,7 +183,7 @@ impl Palette {
                     (false, true, _) | (false, _, true) => '│',
                     _ => ' ',
                 };
-                put(frame, row, column, character, BORDER, GROUND);
+                put(frame, row, column, character, chrome.border, ground);
             }
         }
         let end = usize::from(right);
@@ -197,14 +192,14 @@ impl Palette {
             top + 1,
             usize::from(left) + 2,
             "❯ ",
-            ACCENT,
-            GROUND,
+            chrome.accent,
+            ground,
             end,
         );
-        let cursor = write(frame, top + 1, at, &self.query, TEXT, GROUND, end);
+        let cursor = write(frame, top + 1, at, &self.query, text, ground, end);
         let hint = end.saturating_sub(CLOSE_HINT.len() + 1);
         if hint > cursor {
-            write(frame, top + 1, hint, CLOSE_HINT, HINT, GROUND, end);
+            write(frame, top + 1, hint, CLOSE_HINT, dim, ground, end);
         }
         frame.cursor = Some((top + 1, cursor.min(end - 1) as u16));
         if self.shown.is_empty() {
@@ -217,17 +212,17 @@ impl Palette {
                 } else {
                     "no match"
                 },
-                HINT,
-                GROUND,
+                dim,
+                ground,
                 end,
             );
         }
         for (line, &index) in self.shown.iter().enumerate().skip(first).take(lines) {
             let row = top + 2 + (line - first) as u16;
             let (colour, ground) = if line == self.selected {
-                (ACCENT, SELECTED)
+                (chrome.accent, chrome.tab_active)
             } else {
-                (TEXT, GROUND)
+                (text, ground)
             };
             for column in left + 1..right {
                 put(frame, row, column, ' ', colour, ground);
@@ -311,6 +306,7 @@ fn write(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pinfold_config::theme::GRAPHITE;
 
     const NONE: ModifiersState = ModifiersState::empty();
 
@@ -386,7 +382,7 @@ mod tests {
         crate::panes::blank(&mut frame, 5, 20);
         let mut palette = Palette::commands();
         named(&mut palette, NamedKey::ArrowUp);
-        palette.draw(&mut frame);
+        palette.draw(&mut frame, &GRAPHITE);
         let row = |row: usize| -> String {
             frame.cells[row * 20..(row + 1) * 20]
                 .iter()

@@ -1,6 +1,7 @@
 //! The strip that says what a restored pane was running (ADR-0034), drawn in the row under the
 //! panes. That row is outside pane text, so program output cannot fake it.
 
+use pinfold_config::theme::Theme;
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
@@ -8,14 +9,12 @@ use pinfold_proto::Frame;
 use pinfold_proto::link::MAX_PANES;
 use winit::keyboard::{Key, NamedKey};
 
-use crate::paste::{self, TEXT};
+use crate::paste;
 
 /// How long a strip is on screen in a focused window before Enter counts, as for the approval
 /// prompt, so typing already under way in a pane cannot run a command that appeared mid-word.
 pub const ARMED_AFTER: Duration = Duration::from_millis(500);
 
-/// The idle state's grey.
-const GREY: u32 = 0x009a_a1ac;
 const LABEL: &str = " ○ was running: ";
 const RUN: &str = "  Enter run · Esc dismiss";
 const DISMISS: &str = "  Esc dismiss";
@@ -59,16 +58,18 @@ pub fn offers_run(runnable: bool, command: &str, columns: u16) -> bool {
 }
 
 /// Adds the strip for `command` under the panes in `frame`.
-pub fn banner(frame: &mut Frame, runnable: bool, command: &str) {
+pub fn banner(frame: &mut Frame, runnable: bool, command: &str, theme: &Theme) {
+    let (grey, plain) = (theme.states.idle, theme.prompt_text());
     let (text, whole) = shown(command, room(frame.columns));
     let keys = if runnable && whole { RUN } else { DISMISS };
     paste::row(
         frame,
         &[
-            (LABEL.to_owned(), GREY),
-            (text, TEXT),
-            (keys.to_owned(), GREY),
+            (LABEL.to_owned(), grey),
+            (text, plain),
+            (keys.to_owned(), grey),
         ],
+        theme,
     );
 }
 
@@ -114,12 +115,12 @@ impl Strips {
 
     /// Draws `pane`'s strip, if any, and starts its arming delay in a focused window. Returns
     /// whether it drew one.
-    pub fn draw(&mut self, frame: &mut Frame, pane: u32, now: Instant) -> bool {
+    pub fn draw(&mut self, frame: &mut Frame, pane: u32, now: Instant, theme: &Theme) -> bool {
         let Some((_, runnable, command)) = self.waiting.iter().find(|(at, ..)| *at == pane) else {
             self.hide();
             return false;
         };
-        banner(frame, *runnable, command);
+        banner(frame, *runnable, command, theme);
         if !self.unfocused && self.shown.is_none_or(|(at, _)| at != pane) {
             self.shown = Some((pane, now));
         }
@@ -156,13 +157,14 @@ impl Strips {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pinfold_config::theme::GRAPHITE;
 
     fn drawn(runnable: bool, command: &str, columns: u16) -> String {
         let mut frame = Frame {
             columns,
             ..Frame::default()
         };
-        banner(&mut frame, runnable, command);
+        banner(&mut frame, runnable, command, &GRAPHITE);
         assert_eq!(frame.rows, 1);
         frame.cells.iter().map(|cell| cell.character).collect()
     }
@@ -207,7 +209,7 @@ mod tests {
             columns: 80,
             ..Frame::default()
         };
-        assert!(strips.draw(&mut frame, pane, now));
+        assert!(strips.draw(&mut frame, pane, now, &GRAPHITE));
     }
 
     const ENTER: Key = Key::Named(NamedKey::Enter);
