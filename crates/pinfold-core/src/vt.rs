@@ -568,6 +568,9 @@ impl VtEngine for AlacrittyEngine {
         let grid = self.term.grid();
         (frame.rows, frame.columns) = self.size();
         frame.cells.clear();
+        // One allocation of the right size, as a link keeps no frame of a large pane to reuse.
+        let cells = usize::from(frame.rows) * usize::from(frame.columns);
+        frame.cells.reserve_exact(cells);
         // A poisoned lock still holds a whole palette, as a palette is set in one write.
         let palette = *self
             .palette
