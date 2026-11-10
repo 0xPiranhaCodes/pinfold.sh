@@ -1,7 +1,7 @@
 # ADR-0047: Keeping other processes' environment from a sandboxed agent on macOS
 
-- **Status:** Proposed
-- **Date:** 2026-11-09
+- **Status:** Accepted
+- **Date:** 2026-11-09, accepted 2026-11-10 by the maintainer
 
 ## Context
 
@@ -22,9 +22,7 @@ only, which hides the gap from a quick check.
 Linux is not affected: bubblewrap gives the agent its own PID namespace (`--unshare-pid`) and
 `/proc`, so it sees no process outside its sandbox.
 
-## Decision
-
-Proposed; none of these is built. The options:
+## Options
 
 1. **Launch panes' shells with a stripped environment.** The core starts every pane, and itself,
    without the variables [`secret_name`](../../crates/pinfold-core/src/sandbox.rs) matches, and a
@@ -45,12 +43,62 @@ Proposed; none of these is built. The options:
 5. **State the gap and do nothing**, as v0.1 does: the docs tell the person not to export
    secrets in a shell whose user also runs sandboxed agents.
 
-We lean to option 2 for the core plus the documented advice of option 5, and to option 3 as an
-opt-in later if people ask for it.
+## Decision
+
+The maintainer's decision of 2026-11-10: a warning on macOS, which no option above listed,
+plus option 1 as an opt-in that is off by default. Option 3 waits until after v0.1, as a possible
+opt-in. Options 2 and 4 are not taken.
+
+**The warning.** On macOS only, when the core launches a sandboxed agent (`agent.launch` of a
+profile with `sandbox = true`, as `pinfold agent <name>` calls it), it checks the names in its
+own environment and in the environment it gives panes with `secret_name`. If any match and
+`strip_secrets` is off, the core tells the window once per core session, and the window shows a
+one-time notice drawn by PinFold outside pane text, as ADR-0044's notice is:
+
+> On macOS, sandboxed agents can read N secret-looking variables in your other panes: NAME1,
+> NAME2, … (strip_secrets = true removes them)
+
+N is the count of distinct names. The notice lists a capped number of names, then `…`. The core
+logs the names at `warn`, and never a value: no value is logged, shown, sent over the link or
+stored. Linux shows no warning, as it is not affected. The check sees only the environment the
+core started with and gives panes. It cannot see a variable that a shell exports after it
+starts, by hand or from its startup files, so no notice does not mean no secret in a pane.
+
+**The opt-in.** `strip_secrets`, a top-level bool in `pinfold.toml`, default `false`. With it
+on, the `pinfold` launcher starts the core, and the core starts every pane, sandboxed or not,
+without the variables `secret_name` matches. `keep_env` still applies only inside a sandboxed
+profile and cannot bring back a stripped variable. What `KERN_PROCARGS2` shows of the core is
+the environment it was given at `exec`, which later changes in the process do not alter, so the
+launcher must strip before it executes the core. The core removing variables from itself once
+running would not hide them. A core that finds `strip_secrets` on but secret-looking names in
+its own environment, such as one not started by the launcher, logs the names, never values. What
+it breaks: a token exported before launching PinFold, such as `GITHUB_TOKEN` set in the shell
+that runs `pinfold`, no longer reaches any pane. Load such tokens from the shell's startup
+files instead (`~/.zshrc`, `~/.bashrc`), which a pane's shell reads itself. A token a shell
+exports there is still in that shell's environment, which a sandboxed agent can read on macOS,
+and neither the opt-in nor the warning sees it. The opt-in works on Linux too, though Linux
+does not need it.
+
+**Why not option 2.** It protects the core, but not the panes' shells, and those are where the
+realistic leak is: a token exported in a shell, or inherited by every pane from the shell that
+started PinFold. Its private channel to unsandboxed panes would also be new state to protect.
+
+**Option 3 later.** Running sandboxed agents as another user is the only option that also covers
+the user's processes outside PinFold. Its helper with root rights or user setup, file ownership
+and changes to how the API knows the caller do not fit v0.1. It stays future work, as an opt-in
+if people ask for it.
 
 ## Consequences
 
-Until a choice is built, on macOS ADR-0041's environment stripping keeps secrets out of the
-agent's own environment only, and the threat model, `docs/beta/known-issues.md` and the README
-say so. We would revisit if macOS gains a sandbox operation that refuses `KERN_PROCARGS2` for
-other processes alone, which `tests/macos/sandbox-procargs.sh` would then show as `HIDDEN`.
+- The window gains a one-time notice, sent over the link like ADR-0044's, so the link version
+  rises and ADR-0043 gains a row.
+- `pinfold-config` gains `strip_secrets`. The launcher and the core's pane spawn filter the
+  environment with `sandbox::secret_name`, in one place each.
+- With the opt-in on, a person who relied on exporting tokens before launching PinFold must
+  move them to shell startup files, where they are again readable by a sandboxed agent on macOS.
+  The opt-in protects only the environment PinFold hands out.
+- Processes outside PinFold, such as another terminal app's shells, stay readable on macOS.
+  The threat model, `docs/beta/known-issues.md` and the README say so.
+- We would revisit if macOS gains a sandbox operation that refuses `KERN_PROCARGS2` for other
+  processes alone, which `tests/macos/sandbox-procargs.sh` would then show as `HIDDEN`, or if
+  people ask for option 3.
