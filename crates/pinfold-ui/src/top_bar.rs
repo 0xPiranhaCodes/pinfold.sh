@@ -1261,7 +1261,7 @@ mod tests {
             columns: frame.columns,
             rows: frame.rows,
         };
-        selection::overlay(&mut frame, rect, 100, selected);
+        selection::overlay(&mut frame, rect, 100, selected, None);
         draw(&mut frame, &shown(&["x"], 0));
         let inverted: Vec<usize> = (0..frame.cells.len())
             .filter(|&index| frame.cells[index].foreground == 2)

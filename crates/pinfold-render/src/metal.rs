@@ -101,7 +101,7 @@ fn instances(
             });
         }
     }
-    for (offset, colour) in bleeds(&cells[tabs.clone()]).enumerate() {
+    for (offset, colour) in bleeds(&cells[tabs.clone()], clear).enumerate() {
         if colour != clear {
             let (x, y) = position(tabs.start + offset);
             for top in [y - bleed, y + height] {
@@ -153,6 +153,9 @@ pub struct MetalRenderer {
     slots: HashMap<(char, u32), Slot>,
     cells: Vec<Cell>,
     instances: Vec<Instance>,
+    /// The theme's background, which is the clear and needs no quad.
+    background: u32,
+    cursor: Option<(u32, u32)>,
 }
 
 impl MetalRenderer {
@@ -176,6 +179,8 @@ impl MetalRenderer {
             slots: HashMap::new(),
             cells: Vec::new(),
             instances: Vec::new(),
+            background: DEFAULT_BACKGROUND,
+            cursor: None,
         }
     }
 }
@@ -211,8 +216,12 @@ impl Renderer for MetalRenderer {
         self.gpu.set_opacity(opacity)
     }
 
+    fn set_colours(&mut self, background: u32, cursor: Option<(u32, u32)>) {
+        (self.background, self.cursor) = (background, cursor);
+    }
+
     fn draw(&mut self, frame: &Frame) -> Result<(), RenderError> {
-        cells_with_cursor(frame, &mut self.cells);
+        cells_with_cursor(frame, &mut self.cells, self.cursor);
         let metrics = self.metrics;
         let Self {
             gpu,
@@ -255,12 +264,12 @@ impl Renderer for MetalRenderer {
             columns,
             metrics,
             self.padding,
-            DEFAULT_BACKGROUND,
+            self.background,
             slot,
             &mut self.instances,
         );
         self.fonts.release_pages();
-        self.gpu.draw(DEFAULT_BACKGROUND, &self.instances);
+        self.gpu.draw(self.background, &self.instances);
         Ok(())
     }
 }
@@ -398,6 +407,28 @@ mod tests {
         renderer.draw(&frame(2, 1, cells)).unwrap();
         let colours: Vec<u32> = renderer.instances.iter().map(|quad| quad.colour).collect();
         assert_eq!(colours, [0x00ff_0000]);
+    }
+
+    /// ADR-0049: the glass shows through a theme's background as it does through the default,
+    /// and a cursor with a colour of its own is drawn in it.
+    #[test]
+    fn a_themes_background_needs_no_quad_and_its_cursor_is_drawn() {
+        let Some(mut renderer) = renderer() else {
+            eprintln!("skipped: no Metal device");
+            return;
+        };
+        renderer.resize(100, 100, Padding::default());
+        renderer.set_colours(PAPER, Some((0x00ff_0000, PAPER)));
+        let cells = vec![cell(' ', PAPER), cell(' ', DEFAULT_BACKGROUND)];
+        let mut screen = frame(2, 1, cells);
+        let mut drawn = |screen: &Frame| {
+            renderer.draw(screen).unwrap();
+            let quads = renderer.instances.iter();
+            quads.map(|quad| quad.colour).collect::<Vec<u32>>()
+        };
+        assert_eq!(drawn(&screen), [DEFAULT_BACKGROUND]);
+        screen.cursor = Some((0, 0));
+        assert_eq!(drawn(&screen), [0x00ff_0000, DEFAULT_BACKGROUND]);
     }
 
     #[test]

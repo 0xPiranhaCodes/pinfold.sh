@@ -15,6 +15,7 @@ use std::thread;
 use std::time::Instant;
 
 use mio::Waker;
+use pinfold_config::theme::{self, GRAPHITE, Theme};
 use pinfold_config::{Config, MAX_FONT_SIZE, MIN_FONT_SIZE};
 use pinfold_proto::link::{self as proto, MAX_DIMENSION, MAX_PASTE, Position, Rect, Selection};
 use pinfold_proto::{Frame, MouseMode};
@@ -96,6 +97,8 @@ enum Notice {
     Raise,
     /// The core lacks the hardened runtime, and whether it could tell (ADR-0044).
     Unhardened(bool),
+    /// The core is too old to take the theme's palette (ADR-0049).
+    Unthemed,
     /// The config file was saved, and this is what it now says.
     Config(Config),
     /// A menu item was chosen.
@@ -190,6 +193,7 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
         let raised = link.take_raised().then_some(Notice::Raise);
         let unhardened = link.take_unhardened().map(Notice::Unhardened);
         let refused = link.take_refused().map(Notice::Refused);
+        let unthemed = link.take_unthemed().then_some(Notice::Unthemed);
         while let Some(approval) = link.take_approval() {
             if proxy.send_event(Notice::Approval(approval)).is_err() {
                 return;
@@ -198,7 +202,7 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
         let ran = link.take_was_running().into_iter();
         let ran = ran.map(|(pane, runnable, command)| Notice::WasRunning(pane, runnable, command));
         let notices = [
-            searched, copied, linked, markdown, raised, unhardened, refused,
+            searched, copied, linked, markdown, raised, unhardened, refused, unthemed,
         ]
         .into_iter()
         .flatten();
@@ -264,6 +268,13 @@ impl Open {
         // that call if a user needs another radius, as WezTerm's 30 is out of reach here.
         self.window.set_blur(translucent && config.background_blur);
     }
+
+    /// Hands the renderer the theme's background, for the clear, the padding and the glass,
+    /// and its cursor.
+    fn apply_theme(&mut self, theme: &Theme) {
+        let cursor = over(theme, theme.cursor, theme.cursor_text);
+        self.renderer.set_colours(theme.background, cursor);
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -272,6 +283,39 @@ fn option_as_alt(config: &Config) -> OptionAsAlt {
         OptionAsAlt::Both
     } else {
         OptionAsAlt::None
+    }
+}
+
+/// What `theme` asks of its text and background drawn the other way round, a cursor or a
+/// selection: its `ground` and `text`, or none where they are the theme's foreground and
+/// background, which inverts each cell as before themes (ADR-0049, section 1).
+fn over(theme: &Theme, ground: u32, text: u32) -> Option<(u32, u32)> {
+    ((ground, text) != (theme.foreground, theme.background)).then_some((ground, text))
+}
+
+/// The 18 colours of `theme` the core resolves pane colours through.
+fn palette_of(theme: &Theme) -> pinfold_proto::Palette {
+    pinfold_proto::Palette {
+        background: theme.background,
+        foreground: theme.foreground,
+        ansi: [
+            theme.black,
+            theme.red,
+            theme.green,
+            theme.yellow,
+            theme.blue,
+            theme.magenta,
+            theme.cyan,
+            theme.white,
+            theme.bright_black,
+            theme.bright_red,
+            theme.bright_green,
+            theme.bright_yellow,
+            theme.bright_blue,
+            theme.bright_magenta,
+            theme.bright_cyan,
+            theme.bright_white,
+        ],
     }
 }
 
@@ -312,6 +356,8 @@ fn view(screen: &Screen) -> View<'_> {
 
 struct App {
     config: Config,
+    /// The one theme the window draws from (ADR-0049).
+    theme: Theme,
     size: Option<(u32, u32)>,
     outbox: Outbox,
     latest: Arc<Latest>,
@@ -428,6 +474,7 @@ impl App {
         Self {
             prefix: Prefix::new(config.keys.prefix),
             config,
+            theme: GRAPHITE,
             size,
             outbox,
             latest,
@@ -525,8 +572,26 @@ impl App {
             fullscreen: false,
         };
         open.apply_background(&self.config);
+        open.apply_theme(&self.theme);
         self.open = Some(open);
         Ok(())
+    }
+
+    /// Draws everything in Graphite Grid, as the panes of a core too old for a palette are
+    /// (ADR-0049, section 3).
+    fn untheme(&mut self) {
+        if self.theme == GRAPHITE {
+            return;
+        }
+        let _ = writeln!(
+            io::stderr(),
+            "pinfold: drawing Graphite Grid, not the theme: themes need the core updated"
+        );
+        self.theme = GRAPHITE;
+        if let Some(open) = &mut self.open {
+            open.apply_theme(&self.theme);
+        }
+        self.redraw_soon();
     }
 
     fn resized(&mut self, size: PhysicalSize<u32>) {
@@ -695,7 +760,7 @@ impl App {
         self.flash.tick(Instant::now());
         if let Some(open) = &mut self.open {
             let (rows, columns) = self.area;
-            panes::blank(&mut self.composed, rows, columns);
+            panes::clear(&mut self.composed, rows, columns, self.theme.background);
             for pane in &self.panes {
                 panes::blit(&mut self.composed, &pane.frame, pane.rect);
             }
@@ -723,7 +788,13 @@ impl App {
                     }
                 }
                 if let Some(selection) = self.selecting.current {
-                    selection::overlay(&mut self.composed, rect, top, selection);
+                    let theme = &self.theme;
+                    let colours = over(
+                        theme,
+                        theme.selection_background,
+                        theme.selection_foreground,
+                    );
+                    selection::overlay(&mut self.composed, rect, top, selection, colours);
                 }
                 let end = rect.x + rect.columns;
                 ime::overlay(&mut self.composed, end, &self.preedit.0, self.preedit.1);
@@ -1581,6 +1652,7 @@ impl ApplicationHandler<Notice> for App {
                     open.window.focus_window();
                 }
             }
+            Notice::Unthemed => self.untheme(),
             Notice::Config(config) => self.configure(config),
             Notice::WasRunning(pane, runnable, command) => {
                 self.was_running.add(pane, runnable, command);
@@ -1771,6 +1843,17 @@ fn config() -> Config {
     })
 }
 
+/// Reads the theme the config file at `path` chooses, with its `[colors]` on top. A theme that
+/// cannot be used means Graphite Grid, and the log says why (ADR-0049, section 2).
+fn theme_at(path: &Path) -> Theme {
+    let (theme, notes) = theme::load(path)
+        .unwrap_or_else(|error| (GRAPHITE, vec![format!("using Graphite Grid: {error}")]));
+    for note in notes {
+        let _ = writeln!(io::stderr(), "pinfold: theme: {note}");
+    }
+    theme
+}
+
 /// Opens a window on the core at the other end of `link`, and returns when the window closes
 /// or the session's last pane does. A core that goes away leaves the window open and saying so.
 ///
@@ -1780,7 +1863,9 @@ fn config() -> Config {
 ///
 /// Returns an error if the window, font, surface or link cannot be set up.
 pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
-    let link = Link::silent(link)?;
+    let mut link = Link::silent(link)?;
+    let theme = pinfold_config::path().map_or(GRAPHITE, |path| theme_at(&path));
+    link.theme(palette_of(&theme));
     let waker = link.waker();
     let (outbox, inbox) = outbox::channel();
     let latest = Arc::new(Latest::default());
@@ -1822,6 +1907,7 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
         dock,
         notifier,
     );
+    app.theme = theme;
     event_loop.run_app(&mut app)?;
     app.result
 }
@@ -2147,6 +2233,38 @@ mod tests {
         assert_eq!(app.pane_key(&text("q"), Some("q"), false), None);
         let sent = inbox.take();
         assert!(matches!(&sent[..], [Request::Input(1, bytes)] if bytes == b"q"));
+    }
+
+    /// ADR-0049: a theme set in `pinfold.toml` at start colours the padding, the cursor and the
+    /// palette the core is sent, and a core too old for a palette means Graphite Grid.
+    #[test]
+    fn a_theme_in_the_config_colours_the_ground_the_cursor_and_the_palette() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = opener_dir("theme").join("pinfold.toml");
+        let write = |text: &str| {
+            std::fs::write(&path, text).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            theme_at(&path)
+        };
+        let theme = write("[colors]\nbackground = \"#0d1117\"\ncursor = \"#58a6ff\"\n");
+        let palette = palette_of(&theme);
+        assert_eq!(palette.background, 0x000d_1117);
+        assert_eq!(palette.ansi, pinfold_proto::Palette::GRAPHITE_GRID.ansi);
+        let cursor = over(&theme, theme.cursor, theme.cursor_text);
+        // `[colors]` sits on Graphite Grid, whose cursor text this is.
+        assert_eq!(cursor, Some((0x0058_a6ff, GRAPHITE.cursor_text)));
+
+        let (mut app, _inbox, _poll) = app();
+        app.theme = theme;
+        app.untheme();
+        assert_eq!(app.theme, GRAPHITE);
+        // The default's cursor and selection invert each cell, as before themes.
+        assert_eq!(over(&GRAPHITE, GRAPHITE.cursor, GRAPHITE.cursor_text), None);
+        let (ground, text) = (GRAPHITE.selection_background, GRAPHITE.selection_foreground);
+        assert_eq!(over(&GRAPHITE, ground, text), None);
+        assert_eq!(palette_of(&GRAPHITE), pinfold_proto::Palette::GRAPHITE_GRID);
+        // No theme has a name that is a path, so this one is refused.
+        assert_eq!(write("theme = \"../other\""), GRAPHITE);
     }
 
     #[test]

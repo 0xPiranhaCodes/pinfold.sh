@@ -113,7 +113,7 @@ fn draw(frame: &Frame, bar: bool) -> (Vec<u32>, usize) {
         .inset(padding);
     canvas.clear(DEFAULT_BACKGROUND);
     let mut cells = Vec::new();
-    cells_with_cursor(frame, &mut cells);
+    cells_with_cursor(frame, &mut cells, None);
     for (row, cells) in cells.chunks(columns).enumerate() {
         painter.draw_row(&mut canvas, row, cells);
     }

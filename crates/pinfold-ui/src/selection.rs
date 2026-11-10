@@ -90,10 +90,17 @@ fn visible(
     })
 }
 
-/// Inverts the cells of `selection` in the pane at `rect` of `frame`, whose first row is `top`.
+/// Draws the cells of `selection` in the pane at `rect` of `frame`, whose first row is `top`,
+/// in `colours`, the selection's background and text, or inverted with none.
 // shortcut: a search match ending on a wide character inverts only its first cell, since the
 // frame does not say which cells are a wide character's second half.
-pub fn overlay(frame: &mut Frame, rect: Rect, top: usize, selection: Selection) {
+pub fn overlay(
+    frame: &mut Frame,
+    rect: Rect,
+    top: usize,
+    selection: Selection,
+    colours: Option<(u32, u32)>,
+) {
     let width = usize::from(frame.columns);
     for (row, columns) in visible(selection, top, rect.rows, rect.columns) {
         let start = (row - top + usize::from(rect.y)) * width + usize::from(rect.x);
@@ -101,7 +108,7 @@ pub fn overlay(frame: &mut Frame, rect: Rect, top: usize, selection: Selection) 
             .cells
             .get_mut(start + columns.start..start + columns.end)
         {
-            cells.iter_mut().for_each(pinfold_proto::Cell::invert);
+            cells.iter_mut().for_each(|cell| cell.recolour(colours));
         }
     }
 }
@@ -145,7 +152,7 @@ mod tests {
             columns,
             rows,
         };
-        super::overlay(frame, rect, top, selection);
+        super::overlay(frame, rect, top, selection, None);
     }
 
     #[test]
@@ -158,7 +165,10 @@ mod tests {
             columns: 2,
             rows: 2,
         };
-        super::overlay(&mut grid, rect, 10, select(at(10, 0), at(11, 500)));
+        // In a theme's selection colours, where it sets them.
+        let colours = Some((0x0026_4f78, 0x00ff_ffff));
+        super::overlay(&mut grid, rect, 10, select(at(10, 0), at(11, 500)), colours);
+        assert_eq!(grid.cells[9].background, 0x0026_4f78);
         let inverted: Vec<usize> = (0..24)
             .filter(|at| grid.cells[*at] != plain.cells[*at])
             .collect();

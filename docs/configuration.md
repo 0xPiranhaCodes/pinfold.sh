@@ -55,7 +55,8 @@ directory symlinks and special files. It uses `~/Library/Fonts`, `/Library/Fonts
 `$XDG_DATA_HOME/fonts` (default `~/.local/share/fonts`), `/usr/local/share/fonts`, and
 `/usr/share/fonts`. Rasterization remains outline-based; this does not add colour emoji.
 
-`background_opacity` applies only to the default background and the padding around the grid.
+`background_opacity` applies only to the default background, which is the [theme](#themes)'s
+`background`, and the padding around the grid.
 Text and cells a program coloured stay opaque, so a program that paints its own background,
 such as an editor with a colour scheme, covers the glass. A program that changes the default
 background with OSC 11 gets that colour as an opaque cell colour. `background_blur` does nothing
@@ -323,9 +324,16 @@ that composes text in an input method never counts as the prefix.
 
 ## Themes
 
-PinFold reads and checks these keys, but the window does not draw from them yet
-([#399](https://github.com/0xPiranhaCodes/pinfold.sh/issues/399)), so for now they change
-nothing on screen. The rules are those of [ADR-0049](adr/0049-themes.md).
+The window reads these keys when it starts. The theme colours the panes, history included,
+the padding, the cursor and the selection, and `background_opacity` and `background_blur` act on
+the theme's background. A cursor or a selection whose two colours are the theme's `foreground`
+and `background` inverts each cell it covers, and any other colours are drawn as they are. The
+chrome (the bar, menus and prompts) is still Graphite Grid's until the rest of
+[#399](https://github.com/0xPiranhaCodes/pinfold.sh/issues/399), and a saved change needs a new
+window until [#400](https://github.com/0xPiranhaCodes/pinfold.sh/issues/400). A core older than
+the window (link version 13) cannot take a palette, so the window draws Graphite Grid and
+[reports](#where-problems-are-reported) that themes need the core updated. The rules are those
+of [ADR-0049](adr/0049-themes.md).
 
 ```toml
 theme = "My Theme"

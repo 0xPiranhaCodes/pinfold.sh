@@ -99,6 +99,27 @@ impl Cell {
         self.foreground |= style;
         self.background &= !style;
     }
+
+    /// Draws the cell in `colours`, a background and a text colour, as a cursor or a selection
+    /// with colours of its own is. With none it [inverts](Self::invert), which is what a theme
+    /// that sets neither asks for. The style stays with the text.
+    ///
+    /// ```
+    /// use pinfold_proto::{BOLD, Cell};
+    ///
+    /// let mut cell = Cell { character: 'a', foreground: 1 | BOLD, background: 2 };
+    /// cell.recolour(Some((3, 4)));
+    /// assert_eq!((cell.foreground, cell.background), (4 | BOLD, 3));
+    /// cell.recolour(None);
+    /// assert_eq!((cell.foreground, cell.background), (3 | BOLD, 4));
+    /// ```
+    pub fn recolour(&mut self, colours: Option<(u32, u32)>) {
+        let Some((background, text)) = colours else {
+            return self.invert();
+        };
+        self.foreground = text & 0x00ff_ffff | self.style();
+        self.background = background & 0x00ff_ffff;
+    }
 }
 
 /// Which mouse events a program asked to be told about.
