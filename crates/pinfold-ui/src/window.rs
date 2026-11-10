@@ -760,7 +760,8 @@ impl App {
         self.flash.tick(Instant::now());
         if let Some(open) = &mut self.open {
             let (rows, columns) = self.area;
-            panes::clear(&mut self.composed, rows, columns, self.theme.background);
+            let theme = &self.theme;
+            panes::clear(&mut self.composed, rows, columns, theme.background);
             for pane in &self.panes {
                 panes::blit(&mut self.composed, &pane.frame, pane.rect);
             }
@@ -769,6 +770,7 @@ impl App {
                 &mut self.composed,
                 &self.rects,
                 focused.map(|pane| pane.rect),
+                theme,
             );
             if let Some(pane) = focused {
                 let (rect, top) = (pane.rect, pane.top);
@@ -788,7 +790,6 @@ impl App {
                     }
                 }
                 if let Some(selection) = self.selecting.current {
-                    let theme = &self.theme;
                     let colours = over(
                         theme,
                         theme.selection_background,
@@ -803,28 +804,34 @@ impl App {
                 }
             }
             if let Some(menu) = &self.menu {
-                menu.draw(&mut self.composed);
+                menu.draw(&mut self.composed, theme);
                 self.composed.cursor = None;
             }
             if let Some(palette) = &self.palette {
-                palette.draw(&mut self.composed);
+                palette.draw(&mut self.composed, theme);
             }
             if self.ended {
-                flash::ended(&mut self.composed);
+                flash::ended(&mut self.composed, theme);
             } else if !self.approvals.is_empty() {
-                self.approvals.draw(&mut self.composed, Instant::now());
+                self.approvals
+                    .draw(&mut self.composed, Instant::now(), theme);
                 self.was_running.hide();
             } else if let Some(prompt) = &self.prompt {
-                paste::banner(&mut self.composed, prompt);
+                paste::banner(&mut self.composed, prompt, theme);
                 self.was_running.hide();
-            } else if (self.was_running).draw(&mut self.composed, self.focused, Instant::now()) {
+            } else if (self.was_running).draw(
+                &mut self.composed,
+                self.focused,
+                Instant::now(),
+                theme,
+            ) {
                 // The strip is drawn.
             } else if let Some(bar) = &self.bar {
-                bar.draw(&mut self.composed);
+                bar.draw(&mut self.composed, theme);
             } else if let Some(vi) = self.vi.filter(|_| self.flash.until().is_none()) {
-                vi.draw(&mut self.composed);
+                vi.draw(&mut self.composed, theme);
             } else {
-                self.flash.banner(&mut self.composed);
+                self.flash.banner(&mut self.composed, theme);
             }
             let (time, minute_left) = top_bar::now();
             self.minute = Instant::now() + minute_left;
@@ -849,6 +856,7 @@ impl App {
                 time,
                 inset,
                 unhardened: self.unhardened,
+                theme,
             };
             top_bar::draw(&mut self.composed, &bar);
             open.renderer.draw(&self.composed)?;

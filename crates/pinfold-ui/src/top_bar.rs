@@ -11,43 +11,22 @@
 //! do, and the title row gives the active tab's state as glyph, colour and word, with the
 //! agent's message or "from output" when marks, which output can fake, gave it.
 
+use pinfold_config::theme::Theme;
 use std::ffi::OsStr;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use pinfold_proto::{BOLD, Cell, DEFAULT_BACKGROUND, Frame, LEFT_CAP, RIGHT_CAP, TALL};
+use pinfold_proto::{BOLD, Cell, Frame, LEFT_CAP, RIGHT_CAP, TALL};
 use pinfold_render::padding::Padding;
 use pinfold_sys::LocalTime;
 use unicode_width::UnicodeWidthChar;
 
 use crate::mouse;
-use crate::paste::TEXT;
 use crate::search_bar::write;
 
 /// Points to leave on the left. On macOS the real traffic lights sit there, and elsewhere
 /// the system draws its buttons outside the window.
 pub const LEFT_POINTS: f64 = if cfg!(target_os = "macos") { 86.0 } else { 0.0 };
-
-/// The padding's colour, so the bar has no edge and a translucent window shows through it.
-const CHROME: u32 = DEFAULT_BACKGROUND;
-/// The active tab. The default blue is a running agent's colour, and a state is glyph, colour
-/// and word, so a tab must not look like one.
-const ACTIVE: u32 = 0x0025_3c3b;
-const ACCENT: u32 = 0x005c_d6cb;
-/// An inactive tab or the new tab button.
-const QUIET: u32 = 0x001c_2026;
-const HOVER: u32 = 0x002b_323b;
-const QUIET_TEXT: u32 = 0x00b0_b8c4;
-const HOVER_TEXT: u32 = 0x00e2_e5ea;
-/// The number on a tab that is not active.
-const KEY_TEXT: u32 = 0x0090_9ba9;
-const NEW_TAB_TEXT: u32 = 0x00b0_b8c4;
-const TITLE: u32 = 0x009b_a5b3;
-const CLOCK_TEXT: u32 = 0x00e2_e5ea;
-/// The title and date of an unfocused window.
-const UNFOCUSED_TITLE: u32 = 0x0087_909e;
-/// The time and the cursor of an unfocused window.
-const UNFOCUSED: u32 = 0x009b_a5b3;
 
 const FALLBACK: &str = "shell";
 /// Widest label in cells, so it stays a tab and cannot crowd out the clock.
@@ -68,15 +47,28 @@ const KEY: &str = if cfg!(target_os = "macos") { "⌘" } else { "" };
 const KEYED: usize = 9;
 const DOUBLE_CLICK: Duration = Duration::from_millis(500);
 
-/// Each agent state by its number on the link: glyph, word and colour, from
+/// Each agent state by its number on the link: glyph and word, from
 /// `docs/design/ui/Foundations.dc.html` (CLAUDE.md, UI).
-pub const STATES: [(char, &str, u32); 5] = [
-    ('◆', "needs you", 0x00f5_b544),
-    ('●', "running", 0x007a_a7ff),
-    ('✓', "done", 0x0063_d29a),
-    ('✕', "error", 0x00ff_8a8a),
-    ('○', "idle", 0x009a_a1ac),
+pub const STATES: [(char, &str); 5] = [
+    ('◆', "needs you"),
+    ('●', "running"),
+    ('✓', "done"),
+    ('✕', "error"),
+    ('○', "idle"),
 ];
+
+/// A state's colour in `theme`, by its number on the link.
+fn state_colour(theme: &Theme, state: u8) -> Option<u32> {
+    let states = theme.states;
+    let colours = [
+        states.needs_you,
+        states.running,
+        states.done,
+        states.error,
+        states.idle,
+    ];
+    colours.get(usize::from(state)).copied()
+}
 /// The mark for a core without the hardened runtime (ADR-0044): not a state's glyph, in a
 /// colour no state uses, and [`label`] keeps the glyph out of labels.
 pub const UNHARDENED: char = '▲';
@@ -181,6 +173,8 @@ pub struct Bar<'a, L> {
     pub inset: usize,
     /// Set when the core lacks the hardened runtime: whether it could tell.
     pub unhardened: Option<bool>,
+    /// The window's theme, which every colour here but the unhardened mark's is read from.
+    pub theme: &'a Theme,
 }
 
 /// The word beside [`UNHARDENED`]: the core lacks the runtime, or could not tell.
@@ -198,12 +192,13 @@ pub fn tab_columns(columns: u16, unhardened: Option<bool>) -> u16 {
 
 /// Adds the bar above the pane in `frame`. The title is the active tab's label.
 pub fn draw(frame: &mut Frame, bar: &Bar<'_, impl AsRef<str>>) {
+    let (theme, chrome) = (bar.theme, bar.theme.chrome);
     if !bar.focused
         && let Some((row, column)) = frame.cursor
     {
         let at = usize::from(row) * usize::from(frame.columns) + usize::from(column);
         if let Some(cell) = frame.cells.get_mut(at) {
-            cell.foreground = UNFOCUSED;
+            cell.foreground = chrome.title;
         }
     }
     let rows = if bar.title { 2 } else { 1 };
@@ -212,8 +207,8 @@ pub fn draw(frame: &mut Frame, bar: &Bar<'_, impl AsRef<str>>) {
         frame.cells.len() + cells,
         Cell {
             character: ' ',
-            foreground: TEXT,
-            background: CHROME,
+            foreground: theme.foreground,
+            background: theme.background,
         },
     );
     frame.cells.rotate_right(cells);
@@ -221,13 +216,17 @@ pub fn draw(frame: &mut Frame, bar: &Bar<'_, impl AsRef<str>>) {
     frame.cursor = frame.cursor.map(|(row, column)| (row + rows, column));
     if bar.title {
         let title = bar.tabs.get(bar.active).map_or("", AsRef::as_ref);
-        let colour = if bar.focused { TITLE } else { UNFOCUSED_TITLE };
+        let colour = if bar.focused {
+            chrome.title
+        } else {
+            chrome.title_unfocused
+        };
         let mut end = write(frame, 0, bar.inset, title, colour);
         if let Some(status) = bar.status {
-            end = state_line(frame, end + GAP, status, colour);
+            end = state_line(frame, theme, end + GAP, status, colour);
         }
         if let Some(time) = bar.time {
-            clock(frame, time, end, bar.focused);
+            clock(frame, theme, time, end, bar.focused);
         }
     }
     strip(frame, bar, cells - usize::from(frame.columns));
@@ -236,9 +235,16 @@ pub fn draw(frame: &mut Frame, bar: &Bar<'_, impl AsRef<str>>) {
 /// Writes a state as glyph and word in its colour from `column` of the title row, then where it
 /// came from in `colour`: the agent's message, or "from output" for marks. Nothing for an idle
 /// shell. Returns the column after it.
-fn state_line(frame: &mut Frame, column: usize, status: (u8, bool, &str), colour: u32) -> usize {
+fn state_line(
+    frame: &mut Frame,
+    theme: &Theme,
+    column: usize,
+    status: (u8, bool, &str),
+    colour: u32,
+) -> usize {
     let (state, reported, message) = status;
-    let Some(&(glyph, word, tint)) = STATES.get(usize::from(state)) else {
+    let shown = (STATES.get(usize::from(state)), state_colour(theme, state));
+    let (Some(&(glyph, word)), Some(tint)) = shown else {
         return column;
     };
     if state == IDLE && !reported {
@@ -365,16 +371,18 @@ pub fn hit(column: u16, tabs: &[impl AsRef<str>], activity: u32, columns: u16) -
 
 /// Returns a tab's fill, label colour and number colour.
 fn look<L>(index: usize, bar: &Bar<'_, L>) -> (u32, u32, u32) {
+    let (text, chrome) = (bar.theme.foreground, bar.theme.chrome);
     match (index == bar.active, bar.focused) {
-        (true, true) => (ACTIVE, ACCENT | BOLD, QUIET_TEXT),
-        (true, false) => (HOVER, HOVER_TEXT | BOLD, KEY_TEXT),
-        _ if bar.hovered == Some(index) => (HOVER, HOVER_TEXT, QUIET_TEXT),
-        _ => (QUIET, QUIET_TEXT, KEY_TEXT),
+        (true, true) => (chrome.tab_active, chrome.accent | BOLD, chrome.tab_text),
+        (true, false) => (chrome.tab_hover, text | BOLD, chrome.key),
+        _ if bar.hovered == Some(index) => (chrome.tab_hover, text, chrome.tab_text),
+        _ => (chrome.tab, chrome.tab_text, chrome.key),
     }
 }
 
 /// Writes the tabs' row, which starts at cell `row`: pills from the left, then the button.
 fn strip(frame: &mut Frame, bar: &Bar<'_, impl AsRef<str>>, row: usize) {
+    let (ground, chrome) = (bar.theme.background, bar.theme.chrome);
     let columns = usize::from(tab_columns(frame.columns, bar.unhardened));
     if let Some(checked) = bar.unhardened {
         let marker = format!("{UNHARDENED} {}", unhardened_word(checked));
@@ -385,7 +393,7 @@ fn strip(frame: &mut Frame, bar: &Bar<'_, impl AsRef<str>>, row: usize) {
     for span in spans(bar.tabs, bar.activity, columns) {
         button = span.end + 1;
         let (fill, text, key) = look(span.index, bar);
-        pill(frame, row, span.start..span.end, fill | TALL, CHROME);
+        pill(frame, row, span.start..span.end, fill | TALL, ground);
         let label = bar.tabs.get(span.index).map_or("", AsRef::as_ref);
         let Some(room) = span.room else {
             let shown = fit(label, (span.end - span.start).saturating_sub(2));
@@ -395,9 +403,13 @@ fn strip(frame: &mut Frame, bar: &Bar<'_, impl AsRef<str>>, row: usize) {
         let mut at = span.start + LEADING;
         if has_news(bar.activity, span.index) {
             let state = bar.states.get(span.index).copied().unwrap_or(IDLE);
-            let (mark, tint) = match STATES.get(usize::from(state)) {
-                Some(&(glyph, _, tint)) if state != IDLE => (glyph, tint),
-                _ => (ACTIVITY_MARK, ACCENT),
+            let shown = (
+                STATES.get(usize::from(state)),
+                state_colour(bar.theme, state),
+            );
+            let (mark, tint) = match shown {
+                (Some(&(glyph, _)), Some(tint)) if state != IDLE => (glyph, tint),
+                _ => (ACTIVITY_MARK, chrome.accent),
             };
             put(frame, row, at, mark, tint, fill);
             at += ACTIVITY;
@@ -405,13 +417,19 @@ fn strip(frame: &mut Frame, bar: &Bar<'_, impl AsRef<str>>, row: usize) {
         write(frame, row, at, &fit(label, room), text);
         if span.index < KEYED {
             let left = span.end - key_cells(span.index);
-            pill(frame, row, left..span.end - 1, CHROME, fill);
+            pill(frame, row, left..span.end - 1, ground, fill);
             let number = format!("{KEY}{}", span.index + 1);
             write(frame, row, left + 1, &number, key);
         }
     }
-    pill(frame, row, button..button + NEW_TAB, QUIET | TALL, CHROME);
-    write(frame, row, button + 1, "+", NEW_TAB_TEXT);
+    pill(
+        frame,
+        row,
+        button..button + NEW_TAB,
+        chrome.tab | TALL,
+        ground,
+    );
+    write(frame, row, button + 1, "+", chrome.tab_text);
 }
 
 /// Draws a pill over a span of the tabs' row, on `outside`. `inside` can carry [`TALL`].
@@ -477,16 +495,16 @@ fn name(names: &[&'static str], index: u8) -> &'static str {
 }
 
 /// Writes the date and time at the row's right end, each only if it clears the title.
-fn clock(frame: &mut Frame, time: LocalTime, title_end: usize, focused: bool) {
+fn clock(frame: &mut Frame, theme: &Theme, time: LocalTime, title_end: usize, focused: bool) {
     let (weekday, month) = (name(&WEEKDAYS, time.weekday), name(&MONTHS, time.month));
     let date = format!("{weekday} {:02} {month}  ", time.day);
     let clock = format!("{:02}:{:02}", time.hour, time.minute);
     let clock_at = usize::from(frame.columns).saturating_sub(clock.len());
     let date_at = clock_at.saturating_sub(date.len());
     let (date_colour, clock_colour) = if focused {
-        (TITLE, CLOCK_TEXT)
+        (theme.chrome.title, theme.foreground)
     } else {
-        (UNFOCUSED_TITLE, UNFOCUSED)
+        (theme.chrome.title_unfocused, theme.chrome.title)
     };
     if date_at >= title_end + GAP {
         write(frame, 0, date_at, &date, date_colour);
@@ -567,6 +585,7 @@ impl Clicks {
 mod tests {
     use super::*;
     use crate::selection;
+    use pinfold_config::theme::GRAPHITE;
     use pinfold_core::search::{Position, Selection};
     use pinfold_proto::link::MAX_TABS;
     use pinfold_proto::{MouseEncoding, MouseMode};
@@ -600,6 +619,27 @@ mod tests {
         minute: 41,
         second: 7,
     };
+    // Graphite Grid's colours as they were before themes, which the default must still draw.
+    /// The padding's colour, so the bar has no edge and a translucent window shows through it.
+    const CHROME: u32 = pinfold_proto::DEFAULT_BACKGROUND;
+    /// The active tab. The default blue is a running agent's colour, and a state is glyph, colour
+    /// and word, so a tab must not look like one.
+    const ACTIVE: u32 = 0x0025_3c3b;
+    const ACCENT: u32 = 0x005c_d6cb;
+    /// An inactive tab or the new tab button.
+    const QUIET: u32 = 0x001c_2026;
+    const HOVER: u32 = 0x002b_323b;
+    const QUIET_TEXT: u32 = 0x00b0_b8c4;
+    const HOVER_TEXT: u32 = 0x00e2_e5ea;
+    /// The number on a tab that is not active.
+    const KEY_TEXT: u32 = 0x0090_9ba9;
+    const NEW_TAB_TEXT: u32 = 0x00b0_b8c4;
+    const TITLE: u32 = 0x009b_a5b3;
+    const CLOCK_TEXT: u32 = 0x00e2_e5ea;
+    /// The title and date of an unfocused window.
+    const UNFOCUSED_TITLE: u32 = 0x0087_909e;
+    /// The time and the cursor of an unfocused window.
+    const UNFOCUSED: u32 = 0x009b_a5b3;
     const STATE_COLOURS: [u32; 5] = [
         0x00f5_b544,
         0x007a_a7ff,
@@ -648,6 +688,7 @@ mod tests {
             time: None,
             inset: 1,
             unhardened: None,
+            theme: &GRAPHITE,
         }
     }
 
@@ -675,11 +716,8 @@ mod tests {
             );
         }
         assert_eq!(tab_columns(50, None), 50);
-        assert!(
-            STATES
-                .iter()
-                .all(|&(glyph, _, tint)| glyph != UNHARDENED && tint != VIOLET)
-        );
+        assert!(STATES.iter().all(|&(glyph, _)| glyph != UNHARDENED));
+        assert!(!STATE_COLOURS.contains(&VIOLET));
         assert!(!safe(UNHARDENED), "a label could fake it");
     }
 
@@ -695,10 +733,15 @@ mod tests {
         ];
         assert_eq!(STATES.len(), usize::from(pinfold_proto::link::STATES));
         for status in all {
-            let (glyph, word, _) = STATES[status as usize];
+            let (glyph, word) = STATES[status as usize];
             assert_eq!((glyph, word), (status.glyph(), status.word()));
         }
-        assert_eq!(STATES[usize::from(NEEDS_YOU)].2, 0x00f5_b544, "amber");
+        let amber = state_colour(&GRAPHITE, NEEDS_YOU);
+        assert_eq!(amber, Some(0x00f5_b544), "amber");
+        assert_eq!(
+            STATE_COLOURS.map(Some),
+            [0, 1, 2, 3, 4].map(|s| state_colour(&GRAPHITE, s))
+        );
         assert_eq!(STATES[usize::from(IDLE)].0, '○');
     }
 
@@ -721,7 +764,10 @@ mod tests {
         for (index, state) in [(0, 1), (1, NEEDS_YOU), (2, 3)] {
             let start = spans(&names, bar.activity, 60).nth(index).unwrap().start;
             let mark = strip[start + LEADING];
-            let (glyph, _, tint) = STATES[usize::from(state)];
+            let (glyph, tint) = (
+                STATES[usize::from(state)].0,
+                STATE_COLOURS[usize::from(state)],
+            );
             assert_eq!(
                 (mark.character, mark.foreground),
                 (glyph, tint),
@@ -747,7 +793,7 @@ mod tests {
         };
         let (line, tint) = title(Some((NEEDS_YOU, true, "approve the diff?")));
         assert_eq!(line, " work  ◆ needs you · approve the diff?");
-        assert_eq!(tint, Some(STATES[0].2 | BOLD));
+        assert_eq!(tint, Some(STATE_COLOURS[0] | BOLD));
         assert_eq!(title(Some((2, false, ""))).0, " work  ✓ done · from output");
         assert_eq!(title(Some((IDLE, false, ""))).0, " work");
         assert_eq!(title(Some((IDLE, true, ""))).0, " work  ○ idle");

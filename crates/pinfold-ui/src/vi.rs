@@ -5,13 +5,14 @@
 //! whole store costs a view per row, as the wheel does, and never a copy of the store. The label
 //! sits in the row under the pane, where program output cannot fake it.
 
+use pinfold_config::theme::Theme;
 use std::ops::Range;
 
 use pinfold_proto::link::{Position, Selection};
 use pinfold_proto::{Cell, Frame};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
-use crate::paste::{self, TEXT};
+use crate::paste;
 
 /// What a key asks the window to do. Every key is vi mode's: none reaches the program.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -317,7 +318,8 @@ impl Vi {
     }
 
     /// Adds the mode's row under the pane in `frame`.
-    pub fn draw(&self, frame: &mut Frame) {
+    pub fn draw(&self, frame: &mut Frame, theme: &Theme) {
+        let text = theme.prompt_text();
         let (label, help) = if self.visual.is_some() {
             (" VISUAL  ", "Move to extend, y copies, Esc cancels")
         } else {
@@ -326,7 +328,11 @@ impl Vi {
                 "h j k l move, v selects, y copies, / finds, Esc leaves",
             )
         };
-        paste::row(frame, &[(label.to_owned(), TEXT), (help.to_owned(), TEXT)]);
+        paste::row(
+            frame,
+            &[(label.to_owned(), text), (help.to_owned(), text)],
+            theme,
+        );
     }
 }
 
@@ -335,6 +341,7 @@ mod tests {
     use super::*;
     use crate::search_bar::scroll_to;
     use crate::selection;
+    use pinfold_config::theme::GRAPHITE;
     use pinfold_core::vt::{AlacrittyEngine, VtEngine};
 
     const NONE: ModifiersState = ModifiersState::empty();
@@ -643,7 +650,7 @@ mod tests {
     fn the_label_is_a_row_of_its_own_and_says_when_selecting() {
         let row = |cursor: &Vi| {
             let mut frame = frame(&["x"], 40);
-            cursor.draw(&mut frame);
+            cursor.draw(&mut frame, &GRAPHITE);
             assert_eq!(frame.rows, 2);
             let cells = frame.cells[40..].iter();
             cells.map(|cell| cell.character).collect::<String>()

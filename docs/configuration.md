@@ -325,12 +325,13 @@ that composes text in an input method never counts as the prefix.
 ## Themes
 
 The window reads these keys when it starts. The theme colours the panes, history included,
-the padding, the cursor and the selection, and `background_opacity` and `background_blur` act on
+the padding, the cursor, the selection and the chrome: the bar, the borders, the menus, the
+palette, the prompts and the agent states. `background_opacity` and `background_blur` act on
 the theme's background. A cursor or a selection whose two colours are the theme's `foreground`
 and `background` inverts each cell it covers, and any other colours are drawn as they are. The
-chrome (the bar, menus and prompts) is still Graphite Grid's until the rest of
-[#399](https://github.com/0xPiranhaCodes/pinfold.sh/issues/399), and a saved change needs a new
-window until [#400](https://github.com/0xPiranhaCodes/pinfold.sh/issues/400). A core older than
+▲ mark of a core without the hardened runtime keeps its own violet under every theme. A saved
+change needs a new window until
+[#400](https://github.com/0xPiranhaCodes/pinfold.sh/issues/400). A core older than
 the window (link version 13) cannot take a palette, so the window draws Graphite Grid and
 [reports](#where-problems-are-reported) that themes need the core updated. The rules are those
 of [ADR-0049](adr/0049-themes.md).
@@ -370,6 +371,8 @@ and `[colors]` take the same keys, each a string of `#` and six hex digits:
 | `chrome.tab_active` | optional | `background` moved 22% towards `chrome.accent` if set, else `cyan` |
 | `chrome.border`, `chrome.muted` | optional | `background` moved 20% and 30% towards `foreground` |
 | `chrome.dim` | optional | `foreground` moved 25% towards `background` |
+| `chrome.tab_text`, `chrome.key`, `chrome.title`, `chrome.title_unfocused` | optional | `foreground` moved 20%, 35%, 30% and 40% towards `background` |
+| `chrome.rule`, `chrome.palette` | optional | `background` moved 12% and 4% towards `foreground` |
 | `states.needs_you`, `states.running`, `states.done`, `states.error`, `states.idle` | optional | Graphite Grid's five colours |
 
 In a theme file the last two groups are the tables `[chrome]` and `[states]`, and in
