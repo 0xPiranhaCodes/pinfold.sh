@@ -1199,14 +1199,20 @@ mod tests {
 
         peer.socket.set_nonblocking(false).unwrap();
         let mut socket = peer.socket.try_clone().unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
         let reader = std::thread::spawn(move || io::copy(&mut socket, &mut io::sink()));
         let start = Instant::now();
         while reactor.host.window.as_ref().unwrap().session.pending() > 0 {
             reactor.turn(Some(Duration::from_secs(5))).unwrap();
             assert!(start.elapsed() < Duration::from_secs(4), "a turn slept");
         }
-        peer.socket.shutdown(std::net::Shutdown::Both).unwrap();
-        reader.join().unwrap().unwrap();
+        // Closes the core's end, the one close that always ends the read: a shutdown of the
+        // original left it blocked for hours on macOS (#387).
+        drop(reactor);
+        let read = reader.join().unwrap();
+        read.expect("the reader never saw the core's end close");
     }
 
     #[test]

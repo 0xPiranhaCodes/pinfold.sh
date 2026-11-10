@@ -1,13 +1,16 @@
 //! The markdown reader behind `pinfold md` (ADR-0045 sections 2 and 3).
 //!
 //! The file is laid out again for each width, as lines of styled spans that are already
-//! escaped, so a line's length in characters is its length in cells.
+//! escaped, so a line's length in characters is its length in cells. It is parsed a window of
+//! whole top-level blocks at a time, which bounds the memory of the parse (#380).
 //!
 //! Each cap is a constant (ADR-0045 section 4), and the reader says above the file when one
 //! cut it.
 
+use std::borrow::Cow;
 use std::ffi::OsString;
 use std::io::{self, Read};
+use std::ops::Range;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
@@ -23,6 +26,13 @@ use crate::{Flow, Tool};
 const MAX_BYTES: usize = 5_000_000;
 /// Time parsing may take at each width, after which the rest shows as plain text.
 const MAX_PARSE: Duration = Duration::from_secs(2);
+/// Bytes of markdown parsed at a time. pulldown-cmark builds a tree of all it is given before
+/// its first event, about 11 bytes for each byte of dense markdown (#380).
+const WINDOW: usize = 32 * 1024;
+/// Bytes of link reference definitions put above each window; later ones are not used across
+/// windows. Two windows' worth keeps each parse within three windows, and holds about a
+/// thousand definitions of a typical length.
+const MAX_DEFS: usize = 64 * 1024;
 /// Characters on a laid-out line. Code, table and plain-text lines are cut here.
 const MAX_LINE: usize = 10_000;
 /// Laid-out lines; the rest of the file is not shown.
@@ -55,14 +65,140 @@ const KEYS: [&str; 13] = [
     "q                     quit",
 ];
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// A run of laid-out text in one style and link, which starts where the span before it ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Span {
-    text: String,
+    /// Where the span ends in [`Lines::text`].
+    end: u32,
+    /// The link's index in [`Lines::links`] plus one, or 0 for none.
+    link: u32,
     style: Style,
-    link: Option<String>,
 }
 
-type Line = Vec<Span>;
+// Offsets into the laid-out text fit in a u32: at most MAX_LINES lines of MAX_LINE characters
+// of 4 bytes, and a banner.
+const _: () = assert!(MAX_LINES * MAX_LINE * 4 + 1_000_000 <= u32::MAX as usize);
+
+/// Laid-out lines, kept flat so that a span is 12 bytes, not allocations of its own (#380).
+#[derive(Debug, Default)]
+struct Lines {
+    /// Each line's escaped text, one after another.
+    text: String,
+    spans: Vec<Span>,
+    /// Each line's first span; the line in progress starts at `open`.
+    starts: Vec<u32>,
+    open: usize,
+    links: Vec<String>,
+}
+
+impl Lines {
+    /// Room for the layout of `bytes` of text, ample for most files. A freed buffer stays in the
+    /// process's footprint on macOS, so growing by doubling would cost about twice the final
+    /// size, while room that is never written costs no memory.
+    fn with_capacity(bytes: usize) -> Self {
+        Self {
+            text: String::with_capacity(bytes.saturating_mul(2)),
+            spans: Vec::with_capacity(bytes / 4),
+            starts: Vec::with_capacity(bytes.min(MAX_LINES) + 8),
+            ..Self::default()
+        }
+    }
+
+    fn len(&self) -> usize {
+        self.starts.len()
+    }
+
+    /// The spans of line `at`, as indexes into `spans`.
+    fn range(&self, at: usize) -> Range<usize> {
+        let start = self
+            .starts
+            .get(at)
+            .map_or(self.open, |&start| start as usize);
+        let end = self
+            .starts
+            .get(at + 1)
+            .map_or(self.open, |&end| end as usize);
+        start..end.max(start)
+    }
+
+    /// Where span `index` starts in `text`.
+    fn offset(&self, index: usize) -> usize {
+        (index.checked_sub(1).and_then(|last| self.spans.get(last)))
+            .map_or(0, |span| span.end as usize)
+    }
+
+    /// The text of line `at`.
+    fn text(&self, at: usize) -> &str {
+        let spans = self.range(at);
+        (self
+            .text
+            .get(self.offset(spans.start)..self.offset(spans.end)))
+        .unwrap_or_default()
+    }
+
+    /// The spans of line `at`, as their text, style and link.
+    fn line(&self, at: usize) -> impl Iterator<Item = (&str, Style, Option<&str>)> {
+        self.range(at).filter_map(|index| {
+            let span = self.spans.get(index)?;
+            let text = self.text.get(self.offset(index)..span.end as usize)?;
+            let link = (span.link as usize)
+                .checked_sub(1)
+                .and_then(|link| self.links.get(link));
+            Some((text, span.style, link.map(String::as_str)))
+        })
+    }
+
+    /// The line in progress has no spans yet.
+    fn open_is_empty(&self) -> bool {
+        self.spans.len() == self.open
+    }
+
+    /// Adds `text` to the line in progress, in its last span if that has the same style and link.
+    fn append(&mut self, text: &str, style: Style, link: u32) {
+        self.text.push_str(text);
+        let end = u32::try_from(self.text.len()).unwrap_or(u32::MAX);
+        let open = self.open < self.spans.len();
+        match self.spans.last_mut() {
+            Some(last) if open && last.style == style && last.link == link => {
+                last.end = end;
+            }
+            _ => self.spans.push(Span { end, link, style }),
+        }
+    }
+
+    /// Ends the line in progress, or drops it if [`MAX_LINES`] are laid out, and says which.
+    fn end_line(&mut self) -> bool {
+        if self.len() < MAX_LINES {
+            self.starts
+                .push(u32::try_from(self.open).unwrap_or(u32::MAX));
+            self.open = self.spans.len();
+            return true;
+        }
+        let at = self.offset(self.open);
+        self.text.truncate(at);
+        self.spans.truncate(self.open);
+        false
+    }
+
+    /// Puts `banner`, which has no links, above these lines.
+    fn prepend(&mut self, banner: Lines) {
+        let shift = u32::try_from(banner.text.len()).unwrap_or(u32::MAX);
+        let count = u32::try_from(banner.spans.len()).unwrap_or(u32::MAX);
+        self.text.reserve_exact(banner.text.len());
+        self.text.insert_str(0, &banner.text);
+        for span in &mut self.spans {
+            span.end = span.end.saturating_add(shift);
+        }
+        for start in &mut self.starts {
+            *start = start.saturating_add(count);
+        }
+        self.spans.reserve_exact(banner.spans.len());
+        self.spans.splice(0..0, banner.spans);
+        self.starts.reserve_exact(banner.starts.len());
+        self.starts.splice(0..0, banner.starts);
+        self.open += banner.open;
+    }
+}
 
 /// A heading in the outline: the line it starts on, its level and its escaped text.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -110,12 +246,10 @@ pub(crate) fn lines(bytes: &[u8], width: u16) -> Vec<String> {
     texts(&layout(&reader.text, usize::from(width), true, false, MAX_PARSE).0)
 }
 
-fn texts(lines: &[Line]) -> Vec<String> {
-    lines.iter().map(text).collect()
-}
-
-fn text(line: &Line) -> String {
-    line.iter().map(|span| span.text.as_str()).collect()
+fn texts(lines: &Lines) -> Vec<String> {
+    (0..lines.len())
+        .map(|at| lines.text(at).to_owned())
+        .collect()
 }
 
 /// The laid-out text, which is escaped, lowercased in ASCII only so byte offsets still match.
@@ -207,7 +341,7 @@ pub(crate) struct Reader {
     whole: bool,
     markdown: bool,
     width: u16,
-    lines: Vec<Line>,
+    lines: Lines,
     widest: usize,
     headings: Vec<Heading>,
     top: usize,
@@ -243,7 +377,7 @@ impl Reader {
             whole,
             markdown: true,
             width: 0,
-            lines: Vec::new(),
+            lines: Lines::default(),
             widest: 0,
             headings: Vec::new(),
             top: 0,
@@ -310,20 +444,20 @@ impl Reader {
     fn links(&self) -> Vec<(usize, usize)> {
         let mut starts = Vec::new();
         let mut last = None;
-        for (at, line) in self.lines.iter().enumerate() {
-            for (index, span) in line.iter().enumerate() {
+        for at in 0..self.lines.len() {
+            for (index, (_, _, link)) in self.lines.line(at).enumerate() {
                 // A link wrapped or restyled across spans is one link.
-                if span.link.is_some() && span.link.as_ref() != last {
+                if link.is_some() && link != last {
                     starts.push((at, index));
                 }
-                last = span.link.as_ref();
+                last = link;
             }
         }
         starts
     }
 
     fn link(&self, (line, span): (usize, usize)) -> Option<String> {
-        self.lines.get(line)?.get(span)?.link.clone()
+        Some(self.lines.line(line).nth(span)?.2?.to_owned())
     }
 
     /// Picks the next link after the one picked, wrapping, and scrolls to it.
@@ -348,8 +482,8 @@ impl Reader {
     fn clicked(&self, row: u16, column: u16) -> Option<(usize, usize)> {
         let line = (self.top + usize::from(row)).checked_sub(1)?;
         let mut x = self.left + usize::from(column);
-        for (index, span) in self.lines.get(line)?.iter().enumerate() {
-            let length = span.text.chars().count();
+        for (index, (text, _, _)) in self.lines.line(line).enumerate() {
+            let length = text.chars().count();
             if x < length {
                 return Some((line, index));
             }
@@ -373,9 +507,8 @@ impl Reader {
         self.matches = if needle.is_empty() {
             Vec::new()
         } else {
-            (self.lines.iter().enumerate())
-                .filter(|(_, line)| folded(&text(line)).contains(&needle))
-                .map(|(at, _)| at)
+            (0..self.lines.len())
+                .filter(|&at| folded(self.lines.text(at)).contains(&needle))
                 .take(MAX_MATCHES)
                 .collect()
         };
@@ -463,16 +596,15 @@ impl Reader {
         }
     }
 
-    /// Marks each visible occurrence of the search on `row`, which shows `line`.
-    fn mark_matches(&self, screen: &mut Screen, row: u16, line: &Line) {
+    /// Marks each visible occurrence of the search on `row`, which shows `text`.
+    fn mark_matches(&self, screen: &mut Screen, row: u16, text: &str) {
         let needle = self.needle();
-        let text = text(line);
         let hit = Style {
             fg: Color::Black,
             bg: Color::Yellow,
             bold: false,
         };
-        for (at, found) in folded(&text).match_indices(&needle) {
+        for (at, found) in folded(text).match_indices(&needle) {
             let start = text[..at].chars().count();
             let skip = self.left.saturating_sub(start);
             let Some((cut, _)) = text[at..at + found.len()].char_indices().nth(skip) else {
@@ -488,6 +620,8 @@ impl Tool for Reader {
     fn draw(&mut self, screen: &mut Screen) {
         let (rows, columns) = screen.size();
         if columns != self.width {
+            // The old layout goes first, so the two are never in memory together.
+            self.lines = Lines::default();
             (self.lines, self.widest, self.headings) = layout(
                 &self.text,
                 usize::from(columns),
@@ -539,27 +673,26 @@ impl Tool for Reader {
             self.draw_outline(screen, selected);
             return;
         }
-        let lines = self.lines.iter().enumerate().skip(self.top);
-        for (row, (at, line)) in (1..rows).zip(lines) {
+        for (row, at) in (1..rows).zip(self.top..self.lines.len()) {
             let mut x = 0;
-            for (index, span) in line.iter().enumerate() {
-                let length = span.text.chars().count();
+            for (index, (text, style, link)) in self.lines.line(at).enumerate() {
+                let length = text.chars().count();
                 let focused = Style {
                     fg: Color::Black,
                     bg: Color::Blue,
-                    ..span.style
+                    ..style
                 };
                 let style = if self.focus == Some((at, index)) {
                     focused
                 } else {
-                    span.style
+                    style
                 };
                 if x + length > self.left {
                     let skip = self.left.saturating_sub(x);
                     let column = u16::try_from(x + skip - self.left).unwrap_or(u16::MAX);
-                    let from = span.text.char_indices().nth(skip).map_or(0, |(at, _)| at);
-                    let text = &span.text[from..];
-                    match &span.link {
+                    let from = text.char_indices().nth(skip).map_or(0, |(at, _)| at);
+                    let text = &text[from..];
+                    match link {
                         Some(target) => {
                             screen.put_link(row, column, text, style, target.as_bytes())
                         }
@@ -569,7 +702,7 @@ impl Tool for Reader {
                 x += length;
             }
             if !self.typing && !self.matches.is_empty() {
-                self.mark_matches(screen, row, line);
+                self.mark_matches(screen, row, self.lines.text(at));
             }
         }
         let last = rows.saturating_sub(1);
@@ -718,40 +851,52 @@ fn layout(
     markdown: bool,
     cut: bool,
     budget: Duration,
-) -> (Vec<Line>, usize, Vec<Heading>) {
+) -> (Lines, usize, Vec<Heading>) {
     let width = width.clamp(1, MAX_LINE);
     let mut layout = Layout {
         width,
+        lines: Lines::with_capacity(text.len()),
         ..Layout::default()
     };
     let mut notes = Vec::new();
     if markdown {
-        let options = Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
         let started = Instant::now();
-        // shortcut: the time is checked between events, so pulldown-cmark's first pass over the
-        // blocks and any one slow event are not cut short; a parse thread with a deadline would
+        // shortcut: the time is checked between events, so pulldown-cmark's first pass over a
+        // window and any one slow event are not cut short; a parse thread with a deadline would
         // be, if a hostile file is ever found to stall either.
+        let (defs, cut_defs) = definitions(text, WINDOW, || started.elapsed() <= budget);
+        if cut_defs {
+            notes.push(format!(
+                "Only the first {} KiB of link definitions are used.",
+                MAX_DEFS / 1024
+            ));
+        }
         // Where the text laid out so far ends: a start's range covers its whole element.
         let mut done = 0;
-        for (event, range) in Parser::new_ext(text, options).into_offset_iter() {
+        let mut late = false;
+        parse(text, &defs, WINDOW, |event, range| {
             if layout.full {
-                break;
+                return false;
             }
-            if started.elapsed() > budget {
-                notes.push(format!(
-                    "Parsing took over {} s, so the rest shows as plain text.",
-                    MAX_PARSE.as_secs()
-                ));
-                let at = (done..text.len())
-                    .find(|&at| text.is_char_boundary(at))
-                    .unwrap_or(text.len());
-                layout.plain(&text[at..]);
-                break;
+            late = started.elapsed() > budget;
+            if late {
+                return false;
             }
             if !matches!(event, Event::Start(_)) {
                 done = done.max(range.end);
             }
             layout.event(event);
+            true
+        });
+        if late {
+            notes.push(format!(
+                "Parsing took over {} s, so the rest shows as plain text.",
+                MAX_PARSE.as_secs()
+            ));
+            let at = (done..text.len())
+                .find(|&at| text.is_char_boundary(at))
+                .unwrap_or(text.len());
+            layout.plain(&text[at..]);
         }
     } else {
         if cut {
@@ -784,20 +929,158 @@ fn layout(
     for heading in &mut layout.headings {
         heading.line += banner.lines.len();
     }
-    banner.lines.append(&mut layout.lines);
+    layout.lines.prepend(banner.lines);
     (
-        banner.lines,
+        layout.lines,
         banner.widest.max(layout.widest),
         layout.headings,
     )
 }
 
+/// Parses `text` as markdown `window` bytes at a time, with `defs` above each window, and passes
+/// each event and its range in `text` to `each` until it returns false. A window ends at a line
+/// end, and its last top-level block, which that end may have cut, starts the next window, so
+/// each event is the one a parse of the whole text gives. A block longer than a window doubles
+/// it.
+///
+/// shortcut: a single top-level block, such as a list, is parsed whole, so a 5 MB one still
+/// costs pulldown-cmark's tree of it; cutting inside blocks would bound that, if such files
+/// turn up.
+fn parse(text: &str, defs: &str, window: usize, each: impl FnMut(Event<'_>, Range<usize>) -> bool) {
+    windows(text, defs, window, each, |_| true);
+}
+
+/// The source of each link reference definition in `text`, a line each, as [`parse`] puts them
+/// above every window so a link can use a definition in a later one, and whether
+/// [`MAX_DEFS`] cut them. It stops when `more` says.
+///
+/// shortcut: a definition that spans lines inside a block quote keeps the `>` of its later lines,
+/// so a link before its window does not find it; such definitions are rare.
+fn definitions(text: &str, window: usize, more: impl Fn() -> bool) -> (String, bool) {
+    let mut defs = String::new();
+    let mut cut = false;
+    if text.contains("]:") {
+        windows(
+            text,
+            "",
+            window,
+            |_, _| more(),
+            |span| {
+                let def = text.get(span).unwrap_or_default();
+                cut = defs.len() + def.len() + 1 > MAX_DEFS;
+                if !cut {
+                    defs.push_str(def);
+                    defs.push('\n');
+                }
+                !cut && more()
+            },
+        );
+    }
+    (defs, cut)
+}
+
+/// [`parse`], which also passes `found` the span of each definition in the blocks it passed on,
+/// in order, until it returns false.
+fn windows(
+    text: &str,
+    defs: &str,
+    window: usize,
+    mut each: impl FnMut(Event<'_>, Range<usize>) -> bool,
+    mut found: impl FnMut(Range<usize>) -> bool,
+) {
+    let options = Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
+    let (mut from, mut size) = (0, window.max(1));
+    while from < text.len() {
+        let end = (text.as_bytes().get(from.saturating_add(size)..))
+            .and_then(|rest| rest.iter().position(|&byte| byte == b'\n'))
+            .map_or(text.len(), |at| from + size + at + 1);
+        let last = end == text.len();
+        let body = text.get(from..end).unwrap_or_default();
+        // A blank line ends the definitions, so the window's first line is not a title.
+        let input: Cow<'_, str> = if defs.is_empty() {
+            body.into()
+        } else {
+            format!("{defs}\n{body}").into()
+        };
+        let skip = input.len() - body.len();
+        let place = |range: Range<usize>| {
+            from + range.start.saturating_sub(skip)..from + range.end.saturating_sub(skip)
+        };
+        let mut parser = Parser::new_ext(&input, options).into_offset_iter();
+        // The events of the top-level block in progress, and where its line starts.
+        let mut held = Vec::new();
+        let mut block = from;
+        let mut depth = 0_usize;
+        for (event, range) in parser.by_ref() {
+            let range = place(range);
+            if depth == 0 && !matches!(event, Event::End(_)) {
+                // A top-level block starts, so the one before it is whole.
+                for (event, range) in held.drain(..) {
+                    if !each(event, range) {
+                        return;
+                    }
+                }
+                let before = text.as_bytes().get(..range.start).unwrap_or_default();
+                block = before
+                    .iter()
+                    .rposition(|&byte| byte == b'\n')
+                    .map_or(0, |at| at + 1)
+                    .max(from);
+            }
+            match event {
+                Event::Start(_) => depth += 1,
+                Event::End(_) => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            held.push((event, range));
+        }
+        let mut spans: Vec<_> = (parser.reference_definitions().iter())
+            .filter(|(_, def)| def.span.start >= skip)
+            .map(|(_, def)| place(def.span.clone()))
+            .collect();
+        spans.sort_by_key(|span| span.start);
+        // Definitions give no events, so a file of them would never split. One that starts a
+        // line ends every block before it: inside a list or quote it would be indented or quoted.
+        if let Some(span) = spans
+            .iter()
+            .rev()
+            .find(|span| span.start > block && text.as_bytes().get(span.start - 1) == Some(&b'\n'))
+            && !last
+        {
+            for (event, range) in held.drain(..) {
+                if !each(event, range) {
+                    return;
+                }
+            }
+            block = span.start;
+        }
+        let kept = if last { end } else { block };
+        for span in spans.into_iter().filter(|span| span.start < kept) {
+            if !found(span) {
+                return;
+            }
+        }
+        if last {
+            for (event, range) in held {
+                if !each(event, range) {
+                    return;
+                }
+            }
+            return;
+        }
+        if block == from {
+            size = size.saturating_mul(2);
+        } else {
+            (from, size) = (block, window.max(1));
+        }
+    }
+}
+
 #[derive(Default)]
 struct Layout {
     width: usize,
-    lines: Vec<Line>,
-    line: Line,
-    /// Characters on `line`, and in its prefix.
+    lines: Lines,
+    /// Characters on the line in progress, and in its prefix.
     used: usize,
     start: usize,
     widest: usize,
@@ -808,7 +1091,8 @@ struct Layout {
     /// Each open list's next number, or `None` for bullets.
     lists: Vec<Option<u64>>,
     styles: Vec<Style>,
-    link: Option<String>,
+    /// The link text is in, as a [`Span::link`].
+    link: u32,
     /// Text goes between words.
     space: bool,
     /// A blank line goes before the next block.
@@ -941,7 +1225,10 @@ impl Layout {
             }
             Tag::Strong => self.push_style(|style| style.bold = true),
             Tag::Link { dest_url, .. } => {
-                self.link = Some(dest_url.into_string());
+                if self.lines.links.last().map(String::as_str) != Some(&*dest_url) {
+                    self.lines.links.push(dest_url.into_string());
+                }
+                self.link = u32::try_from(self.lines.links.len()).unwrap_or(0);
                 self.push_style(|style| style.fg = Color::Blue);
             }
             Tag::Image { .. } => {
@@ -983,7 +1270,7 @@ impl Layout {
                 self.styles.pop();
             }
             TagEnd::Link => {
-                self.link = None;
+                self.link = 0;
                 self.styles.pop();
             }
             TagEnd::Image => {
@@ -998,9 +1285,11 @@ impl Layout {
     /// Ends the line in progress, and puts a blank line before a block that follows another.
     fn block(&mut self) {
         self.flush();
-        if self.gap && !self.lines.is_empty() {
+        if self.gap && self.lines.len() > 0 {
             let (prefix, _) = self.prefix(false);
-            self.push(vec![span(prefix.trim_end(), colour(Color::BrightBlack))]);
+            self.lines
+                .append(prefix.trim_end(), colour(Color::BrightBlack), 0);
+            self.push();
         }
         self.gap = false;
     }
@@ -1011,25 +1300,22 @@ impl Layout {
     }
 
     fn flush(&mut self) {
-        if !self.line.is_empty() {
+        if !self.lines.open_is_empty() {
             self.newline();
         }
     }
 
     fn newline(&mut self) {
-        let line = std::mem::take(&mut self.line);
         if !self.full {
             self.widest = self.widest.max(self.used);
         }
-        self.push(line);
+        self.push();
         self.used = 0;
         self.space = false;
     }
 
-    fn push(&mut self, line: Line) {
-        if self.lines.len() < MAX_LINES {
-            self.lines.push(line);
-        } else {
+    fn push(&mut self) {
+        if !self.lines.end_line() {
             self.full = true;
         }
     }
@@ -1040,7 +1326,7 @@ impl Layout {
         self.indents.clear();
         self.marker = None;
         self.styles.clear();
-        self.link = None;
+        self.link = 0;
         self.code = false;
         self.table = None;
         self.code_text(text, Style::default());
@@ -1068,11 +1354,11 @@ impl Layout {
 
     /// Starts a line with its prefix if nothing is on it yet.
     fn start_line(&mut self) {
-        if self.line.is_empty() {
+        if self.lines.open_is_empty() {
             let (prefix, length) = self.prefix(true);
             self.marker = None;
             if length > 0 {
-                self.line.push(span(&prefix, colour(Color::BrightBlack)));
+                self.lines.append(&prefix, colour(Color::BrightBlack), 0);
             }
             self.used = length;
             self.start = length;
@@ -1159,16 +1445,7 @@ impl Layout {
             None => text,
         };
         self.used += text.chars().count();
-        match self.line.last_mut() {
-            Some(last) if last.style == style && last.link == self.link => {
-                last.text.push_str(text);
-            }
-            _ => self.line.push(Span {
-                text: text.to_owned(),
-                style,
-                link: self.link.clone(),
-            }),
-        }
+        self.lines.append(text, style, self.link);
     }
 
     /// Draws the table that just ended, its columns as wide as their widest cell. Rows wider
@@ -1208,14 +1485,6 @@ impl Layout {
             self.newline();
         }
         self.end_block();
-    }
-}
-
-fn span(text: &str, style: Style) -> Span {
-    Span {
-        text: text.to_owned(),
-        style,
-        link: None,
     }
 }
 
@@ -1295,13 +1564,9 @@ mod tests {
             false,
             MAX_PARSE,
         );
-        let first: String = lines[0].iter().map(|span| span.text.as_str()).collect();
-        assert_eq!(first, "│ │ │d");
-        assert!(
-            lines
-                .iter()
-                .all(|line| line.iter().map(|s| s.text.chars().count()).sum::<usize>() <= 6)
-        );
+        let texts = texts(&lines);
+        assert_eq!(texts[0], "│ │ │d");
+        assert!(texts.iter().all(|line| line.chars().count() <= 6));
     }
 
     #[test]
@@ -1399,7 +1664,7 @@ mod tests {
         let markdown = format!("```\n{}```\n", "x\n".repeat(MAX_LINES + 10));
         let (lines, _, _) = layout(&markdown, 80, true, false, MAX_PARSE);
         assert_eq!(lines.len(), MAX_LINES + 2);
-        assert_eq!(texts(&lines[..1]), ["Only the first 100000 lines show."]);
+        assert_eq!(texts(&lines)[..1], ["Only the first 100000 lines show."]);
     }
 
     #[test]
@@ -1407,8 +1672,8 @@ mod tests {
         let markdown = format!("```\n{}\n```\n", "y".repeat(MAX_LINE + 5));
         let (lines, widest, _) = layout(&markdown, 80, true, false, MAX_PARSE);
         assert_eq!(widest, MAX_LINE);
-        assert_eq!(texts(&lines[..1]), ["Lines over 10000 characters are cut."]);
-        assert_eq!(texts(&lines[2..])[0].len(), MAX_LINE);
+        assert_eq!(texts(&lines)[..1], ["Lines over 10000 characters are cut."]);
+        assert_eq!(texts(&lines)[2].len(), MAX_LINE);
     }
 
     /// A reader for `markdown` and its 80×24 screen, drawn once.
@@ -1537,6 +1802,104 @@ mod tests {
         let (lines, _, headings) = layout(&markdown, 80, true, false, MAX_PARSE);
         assert_eq!(headings.len(), 1);
         assert_eq!(texts(&lines)[headings[0].line], "# Title");
+    }
+
+    #[test]
+    fn parsing_a_window_at_a_time_gives_the_events_of_the_whole_text() {
+        let blocks = [
+            "# Title\n\nSee [the ref][later], [Later] and [x]: no.\n",
+            "Setext\n======\n\nAnother\n---\n",
+            "| a | b |\n| - | - |\n| 1 | 2 |\nlazy row\n",
+            "```\ncode\n\n# not a heading\n\n```\n",
+            "    indented\n\n    still code\n",
+            "- tight\n- list\n\n- now loose\n\n  more of it\n\n1. one\n2. two\n",
+            "> quote\nlazy\n\n> - [x] task\n>   ```\n>   fenced\n",
+            "<!-- a comment\n\n# inside it\n\n-->\n\n<div>\nhtml\n</div>\n",
+            "Hard  \nbreak and `code`, **bold *both***\n\n***\n",
+            "[later]: https://pinfold.sh/later \"Title\"\n[x]:\n  <spaced dest>\n",
+            "[d1]: /one\n[d2]: /two\n\"titled\"\n[d3]: /three\ntext after [d1] [d4]\n\n",
+            "- [y]: /in-a-list\n  [w]: /indented\n\n> [q]: /quoted\n> [d4]: /four\n\n",
+        ];
+        let text = blocks.concat().repeat(4);
+        let options = Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS;
+        let whole: Vec<_> = Parser::new_ext(&text, options)
+            .into_offset_iter()
+            .map(|(event, range)| format!("{event:?} {range:?}"))
+            .collect();
+        assert!(whole.iter().any(|event| event.contains("pinfold.sh/later")));
+        for window in [1, 7, 64, 300, WINDOW] {
+            let (defs, _) = definitions(&text, window, || true);
+            let mut events = Vec::new();
+            parse(&text, &defs, window, |event, range| {
+                events.push(format!("{event:?} {range:?}"));
+                true
+            });
+            assert_eq!(events, whole, "{window}-byte windows");
+        }
+    }
+
+    #[test]
+    fn link_definitions_above_each_window_stop_at_their_cap() {
+        let text: String = (0..20_000).map(|n| format!("[a{n}]: x\n")).collect();
+        let (defs, cut) = definitions(&text, WINDOW, || true);
+        assert!(cut);
+        assert!(defs.len() <= MAX_DEFS && defs.len() > MAX_DEFS - 100);
+        assert!(defs.starts_with("[a0]: x\n[a1]: x\n"), "the first are kept");
+        let (lines, _, _) = layout(&text, 80, true, false, MAX_PARSE);
+        assert_eq!(
+            texts(&lines),
+            ["Only the first 64 KiB of link definitions are used.", ""]
+        );
+        let (_, cut) = definitions("[a]: x\n", WINDOW, || true);
+        assert!(!cut);
+    }
+
+    /// The median time to lay out each of `cargo xtask mem-gate`'s 5 MB files at 80 columns:
+    /// `cargo test --release -p pinfold-tools layout_time -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement, run by hand"]
+    fn layout_time_at_the_byte_cap() {
+        // As `write_tool_inputs` in `xtask/src/main.rs` writes them.
+        let markdown = |section: usize| {
+            format!(
+                "## Section {section}\n\n見出し 日本語 中文 한국어\n\nSome *emphasis*, **bold**, \
+                 `code` and a [link](https://pinfold.sh/{section}).\n\n- one\n- two\n\n\
+                 | a | b |\n| --- | --- |\n| 1 | 2 |\n\n```\nfn main() {{}}\n```\n\n"
+            )
+        };
+        let prose = |paragraph: usize| {
+            format!(
+                "Paragraph {paragraph} of plain prose, with words enough to wrap across two \
+                 lines at eighty columns and no markup at all.\n\n"
+            )
+        };
+        let defs =
+            |definition: usize| format!("[a{definition}]: https://pinfold.sh/{definition}\n");
+        let inputs: [(&str, &dyn Fn(usize) -> String); 3] = [
+            ("markdown", &markdown),
+            ("plain prose", &prose),
+            ("link definitions", &defs),
+        ];
+        for (name, part) in inputs {
+            let mut bytes = Vec::new();
+            for at in 0.. {
+                if bytes.len() >= MAX_BYTES {
+                    break;
+                }
+                bytes.extend(part(at).bytes());
+            }
+            bytes.truncate(MAX_BYTES);
+            let text = decode(bytes);
+            let mut times: Vec<Duration> = (0..5)
+                .map(|_| {
+                    let started = Instant::now();
+                    layout(&text, 80, true, false, MAX_PARSE);
+                    started.elapsed()
+                })
+                .collect();
+            times.sort();
+            eprintln!("{name}: {:.1} ms", times[2].as_secs_f64() * 1000.0);
+        }
     }
 
     /// A new empty directory for one test.
