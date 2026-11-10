@@ -99,6 +99,8 @@ enum Notice {
     Unhardened(bool),
     /// The core is too old to take the theme's palette (ADR-0049).
     Unthemed,
+    /// The config file or the theme file in use was saved, and this is the theme now.
+    Theme(Theme),
     /// The config file was saved, and this is what it now says.
     Config(Config),
     /// A menu item was chosen.
@@ -358,6 +360,8 @@ struct App {
     config: Config,
     /// The one theme the window draws from (ADR-0049).
     theme: Theme,
+    /// Whether the core is too old for a palette, so the theme stays Graphite Grid.
+    unthemed: bool,
     size: Option<(u32, u32)>,
     outbox: Outbox,
     latest: Arc<Latest>,
@@ -475,6 +479,7 @@ impl App {
             prefix: Prefix::new(config.keys.prefix),
             config,
             theme: GRAPHITE,
+            unthemed: false,
             size,
             outbox,
             latest,
@@ -580,6 +585,7 @@ impl App {
     /// Draws everything in Graphite Grid, as the panes of a core too old for a palette are
     /// (ADR-0049, section 3).
     fn untheme(&mut self) {
+        self.unthemed = true;
         if self.theme == GRAPHITE {
             return;
         }
@@ -588,6 +594,21 @@ impl App {
             "pinfold: drawing Graphite Grid, not the theme: themes need the core updated"
         );
         self.theme = GRAPHITE;
+        if let Some(open) = &mut self.open {
+            open.apply_theme(&self.theme);
+        }
+        self.redraw_soon();
+    }
+
+    /// Draws from `theme`, saved while the window was open, and sends the core its palette
+    /// (ADR-0049, section 2).
+    fn retheme(&mut self, theme: Theme) {
+        if self.unthemed || theme == self.theme {
+            return;
+        }
+        self.theme = theme;
+        let palette = proto::Request::Palette(palette_of(&self.theme));
+        self.outbox.send(Request::Core(palette));
         if let Some(open) = &mut self.open {
             open.apply_theme(&self.theme);
         }
@@ -1661,6 +1682,7 @@ impl ApplicationHandler<Notice> for App {
                 }
             }
             Notice::Unthemed => self.untheme(),
+            Notice::Theme(theme) => self.retheme(theme),
             Notice::Config(config) => self.configure(config),
             Notice::WasRunning(pane, runnable, command) => {
                 self.was_running.add(pane, runnable, command);
@@ -1872,8 +1894,6 @@ fn theme_at(path: &Path) -> Theme {
 /// Returns an error if the window, font, surface or link cannot be set up.
 pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
     let mut link = Link::silent(link)?;
-    let theme = pinfold_config::path().map_or(GRAPHITE, |path| theme_at(&path));
-    link.theme(palette_of(&theme));
     let waker = link.waker();
     let (outbox, inbox) = outbox::channel();
     let latest = Arc::new(Latest::default());
@@ -1882,13 +1902,21 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
     #[cfg(target_os = "macos")]
     winit::platform::macos::EventLoopBuilderExtMacOS::with_default_menu(&mut builder, false);
     let event_loop = builder.build()?;
+    // Before either file is first read, so a save between the two is not missed.
+    let proxy = event_loop.create_proxy();
+    reload::watch(move |saved| {
+        let notice = match saved {
+            reload::Saved::Config(config) => Notice::Config(config),
+            reload::Saved::Theme(theme) => Notice::Theme(theme),
+        };
+        proxy.send_event(notice).is_ok()
+    })?;
+    let theme = pinfold_config::path().map_or(GRAPHITE, |path| theme_at(&path));
+    link.theme(palette_of(&theme));
     let (proxy, shared) = (event_loop.create_proxy(), latest.clone());
     thread::Builder::new()
         .name("pinfold-io".into())
         .spawn(move || run_io(link, &inbox, &shared, &proxy))?;
-    // Before the file is first read, so a save between the two is not missed.
-    let proxy = event_loop.create_proxy();
-    reload::watch(move |config| proxy.send_event(Notice::Config(config)).is_ok())?;
     let proxy = event_loop.create_proxy();
     let menu_bar = menu_bar::Bar::install(move |command| {
         let _ = proxy.send_event(Notice::Command(command));
@@ -2262,10 +2290,21 @@ mod tests {
         // `[colors]` sits on Graphite Grid, whose cursor text this is.
         assert_eq!(cursor, Some((0x0058_a6ff, GRAPHITE.cursor_text)));
 
-        let (mut app, _inbox, _poll) = app();
-        app.theme = theme;
+        let (mut app, inbox, _poll) = app();
+        // A save while the window is open draws from the new theme and tells the core, once.
+        app.retheme(theme);
+        app.retheme(theme);
+        assert_eq!(app.theme, theme);
+        let sent = inbox.take();
+        assert!(
+            matches!(&sent[..], [Request::Core(proto::Request::Palette(sent))] if *sent == palette)
+        );
         app.untheme();
         assert_eq!(app.theme, GRAPHITE);
+        // A core too old for a palette keeps Graphite Grid whatever is saved.
+        app.retheme(theme);
+        assert_eq!(app.theme, GRAPHITE);
+        assert!(inbox.take().is_empty());
         // The default's cursor and selection invert each cell, as before themes.
         assert_eq!(over(&GRAPHITE, GRAPHITE.cursor, GRAPHITE.cursor_text), None);
         let (ground, text) = (GRAPHITE.selection_background, GRAPHITE.selection_foreground);
