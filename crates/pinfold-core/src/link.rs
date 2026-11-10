@@ -43,10 +43,11 @@ const REPLIES: usize = 4 * 1024 * 1024;
 pub const MAX_PENDING: usize = size_of::<u32>() + link::MAX_MESSAGE + REPLIES;
 /// Room for a notice around its text, which is well past the largest head.
 const NOTICE_HEAD: usize = 64;
-/// Send buffer an idle link keeps. This holds a full frame of 200x80 cells.
-const KEPT_OUTPUT: usize = 256 * 1024;
-/// Cells the spare frame keeps, so one huge pane does not cost memory for good.
-const KEPT_CELLS: usize = 16 * 1024;
+/// Send buffer an idle link keeps. This holds a full frame of 80x24 cells, or a few changed
+/// rows of any pane. A larger frame's buffer is freed once the socket has taken it (#408).
+const KEPT_OUTPUT: usize = 32 * 1024;
+/// Cells the spare frame keeps, a pane of 80x24, so a larger pane costs one frame, not two.
+const KEPT_CELLS: usize = 80 * 24;
 /// One read from the socket, which lives on the stack and costs nothing when idle.
 const READ_CHUNK: usize = 16 * 1024;
 
@@ -1724,6 +1725,26 @@ mod tests {
             p.layouts > 1 && p.tabs.is_empty()
         });
         assert!(reactor.has_window(), "a pane ending is not the window");
+    }
+
+    #[test]
+    fn an_idle_link_keeps_little_beside_the_frame_it_sent() {
+        let mut reactor = Reactor::new().unwrap();
+        let pane = reactor.open_tab(shell("sleep 30"), 24, 80).unwrap();
+        let mut peer = Peer::watching(&mut reactor, pane);
+        let number = pane as u32;
+        // The pane of a full HD window (#408), sent twice so the spare frame has held one.
+        for columns in [235, 236] {
+            peer.send(Request::Resize { rows: 53, columns });
+            serve(&mut reactor, &mut peer, |r, p| {
+                p.frames.get(&number).is_some_and(|f| f.columns == columns) && p.matches(r, pane)
+            });
+        }
+        let session = &reactor.host.window.as_ref().unwrap().session;
+        let spare = session.spare.cells.capacity() * size_of::<pinfold_proto::Cell>();
+        let kept = session.out.capacity() + spare;
+        assert!(kept <= 64 * 1024, "{kept} bytes");
+        assert_eq!(session.panes[pane].sent.cells.capacity(), 53 * 236);
     }
 
     #[test]
