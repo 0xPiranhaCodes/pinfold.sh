@@ -347,7 +347,9 @@ needs_you = "#f5b544"
 
 `theme` names a theme: 1 to 64 ASCII letters, digits, spaces and `-`, `_`, `+`, `.`, not
 starting with `.`, so no name is a path. PinFold looks for `themes/<name>.toml` beside
-`pinfold.toml`, then for `themes/<name>` as a [Ghostty theme](#ghostty-themes), then among the
+`pinfold.toml`, then for `themes/<name>.itermcolors`, an
+[iTerm2 colour preset](#iterm2-colour-presets), then for `themes/<name>` as a
+[Ghostty theme](#ghostty-themes), then among the
 built-in themes, of which `Graphite Grid`, the default, is the only one so far. A theme file
 gets the checks `pinfold.toml` gets: a regular file after links are followed, at most 64 KiB,
 UTF-8, yours, and not writable by group or others, with an unknown key refused and named with
@@ -425,7 +427,47 @@ top.
 
 A Ghostty theme may hold any Ghostty setting, such as `font-size` or `command`. PinFold acts on
 none of them: every other key, and a palette colour from 16 to 255, is ignored, and one log
-line says how many. A `themes/<name>.toml` of the same name is used first.
+line says how many. A `themes/<name>.toml` or `themes/<name>.itermcolors` of the same name is
+used first.
+
+### iTerm2 colour presets
+
+An iTerm2 colour preset, an `.itermcolors` file, works as it is. In iTerm2, export one from
+Settings, Profiles, Colors, Color Presets, Export, or take one from a collection such as
+[iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes). Copy it into
+`themes/` beside `pinfold.toml`, keeping the `.itermcolors` extension, and name it without:
+
+```sh
+mkdir -p ~/.config/pinfold/themes
+cp ~/Downloads/Nord.itermcolors ~/.config/pinfold/themes/
+```
+
+```toml
+theme = "Nord"
+```
+
+PinFold reads these colours and no others, each from its `Red Component`, `Green Component`
+and `Blue Component`, a number from 0 to 1:
+
+| iTerm2 key | Theme key |
+| --- | --- |
+| `Background Color`, `Foreground Color` | `background`, `foreground` |
+| `Ansi 0 Color` to `Ansi 15 Color` | `black` to `white` for 0 to 7, `bright_black` to `bright_white` for 8 to 15 |
+| `Cursor Color`, `Cursor Text Color` | `cursor`, `cursor_text` |
+| `Selection Color`, `Selected Text Color` | `selection_background`, `selection_foreground` |
+
+The file needs the background, the foreground and all 16 ANSI colours; the chrome and the agent
+states are derived, as for any theme, and `[colors]` goes on top. Every other key is ignored,
+including any `(Light)` and `(Dark)` variant of a colour. Components are read as
+sRGB: for a colour whose `Color Space` is another, such as `P3`, one log line says how many, and
+the colour may look slightly different from iTerm2's.
+
+The file must be the XML property list iTerm2 writes, and PinFold reads it with a small parser
+of its own: only the elements `plist`, `dict`, `key`, `real`, `integer` and `string`, at most
+four levels and 4096 elements, and only the entities `&amp;`, `&lt;`, `&gt;`, `&quot;` and
+`&apos;`. The `DOCTYPE` line is skipped and nothing is fetched. Anything else, such as an
+`array`, a comment, a `DOCTYPE` that declares entities, a missing component or one outside 0 to
+1, is refused with its line. A `themes/<name>.toml` of the same name is used first.
 
 ## Reload
 

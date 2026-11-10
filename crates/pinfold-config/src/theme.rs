@@ -432,7 +432,8 @@ struct Chosen {
 
 /// Loads the theme `config`, the path of `pinfold.toml`, chooses: its `theme`, or Graphite Grid
 /// without one, with its `[colors]` on top, as [`parse`] does. A named theme is
-/// `themes/<name>.toml` beside `config`, then `themes/<name>` as a Ghostty theme file
+/// `themes/<name>.toml` beside `config`, then `themes/<name>.itermcolors`
+/// ([`crate::itermcolors::parse`]), then `themes/<name>` as a Ghostty theme file
 /// ([`crate::ghostty::parse`]), each read with the checks of [`crate::load`], and then a
 /// built-in theme.
 ///
@@ -468,7 +469,9 @@ fn named(
     if let Some(bytes) = crate::read(&themes.join(format!("{name}.toml")))? {
         return Ok(parse(&bytes, overrides)?);
     }
-    // `<name>.itermcolors` is tried here, between the two (#403).
+    if let Some(bytes) = crate::read(&themes.join(format!("{name}.itermcolors")))? {
+        return Ok(crate::itermcolors::parse(&bytes, overrides)?);
+    }
     if let Some(bytes) = crate::read(&themes.join(name))? {
         return Ok(crate::ghostty::parse(&bytes, overrides)?);
     }

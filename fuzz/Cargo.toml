@@ -71,6 +71,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "itermcolors"
+path = "fuzz_targets/itermcolors.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "tool_keys"
 path = "fuzz_targets/tool_keys.rs"
 test = false
