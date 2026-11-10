@@ -88,6 +88,14 @@ the user's processes outside PinFold. Its helper with root rights or user setup,
 and changes to how the API knows the caller do not fit v0.1. It stays future work, as an opt-in
 if people ask for it.
 
+**As built (the warning).** The core checks its environment once at start, as every pane gets it
+plus fixed non-secret variables, and the first sandboxed launch of the session makes the result
+due. Link version 15 adds `Notice::Secrets { count, names }`, where `names` is the first five,
+sorted, each escaped and cut at 40 characters, ending in `…` if more. The window shows it under
+the pane for 30 seconds behind `▲ secrets` in violet, as ADR-0044's notice is drawn. The log line
+is `warn secret_names=<count> [<names>]`. `pinfold-config` has `strip_secrets`, which so far
+only turns the notice off.
+
 ## Consequences
 
 - The window gains a one-time notice, sent over the link like ADR-0044's, so the link version
