@@ -208,7 +208,7 @@ pub struct Reactor {
     /// Starts the shell of each pane a window opens.
     pub(crate) shell: fn() -> Command,
     /// Opens each pane's PTY on the spawn thread, with a deadline (ADR-0048).
-    opener: Opener,
+    pub(crate) opener: Opener,
     buffer: Vec<u8>,
     pub(crate) host: Host,
     /// The read end of the self-pipe, kept open while it is polled.
