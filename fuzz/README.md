@@ -35,6 +35,13 @@ Badolato, whose `licenses.yml` gives both schemes as MIT, from nordtheme/iterm2 
 2016-present Sven Greb) and primer/github-vscode-theme (Copyright (c) 2020 Primer). The MIT
 text is `LICENSE-MIT`. `other-keys` is our own.
 
+`itermcolors` parses any bytes as an iTerm2 `.itermcolors` file, and steps and checks the
+colours of one that parses. It fails on a panic, an out-of-memory or a hang. Its seeds in
+`seeds/itermcolors/`, which the `pinfold-config` tests also read, are
+`schemes/Nord.itermcolors` and `schemes/GitHub Dark.itermcolors` of the same repository at the
+same commit, unchanged, under the same MIT licence and `licenses.yml` entries as the two above.
+No preset bundled with iTerm2 itself, which is GPL, is here.
+
 `tool_keys` decodes any bytes as the keys a tool reads, once whole and once a byte at a time.
 It fails on a panic or a hang, or if the two give different keys.
 
