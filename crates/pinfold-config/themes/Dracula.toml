@@ -1,0 +1,27 @@
+# Dracula, a theme bundled with PinFold. Written by convert.py: do not edit.
+# Source: `Dracula.itermcolors` in dracula/iterm
+# Commit: e5749bcd07764ad6e154038892b118ea45f88cc0
+# Licence: MIT, in LICENSE-Dracula.txt
+# Copyright (c) 2013-present Dracula Theme
+background = "#1e1f29"
+foreground = "#e6e6e6"
+black = "#000000"
+red = "#ff5555"
+green = "#50fa7b"
+yellow = "#f1fa8c"
+blue = "#bd93f9"
+magenta = "#ff79c6"
+cyan = "#8be9fd"
+white = "#bbbbbb"
+bright_black = "#555555"
+bright_red = "#ff5555"
+bright_green = "#50fa7b"
+bright_yellow = "#f1fa8c"
+bright_blue = "#bd93f9"
+bright_magenta = "#ff79c6"
+bright_cyan = "#8be9fd"
+bright_white = "#ffffff"
+cursor = "#bbbbbb"
+cursor_text = "#ffffff"
+selection_background = "#44475a"
+selection_foreground = "#ffffff"

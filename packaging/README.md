@@ -8,7 +8,8 @@ the Developer ID, notarizes, and creates a draft release, as described in
 [Cutting the beta](#cutting-the-beta). It never publishes; publishing is the maintainer's job.
 
 Each Linux tarball contains `pinfold`, `pinfold-core`, `pinfold-window`, `README.md`, both
-project license files and the bundled font's `OFL.txt`. The launcher and window use Cargo's
+project license files, the bundled font's `OFL.txt` and `theme-licenses/`, the licence texts of
+the bundled themes. The launcher and window use Cargo's
 `release` profile; the core uses `release-core`, whose panic strategy is `abort`. The checksum
 file is generated in the same job that built the archive.
 
@@ -56,7 +57,9 @@ copyright line. `bundle.sh` refuses any other version form.
 `pinfold`, `pinfold-core` and `pinfold-window` must sit in one directory: the launcher and the
 core each find the next by looking beside themselves.
 
-Every package must ship `crates/pinfold-render/fonts/OFL.txt`, the license of the bundled font.
+Every package must ship `crates/pinfold-render/fonts/OFL.txt`, the license of the bundled font,
+and every `crates/pinfold-config/themes/LICENSE-*.txt`, the licences of the bundled themes
+([ADR-0049](../docs/adr/0049-themes.md), section 7), in a `theme-licenses` directory.
 
 On Linux, packages must depend on `libxkbcommon-x11`. `winit` loads it at runtime and panics at
 startup without it.

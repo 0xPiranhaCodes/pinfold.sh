@@ -1,0 +1,27 @@
+# Nord, a theme bundled with PinFold. Written by convert.py: do not edit.
+# Source: `ghostty/Nord` in mbadolato/iTerm2-Color-Schemes, which has it from nordtheme/iterm2
+# Commit: bc5531d8ec26e6031c698c61eb7d82c9a9cd092d
+# Licence: MIT, in LICENSE-Nord.txt and LICENSE-iTerm2-Color-Schemes.txt
+# Copyright (c) 2016-present Sven Greb; Copyright (c) 2011 to Present Mark Badolato
+background = "#2e3440"
+foreground = "#d8dee9"
+black = "#3b4252"
+red = "#bf616a"
+green = "#a3be8c"
+yellow = "#ebcb8b"
+blue = "#81a1c1"
+magenta = "#b48ead"
+cyan = "#88c0d0"
+white = "#e5e9f0"
+bright_black = "#596377"
+bright_red = "#bf616a"
+bright_green = "#a3be8c"
+bright_yellow = "#ebcb8b"
+bright_blue = "#81a1c1"
+bright_magenta = "#b48ead"
+bright_cyan = "#8fbcbb"
+bright_white = "#eceff4"
+cursor = "#eceff4"
+cursor_text = "#282828"
+selection_background = "#eceff4"
+selection_foreground = "#4c566a"

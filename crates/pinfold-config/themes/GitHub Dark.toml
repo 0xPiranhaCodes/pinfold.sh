@@ -1,0 +1,27 @@
+# GitHub Dark, a theme bundled with PinFold. Written by convert.py: do not edit.
+# Source: `ghostty/GitHub Dark` in mbadolato/iTerm2-Color-Schemes, which has it from primer/github-vscode-theme
+# Commit: bc5531d8ec26e6031c698c61eb7d82c9a9cd092d
+# Licence: MIT, in LICENSE-GitHub.txt and LICENSE-iTerm2-Color-Schemes.txt
+# Copyright (c) 2020 Primer; Copyright (c) 2011 to Present Mark Badolato
+background = "#101216"
+foreground = "#8b949e"
+black = "#000000"
+red = "#f78166"
+green = "#56d364"
+yellow = "#e3b341"
+blue = "#6ca4f8"
+magenta = "#db61a2"
+cyan = "#2b7489"
+white = "#ffffff"
+bright_black = "#4d4d4d"
+bright_red = "#f78166"
+bright_green = "#56d364"
+bright_yellow = "#e3b341"
+bright_blue = "#6ca4f8"
+bright_magenta = "#db61a2"
+bright_cyan = "#2b7489"
+bright_white = "#ffffff"
+cursor = "#c9d1d9"
+cursor_text = "#101216"
+selection_background = "#3b5070"
+selection_foreground = "#ffffff"

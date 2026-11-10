@@ -355,8 +355,9 @@ needs_you = "#f5b544"
 starting with `.`, so no name is a path. PinFold looks for `themes/<name>.toml` beside
 `pinfold.toml`, then for `themes/<name>.itermcolors`, an
 [iTerm2 colour preset](#iterm2-colour-presets), then for `themes/<name>` as a
-[Ghostty theme](#ghostty-themes), then among the
-built-in themes, of which `Graphite Grid`, the default, is the only one so far. A theme file
+[Ghostty theme](#ghostty-themes), then among the [bundled themes](#bundled-themes) and
+`Graphite Grid`, the default. So a file of yours with a bundled theme's name is used in its
+place. A theme file
 gets the checks `pinfold.toml` gets: a regular file after links are followed, at most 64 KiB,
 UTF-8, yours, and not writable by group or others, with an unknown key refused and named with
 its line.
@@ -404,6 +405,40 @@ A theme that cannot be used, for its name, its file, an absent required key, or 
 colour in `[colors]`, is [reported](#where-problems-are-reported) with the reason, and the
 other keys of `pinfold.toml` still apply. At start PinFold then draws Graphite Grid, and on a
 save it keeps the theme it has.
+
+### Bundled themes
+
+Eleven themes come with PinFold beside Graphite Grid, each chosen by its name, such as
+`theme = "GitHub Dark"`. Each sets the 18 required colours and, where its source has them, the
+cursor and selection colours; the chrome and the agent states are derived, and none takes
+Graphite Grid's chrome. Two have text under 4.5 on their background, marked ⚠, which PinFold
+[reports](#where-problems-are-reported) and leaves as their authors made it.
+
+| Theme | Text contrast | Converted from | Licence and attribution |
+| --- | --- | --- | --- |
+| `Catppuccin Latte` | 7.06 | `ghostty/Catppuccin Latte` in mbadolato/iTerm2-Color-Schemes at `bc5531d8ec26`, from catppuccin/palette | MIT, Copyright (c) 2021 Catppuccin |
+| `Catppuccin Mocha` | 11.34 | `ghostty/Catppuccin Mocha`, same collection, from catppuccin/palette | MIT, Copyright (c) 2021 Catppuccin |
+| `Dracula` | 13.11 | `Dracula.itermcolors` in dracula/iterm at `e5749bcd0776` | MIT, Copyright (c) 2013-present Dracula Theme |
+| `GitHub Dark` | 6.10 | `ghostty/GitHub Dark`, same collection, from primer/github-vscode-theme | MIT, Copyright (c) 2020 Primer |
+| `GitHub Light` | 15.80 | `ghostty/GitHub Light Default`, same collection, from primer/github-vscode-theme | MIT, Copyright (c) 2020 Primer |
+| `Gruvbox Dark` | 10.75 | `ghostty/Gruvbox Dark`, same collection, from morhetz/gruvbox | MIT, Copyright (c) Pavel Pertsev. Upstream has no licence file: its README says "MIT/X11" and its `package.json` MIT |
+| `Nord` | 9.25 | `ghostty/Nord`, same collection, from nordtheme/iterm2 | MIT, Copyright (c) 2016-present Sven Greb |
+| `One Dark` | 7.22 | `ghostty/Atom One Dark`, same collection, from atom/atom `packages/one-dark-ui` | MIT, Copyright (c) 2011-2022 GitHub Inc. |
+| `Solarized Dark` | 4.75 | `xresources/solarized` in altercation/solarized at `62f656a02f93` | MIT, Copyright (c) 2011 Ethan Schoonover |
+| `Solarized Light` | ⚠ 4.13 | the same file | MIT, Copyright (c) 2011 Ethan Schoonover |
+| `Tokyo Night` | ⚠ 4.40 | the terminal colours of `themes/tokyo-night-color-theme.json` in tokyo-night/tokyo-night-vscode-theme at `7c0f11eaef32` | MIT, Copyright (c) 2018-present Enkia |
+
+The seven from the collection are also under its own MIT licence, Copyright (c) 2011 to Present
+Mark Badolato. `crates/pinfold-config/themes/convert.py` writes each file from its source at
+that commit, with a header naming the source, commit, licence and copyright, and the licence
+texts sit beside them as `LICENSE-*.txt`. Every package ships those in `theme-licenses`. The
+contrasts are checked by the tests of `crates/pinfold-config/src/theme.rs`.
+
+Dracula's background is `#1e1f29`, as its iTerm2 preset has it. Tokyo Night's selection has
+alpha in its source, which a theme cannot hold, so its selection is the default inversion.
+iTerm2's and Terminal.app's default colours are not bundled, as their licences do not allow it
+(GPL-2.0-or-later, and none). If you have either app, copy your own
+[preset](#iterm2-colour-presets) into `themes/`.
 
 ### Ghostty themes
 
