@@ -5,11 +5,12 @@
 //! which output cannot reach, and with the URI in full and anything outside printable ASCII
 //! escaped.
 
+use pinfold_config::theme::Theme;
 use pinfold_proto::link::MAX_URI;
 use pinfold_proto::{Cell, Frame};
 
-use crate::approval::{MUTED, visible, wrap};
-use crate::paste::{self, AMBER, GROUND, TEXT};
+use crate::approval::{visible, wrap};
+use crate::paste;
 
 /// What Open Link does with a target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,10 +66,11 @@ pub fn fits(uri: &str, rows: u16, columns: u16) -> bool {
 
 /// Mutes the panes in `frame`, draws the prompt over the bottom of them, and its keys on a new
 /// chrome row under them.
-pub fn banner(frame: &mut Frame, uri: &str) {
+pub fn banner(frame: &mut Frame, uri: &str, theme: &Theme) {
+    let (ground, text) = (theme.chrome.overlay, theme.prompt_text());
     let (rows, columns) = (usize::from(frame.rows), usize::from(frame.columns));
     for cell in &mut frame.cells {
-        cell.foreground = MUTED;
+        cell.foreground = theme.chrome.muted;
     }
     let lines = lines(uri, columns);
     let shown = lines.len().min(rows);
@@ -81,8 +83,12 @@ pub fn banner(frame: &mut Frame, uri: &str) {
         for cell in cells {
             *cell = Cell {
                 character: characters.next().unwrap_or(' '),
-                foreground: if offset <= 1 { AMBER } else { TEXT },
-                background: GROUND,
+                foreground: if offset <= 1 {
+                    theme.states.needs_you
+                } else {
+                    text
+                },
+                background: ground,
             };
         }
     }
@@ -91,12 +97,13 @@ pub fn banner(frame: &mut Frame, uri: &str) {
     } else {
         " Too long to show whole, so it cannot open · Esc cancels".to_owned()
     };
-    paste::row(frame, &[(legend, TEXT)]);
+    paste::row(frame, &[(legend, text)], theme);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pinfold_config::theme::GRAPHITE;
 
     #[test]
     fn web_links_open_and_other_schemes_ask() {
@@ -146,7 +153,7 @@ mod tests {
     fn drawn(uri: &str, rows: u16, columns: u16) -> Vec<String> {
         let mut frame = Frame::default();
         crate::panes::blank(&mut frame, rows, columns);
-        banner(&mut frame, uri);
+        banner(&mut frame, uri, &GRAPHITE);
         frame
             .cells
             .chunks(usize::from(columns))

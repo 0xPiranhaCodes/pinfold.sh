@@ -1,6 +1,7 @@
 //! Snapshots of the chrome as cells: pane borders, the bar with its status line, an approval
 //! prompt, the right-click menu and the command palette.
 
+use pinfold_config::theme::GRAPHITE;
 use std::fmt::Write as _;
 use std::time::Instant;
 
@@ -78,7 +79,7 @@ pub(crate) fn borders() -> Frame {
     for (rect, character) in rects.iter().zip(['a', 'b', 'c']) {
         blit(&mut grid, &pane(character, rect.rows, rect.columns), *rect);
     }
-    dividers(&mut grid, &rects, Some(rects[2]));
+    dividers(&mut grid, &rects, Some(rects[2]), &GRAPHITE);
     grid
 }
 
@@ -102,6 +103,7 @@ pub(crate) fn bar() -> Frame {
         second: 0,
     };
     let bar = Bar {
+        theme: &GRAPHITE,
         tabs: &tabs,
         active: 2,
         activity: top_bar::marked(&states),
@@ -137,6 +139,7 @@ fn tool_bar() -> Frame {
     let states = [1, 4];
     let mut frame = pane(' ', 1, 60);
     let bar = Bar {
+        theme: &GRAPHITE,
         tabs: &tabs,
         active: 1,
         activity: top_bar::marked(&states),
@@ -176,8 +179,9 @@ pub(crate) fn unhardened() -> Frame {
     let command =
         "codesign -f -s - -o runtime '/Users/me/pinfold/target/release'/pinfold-{core,window}";
     flash.unhardened(true, command.to_owned(), Instant::now());
-    flash.banner(&mut frame);
+    flash.banner(&mut frame, &GRAPHITE);
     let bar = Bar {
+        theme: &GRAPHITE,
         tabs: &tabs,
         active: 0,
         activity: 0,
@@ -212,7 +216,7 @@ pub(crate) fn approval() -> Frame {
     };
     assert_eq!(queue.add(send), None);
     let mut frame = pane('x', 6, 80);
-    queue.draw(&mut frame, Instant::now());
+    queue.draw(&mut frame, Instant::now(), &GRAPHITE);
     frame
 }
 
@@ -225,7 +229,7 @@ fn an_approval_prompt_names_both_panes_and_the_exact_send() {
 fn the_right_click_menu_with_a_link() {
     let mut frame = pane('x', 14, 20);
     let menu = Menu::open((1, 2), (14, 20), Some("https://pinfold.sh".to_owned()));
-    menu.draw(&mut frame);
+    menu.draw(&mut frame, &GRAPHITE);
     insta::assert_snapshot!(cells(&frame));
 }
 
@@ -239,6 +243,157 @@ fn the_command_palette_filtered_to_open() {
         Some("open"),
         winit::keyboard::ModifiersState::empty(),
     );
-    palette.draw(&mut frame);
+    palette.draw(&mut frame, &GRAPHITE);
     insta::assert_snapshot!(cells(&frame));
+}
+
+/// ADR-0049: every colour of the chrome is read from the theme. Under a light theme with only
+/// its 18 required keys, no piece of chrome draws a dark ground or one of Graphite Grid's
+/// colours, which a constant left behind would.
+#[test]
+fn a_light_theme_colours_every_piece_of_chrome() {
+    use pinfold_config::theme::{Colors, parse};
+
+    use crate::paste::{Prompt, banner};
+
+    // GitHub Light's background, foreground and cyan, as in `docs/spikes/themes/contrast.py`.
+    let mut file = String::from("background = \"#ffffff\"\nforeground = \"#1f2328\"\n");
+    for key in [
+        "black", "red", "green", "yellow", "blue", "magenta", "white",
+    ] {
+        let _ = writeln!(file, "{key} = \"#808080\"\nbright_{key} = \"#808080\"");
+    }
+    file += "cyan = \"#1b7c83\"\nbright_cyan = \"#808080\"\n";
+    let (theme, notes) = parse(file.as_bytes(), Colors::default()).unwrap();
+    assert_eq!(notes, [""; 0], "its own chrome, not the fallback");
+    let screen = |rows, columns| {
+        let mut frame = Frame::default();
+        crate::panes::clear(&mut frame, rows, columns, theme.background);
+        frame
+    };
+    let whole = |rows, columns| Rect {
+        x: 0,
+        y: 0,
+        columns,
+        rows,
+    };
+    let mut drawn = Vec::new();
+
+    let mut frame = screen(5, 9);
+    let rects = [
+        Rect {
+            columns: 4,
+            ..whole(5, 9)
+        },
+        Rect {
+            x: 5,
+            ..whole(5, 4)
+        },
+    ];
+    dividers(&mut frame, &rects, Some(rects[0]), &theme);
+    let (tabs, states) = (["work", "logs", "agent", "done", "bad"], [1, 4, 0, 2, 3]);
+    for (focused, hovered) in [(true, Some(1)), (false, None)] {
+        let bar = Bar {
+            tabs: &tabs,
+            active: 2,
+            activity: top_bar::marked(&states),
+            states: &states,
+            status: Some((0, true, "approve the diff?")),
+            hovered,
+            focused,
+            title: true,
+            time: Some(LocalTime {
+                weekday: 5,
+                day: 6,
+                month: 10,
+                hour: 9,
+                minute: 41,
+                second: 0,
+            }),
+            inset: 1,
+            unhardened: None,
+            theme: &theme,
+        };
+        let mut frame = screen(1, 90);
+        top_bar::draw(&mut frame, &bar);
+        drawn.push(frame);
+    }
+    drawn.push(frame);
+
+    let mut frame = screen(14, 20);
+    Menu::open((1, 2), (14, 20), Some("https://pinfold.sh".to_owned())).draw(&mut frame, &theme);
+    drawn.push(frame);
+    let mut frame = screen(12, 60);
+    Palette::commands().draw(&mut frame, &theme);
+    drawn.push(frame);
+
+    let mut queue = Queue::default();
+    let send = Approval {
+        id: 7,
+        caller: 2,
+        target: 0,
+        action: ApprovalAction::Send,
+        texts: vec!["cargo test\n".to_owned()],
+    };
+    assert_eq!(queue.add(send), None);
+    let mut frame = screen(6, 80);
+    queue.draw(&mut frame, Instant::now(), &theme);
+    drawn.push(frame);
+
+    let prompts = [
+        Prompt::Confirm {
+            text: "rm -rf /\n".to_owned(),
+            lines: 1,
+            risk: Some("ends a line"),
+        },
+        Prompt::TooLarge,
+        Prompt::Close {
+            pane: 1,
+            last: true,
+        },
+        Prompt::OpenLink("file:///etc/passwd".to_owned()),
+    ];
+    for prompt in &prompts {
+        let mut frame = screen(6, 80);
+        banner(&mut frame, prompt, &theme);
+        drawn.push(frame);
+    }
+    let mut frame = screen(2, 80);
+    crate::flash::ended(&mut frame, &theme);
+    drawn.push(frame);
+    let mut frame = screen(2, 80);
+    crate::was_running::banner(&mut frame, true, "cargo test", &theme);
+    drawn.push(frame);
+
+    let graphite = [
+        GRAPHITE.foreground,
+        GRAPHITE.chrome.accent,
+        GRAPHITE.chrome.dim,
+        GRAPHITE.chrome.muted,
+        GRAPHITE.chrome.tab_text,
+        GRAPHITE.chrome.key,
+        GRAPHITE.chrome.title,
+        GRAPHITE.chrome.title_unfocused,
+        GRAPHITE.chrome.rule,
+        GRAPHITE.chrome.border,
+        GRAPHITE.states.needs_you,
+        GRAPHITE.states.running,
+        GRAPHITE.states.done,
+        GRAPHITE.states.error,
+        GRAPHITE.states.idle,
+    ];
+    for (index, frame) in drawn.iter().enumerate() {
+        for cell in &frame.cells {
+            let light = cell.background.to_be_bytes()[1..]
+                .iter()
+                .all(|&c| c >= 0x80);
+            assert!(light, "frame {index}: a dark ground, {}", describe(*cell));
+            let text = cell.foreground & 0x00ff_ffff;
+            assert!(
+                !graphite.contains(&text),
+                "frame {index}: {}",
+                describe(*cell)
+            );
+        }
+    }
 }

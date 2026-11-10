@@ -2,7 +2,7 @@
 //!
 //! A theme file is untrusted input, so nothing here panics on what it holds.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, de};
 
@@ -59,7 +59,8 @@ keys!("A theme's colours" Theme Colors:
     bright_white cursor cursor_text selection_background selection_foreground;
     chrome: Chrome ChromeColors states: States StateColors);
 keys!("The chrome's colours" Chrome ChromeColors:
-    accent tab tab_hover tab_active overlay border dim muted);
+    accent tab tab_hover tab_active overlay border dim muted
+    tab_text key title title_unfocused rule palette);
 keys!("The agent states' colours" States StateColors: needs_you running done error idle);
 
 /// Graphite Grid, the default theme and the fallback (`docs/design/ui/`).
@@ -95,6 +96,12 @@ pub const GRAPHITE: Theme = Theme {
         border: 0x0034_3a44,
         dim: 0x009a_a1ac,
         muted: 0x0055_5a63,
+        tab_text: 0x00b0_b8c4,
+        key: 0x0090_9ba9,
+        title: 0x009b_a5b3,
+        title_unfocused: 0x0087_909e,
+        rule: 0x0026_2b33,
+        palette: 0x0015_1920,
     },
     states: States {
         needs_you: 0x00f5_b544,
@@ -104,6 +111,28 @@ pub const GRAPHITE: Theme = Theme {
         idle: 0x009a_a1ac,
     },
 };
+
+/// The bundled themes by name (ADR-0049, section 7). `themes/convert.py` writes each from its
+/// MIT source, and the licence texts sit beside them. Only the theme in use is parsed.
+const BUNDLED: [(&str, &str); 11] = {
+    macro_rules! bundled {
+        ($($name:literal)*) => {
+            [$(($name, include_str!(concat!("../themes/", $name, ".toml")))),*]
+        };
+    }
+    bundled!("Catppuccin Latte" "Catppuccin Mocha" "Dracula" "GitHub Dark" "GitHub Light"
+        "Gruvbox Dark" "Nord" "One Dark" "Solarized Dark" "Solarized Light" "Tokyo Night")
+};
+
+/// How far each chrome text added with the window (#399) sits from the foreground towards the
+/// background, and each surface from the background towards the foreground, where a theme
+/// leaves the key out. Each is inside the range of Graphite Grid's own colour, by channel.
+const TAB_TEXT: f64 = 0.20;
+const KEY: f64 = 0.35;
+const TITLE: f64 = 0.30;
+const TITLE_UNFOCUSED: f64 = 0.40;
+const RULE: f64 = 0.12;
+const PALETTE: f64 = 0.04;
 
 /// The lowest contrast of text, and of a state on a surface.
 const LEGIBLE: f64 = 4.5;
@@ -118,7 +147,7 @@ pub enum Error {
         "a theme name is 1 to 64 letters, digits, spaces and `-_+.`, and does not start with `.`"
     )]
     Name,
-    /// No file in the themes directory and no built-in theme has the name.
+    /// No file in the themes directory and no bundled theme has the name.
     #[error("there is no theme of that name")]
     NotFound,
     /// The theme file was refused, as `pinfold.toml` would be, or lacks a required key.
@@ -332,6 +361,7 @@ fn fill(colors: Colors) -> Result<Theme, crate::Error> {
         return colors.all().map_err(missing);
     };
     let toward_text = |share| Some(mix(ground, text, share));
+    let toward_ground = |share| Some(mix(text, ground, share));
     // The active tab is mixed from cyan, as in the script, even where the accent ends up the
     // foreground.
     let towards = colors.chrome.accent.unwrap_or(cyan);
@@ -353,8 +383,14 @@ fn fill(colors: Colors) -> Result<Theme, crate::Error> {
             tab_active: Some(tab_active),
             overlay: toward_text(0.04),
             border: toward_text(0.20),
-            dim: Some(mix(text, ground, 0.25)),
+            dim: toward_ground(0.25),
             muted: toward_text(0.30),
+            tab_text: toward_ground(TAB_TEXT),
+            key: toward_ground(KEY),
+            title: toward_ground(TITLE),
+            title_unfocused: toward_ground(TITLE_UNFOCUSED),
+            rule: toward_text(RULE),
+            palette: toward_text(PALETTE),
         },
         states: GRAPHITE.states.into(),
         ..Colors::default()
@@ -435,7 +471,7 @@ struct Chosen {
 /// `themes/<name>.toml` beside `config`, then `themes/<name>.itermcolors`
 /// ([`crate::itermcolors::parse`]), then `themes/<name>` as a Ghostty theme file
 /// ([`crate::ghostty::parse`]), each read with the checks of [`crate::load`], and then a
-/// built-in theme.
+/// bundled theme or Graphite Grid.
 ///
 /// This reads `config` itself, and [`crate::Config`] holds neither key, so the core, which
 /// never calls this, carries no theme code.
@@ -460,20 +496,18 @@ fn named(
     let Some(name) = name else {
         return Ok(resolve(GRAPHITE.into(), overrides)?);
     };
-    // No `/`, and no leading `.`, so no name is a path.
-    let valid = |byte: u8| byte.is_ascii_alphanumeric() || b" -_+.".contains(&byte);
-    if !(1..=64).contains(&name.len()) || name.starts_with('.') || !name.bytes().all(valid) {
-        return Err(Error::Name);
-    }
-    let themes = config.with_file_name("themes");
-    if let Some(bytes) = crate::read(&themes.join(format!("{name}.toml")))? {
+    let [toml, itermcolors, ghostty] = files(config, name)?;
+    if let Some(bytes) = crate::read(&toml)? {
         return Ok(parse(&bytes, overrides)?);
     }
-    if let Some(bytes) = crate::read(&themes.join(format!("{name}.itermcolors")))? {
+    if let Some(bytes) = crate::read(&itermcolors)? {
         return Ok(crate::itermcolors::parse(&bytes, overrides)?);
     }
-    if let Some(bytes) = crate::read(&themes.join(name))? {
+    if let Some(bytes) = crate::read(&ghostty)? {
         return Ok(crate::ghostty::parse(&bytes, overrides)?);
+    }
+    if let Some((_, text)) = BUNDLED.iter().find(|(bundled, _)| *bundled == name) {
+        return Ok(parse(text.as_bytes(), overrides)?);
     }
     if name != "Graphite Grid" {
         return Err(Error::NotFound);
@@ -481,11 +515,71 @@ fn named(
     Ok(resolve(GRAPHITE.into(), overrides)?)
 }
 
+/// The files a theme called `name` can be, in the order [`load`] looks for them.
+fn files(config: &Path, name: &str) -> Result<[PathBuf; 3], Error> {
+    // No `/`, and no leading `.`, so no name is a path.
+    let valid = |byte: u8| byte.is_ascii_alphanumeric() || b" -_+.".contains(&byte);
+    if !(1..=64).contains(&name.len()) || name.starts_with('.') || !name.bytes().all(valid) {
+        return Err(Error::Name);
+    }
+    let themes = config.with_file_name("themes");
+    Ok([
+        themes.join(format!("{name}.toml")),
+        themes.join(format!("{name}.itermcolors")),
+        themes.join(name),
+    ])
+}
+
+/// The theme file the config file at `config` has in use, if it names one that exists.
+fn in_use(config: &Path) -> Option<PathBuf> {
+    let chosen: Chosen = crate::parse_as(&crate::read(config).ok()??).ok()?;
+    let files = files(config, chosen.theme.as_deref()?).ok()?;
+    files.into_iter().find(|file| file.exists())
+}
+
+/// Notices saves to the theme file in use, with one `stat` a poll, as [`crate::Watch`] notices
+/// saves to the config file (ADR-0049, section 2).
+///
+/// shortcut: a theme file made after its name was chosen is seen at the next save of the
+/// config file, watch the themes directory if people trip on that.
+#[derive(Debug)]
+pub struct Watch {
+    config: PathBuf,
+    file: Option<PathBuf>,
+    seen: Option<(u64, u64, i64, i64)>,
+}
+
+impl Watch {
+    /// Starts from the theme file as it is now. Create this before the first [`load`], so a
+    /// save between the two is not missed.
+    pub fn new(config: PathBuf) -> Self {
+        let file = in_use(&config);
+        let seen = file.as_deref().and_then(crate::stamp);
+        Self { config, file, seen }
+    }
+
+    /// [`load`]s the theme again if the theme file in use changed since the last poll, or if
+    /// `saved` says the config file did, which may choose another theme. Each save is reported
+    /// once. On an error the caller keeps the theme it has.
+    pub fn poll(&mut self, saved: bool) -> Option<Result<(Theme, Vec<String>), Error>> {
+        if saved {
+            self.file = in_use(&self.config);
+        }
+        let now = self.file.as_deref().and_then(crate::stamp);
+        // A file that is gone can be the middle of a save, so it changes nothing.
+        if !saved && (now.is_none() || now == self.seen) {
+            return None;
+        }
+        // Stamped before the read, so a save during it is read by the next poll.
+        self.seen = now;
+        Some(load(&self.config))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs::{self, Permissions};
     use std::os::unix::fs::{PermissionsExt, symlink};
-    use std::path::PathBuf;
 
     use proptest::prelude::*;
     use tempfile::{TempDir, tempdir};
@@ -662,6 +756,12 @@ mod tests {
             border: 0x0029_2c31,
             dim: 0x006c_747c,
             muted: 0x0035_393f,
+            tab_text: 0x0072_7a83,
+            key: 0x0060_666e,
+            title: 0x0066_6d75,
+            title_unfocused: 0x005a_6068,
+            rule: 0x001f_2226,
+            palette: 0x0015_171b,
         };
         assert_eq!((theme.chrome, notes.as_str()), (chrome, ""));
         assert_eq!(
@@ -673,6 +773,38 @@ mod tests {
         assert_eq!(theme.states, GRAPHITE.states);
         let accent = row(0x0028_2a36, 0x00f8_f8f2, 0x008b_e9fd).0.chrome.accent;
         assert_eq!(accent, 0x008b_e9fd);
+    }
+
+    /// Each share of the keys #399 added is one Graphite Grid itself has: between the least
+    /// and the most its own colour sits along the way, over the three channels.
+    #[test]
+    fn the_shares_of_the_added_chrome_keys_are_graphite_grids_own() {
+        let (ground, text, chrome) = (GRAPHITE.background, GRAPHITE.foreground, GRAPHITE.chrome);
+        for (key, from, to, colour, share) in [
+            ("tab_text", text, ground, chrome.tab_text, TAB_TEXT),
+            ("key", text, ground, chrome.key, KEY),
+            ("title", text, ground, chrome.title, TITLE),
+            (
+                "title_unfocused",
+                text,
+                ground,
+                chrome.title_unfocused,
+                TITLE_UNFOCUSED,
+            ),
+            ("rule", ground, text, chrome.rule, RULE),
+            ("palette", ground, text, chrome.palette, PALETTE),
+        ] {
+            let channel = |colour: u32, i: usize| f64::from(colour.to_be_bytes()[i]);
+            let along = [1, 2, 3].map(|i| {
+                (channel(colour, i) - channel(from, i)) / (channel(to, i) - channel(from, i))
+            });
+            let (least, most) = (along[0].min(along[2]), along[0].max(along[2]));
+            assert!(least <= along[1] && along[1] <= most, "{key}: {along:?}");
+            assert!(
+                least <= share && share <= most,
+                "{key}: {share} in {along:?}"
+            );
+        }
     }
 
     #[test]
@@ -720,6 +852,48 @@ mod tests {
         assert_eq!(theme.background, 0x0028_2a36);
         let missing = named(&config, Some("Other"), Colors::default());
         assert!(matches!(missing, Err(Error::NotFound)));
+        // A bundled theme is found after the user's files, so a file of its name is used.
+        let (nord, _) = named(&config, Some("Nord"), Colors::default()).unwrap();
+        assert_eq!(nord.background, 0x002e_3440);
+        fs::rename(
+            config.with_file_name("themes/My Theme-1.toml"),
+            config.with_file_name("themes/Nord.toml"),
+        )
+        .unwrap();
+        let (mine, _) = named(&config, Some("Nord"), Colors::default()).unwrap();
+        assert_eq!(mine.background, 0x0028_2a36);
+    }
+
+    /// ADR-0049, section 2: a save of either file loads the theme again, once, and a broken
+    /// theme file is an error, on which the window keeps the theme it has.
+    #[test]
+    fn a_save_of_the_config_or_the_theme_file_in_use_loads_the_theme_again() {
+        let (dir, config) = themes(
+            "My Theme-1.toml",
+            file(0x0028_2a36, 0x00f8_f8f2, 0).as_bytes(),
+        );
+        let path = dir.path().join("themes/My Theme-1.toml");
+        let mut watch = Watch::new(config.clone());
+        assert!(watch.poll(false).is_none(), "nothing was saved");
+        let save = |path: &Path, text: &str| {
+            let new = path.with_extension("new");
+            fs::write(&new, text).unwrap();
+            fs::set_permissions(&new, Permissions::from_mode(0o600)).unwrap();
+            fs::rename(&new, path).unwrap();
+        };
+        save(&path, &file(0x00fd_f6e3, 0x0065_7b83, 0));
+        let (theme, _) = watch.poll(false).unwrap().unwrap();
+        assert_eq!(theme.background, 0x00fd_f6e3);
+        assert!(watch.poll(false).is_none(), "said once");
+        save(&path, "background = 1");
+        assert!(watch.poll(false).unwrap().is_err());
+        assert!(watch.poll(false).is_none(), "a bad save is said once too");
+        // The config file's own watch says it was saved. It now names no theme file.
+        save(&config, "[colors]\nbackground = \"#0d1117\"\n");
+        let (theme, _) = watch.poll(true).unwrap().unwrap();
+        assert_eq!(theme.background, 0x000d_1117);
+        save(&path, &file(0x0028_2a36, 0x00f8_f8f2, 0));
+        assert!(watch.poll(false).is_none(), "that file is no longer in use");
     }
 
     #[test]
@@ -747,6 +921,60 @@ mod tests {
         let text = file(0x0028_2a36, 0x00f8_f8f2, 0x008b_e9fd);
         fs::write(path.with_extension("toml"), text).unwrap();
         assert_eq!(load(&config).unwrap().0.background, 0x0028_2a36);
+    }
+
+    /// ADR-0049, sections 5 to 7: each bundled theme is found by name, keeps its own chrome
+    /// and states, and holds the rules of the states and of prompts.
+    #[test]
+    fn every_bundled_theme_is_legible_and_none_takes_the_fallback() {
+        // The contrast of each one's text, as `docs/configuration.md` lists it. Two are under
+        // 4.5, which is only reported.
+        let texts = [
+            "7.06", "11.34", "13.11", "6.10", "15.80", "10.75", "9.25", "7.22", "4.75", "4.13",
+            "4.40",
+        ];
+        for ((name, text), ratio) in BUNDLED.into_iter().zip(texts) {
+            let config = Path::new("/nowhere/pinfold.toml");
+            let (theme, notes) = named(config, Some(name), Colors::default()).unwrap();
+            let (faintest, closest) = (theme.faintest(), theme.closest());
+            let measured = contrast(theme.foreground, theme.background);
+            assert_eq!(format!("{measured:.2}"), ratio, "{name}");
+            let warns = ["Solarized Light", "Tokyo Night"].contains(&name);
+            assert_eq!(notes.len(), usize::from(warns), "{name}: {notes:?}");
+            assert_eq!(measured < LEGIBLE, warns, "{name}");
+            assert!(theme.chrome != GRAPHITE.chrome, "{name}: {notes:?}");
+            assert!(faintest.0 >= LEGIBLE, "{name}: {faintest:?}");
+            assert!(closest.0 >= APART, "{name}: {closest:?}");
+            // A prompt: its text and its rule read on the overlay, over muted pane text.
+            let overlay = theme.chrome.overlay;
+            assert!(contrast(theme.prompt_text(), overlay) >= LEGIBLE, "{name}");
+            assert!(
+                contrast(theme.states.needs_you, overlay) >= LEGIBLE,
+                "{name}"
+            );
+            assert!(
+                contrast(theme.chrome.muted, theme.background) < 3.0,
+                "{name}"
+            );
+            // The header names where the file comes from, and each licence text it names sits
+            // beside the file.
+            for line in [
+                "# Source: ",
+                "# Commit: ",
+                "# Licence: MIT",
+                "# Copyright (c) ",
+            ] {
+                assert!(text.contains(line), "{name}: {line}");
+            }
+            let beside = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/themes"));
+            let licences = text
+                .split_whitespace()
+                .filter(|word| word.starts_with("LICENSE-"));
+            for licence in licences.clone() {
+                assert!(beside.join(licence).is_file(), "{name}: {licence}");
+            }
+            assert!(licences.count() >= 1, "{name}");
+        }
     }
 
     #[test]

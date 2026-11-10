@@ -1,16 +1,12 @@
 //! The search bar, drawn in the row under the pane so program output cannot fake it.
 
+use pinfold_config::theme::Theme;
 use pinfold_proto::link::{Direction, MAX_QUERY, Position, Selection};
 use pinfold_proto::{Cell, Frame};
 use unicode_width::UnicodeWidthChar;
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
 use crate::selection;
-
-const GROUND: u32 = 0x0012_151a;
-const HINT: u32 = 0x009a_a1ac;
-const TEXT: u32 = 0x00e2_e5ea;
-const RED: u32 = 0x00ff_8a8a;
 
 /// Past the newest row, so a backward search starts at the newest output.
 const NEWEST: Position = Position {
@@ -92,30 +88,31 @@ impl Bar {
 
     /// Adds a row for the bar under the pane in `frame`, with the cursor at the query's end.
     // shortcut: a query wider than the window runs off its end, scroll it if that shows up.
-    pub fn draw(&self, frame: &mut Frame) {
+    pub fn draw(&self, frame: &mut Frame, theme: &Theme) {
+        let (ground, text) = (theme.chrome.overlay, theme.prompt_text());
         let columns = usize::from(frame.columns);
         let start = frame.cells.len();
         frame.cells.resize(
             start + columns,
             Cell {
                 character: ' ',
-                foreground: TEXT,
-                background: GROUND,
+                foreground: text,
+                background: ground,
             },
         );
-        let mut column = write(frame, start, 0, " Find: ", TEXT);
-        column = write(frame, start, column, &self.query, TEXT);
+        let mut column = write(frame, start, 0, " Find: ", text);
+        column = write(frame, start, column, &self.query, text);
         let cursor = column.min(columns.saturating_sub(1));
         column += 1;
         if self.missing {
-            column = write(frame, start, column, " no match", RED);
+            column = write(frame, start, column, " no match", theme.states.error);
         }
         write(
             frame,
             start,
             column,
             "  Enter older, Shift+Enter newer, Esc closes",
-            HINT,
+            theme.chrome.dim,
         );
         frame.cursor = Some((frame.rows, cursor as u16));
         frame.rows += 1;
@@ -167,6 +164,7 @@ pub fn scroll_to(row: usize, top: usize, rows: u16) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pinfold_config::theme::GRAPHITE;
     use pinfold_core::search::{Search, SearchStep};
     use pinfold_core::vt::{AlacrittyEngine, VtEngine};
 
@@ -194,7 +192,7 @@ mod tests {
             ],
             ..Frame::default()
         };
-        bar.draw(&mut frame);
+        bar.draw(&mut frame, &GRAPHITE);
         let text = frame.cells[usize::from(columns)..]
             .iter()
             .map(|cell| cell.character)
@@ -285,7 +283,7 @@ mod tests {
         assert_eq!(frame.cells[0].character, 'x');
         assert!(text.starts_with(" Find: 漢 a   Enter older"), "{text}");
         assert_eq!(frame.cursor, Some((1, 10)));
-        assert_eq!(frame.cells[80].background, GROUND);
+        assert_eq!(frame.cells[80].background, GRAPHITE.chrome.overlay);
     }
 
     #[test]
@@ -295,7 +293,7 @@ mod tests {
         bar.missing = true;
         let (frame, text) = row(&bar, 80);
         assert!(text.starts_with(" Find: a  no match  Enter"), "{text}");
-        assert_eq!(frame.cells[90].foreground, RED);
+        assert_eq!(frame.cells[90].foreground, GRAPHITE.states.error);
     }
 
     #[test]
@@ -355,7 +353,7 @@ mod tests {
                 columns: view.columns,
                 rows: view.rows,
             };
-            selection::overlay(&mut view, rect, engine.position(0, 0).row, found);
+            selection::overlay(&mut view, rect, engine.position(0, 0).row, found, None);
             let cells = plain.cells.iter().zip(&view.cells);
             let picked = cells.filter(|(plain, drawn)| plain != drawn);
             let inverted: String = picked.map(|(_, drawn)| drawn.character).collect();

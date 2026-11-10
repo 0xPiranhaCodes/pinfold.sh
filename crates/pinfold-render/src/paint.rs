@@ -95,12 +95,10 @@ fn blend(background: u32, foreground: u32, alpha: u8) -> u32 {
 
 /// Returns the colour above and below each cell of the row of tabs: its own background, except
 /// that a tab's number sits in a smaller pill inside the tab, which goes on around it.
-pub(crate) fn bleeds(cells: &[Cell]) -> impl Iterator<Item = u32> + '_ {
-    let mut around = DEFAULT_BACKGROUND;
+pub(crate) fn bleeds(cells: &[Cell], ground: u32) -> impl Iterator<Item = u32> + '_ {
+    let mut around = ground;
     cells.iter().map(move |cell| {
-        let inside = cell.background == DEFAULT_BACKGROUND
-            && cell.character != ' '
-            && cell.style() & TALL == 0;
+        let inside = cell.background == ground && cell.character != ' ' && cell.style() & TALL == 0;
         if !inside {
             around = cell.background;
         }
@@ -116,6 +114,8 @@ pub(crate) fn is_cap(character: char) -> bool {
 /// Turns cells into pixels, using one font at one size.
 pub struct Painter {
     cache: GlyphCache,
+    /// The theme's background, which the row of tabs sits on.
+    pub(crate) background: u32,
 }
 
 impl Painter {
@@ -128,6 +128,7 @@ impl Painter {
     fn with_limit(fonts: impl Into<Fonts>, size: f32, limit: usize) -> Self {
         Self {
             cache: GlyphCache::new(fonts, clamp_size(size), limit),
+            background: DEFAULT_BACKGROUND,
         }
     }
 
@@ -188,11 +189,12 @@ impl Painter {
                 top,
                 left.saturating_add(cell_width),
                 bottom,
-                cell.background,
+                // No alpha here, so glass is opaque.
+                cell.background & 0x00ff_ffff,
             );
         }
         if tabs {
-            for (column, colour) in bleeds(cells).enumerate() {
+            for (column, colour) in bleeds(cells, self.background).enumerate() {
                 let left = column.saturating_mul(cell_width) + canvas.padding.left;
                 let right = left.saturating_add(cell_width);
                 canvas.fill(left, top.saturating_sub(bleed), right, top, colour);
@@ -279,9 +281,14 @@ mod tests {
     #[test]
     fn a_space_draws_only_background() {
         let mut painter = painter();
-        let (mut buffer, width, height) = pixels(&painter, 1, 1);
+        let (mut buffer, width, height) = pixels(&painter, 2, 1);
         let mut canvas = Canvas::new(&mut buffer, width, height).unwrap();
-        painter.draw_row(&mut canvas, 0, &[cell(' ')]);
+        // Glass has no alpha here, and a pixel's top byte stays 0.
+        let glass = Cell {
+            background: PAPER | pinfold_proto::GLASS,
+            ..cell(' ')
+        };
+        painter.draw_row(&mut canvas, 0, &[cell(' '), glass]);
         assert!(buffer.iter().all(|&pixel| pixel == PAPER));
     }
 
@@ -308,7 +315,8 @@ mod tests {
             background,
         };
         const FILL: u32 = 0x0012_3456;
-        let clear = DEFAULT_BACKGROUND;
+        // Any theme's background, not only the default.
+        let clear = PAPER;
         let row = [
             cell(LEFT_CAP, FILL | TALL, clear),
             cell('a', 0, FILL),
@@ -318,7 +326,7 @@ mod tests {
             cell(RIGHT_CAP, FILL | TALL, clear),
             cell(' ', 0, clear),
         ];
-        let colours: Vec<_> = bleeds(&row).collect();
+        let colours: Vec<_> = bleeds(&row, clear).collect();
         assert_eq!(colours, [clear, FILL, FILL, FILL, FILL, clear, clear]);
     }
 

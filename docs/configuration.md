@@ -55,10 +55,17 @@ directory symlinks and special files. It uses `~/Library/Fonts`, `/Library/Fonts
 `$XDG_DATA_HOME/fonts` (default `~/.local/share/fonts`), `/usr/local/share/fonts`, and
 `/usr/share/fonts`. Rasterization remains outline-based; this does not add colour emoji.
 
-`background_opacity` applies only to the default background and the padding around the grid.
+`background_opacity` applies only to the default background, which is the [theme](#themes)'s
+`background`, and the padding around the grid.
 Text and cells a program coloured stay opaque, so a program that paints its own background,
 such as an editor with a colour scheme, covers the glass. A program that changes the default
-background with OSC 11 gets that colour as an opaque cell colour. `background_blur` does nothing
+background with OSC 11 changes it for its own pane: that colour is then the pane's default
+background, so it is translucent as the theme's is, while the padding, the other panes and the
+chrome keep the theme's. OSC 12 sets the colour of that pane's cursor, drawn under the theme's
+`cursor_text`. OSC 111 and OSC 112 give the pane back the theme's background and cursor.
+Prompts drawn by PinFold read only the theme and stay opaque. With a core older than the
+window (link version 13), OSC 11 stays an opaque cell colour and OSC 12 does nothing.
+`background_blur` does nothing
 at opacity 1. Its radius is fixed at 80, because winit sets it through a private CoreGraphics
 call that takes no radius from callers, and macOS may change that call.
 
@@ -323,9 +330,16 @@ that composes text in an input method never counts as the prefix.
 
 ## Themes
 
-PinFold reads and checks these keys, but the window does not draw from them yet
-([#399](https://github.com/0xPiranhaCodes/pinfold.sh/issues/399)), so for now they change
-nothing on screen. The rules are those of [ADR-0049](adr/0049-themes.md).
+The theme colours the panes, history included,
+the padding, the cursor, the selection and the chrome: the bar, the borders, the menus, the
+palette, the prompts and the agent states. `background_opacity` and `background_blur` act on
+the theme's background. A cursor or a selection whose two colours are the theme's `foreground`
+and `background` inverts each cell it covers, and any other colours are drawn as they are. The
+▲ mark of a core without the hardened runtime keeps its own violet under every theme. A saved
+change to `pinfold.toml` or to the theme file in use applies [on save](#reload). A core older than
+the window (link version 13) cannot take a palette, so the window draws Graphite Grid and
+[reports](#where-problems-are-reported) that themes need the core updated. The rules are those
+of [ADR-0049](adr/0049-themes.md).
 
 ```toml
 theme = "My Theme"
@@ -341,8 +355,9 @@ needs_you = "#f5b544"
 starting with `.`, so no name is a path. PinFold looks for `themes/<name>.toml` beside
 `pinfold.toml`, then for `themes/<name>.itermcolors`, an
 [iTerm2 colour preset](#iterm2-colour-presets), then for `themes/<name>` as a
-[Ghostty theme](#ghostty-themes), then among the
-built-in themes, of which `Graphite Grid`, the default, is the only one so far. A theme file
+[Ghostty theme](#ghostty-themes), then among the [bundled themes](#bundled-themes) and
+`Graphite Grid`, the default. So a file of yours with a bundled theme's name is used in its
+place. A theme file
 gets the checks `pinfold.toml` gets: a regular file after links are followed, at most 64 KiB,
 UTF-8, yours, and not writable by group or others, with an unknown key refused and named with
 its line.
@@ -364,6 +379,8 @@ and `[colors]` take the same keys, each a string of `#` and six hex digits:
 | `chrome.tab_active` | optional | `background` moved 22% towards `chrome.accent` if set, else `cyan` |
 | `chrome.border`, `chrome.muted` | optional | `background` moved 20% and 30% towards `foreground` |
 | `chrome.dim` | optional | `foreground` moved 25% towards `background` |
+| `chrome.tab_text`, `chrome.key`, `chrome.title`, `chrome.title_unfocused` | optional | `foreground` moved 20%, 35%, 30% and 40% towards `background` |
+| `chrome.rule`, `chrome.palette` | optional | `background` moved 12% and 4% towards `foreground` |
 | `states.needs_you`, `states.running`, `states.done`, `states.error`, `states.idle` | optional | Graphite Grid's five colours |
 
 In a theme file the last two groups are the tables `[chrome]` and `[states]`, and in
@@ -386,7 +403,42 @@ holds the colours to these rules whatever the theme says:
 
 A theme that cannot be used, for its name, its file, an absent required key, or a bad key or
 colour in `[colors]`, is [reported](#where-problems-are-reported) with the reason, and the
-other keys of `pinfold.toml` still apply.
+other keys of `pinfold.toml` still apply. At start PinFold then draws Graphite Grid, and on a
+save it keeps the theme it has.
+
+### Bundled themes
+
+Eleven themes come with PinFold beside Graphite Grid, each chosen by its name, such as
+`theme = "GitHub Dark"`. Each sets the 18 required colours and, where its source has them, the
+cursor and selection colours; the chrome and the agent states are derived, and none takes
+Graphite Grid's chrome. Two have text under 4.5 on their background, marked ⚠, which PinFold
+[reports](#where-problems-are-reported) and leaves as their authors made it.
+
+| Theme | Text contrast | Converted from | Licence and attribution |
+| --- | --- | --- | --- |
+| `Catppuccin Latte` | 7.06 | `ghostty/Catppuccin Latte` in mbadolato/iTerm2-Color-Schemes at `bc5531d8ec26`, from catppuccin/palette | MIT, Copyright (c) 2021 Catppuccin |
+| `Catppuccin Mocha` | 11.34 | `ghostty/Catppuccin Mocha`, same collection, from catppuccin/palette | MIT, Copyright (c) 2021 Catppuccin |
+| `Dracula` | 13.11 | `Dracula.itermcolors` in dracula/iterm at `e5749bcd0776` | MIT, Copyright (c) 2013-present Dracula Theme |
+| `GitHub Dark` | 6.10 | `ghostty/GitHub Dark`, same collection, from primer/github-vscode-theme | MIT, Copyright (c) 2020 Primer |
+| `GitHub Light` | 15.80 | `ghostty/GitHub Light Default`, same collection, from primer/github-vscode-theme | MIT, Copyright (c) 2020 Primer |
+| `Gruvbox Dark` | 10.75 | `ghostty/Gruvbox Dark`, same collection, from morhetz/gruvbox | MIT, Copyright (c) Pavel Pertsev. Upstream has no licence file: its README says "MIT/X11" and its `package.json` MIT |
+| `Nord` | 9.25 | `ghostty/Nord`, same collection, from nordtheme/iterm2 | MIT, Copyright (c) 2016-present Sven Greb |
+| `One Dark` | 7.22 | `ghostty/Atom One Dark`, same collection, from atom/atom `packages/one-dark-ui` | MIT, Copyright (c) 2011-2022 GitHub Inc. |
+| `Solarized Dark` | 4.75 | `xresources/solarized` in altercation/solarized at `62f656a02f93` | MIT, Copyright (c) 2011 Ethan Schoonover |
+| `Solarized Light` | ⚠ 4.13 | the same file | MIT, Copyright (c) 2011 Ethan Schoonover |
+| `Tokyo Night` | ⚠ 4.40 | the terminal colours of `themes/tokyo-night-color-theme.json` in tokyo-night/tokyo-night-vscode-theme at `7c0f11eaef32` | MIT, Copyright (c) 2018-present Enkia |
+
+The seven from the collection are also under its own MIT licence, Copyright (c) 2011 to Present
+Mark Badolato. `crates/pinfold-config/themes/convert.py` writes each file from its source at
+that commit, with a header naming the source, commit, licence and copyright, and the licence
+texts sit beside them as `LICENSE-*.txt`. Every package ships those in `theme-licenses`. The
+contrasts are checked by the tests of `crates/pinfold-config/src/theme.rs`.
+
+Dracula's background is `#1e1f29`, as its iTerm2 preset has it. Tokyo Night's selection has
+alpha in its source, which a theme cannot hold, so its selection is the default inversion.
+iTerm2's and Terminal.app's default colours are not bundled, as their licences do not allow it
+(GPL-2.0-or-later, and none). If you have either app, copy your own
+[preset](#iterm2-colour-presets) into `themes/`.
 
 ### Ghostty themes
 
@@ -472,8 +524,14 @@ why in its [log](#where-problems-are-reported), once, and keeps the current sett
 save or `chmod` fixes it. A bad `font_path` file means the bundled font, as it does at startup.
 Deleting the file changes nothing until the next start.
 
-PinFold checks the file with one `stat` a second on a thread of its own, so an idle window
-wakes once a second for this. Changes to the font file itself are not noticed.
+The theme reloads with the rest: saving `pinfold.toml` or the theme file in use recolours the
+chrome and the panes, history included, within about a second. A theme file that a save breaks
+is reported once, and the theme in use stays until a later save fixes it. A theme file created
+after `theme` named it is picked up at the next save of `pinfold.toml`.
+
+PinFold checks `pinfold.toml` and the theme file in use with one `stat` each a second on a
+thread of its own, so an idle window wakes once a second for this. Changes to the font file
+itself are not noticed.
 
 ## Workspace layouts
 

@@ -1,5 +1,6 @@
 //! Cross-pane approval chrome. It is composed after pane cells, so pane output cannot draw it.
 
+use pinfold_config::theme::Theme;
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
@@ -8,15 +9,13 @@ use pinfold_proto::{Cell, Frame};
 use winit::keyboard::{Key, NamedKey};
 
 use crate::link::Approval;
-use crate::paste::{self, AMBER, GROUND, RED, TEXT};
+use crate::paste;
 
 /// How long a prompt is on screen in a focused window before an allow key counts, so typing
 /// already under way in a pane cannot allow a prompt that appeared mid-word.
 pub const ARMED_AFTER: Duration = Duration::from_millis(500);
 /// Most prompts waiting at once; past this a new one is denied at once.
 pub const MAX_QUEUED: usize = 16;
-/// Pane text while a prompt is up, so lookalike rows a pane draws read as pane text.
-pub(crate) const MUTED: u32 = 0x0055_5a63;
 
 /// Turns only the documented, non-repeating window key into an answer. Denial always counts.
 /// Allowing needs the prompt `armed` and shown whole, so nothing unseen can be approved.
@@ -107,9 +106,9 @@ impl Queue {
     }
 
     /// Draws the prompt on screen, if any, and starts its arming delay in a focused window.
-    pub fn draw(&mut self, frame: &mut Frame, now: Instant) {
+    pub fn draw(&mut self, frame: &mut Frame, now: Instant, theme: &Theme) {
         if let Some(prompt) = self.prompts.first() {
-            banner(frame, prompt, self.prompts.len());
+            banner(frame, prompt, self.prompts.len(), theme);
             if self.focused && self.shown.is_none() {
                 self.shown = Some(now);
             }
@@ -218,11 +217,13 @@ pub fn fits(prompt: &Approval, queued: usize, rows: u16, columns: u16) -> bool {
 /// Mutes every pane cell, draws the request over the bottom of the pane area under a border
 /// row, and the key legend on its own chrome row, which is never cut. The legend says how many
 /// rows above are the prompt's. A request too long to show whole offers only denial.
-fn banner(frame: &mut Frame, prompt: &Approval, queued: usize) {
+fn banner(frame: &mut Frame, prompt: &Approval, queued: usize, theme: &Theme) {
+    let (ground, text) = (theme.chrome.overlay, theme.prompt_text());
+    let (amber, red) = (theme.states.needs_you, theme.states.error);
     let columns = usize::from(frame.columns);
     let rows = usize::from(frame.rows);
     for cell in &mut frame.cells {
-        cell.foreground = MUTED;
+        cell.foreground = theme.chrome.muted;
     }
     let lines = lines(prompt, queued, columns);
     let whole = lines.len() <= rows;
@@ -232,13 +233,13 @@ fn banner(frame: &mut Frame, prompt: &Approval, queued: usize) {
         let Some(cells) = frame.cells.get_mut(start..start + columns) else {
             break;
         };
-        let colour = if offset <= 1 { AMBER } else { TEXT };
+        let colour = if offset <= 1 { amber } else { text };
         let mut characters = line.chars();
         for cell in cells {
             *cell = Cell {
                 character: characters.next().unwrap_or(' '),
                 foreground: colour,
-                background: GROUND,
+                background: ground,
             };
         }
     }
@@ -252,17 +253,17 @@ fn banner(frame: &mut Frame, prompt: &Approval, queued: usize) {
     let legend = if whole {
         (
             format!(" {allow} · {deny} · the {shown} rows above are this prompt"),
-            TEXT,
+            text,
         )
     } else {
         (
             format!(
                 " ✕ too long to show whole; only {deny} is offered · the {shown} rows above are this prompt"
             ),
-            RED,
+            red,
         )
     };
-    paste::row(frame, &[legend]);
+    paste::row(frame, &[legend], theme);
 }
 
 /// Shows printable ASCII and the space as they are, newline and tab as marks, and every other
@@ -290,6 +291,7 @@ pub(crate) fn visible(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pinfold_config::theme::GRAPHITE;
     use pinfold_proto::Cell;
 
     #[test]
@@ -368,7 +370,7 @@ mod tests {
             texts: vec!["cargo test\n".to_owned()],
         };
         let mut frame = frame(3, 80);
-        banner(&mut frame, &prompt, 1);
+        banner(&mut frame, &prompt, 1, &GRAPHITE);
         assert_eq!(frame.rows, 4);
         let text = text(&frame);
         assert!(
@@ -399,7 +401,7 @@ mod tests {
         // A 24-row window keeps at most 23 rows for panes: the chrome row takes one.
         assert!(!fits(&prompt, 1, 23, 80));
         let mut frame = frame(23, 80);
-        banner(&mut frame, &prompt, 1);
+        banner(&mut frame, &prompt, 1, &GRAPHITE);
         let text = text(&frame);
         assert!(text.contains("too long to show whole"), "{text}");
         assert!(!text.contains("y allow once"), "{text}");
@@ -419,7 +421,7 @@ mod tests {
         };
         assert!(fits(&prompt, 1, 22, 80));
         let mut frame = frame(22, 80);
-        banner(&mut frame, &prompt, 1);
+        banner(&mut frame, &prompt, 1, &GRAPHITE);
         let text = text(&frame);
         // Rows are full-width chunks, so a whole send reads back as one run of cells.
         assert!(
@@ -445,7 +447,7 @@ mod tests {
     fn a_trust_prompt_lists_the_directory_and_every_run_line() {
         let prompt = trust(3);
         let mut frame = frame(8, 80);
-        banner(&mut frame, &prompt, 1);
+        banner(&mut frame, &prompt, 1, &GRAPHITE);
         let text = text(&frame);
         assert!(text.contains("── PinFold workspace trust"), "{text}");
         assert!(
@@ -467,7 +469,7 @@ mod tests {
         queue.focus(true);
         let _ = queue.add(trust(30));
         let mut frame = frame(23, 80);
-        queue.draw(&mut frame, start);
+        queue.draw(&mut frame, start, &GRAPHITE);
         let text = text(&frame);
         assert!(text.contains("only n/Esc don't trust is offered"), "{text}");
         assert!(!text.contains("y trust"), "{text}");
@@ -477,7 +479,7 @@ mod tests {
         queue.focus(true);
         let _ = queue.add(trust(2));
         let _ = queue.add(trust(1));
-        queue.draw(&mut frame, start);
+        queue.draw(&mut frame, start, &GRAPHITE);
         assert_eq!(queue.key(&Key::Character("a".into()), later, 23, 80), None);
         assert_eq!(
             queue.key(&Key::Character("y".into()), later, 23, 80),
@@ -501,7 +503,7 @@ mod tests {
         queue.focus(true);
         let _ = queue.add(prompt);
         let mut frame = frame(6, 80);
-        queue.draw(&mut frame, start);
+        queue.draw(&mut frame, start, &GRAPHITE);
         let text = text(&frame);
         assert!(text.contains("── PinFold owner action"), "{text}");
         assert!(
@@ -528,6 +530,33 @@ mod tests {
         }
     }
 
+    /// ADR-0049, sections 4 and 6: a prompt reads only the theme, whatever OSC 10 and OSC 11
+    /// colours the pane under it set, and is never glass.
+    #[test]
+    fn a_prompt_keeps_the_themes_colours_over_a_pane_that_set_its_own() {
+        let mut frame = frame(6, 80);
+        for cell in &mut frame.cells {
+            // The pane's OSC 10 text on its OSC 11 background, as the window marks it.
+            (cell.foreground, cell.background) = (0x00ff_00ff, 0x0000_ff00 | pinfold_proto::GLASS);
+        }
+        let mut queue = Queue::default();
+        assert_eq!(queue.add(read(1)), None);
+        queue.draw(&mut frame, Instant::now(), &GRAPHITE);
+        let glass = 0x0000_ff00 | pinfold_proto::GLASS;
+        let text = [GRAPHITE.states.needs_you, GRAPHITE.prompt_text()];
+        for cell in &frame.cells {
+            if cell.background == glass {
+                // The pane keeps its background, and its text is muted under the prompt.
+                assert_eq!(cell.foreground, GRAPHITE.chrome.muted, "{cell:?}");
+            } else {
+                assert_eq!(cell.background, GRAPHITE.chrome.overlay, "{cell:?}");
+                assert!(text.contains(&cell.foreground), "{cell:?}");
+            }
+        }
+        let grounds = [frame.cells[0].background, frame.cells[479].background];
+        assert_eq!(grounds, [glass, GRAPHITE.chrome.overlay]);
+    }
+
     #[test]
     fn a_key_for_the_first_prompt_cannot_allow_the_next_before_it_is_armed() {
         let start = Instant::now();
@@ -536,7 +565,7 @@ mod tests {
         assert_eq!(queue.add(read(1)), None);
         assert_eq!(queue.add(read(2)), None);
         let mut frame = frame(5, 80);
-        queue.draw(&mut frame, start);
+        queue.draw(&mut frame, start, &GRAPHITE);
         let shown = text(&frame);
         assert!(shown.contains("(1 of 2)"), "{shown}");
         assert!(shown.contains("── PinFold approval"), "{shown}");
@@ -547,7 +576,7 @@ mod tests {
         assert!(
             frame.cells[..80]
                 .iter()
-                .all(|cell| cell.foreground == MUTED)
+                .all(|cell| cell.foreground == GRAPHITE.chrome.muted)
         );
         let y = Key::Character("y".into());
         let armed = start + ARMED_AFTER;
@@ -557,7 +586,7 @@ mod tests {
         );
         // Not drawn yet, so not armed however late the key comes.
         assert_eq!(queue.key(&y, armed + ARMED_AFTER, 22, 80), None);
-        queue.draw(&mut frame, armed);
+        queue.draw(&mut frame, armed, &GRAPHITE);
         let early = armed + ARMED_AFTER - Duration::from_millis(1);
         assert_eq!(queue.key(&y, early, 22, 80), None);
         assert!(!queue.is_empty());
@@ -575,14 +604,14 @@ mod tests {
         let _ = queue.add(read(1));
         let mut frame = frame(5, 80);
         let y = Key::Character("y".into());
-        queue.draw(&mut frame, start);
+        queue.draw(&mut frame, start, &GRAPHITE);
         assert_eq!(queue.key(&y, start + ARMED_AFTER * 4, 22, 80), None);
         queue.focus(true);
-        queue.draw(&mut frame, start + ARMED_AFTER);
+        queue.draw(&mut frame, start + ARMED_AFTER, &GRAPHITE);
         assert_eq!(queue.key(&y, start + ARMED_AFTER, 22, 80), None);
         queue.focus(false);
         queue.focus(true);
-        queue.draw(&mut frame, start + ARMED_AFTER * 2);
+        queue.draw(&mut frame, start + ARMED_AFTER * 2, &GRAPHITE);
         assert_eq!(queue.key(&y, start + ARMED_AFTER * 2, 22, 80), None);
         assert_eq!(
             queue.key(&y, start + ARMED_AFTER * 3, 22, 80),
@@ -597,7 +626,7 @@ mod tests {
         queue.focus(true);
         let _ = queue.add(read(1));
         let mut frame = frame(5, 80);
-        queue.draw(&mut frame, start);
+        queue.draw(&mut frame, start, &GRAPHITE);
         // Prompts joining behind the head do not hold it unarmed.
         for target in 2..=MAX_QUEUED as u32 {
             assert_eq!(queue.add(read(target)), None);

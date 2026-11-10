@@ -15,6 +15,7 @@ use std::thread;
 use std::time::Instant;
 
 use mio::Waker;
+use pinfold_config::theme::{self, GRAPHITE, Theme};
 use pinfold_config::{Config, MAX_FONT_SIZE, MIN_FONT_SIZE};
 use pinfold_proto::link::{self as proto, MAX_DIMENSION, MAX_PASTE, Position, Rect, Selection};
 use pinfold_proto::{Frame, MouseMode};
@@ -96,6 +97,10 @@ enum Notice {
     Raise,
     /// The core lacks the hardened runtime, and whether it could tell (ADR-0044).
     Unhardened(bool),
+    /// The core is too old to take the theme's palette (ADR-0049).
+    Unthemed,
+    /// The config file or the theme file in use was saved, and this is the theme now.
+    Theme(Theme),
     /// The config file was saved, and this is what it now says.
     Config(Config),
     /// A menu item was chosen.
@@ -165,6 +170,7 @@ fn publish(link: &mut Link, shown: &mut Shown) -> bool {
         let mut ours = shown.screens.iter_mut();
         if let Some(ours) = ours.find(|ours| ours.pane == screen.pane) {
             copy_frame(&mut ours.frame, &screen.frame);
+            ours.colours = screen.colours;
             ours.top = screen.top;
             ours.held.clone_from(&screen.held);
             ours.dirty = true;
@@ -190,6 +196,7 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
         let raised = link.take_raised().then_some(Notice::Raise);
         let unhardened = link.take_unhardened().map(Notice::Unhardened);
         let refused = link.take_refused().map(Notice::Refused);
+        let unthemed = link.take_unthemed().then_some(Notice::Unthemed);
         while let Some(approval) = link.take_approval() {
             if proxy.send_event(Notice::Approval(approval)).is_err() {
                 return;
@@ -198,7 +205,7 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
         let ran = link.take_was_running().into_iter();
         let ran = ran.map(|(pane, runnable, command)| Notice::WasRunning(pane, runnable, command));
         let notices = [
-            searched, copied, linked, markdown, raised, unhardened, refused,
+            searched, copied, linked, markdown, raised, unhardened, refused, unthemed,
         ]
         .into_iter()
         .flatten();
@@ -232,6 +239,8 @@ struct Open {
     renderer: Box<dyn Renderer>,
     /// Whether the window filled the screen when it last changed size.
     fullscreen: bool,
+    /// The cursor colours the renderer last got, which follow the focused pane.
+    colours: Option<(u32, u32)>,
 }
 
 impl Open {
@@ -264,6 +273,13 @@ impl Open {
         // that call if a user needs another radius, as WezTerm's 30 is out of reach here.
         self.window.set_blur(translucent && config.background_blur);
     }
+
+    /// Hands the renderer the theme's background, for the clear, the padding and the glass,
+    /// and its cursor.
+    fn apply_theme(&mut self, theme: &Theme) {
+        self.colours = cursor_of(theme, None);
+        self.renderer.set_colours(theme.background, self.colours);
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -272,6 +288,46 @@ fn option_as_alt(config: &Config) -> OptionAsAlt {
         OptionAsAlt::Both
     } else {
         OptionAsAlt::None
+    }
+}
+
+/// What `theme` asks of its text and background drawn the other way round, a cursor or a
+/// selection: its `ground` and `text`, or none where they are the theme's foreground and
+/// background, which inverts each cell as before themes (ADR-0049, section 1).
+fn over(theme: &Theme, ground: u32, text: u32) -> Option<(u32, u32)> {
+    ((ground, text) != (theme.foreground, theme.background)).then_some((ground, text))
+}
+
+/// The cursor's background and text: `set`, a pane's OSC 12 colour, under the theme's cursor
+/// text, or else the theme's own, which is none where it inverts (ADR-0049, section 4).
+fn cursor_of(theme: &Theme, set: Option<u32>) -> Option<(u32, u32)> {
+    set.map(|colour| (colour, theme.cursor_text))
+        .or_else(|| over(theme, theme.cursor, theme.cursor_text))
+}
+
+/// The 18 colours of `theme` the core resolves pane colours through.
+fn palette_of(theme: &Theme) -> pinfold_proto::Palette {
+    pinfold_proto::Palette {
+        background: theme.background,
+        foreground: theme.foreground,
+        ansi: [
+            theme.black,
+            theme.red,
+            theme.green,
+            theme.yellow,
+            theme.blue,
+            theme.magenta,
+            theme.cyan,
+            theme.white,
+            theme.bright_black,
+            theme.bright_red,
+            theme.bright_green,
+            theme.bright_yellow,
+            theme.bright_blue,
+            theme.bright_magenta,
+            theme.bright_cyan,
+            theme.bright_white,
+        ],
     }
 }
 
@@ -312,6 +368,10 @@ fn view(screen: &Screen) -> View<'_> {
 
 struct App {
     config: Config,
+    /// The one theme the window draws from (ADR-0049).
+    theme: Theme,
+    /// Whether the core is too old for a palette, so the theme stays Graphite Grid.
+    unthemed: bool,
     size: Option<(u32, u32)>,
     outbox: Outbox,
     latest: Arc<Latest>,
@@ -428,6 +488,8 @@ impl App {
         Self {
             prefix: Prefix::new(config.keys.prefix),
             config,
+            theme: GRAPHITE,
+            unthemed: false,
             size,
             outbox,
             latest,
@@ -523,10 +585,45 @@ impl App {
             window,
             renderer,
             fullscreen: false,
+            colours: None,
         };
         open.apply_background(&self.config);
+        open.apply_theme(&self.theme);
         self.open = Some(open);
         Ok(())
+    }
+
+    /// Draws everything in Graphite Grid, as the panes of a core too old for a palette are
+    /// (ADR-0049, section 3).
+    fn untheme(&mut self) {
+        self.unthemed = true;
+        if self.theme == GRAPHITE {
+            return;
+        }
+        let _ = writeln!(
+            io::stderr(),
+            "pinfold: drawing Graphite Grid, not the theme: themes need the core updated"
+        );
+        self.theme = GRAPHITE;
+        if let Some(open) = &mut self.open {
+            open.apply_theme(&self.theme);
+        }
+        self.redraw_soon();
+    }
+
+    /// Draws from `theme`, saved while the window was open, and sends the core its palette
+    /// (ADR-0049, section 2).
+    fn retheme(&mut self, theme: Theme) {
+        if self.unthemed || theme == self.theme {
+            return;
+        }
+        self.theme = theme;
+        let palette = proto::Request::Palette(palette_of(&self.theme));
+        self.outbox.send(Request::Core(palette));
+        if let Some(open) = &mut self.open {
+            open.apply_theme(&self.theme);
+        }
+        self.redraw_soon();
     }
 
     fn resized(&mut self, size: PhysicalSize<u32>) {
@@ -665,6 +762,7 @@ impl App {
             };
             std::mem::swap(&mut fresh.frame, &mut pane.frame);
             std::mem::swap(&mut fresh.top, &mut pane.top);
+            pane.colours = fresh.colours;
             pane.held.clone_from(&fresh.held);
             if pane.pane == self.focused {
                 self.selecting
@@ -695,15 +793,26 @@ impl App {
         self.flash.tick(Instant::now());
         if let Some(open) = &mut self.open {
             let (rows, columns) = self.area;
-            panes::blank(&mut self.composed, rows, columns);
+            let theme = &self.theme;
+            panes::clear(&mut self.composed, rows, columns, theme.background);
             for pane in &self.panes {
                 panes::blit(&mut self.composed, &pane.frame, pane.rect);
+                if let Some(ground) = pane.colours.1 {
+                    panes::glaze(&mut self.composed, pane.rect, ground);
+                }
             }
             let focused = find(&self.panes, self.focused);
+            // The cursor is the focused pane's, so its OSC 12 colour draws it.
+            let cursor = cursor_of(theme, focused.and_then(|pane| pane.colours.0));
+            if open.colours != cursor {
+                open.colours = cursor;
+                open.renderer.set_colours(theme.background, cursor);
+            }
             panes::dividers(
                 &mut self.composed,
                 &self.rects,
                 focused.map(|pane| pane.rect),
+                theme,
             );
             if let Some(pane) = focused {
                 let (rect, top) = (pane.rect, pane.top);
@@ -723,7 +832,12 @@ impl App {
                     }
                 }
                 if let Some(selection) = self.selecting.current {
-                    selection::overlay(&mut self.composed, rect, top, selection);
+                    let colours = over(
+                        theme,
+                        theme.selection_background,
+                        theme.selection_foreground,
+                    );
+                    selection::overlay(&mut self.composed, rect, top, selection, colours);
                 }
                 let end = rect.x + rect.columns;
                 ime::overlay(&mut self.composed, end, &self.preedit.0, self.preedit.1);
@@ -732,28 +846,34 @@ impl App {
                 }
             }
             if let Some(menu) = &self.menu {
-                menu.draw(&mut self.composed);
+                menu.draw(&mut self.composed, theme);
                 self.composed.cursor = None;
             }
             if let Some(palette) = &self.palette {
-                palette.draw(&mut self.composed);
+                palette.draw(&mut self.composed, theme);
             }
             if self.ended {
-                flash::ended(&mut self.composed);
+                flash::ended(&mut self.composed, theme);
             } else if !self.approvals.is_empty() {
-                self.approvals.draw(&mut self.composed, Instant::now());
+                self.approvals
+                    .draw(&mut self.composed, Instant::now(), theme);
                 self.was_running.hide();
             } else if let Some(prompt) = &self.prompt {
-                paste::banner(&mut self.composed, prompt);
+                paste::banner(&mut self.composed, prompt, theme);
                 self.was_running.hide();
-            } else if (self.was_running).draw(&mut self.composed, self.focused, Instant::now()) {
+            } else if (self.was_running).draw(
+                &mut self.composed,
+                self.focused,
+                Instant::now(),
+                theme,
+            ) {
                 // The strip is drawn.
             } else if let Some(bar) = &self.bar {
-                bar.draw(&mut self.composed);
+                bar.draw(&mut self.composed, theme);
             } else if let Some(vi) = self.vi.filter(|_| self.flash.until().is_none()) {
-                vi.draw(&mut self.composed);
+                vi.draw(&mut self.composed, theme);
             } else {
-                self.flash.banner(&mut self.composed);
+                self.flash.banner(&mut self.composed, theme);
             }
             let (time, minute_left) = top_bar::now();
             self.minute = Instant::now() + minute_left;
@@ -778,6 +898,7 @@ impl App {
                 time,
                 inset,
                 unhardened: self.unhardened,
+                theme,
             };
             top_bar::draw(&mut self.composed, &bar);
             open.renderer.draw(&self.composed)?;
@@ -1581,6 +1702,8 @@ impl ApplicationHandler<Notice> for App {
                     open.window.focus_window();
                 }
             }
+            Notice::Unthemed => self.untheme(),
+            Notice::Theme(theme) => self.retheme(theme),
             Notice::Config(config) => self.configure(config),
             Notice::WasRunning(pane, runnable, command) => {
                 self.was_running.add(pane, runnable, command);
@@ -1771,6 +1894,17 @@ fn config() -> Config {
     })
 }
 
+/// Reads the theme the config file at `path` chooses, with its `[colors]` on top. A theme that
+/// cannot be used means Graphite Grid, and the log says why (ADR-0049, section 2).
+fn theme_at(path: &Path) -> Theme {
+    let (theme, notes) = theme::load(path)
+        .unwrap_or_else(|error| (GRAPHITE, vec![format!("using Graphite Grid: {error}")]));
+    for note in notes {
+        let _ = writeln!(io::stderr(), "pinfold: theme: {note}");
+    }
+    theme
+}
+
 /// Opens a window on the core at the other end of `link`, and returns when the window closes
 /// or the session's last pane does. A core that goes away leaves the window open and saying so.
 ///
@@ -1780,7 +1914,7 @@ fn config() -> Config {
 ///
 /// Returns an error if the window, font, surface or link cannot be set up.
 pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
-    let link = Link::silent(link)?;
+    let mut link = Link::silent(link)?;
     let waker = link.waker();
     let (outbox, inbox) = outbox::channel();
     let latest = Arc::new(Latest::default());
@@ -1789,13 +1923,21 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
     #[cfg(target_os = "macos")]
     winit::platform::macos::EventLoopBuilderExtMacOS::with_default_menu(&mut builder, false);
     let event_loop = builder.build()?;
+    // Before either file is first read, so a save between the two is not missed.
+    let proxy = event_loop.create_proxy();
+    reload::watch(move |saved| {
+        let notice = match saved {
+            reload::Saved::Config(config) => Notice::Config(config),
+            reload::Saved::Theme(theme) => Notice::Theme(theme),
+        };
+        proxy.send_event(notice).is_ok()
+    })?;
+    let theme = pinfold_config::path().map_or(GRAPHITE, |path| theme_at(&path));
+    link.theme(palette_of(&theme));
     let (proxy, shared) = (event_loop.create_proxy(), latest.clone());
     thread::Builder::new()
         .name("pinfold-io".into())
         .spawn(move || run_io(link, &inbox, &shared, &proxy))?;
-    // Before the file is first read, so a save between the two is not missed.
-    let proxy = event_loop.create_proxy();
-    reload::watch(move |config| proxy.send_event(Notice::Config(config)).is_ok())?;
     let proxy = event_loop.create_proxy();
     let menu_bar = menu_bar::Bar::install(move |command| {
         let _ = proxy.send_event(Notice::Command(command));
@@ -1822,6 +1964,7 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
         dock,
         notifier,
     );
+    app.theme = theme;
     event_loop.run_app(&mut app)?;
     app.result
 }
@@ -2147,6 +2290,55 @@ mod tests {
         assert_eq!(app.pane_key(&text("q"), Some("q"), false), None);
         let sent = inbox.take();
         assert!(matches!(&sent[..], [Request::Input(1, bytes)] if bytes == b"q"));
+    }
+
+    /// ADR-0049: a theme set in `pinfold.toml` at start colours the padding, the cursor and the
+    /// palette the core is sent, and a core too old for a palette means Graphite Grid.
+    #[test]
+    fn a_theme_in_the_config_colours_the_ground_the_cursor_and_the_palette() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = opener_dir("theme").join("pinfold.toml");
+        let write = |text: &str| {
+            std::fs::write(&path, text).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+            theme_at(&path)
+        };
+        let theme = write("[colors]\nbackground = \"#0d1117\"\ncursor = \"#58a6ff\"\n");
+        let palette = palette_of(&theme);
+        assert_eq!(palette.background, 0x000d_1117);
+        assert_eq!(palette.ansi, pinfold_proto::Palette::GRAPHITE_GRID.ansi);
+        let cursor = over(&theme, theme.cursor, theme.cursor_text);
+        // `[colors]` sits on Graphite Grid, whose cursor text this is.
+        assert_eq!(cursor, Some((0x0058_a6ff, GRAPHITE.cursor_text)));
+
+        let (mut app, inbox, _poll) = app();
+        // A save while the window is open draws from the new theme and tells the core, once.
+        app.retheme(theme);
+        app.retheme(theme);
+        assert_eq!(app.theme, theme);
+        let sent = inbox.take();
+        assert!(
+            matches!(&sent[..], [Request::Core(proto::Request::Palette(sent))] if *sent == palette)
+        );
+        app.untheme();
+        assert_eq!(app.theme, GRAPHITE);
+        // A core too old for a palette keeps Graphite Grid whatever is saved.
+        app.retheme(theme);
+        assert_eq!(app.theme, GRAPHITE);
+        assert!(inbox.take().is_empty());
+        // The default's cursor and selection invert each cell, as before themes.
+        assert_eq!(over(&GRAPHITE, GRAPHITE.cursor, GRAPHITE.cursor_text), None);
+        // A pane's OSC 12 colour draws its cursor under any theme, and OSC 112 gives it back.
+        assert_eq!(cursor_of(&theme, None), cursor);
+        let set = Some((0x00ff_0000, GRAPHITE.cursor_text));
+        assert_eq!(cursor_of(&theme, Some(0x00ff_0000)), set);
+        assert_eq!(cursor_of(&GRAPHITE, Some(0x00ff_0000)), set);
+        assert_eq!(cursor_of(&GRAPHITE, None), None);
+        let (ground, text) = (GRAPHITE.selection_background, GRAPHITE.selection_foreground);
+        assert_eq!(over(&GRAPHITE, ground, text), None);
+        assert_eq!(palette_of(&GRAPHITE), pinfold_proto::Palette::GRAPHITE_GRID);
+        // No theme has a name that is a path, so this one is refused.
+        assert_eq!(write("theme = \"../other\""), GRAPHITE);
     }
 
     #[test]

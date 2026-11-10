@@ -30,7 +30,7 @@ fn items((labels, states): &Tabs) -> Vec<(String, Action<Command>)> {
         .zip(states)
         .enumerate()
         .map(|(index, (label, state))| {
-            let (glyph, word, _) = STATES[usize::from(*state).min(STATES.len() - 1)];
+            let (glyph, word) = STATES[usize::from(*state).min(STATES.len() - 1)];
             (
                 format!("{glyph} {label}  {word}"),
                 Action::Run(Command::Tab(index)),

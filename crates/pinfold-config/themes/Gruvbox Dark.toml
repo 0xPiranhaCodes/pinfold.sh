@@ -1,0 +1,27 @@
+# Gruvbox Dark, a theme bundled with PinFold. Written by convert.py: do not edit.
+# Source: `ghostty/Gruvbox Dark` in mbadolato/iTerm2-Color-Schemes, which has it from morhetz/gruvbox
+# Commit: bc5531d8ec26e6031c698c61eb7d82c9a9cd092d
+# Licence: MIT, in LICENSE-Gruvbox.txt and LICENSE-iTerm2-Color-Schemes.txt
+# Copyright (c) Pavel Pertsev; Copyright (c) 2011 to Present Mark Badolato
+background = "#282828"
+foreground = "#ebdbb2"
+black = "#282828"
+red = "#cc241d"
+green = "#98971a"
+yellow = "#d79921"
+blue = "#458588"
+magenta = "#b16286"
+cyan = "#689d6a"
+white = "#a89984"
+bright_black = "#928374"
+bright_red = "#fb4934"
+bright_green = "#b8bb26"
+bright_yellow = "#fabd2f"
+bright_blue = "#83a598"
+bright_magenta = "#d3869b"
+bright_cyan = "#8ec07c"
+bright_white = "#ebdbb2"
+cursor = "#ebdbb2"
+cursor_text = "#282828"
+selection_background = "#665c54"
+selection_foreground = "#ebdbb2"

@@ -30,6 +30,12 @@ overlay = "#12151a"
 border = "#343a44"
 dim = "#9aa1ac"
 muted = "#555a63"
+tab_text = "#b0b8c4"
+key = "#909ba9"
+title = "#9ba5b3"
+title_unfocused = "#87909e"
+rule = "#262b33"
+palette = "#151920"
 
 [states]
 needs_you = "#f5b544"

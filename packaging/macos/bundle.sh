@@ -32,6 +32,8 @@ plutil -lint -s "$app/Contents/Info.plist"
 install -m 0755 "$pinfold" "$core" "$window" "$app/Contents/MacOS/"
 cp packaging/macos/AppIcon.icns packaging/macos/Credits.rtf crates/pinfold-render/fonts/OFL.txt LICENSE-MIT LICENSE-APACHE \
   "$app/Contents/Resources/"
+mkdir "$app/Contents/Resources/theme-licenses"
+cp crates/pinfold-config/themes/LICENSE-*.txt "$app/Contents/Resources/theme-licenses/"
 # The standard About panel shows Credits.rtf and the copyright only if both are there and parse.
 textutil -convert txt -stdout "$app/Contents/Resources/Credits.rtf" | grep -q 'pinfold agent'
 plutil -extract NSHumanReadableCopyright raw "$app/Contents/Info.plist" > /dev/null
