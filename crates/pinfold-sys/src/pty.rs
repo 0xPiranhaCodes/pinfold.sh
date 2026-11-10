@@ -45,7 +45,22 @@ use libc::ptsname_r;
 /// Opens a PTY's master and slave, each close-on-exec from the moment it exists, so a child
 /// that another thread forks meanwhile inherits neither. A master a stray child holds would
 /// keep a killed pane's program from ending on macOS, as it waits for its output to drain.
-pub(crate) fn open_pair() -> io::Result<(OwnedFd, OwnedFd)> {
+///
+/// On macOS `grantpt` can stay in the kernel forever, so a caller that must not stall opens
+/// the pair on another thread and gives [`Pty::spawn_on`] what it returns (ADR-0048).
+///
+/// # Errors
+///
+/// Returns an error if the PTY cannot be opened, granted, unlocked or named.
+///
+/// # Examples
+///
+/// ```
+/// let (master, slave) = pinfold_sys::pty::open_pair()?;
+/// # drop((master, slave));
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn open_pair() -> io::Result<(OwnedFd, OwnedFd)> {
     let flags = libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC;
     // SAFETY: posix_openpt takes integer flags and returns a new fd or -1.
     let open = || check(unsafe { libc::posix_openpt(flags) });
@@ -127,8 +142,22 @@ impl Pty {
     /// # drop(pty);
     /// # Ok::<(), std::io::Error>(())
     /// ```
-    pub fn spawn(mut command: Command, rows: u16, columns: u16) -> io::Result<Self> {
-        let (master, slave) = open_pair()?;
+    pub fn spawn(command: Command, rows: u16, columns: u16) -> io::Result<Self> {
+        Self::spawn_on(open_pair()?, command, rows, columns)
+    }
+
+    /// [`Pty::spawn`] on a master and slave that [`open_pair`] opened, perhaps on another
+    /// thread: on macOS `grantpt` can stay in the kernel forever (ADR-0048).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the PTY cannot be set up or the program cannot be started.
+    pub fn spawn_on(
+        (master, slave): (OwnedFd, OwnedFd),
+        mut command: Command,
+        rows: u16,
+        columns: u16,
+    ) -> io::Result<Self> {
         let size = window_size(rows, columns);
         // SAFETY: `master` is open, and `size` is a valid winsize for TIOCSWINSZ.
         check(unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ as _, &raw const size) })?;
@@ -369,6 +398,47 @@ mod tests {
         // SAFETY: sysconf reads a limit and touches no memory.
         let limit = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
         eprintln!("{runs} spawns, {each:?} each, open-files limit {limit}");
+    }
+
+    /// Prints how long opens take with 16 threads opening 300 each, for the core's deadline
+    /// (ADR-0048). `tests/open-latency.sh` runs copies at once. The replica closes first, so
+    /// no `grantpt` gets stuck (#392) and every open counts.
+    #[test]
+    #[ignore = "a measurement, run by tests/open-latency.sh"]
+    fn open_latency() {
+        let threads: Vec<_> = (0..16)
+            .map(|_| {
+                thread::spawn(|| {
+                    (0..300)
+                        .map(|_| {
+                            let start = Instant::now();
+                            let pair = open_pair();
+                            let took = start.elapsed();
+                            pair.map(|(master, slave)| drop((slave, master)))
+                                .map(|()| took)
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        let tries: Vec<_> = threads
+            .into_iter()
+            .flat_map(|t| t.join().unwrap())
+            .collect();
+        let mut took: Vec<_> = tries
+            .iter()
+            .filter_map(|tried| tried.as_ref().ok())
+            .collect();
+        took.sort();
+        let at = |share: f64| took[((took.len() - 1) as f64 * share) as usize].as_millis();
+        println!(
+            "opens={} failed={} p50_ms={} p99_ms={} max_ms={}",
+            took.len(),
+            tries.len() - took.len(),
+            at(0.5),
+            at(0.99),
+            at(1.0)
+        );
     }
 
     /// Many PTYs opened at once, as `tests/pty-loop.sh` runs it from several processes (#383).
