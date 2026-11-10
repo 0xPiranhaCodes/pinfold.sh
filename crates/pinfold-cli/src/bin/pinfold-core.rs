@@ -40,6 +40,9 @@ const IDLE: Duration = Duration::from_secs(3600);
 /// How long a core that starts with no pane waits for its first pane or window. `pinfold up`
 /// asks for the window within its 5 s start wait, so past this one is never coming.
 const EMPTY_WAIT: Duration = Duration::from_secs(30);
+/// How long a measured window has to say hello. A window is up in a second or two, and
+/// `cargo xtask mem-gate` must not read a core whose window never came.
+const HELLO_WAIT: Duration = Duration::from_secs(30);
 
 /// [`EMPTY_WAIT`], or in a debug build `PINFOLD_TEST_EMPTY_WAIT_MS`, so its test takes seconds.
 fn empty_wait() -> Duration {
@@ -861,7 +864,8 @@ fn restore_session(
 
 /// Runs the saved session if `restore` and there is one, else `panes` shells, a tab each, until every pane has gone and no window is left to tell, or
 /// until SIGTERM or SIGHUP, saving the session on the way out, when the window closes and a
-/// minute after a change (ADR-0034). With a size, it opens a window for `cargo xtask mem-gate` and prints its pid.
+/// minute after a change (ADR-0034). With a size, it opens a window for `cargo xtask mem-gate` and
+/// prints its pid once that window says hello, or fails if it ends or `HELLO_WAIT` passes first.
 fn daemon(
     mut panes: usize,
     measured: Option<&str>,
@@ -903,12 +907,14 @@ fn daemon(
             .open_tab(shell::command(), ROWS, COLUMNS)
             .map_err(io::Error::other)?;
     }
+    // The measured window's pid and how long it has, until it says hello.
+    let mut unready = None;
     if let Some(size) = measured {
         let mut command = Command::new(&binary);
         command.args(["--measure", size]);
         reactor.spawn_window_command(command)?;
         let pid = reactor.window_pid().unwrap_or_default();
-        writeln!(io::stdout(), "{pid}")?;
+        unready = Some((pid, Instant::now() + HELLO_WAIT));
     }
     // Who asked for the window, until it says hello or ends. A caller that timed out has gone
     // and hears nothing.
@@ -940,7 +946,8 @@ fn daemon(
         let wait = wait
             .into_iter()
             .chain(saver.as_ref().and_then(|saver| saver.wait(now)))
-            .chain((!started).then(|| empty_until.saturating_duration_since(now)));
+            .chain((!started).then(|| empty_until.saturating_duration_since(now)))
+            .chain(unready.map(|(_, by)| by.saturating_duration_since(now)));
         output::tap(&mut reactor, &waits, &subscribers);
         reactor.turn(Some(wait.min().unwrap_or(IDLE)))?;
         output::hand_out(&mut reactor, &mut waits, &subscribers);
@@ -1045,6 +1052,16 @@ fn daemon(
             known = now;
         }
         let ended = !reactor.has_window();
+        if let Some((pid, by)) = unready {
+            if reactor.is_window_ready() {
+                writeln!(io::stdout(), "{pid}")?;
+                unready = None;
+            } else if ended || Instant::now() >= by {
+                return Err(io::Error::other(
+                    "the measured window ended or stalled before it said hello",
+                ));
+            }
+        }
         if ended || reactor.is_window_ready() {
             let result = match (ended, reactor.take_other_version()) {
                 (false, _) => Ok(json!({})),

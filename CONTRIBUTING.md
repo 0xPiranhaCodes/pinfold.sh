@@ -87,7 +87,10 @@ Retina display reads about 51 MB. For a change that can affect it, run the gate 
 Window rows read a `pinfold-window` started by `pinfold-core --window <panes> <size>`, which is a
 core without hardening whose window has none either, as Linux hides a hardened process from
 `/proc`. So the window and the core are read as separate processes. A last row reads the core
-beside such a window, against the core's budget. Run the gate with `XDG_CONFIG_HOME` set to an
+beside such a window, against the core's budget. That core prints the window's pid only once
+the window says hello, and exits with an error if the window ends first or says nothing for
+30 s. The gate fails a row whose window or tool never started or has gone by the reading, so
+without an X server the window rows fail rather than read an idle core. Run the gate with `XDG_CONFIG_HOME` set to an
 empty directory, as your own config changes what a window costs.
 
 Each window has a second row, `with text`, against the same budget. It runs
