@@ -95,11 +95,17 @@ impl Session {
 
     /// Starts a core with `arguments` and a one-line shell, and notes the core.
     fn start_core(&self, arguments: &[&str], shell: &str) -> Result<Child> {
-        self.start_core_at(arguments, shell, &self.directory.join("state"))
+        self.start_core_at(arguments, shell, &self.directory.join("state"), &[])
     }
 
-    /// As [`Session::start_core`], with the core's HOME at `home`.
-    fn start_core_at(&self, arguments: &[&str], shell: &str, home: &Path) -> Result<Child> {
+    /// As [`Session::start_core`], with the core's HOME at `home` and `vars` set too.
+    fn start_core_at(
+        &self,
+        arguments: &[&str],
+        shell: &str,
+        home: &Path,
+        vars: &[(&str, &str)],
+    ) -> Result<Child> {
         let script = self.directory.join("shell");
         // The core asks the shell for its PATH with `-i -c`, for sandboxed agents.
         let ask = "case $1 in -i) exec /bin/sh \"$@\";; esac";
@@ -108,6 +114,7 @@ impl Session {
         fs::set_permissions(&script, fs::Permissions::from_mode(0o700))?;
         let core = Command::new(self.directory.join("pinfold-core"))
             .args(arguments)
+            .envs(vars.iter().copied())
             .env("XDG_RUNTIME_DIR", self.directory.join("run"))
             .env("XDG_CONFIG_HOME", self.directory.join("config"))
             // The state directory, on macOS from HOME, so a test never writes the person's.
@@ -773,6 +780,46 @@ fn debuggable(pid: u32) -> Result<bool> {
 
 /// Shell that notes itself and stays.
 const NOTE_PANE: &str = "echo $$ > \"$PINFOLD_TEST_CLIENT/pane\"\nexec sleep 60";
+
+/// The variables a pane's shell got from a core with `config`, one per line.
+fn pane_environment(name: &str, config: &str) -> Result<String> {
+    let session = Session::new(name, None)?;
+    let directory = session.directory.join("config/pinfold");
+    fs::create_dir_all(&directory)?;
+    fs::write(directory.join("pinfold.toml"), config)?;
+    let vars = [("PINFOLD_MARK_TOKEN", "x"), ("PINFOLD_MARK_PLAIN", "y")];
+    let shell = format!("{}\nexec sleep 60", into("env", "env"));
+    let state = session.directory.join("state");
+    let mut core = session.start_core_at(&["--idle", "1"], &shell, &state, &vars)?;
+    if !session.wait_beside("env", Some(&mut core)) {
+        return Err(format!("the pane did not start: {}", session.read_log()).into());
+    }
+    let log = session.read_log();
+    core.kill()?;
+    core.wait()?;
+    // A core not started by the launcher names what it still holds, and no value.
+    let named = log.contains("PINFOLD_MARK_TOKEN") && !log.contains("PINFOLD_MARK_PLAIN");
+    if config.contains("strip_secrets = true") && !named {
+        return Err(format!("the log names the wrong variables: {log}").into());
+    }
+    Ok(session.read("env"))
+}
+
+#[test]
+fn under_strip_secrets_a_panes_shell_gets_no_secret_looking_variable() {
+    let stripped = pane_environment("ss", "strip_secrets = true\n").unwrap();
+    assert!(stripped.contains("PINFOLD_MARK_PLAIN=y"), "{stripped}");
+    assert!(!stripped.contains("PINFOLD_MARK_TOKEN"), "{stripped}");
+    let secret = |line: &str| {
+        let name = line.split('=').next().unwrap_or_default();
+        pinfold_core::sandbox::secret_name(name.as_ref())
+    };
+    assert!(!stripped.lines().any(secret), "{stripped}");
+    // Off, the default: the pane gets everything, as before.
+    let kept = pane_environment("sk", "").unwrap();
+    assert!(kept.contains("PINFOLD_MARK_TOKEN=x"), "{kept}");
+    assert!(kept.contains("PINFOLD_MARK_PLAIN=y"), "{kept}");
+}
 
 #[test]
 fn hardening_closes_the_core_and_leaves_its_panes_open() {
@@ -3050,7 +3097,7 @@ fn a_sandboxed_agent_starts_nothing_outside_its_sandbox() {
     // The core's HOME is the base: a sandboxed agent's working directory must be strictly inside
     // home, and this one must also be outside the temporary directory.
     let mut core = session
-        .start_core_at(&["--idle", "1"], &shell, &base)
+        .start_core_at(&["--idle", "1"], &shell, &base, &[])
         .unwrap();
     let done = wait_file(&work.join("level1"));
     // Long enough for a shell to run a typed line.

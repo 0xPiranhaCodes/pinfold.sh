@@ -272,7 +272,9 @@ impl Reactor {
     }
 
     /// Starts `command` on a new PTY and returns its pane number. The pane is in no tab, so it
-    /// stays when its program exits, for reading. [`Reactor::open_tab`] adds one to the session.
+    /// stays when its program exits, for reading. After
+    /// [`sandbox::strip_secrets`](crate::sandbox::strip_secrets) it gets no secret-looking
+    /// variable from the core. [`Reactor::open_tab`] adds one to the session.
     ///
     /// # Errors
     ///
@@ -280,6 +282,7 @@ impl Reactor {
     /// An open still stuck in the kernel after five seconds is `TimedOut` (ADR-0048).
     pub fn spawn(&mut self, mut command: Command, rows: u16, columns: u16) -> io::Result<usize> {
         command.env("TERM", "xterm-256color");
+        crate::sandbox::strip_inherited(&mut command);
         // The program alone: its arguments can hold secrets.
         let program = command.get_program().to_string_lossy().into_owned();
         let pty = Pty::spawn_on(self.opener.open()?, command, rows, columns)?;

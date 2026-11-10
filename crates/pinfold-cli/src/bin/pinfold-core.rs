@@ -862,6 +862,27 @@ fn restore_session(
     })
 }
 
+/// Turns on [`sandbox::strip_secrets`] if `on`, and logs the secret-looking names, never values,
+/// this core still has, as one not started by the launcher does: a sandboxed agent on macOS can
+/// read them from the core (ADR-0047), though no pane gets them.
+fn strip_secrets(on: bool) {
+    sandbox::strip_secrets(on);
+    let names: Vec<_> = env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| on && sandbox::secret_name(name))
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect();
+    if !names.is_empty() {
+        let _ = writeln!(
+            io::stderr(),
+            "pinfold-core: strip_secrets is on, but this core started with {}; no pane gets \
+             them, but on macOS a sandboxed agent can read them from the core: start PinFold \
+             with `pinfold`, which leaves them out",
+            names.join(", ")
+        );
+    }
+}
+
 /// Runs the saved session if `restore` and there is one, else `panes` shells, a tab each, until every pane has gone and no window is left to tell, or
 /// until SIGTERM or SIGHUP, saving the session on the way out, when the window closes and a
 /// minute after a change (ADR-0034). With a size, it opens a window for `cargo xtask mem-gate` and
@@ -873,6 +894,10 @@ fn daemon(
     unhardened: Option<bool>,
 ) -> io::Result<()> {
     let binary = sibling("pinfold-window")?;
+    // Read once: the core takes no hot reload. Before the first pane, which `strip_secrets`
+    // must reach.
+    let config = pinfold_cli::config();
+    strip_secrets(config.strip_secrets);
     let mut reactor = Reactor::new()?;
     // The built-in tools (ADR-0045), resolved before a restore runs them again.
     reactor.set_tools(sibling("pinfold")?);
@@ -924,8 +949,6 @@ fn daemon(
     let mut family = Family::default();
     let mut subscribers: Vec<(Subscriber, Topics)> = Vec::new();
     let mut known = Seen::new();
-    // Read once: the core takes no hot reload.
-    let config = pinfold_cli::config();
     // Before any agent runs, and ready by the first sandboxed launch.
     let state = pinfold_config::state_dir();
     if let Some(state) = state.filter(|_| config.agents.values().any(|agent| agent.sandbox)) {

@@ -55,6 +55,9 @@ pub struct Config {
     pub api: Api,
     /// The `[agents.<name>]` tables: agent profiles, by name.
     pub agents: BTreeMap<String, Agent>,
+    /// Whether the launcher starts the core, and the core every program it starts, without the
+    /// variables whose names look like secrets' (ADR-0047). Read when the core starts.
+    pub strip_secrets: bool,
 }
 
 /// An `[agents.<name>]` table: how to start one agent.
@@ -133,6 +136,7 @@ impl Default for Config {
             keys: Keys::default(),
             api: Api::default(),
             agents: BTreeMap::new(),
+            strip_secrets: false,
         }
     }
 }
@@ -600,6 +604,13 @@ mod tests {
         assert!(config.macos_option_as_alt);
         assert_eq!(config.font_size, 14.5);
         assert_eq!(parse(b"font_size = 14").unwrap().font_size, 14.0);
+    }
+
+    #[test]
+    fn strip_secrets_is_off_unless_set() {
+        assert!(!Config::default().strip_secrets);
+        assert!(parse(b"strip_secrets = true").unwrap().strip_secrets);
+        assert!(message(b"strip_secrets = 1").contains("strip_secrets"));
     }
 
     #[test]

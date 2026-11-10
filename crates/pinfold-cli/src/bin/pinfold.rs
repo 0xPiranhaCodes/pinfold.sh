@@ -477,8 +477,9 @@ fn core(directory: &Path, arguments: &[&str]) -> Result<UnixStream, Box<dyn Erro
     // Windows inherit this and panes do not, as a pane's stderr is its terminal. A log that will
     // not open is no reason to go without a core.
     let log = control::start_log(directory).map_or_else(|_| Stdio::null(), Stdio::from);
-    let mut command = Command::new(&binary);
-    command.args(arguments);
+    let strip = pinfold_cli::config().strip_secrets;
+    let names = std::env::vars_os().map(|(name, _)| name);
+    let command = core_command(&binary, arguments, strip, names);
     let mut started = pinfold_sys::spawn_detached(command, log)
         .map_err(|error| format!("cannot start {}: {error}", binary.display()))?;
     let start = Instant::now();
@@ -497,6 +498,23 @@ fn core(directory: &Path, arguments: &[&str]) -> Result<UnixStream, Box<dyn Erro
         thread::sleep(POLL);
     }
     Err(format!("no core answered at {}", path.display()).into())
+}
+
+/// The command that starts the core at `binary` with `arguments`, without each of `names`, this
+/// process's variables, that looks like a secret's if `strip` (ADR-0047). It has to be left out
+/// here: on macOS a sandboxed agent reads the environment the core was given at exec.
+fn core_command(
+    binary: &Path,
+    arguments: &[&str],
+    strip: bool,
+    names: impl IntoIterator<Item = std::ffi::OsString>,
+) -> Command {
+    let mut command = Command::new(binary);
+    command.args(arguments);
+    if strip {
+        sandbox::remove_secrets(&mut command, names);
+    }
+    command
 }
 
 /// Asks the core for a window, and starts one with `arguments` if none answers. A core older
@@ -1154,6 +1172,25 @@ mod tests {
             Path::new("/target/debug/pinfold-core")
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_core_is_executed_without_secrets_only_under_strip_secrets() {
+        let names = || ["GITHUB_TOKEN", "OPENAI_API_KEY", "PATH", "HOME"].map(Into::into);
+        let binary = Path::new("/target/debug/pinfold-core");
+        let stripped = core_command(binary, &["--idle", "1"], true, names());
+        let removed: Vec<_> = stripped.get_envs().collect();
+        assert_eq!(
+            removed,
+            [
+                ("GITHUB_TOKEN".as_ref(), None),
+                ("OPENAI_API_KEY".as_ref(), None)
+            ]
+        );
+        assert_eq!(stripped.get_args().collect::<Vec<_>>(), ["--idle", "1"]);
+        // Off, the default: the core inherits everything, as before.
+        let kept = core_command(binary, &[], false, names());
+        assert_eq!(kept.get_envs().count(), 0);
     }
 
     #[test]
