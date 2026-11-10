@@ -516,7 +516,7 @@ struct Chosen {
 /// Loads the theme `config`, the path of `pinfold.toml`, chooses: its `theme`, or Graphite Grid
 /// without one, with its `[colors]` on top, as [`parse`] does. Where `theme` is a table of
 /// `light` and `dark`, this is the `dark` theme, which is also the one for a system that does
-/// not say, and [`Watch::follow`] loads the other. A named theme is
+/// not say, and [`load_as`] and [`Watch::follow`] load the other. A named theme is
 /// `themes/<name>.toml` beside `config`, then `themes/<name>.itermcolors`
 /// ([`crate::itermcolors::parse`]), then `themes/<name>` as a Ghostty theme file
 /// ([`crate::ghostty::parse`]), each read with the checks of [`crate::load`], and then a
@@ -533,8 +533,20 @@ pub fn load(config: &Path) -> Result<(Theme, Vec<String>), Error> {
     load_as(config, true)
 }
 
-/// [`load`], with the `dark` or the `light` half of a `theme` table.
-fn load_as(config: &Path, dark: bool) -> Result<(Theme, Vec<String>), Error> {
+/// [`load`], with the `dark` or the `light` half of a `theme` table, for a caller that knows
+/// the system's appearance before its first load.
+///
+/// ```
+/// use pinfold_config::theme::{GRAPHITE, load_as};
+/// // No config file, so no `theme` table, and light is Graphite Grid too.
+/// let (theme, _) = load_as("/nowhere/pinfold.toml".as_ref(), false).unwrap();
+/// assert_eq!(theme, GRAPHITE);
+/// ```
+///
+/// # Errors
+///
+/// Returns what [`load`] returns.
+pub fn load_as(config: &Path, dark: bool) -> Result<(Theme, Vec<String>), Error> {
     let chosen: Chosen = match crate::read(config)? {
         Some(bytes) => crate::parse_as(&bytes)?,
         None => Chosen::default(),

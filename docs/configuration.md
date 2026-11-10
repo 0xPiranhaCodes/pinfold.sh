@@ -414,9 +414,9 @@ save it keeps the theme it has.
 theme = { light = "GitHub Light", dark = "GitHub Dark" }
 ```
 
-The window asks the system at start and each time the appearance changes, and applies the
-matching theme as it applies a [save](#reload): the chrome and the panes are recoloured,
-history included. Where the system does not say, as on X11, PinFold uses `dark`. Both keys are
+The window asks the system as it opens, before its first frame, so it starts in the matching
+theme. Each time the appearance changes it applies the matching theme as it applies a
+[save](#reload): the chrome and the panes are recoloured, history included. Where the system does not say, as on X11, PinFold uses `dark`. Both keys are
 required, each is a name as above, and `[colors]` goes on top of whichever is in use.
 
 A name that cannot be used is [reported](#where-problems-are-reported) for either half, the
