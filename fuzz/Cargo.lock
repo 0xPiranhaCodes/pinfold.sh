@@ -352,7 +352,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pinfold-api"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "libc",
  "mio",
@@ -364,7 +364,7 @@ dependencies = [
 
 [[package]]
 name = "pinfold-config"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "libc",
  "pinfold-sys",
@@ -375,7 +375,7 @@ dependencies = [
 
 [[package]]
 name = "pinfold-core"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "alacritty_terminal",
  "lz4_flex",
@@ -404,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "pinfold-mux"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "pinfold-proto",
  "thiserror",
@@ -412,14 +412,14 @@ dependencies = [
 
 [[package]]
 name = "pinfold-proto"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "pinfold-sys"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
  "libc",
  "signal-hook",
@@ -427,10 +427,13 @@ dependencies = [
 
 [[package]]
 name = "pinfold-tools"
-version = "0.1.0-beta.3"
+version = "0.1.0-beta.4"
 dependencies = [
+ "pinfold-api",
  "pinfold-sys",
  "pulldown-cmark",
+ "serde_json",
+ "similar",
 ]
 
 [[package]]
@@ -643,6 +646,12 @@ dependencies = [
  "errno",
  "libc",
 ]
+
+[[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "smallvec"

@@ -11,10 +11,10 @@ publish.workspace = true
 
 [dependencies]
 mio = { version = "1.2.4", features = ["os-ext", "os-poll"] }
-pinfold-config = { path = "../pinfold-config", version = "0.1.0-beta.3" }
-pinfold-proto = { path = "../pinfold-proto", version = "0.1.0-beta.3" }
-pinfold-render = { path = "../pinfold-render", version = "0.1.0-beta.3" }
-pinfold-sys = { path = "../pinfold-sys", version = "0.1.0-beta.3", features = ["clipboard", "menu"] }
+pinfold-config = { path = "../pinfold-config", version = "0.1.0-beta.4" }
+pinfold-proto = { path = "../pinfold-proto", version = "0.1.0-beta.4" }
+pinfold-render = { path = "../pinfold-render", version = "0.1.0-beta.4" }
+pinfold-sys = { path = "../pinfold-sys", version = "0.1.0-beta.4", features = ["clipboard", "menu"] }
 thiserror = "2.0.21"
 unicode-width = "0.2.3"
 winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", "wayland", "wayland-dlopen", "x11"] }
@@ -22,9 +22,9 @@ winit = { version = "=0.30.13", default-features = false, features = ["rwh_06", 
 [dev-dependencies]
 # Off by default, as in pinfold-core: coloured diffs pull in `console`.
 insta = { version = "1.49.0", default-features = false }
-pinfold-core = { path = "../pinfold-core", version = "0.1.0-beta.3" }
+pinfold-core = { path = "../pinfold-core", version = "0.1.0-beta.4" }
 # Golden images of the built-in tools' screens.
-pinfold-tools = { path = "../pinfold-tools", version = "0.1.0-beta.3" }
+pinfold-tools = { path = "../pinfold-tools", version = "0.1.0-beta.4" }
 # Golden images of the renderer's output.
 png = "0.18.1"
 
