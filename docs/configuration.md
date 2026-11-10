@@ -59,7 +59,13 @@ directory symlinks and special files. It uses `~/Library/Fonts`, `/Library/Fonts
 `background`, and the padding around the grid.
 Text and cells a program coloured stay opaque, so a program that paints its own background,
 such as an editor with a colour scheme, covers the glass. A program that changes the default
-background with OSC 11 gets that colour as an opaque cell colour. `background_blur` does nothing
+background with OSC 11 changes it for its own pane: that colour is then the pane's default
+background, so it is translucent as the theme's is, while the padding, the other panes and the
+chrome keep the theme's. OSC 12 sets the colour of that pane's cursor, drawn under the theme's
+`cursor_text`. OSC 111 and OSC 112 give the pane back the theme's background and cursor.
+Prompts drawn by PinFold read only the theme and stay opaque. With a core older than the
+window (link version 13), OSC 11 stays an opaque cell colour and OSC 12 does nothing.
+`background_blur` does nothing
 at opacity 1. Its radius is fixed at 80, because winit sets it through a private CoreGraphics
 call that takes no radius from callers, and macOS may change that call.
 

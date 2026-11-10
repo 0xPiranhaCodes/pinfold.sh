@@ -170,6 +170,7 @@ fn publish(link: &mut Link, shown: &mut Shown) -> bool {
         let mut ours = shown.screens.iter_mut();
         if let Some(ours) = ours.find(|ours| ours.pane == screen.pane) {
             copy_frame(&mut ours.frame, &screen.frame);
+            ours.colours = screen.colours;
             ours.top = screen.top;
             ours.held.clone_from(&screen.held);
             ours.dirty = true;
@@ -238,6 +239,8 @@ struct Open {
     renderer: Box<dyn Renderer>,
     /// Whether the window filled the screen when it last changed size.
     fullscreen: bool,
+    /// The cursor colours the renderer last got, which follow the focused pane.
+    colours: Option<(u32, u32)>,
 }
 
 impl Open {
@@ -274,8 +277,8 @@ impl Open {
     /// Hands the renderer the theme's background, for the clear, the padding and the glass,
     /// and its cursor.
     fn apply_theme(&mut self, theme: &Theme) {
-        let cursor = over(theme, theme.cursor, theme.cursor_text);
-        self.renderer.set_colours(theme.background, cursor);
+        self.colours = cursor_of(theme, None);
+        self.renderer.set_colours(theme.background, self.colours);
     }
 }
 
@@ -293,6 +296,13 @@ fn option_as_alt(config: &Config) -> OptionAsAlt {
 /// background, which inverts each cell as before themes (ADR-0049, section 1).
 fn over(theme: &Theme, ground: u32, text: u32) -> Option<(u32, u32)> {
     ((ground, text) != (theme.foreground, theme.background)).then_some((ground, text))
+}
+
+/// The cursor's background and text: `set`, a pane's OSC 12 colour, under the theme's cursor
+/// text, or else the theme's own, which is none where it inverts (ADR-0049, section 4).
+fn cursor_of(theme: &Theme, set: Option<u32>) -> Option<(u32, u32)> {
+    set.map(|colour| (colour, theme.cursor_text))
+        .or_else(|| over(theme, theme.cursor, theme.cursor_text))
 }
 
 /// The 18 colours of `theme` the core resolves pane colours through.
@@ -575,6 +585,7 @@ impl App {
             window,
             renderer,
             fullscreen: false,
+            colours: None,
         };
         open.apply_background(&self.config);
         open.apply_theme(&self.theme);
@@ -751,6 +762,7 @@ impl App {
             };
             std::mem::swap(&mut fresh.frame, &mut pane.frame);
             std::mem::swap(&mut fresh.top, &mut pane.top);
+            pane.colours = fresh.colours;
             pane.held.clone_from(&fresh.held);
             if pane.pane == self.focused {
                 self.selecting
@@ -785,8 +797,17 @@ impl App {
             panes::clear(&mut self.composed, rows, columns, theme.background);
             for pane in &self.panes {
                 panes::blit(&mut self.composed, &pane.frame, pane.rect);
+                if let Some(ground) = pane.colours.1 {
+                    panes::glaze(&mut self.composed, pane.rect, ground);
+                }
             }
             let focused = find(&self.panes, self.focused);
+            // The cursor is the focused pane's, so its OSC 12 colour draws it.
+            let cursor = cursor_of(theme, focused.and_then(|pane| pane.colours.0));
+            if open.colours != cursor {
+                open.colours = cursor;
+                open.renderer.set_colours(theme.background, cursor);
+            }
             panes::dividers(
                 &mut self.composed,
                 &self.rects,
@@ -2307,6 +2328,12 @@ mod tests {
         assert!(inbox.take().is_empty());
         // The default's cursor and selection invert each cell, as before themes.
         assert_eq!(over(&GRAPHITE, GRAPHITE.cursor, GRAPHITE.cursor_text), None);
+        // A pane's OSC 12 colour draws its cursor under any theme, and OSC 112 gives it back.
+        assert_eq!(cursor_of(&theme, None), cursor);
+        let set = Some((0x00ff_0000, GRAPHITE.cursor_text));
+        assert_eq!(cursor_of(&theme, Some(0x00ff_0000)), set);
+        assert_eq!(cursor_of(&GRAPHITE, Some(0x00ff_0000)), set);
+        assert_eq!(cursor_of(&GRAPHITE, None), None);
         let (ground, text) = (GRAPHITE.selection_background, GRAPHITE.selection_foreground);
         assert_eq!(over(&GRAPHITE, ground, text), None);
         assert_eq!(palette_of(&GRAPHITE), pinfold_proto::Palette::GRAPHITE_GRID);

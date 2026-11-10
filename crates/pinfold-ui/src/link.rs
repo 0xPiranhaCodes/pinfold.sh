@@ -49,6 +49,10 @@ const KEPT_QUEUE: usize = 4 * 1024;
 /// The bytes of the longest request, with its length.
 const LONGEST: usize = size_of::<u32>() + MAX_REQUEST;
 
+/// Most panes whose OSC colours are kept. Past it the oldest goes back to the theme's, so
+/// panes that closed with a colour set cannot add up.
+const MAX_COLOURED: usize = 256;
+
 const LINK: Token = Token(0);
 const WAKE: Token = Token(1);
 
@@ -79,7 +83,10 @@ pub struct Screen {
     pub top: usize,
     /// The rows the view can reach.
     pub held: Range<usize>,
-    /// Whether `frame` changed since this was last cleared.
+    /// The cursor colour and the default background the pane's program set with OSC 12 and
+    /// OSC 11, each nothing while the theme's shows (ADR-0049, section 4).
+    pub colours: (Option<u32>, Option<u32>),
+    /// Whether `frame` or `colours` changed since this was last cleared.
     pub dirty: bool,
     /// Whether a full frame is on its way, so a burst of changes asks once.
     asked_full: bool,
@@ -175,6 +182,8 @@ struct State {
     unhardened: Option<bool>,
     /// Whether the core is too old to take a palette, so it draws Graphite Grid (ADR-0049).
     unthemed: bool,
+    /// The OSC 12 and OSC 11 colours of each pane that has either, shown or not.
+    colours: Vec<(u32, Option<u32>, Option<u32>)>,
     refused: Option<Refusal>,
     /// Restored panes, whether Enter may run what each was running, and that command.
     was_running: Vec<(u32, bool, String)>,
@@ -243,8 +252,23 @@ impl State {
             Notice::Markdown { pane, names } => self.markdown = Some((pane, names.to_owned())),
             Notice::Raise => self.raised = true,
             Notice::Unhardened { checked } => self.unhardened = Some(checked),
-            // shortcut: dropped, so OSC 11 stays opaque cells and OSC 12 undrawn, until #400.
-            Notice::Colours { .. } => {}
+            Notice::Colours {
+                pane,
+                cursor,
+                background,
+            } => {
+                let colours = (cursor, background);
+                self.colours.retain(|(other, ..)| *other != pane);
+                if colours != (None, None) {
+                    if self.colours.len() == MAX_COLOURED {
+                        self.colours.remove(0);
+                    }
+                    self.colours.push((pane, cursor, background));
+                }
+                if let Some(screen) = self.screens.iter_mut().find(|s| s.pane == pane) {
+                    (screen.colours, screen.dirty) = (colours, true);
+                }
+            }
             Notice::Activity { tabs, alerts } => {
                 (self.activity, self.alerts) = (tabs, alerts);
                 self.laid = true;
@@ -304,6 +328,12 @@ impl State {
         self.over = layout.is_empty();
         self.laid = true;
         follow(&mut self.screens, layout.panes());
+        // A pane of a tab that was hidden may have set its colours then.
+        for screen in &mut self.screens {
+            let mut kept = self.colours.iter();
+            let kept = kept.find(|(pane, ..)| *pane == screen.pane);
+            screen.colours = kept.map_or((None, None), |(_, cursor, ground)| (*cursor, *ground));
+        }
         let mut known = std::mem::take(&mut self.tabs);
         self.tabs.extend(layout.tabs().map(|pane| {
             let same = known.iter_mut().find(|tab| tab.pane == pane);
@@ -1295,6 +1325,51 @@ mod tests {
         .unwrap();
         assert!(turn_until(&mut link, |link| link.tabs()[0].pane == PANE + 2));
         assert_eq!(link.tabs()[0].cwd, "");
+    }
+
+    /// ADR-0049, section 4: OSC 12 and OSC 11 colour their own pane, shown or hidden when it
+    /// set them, and OSC 112 and 111 return it to the theme.
+    #[test]
+    fn a_panes_osc_colours_are_kept_until_they_are_reset() {
+        let (mut link, mut peer) = linked().unwrap();
+        peer.greet().unwrap();
+        let colours = |pane, cursor, background| Notice::Colours {
+            pane,
+            cursor,
+            background,
+        };
+        let shows = |link: &Link, pane, colours| {
+            let screen = link.screens().first();
+            screen.is_some_and(|screen| (screen.pane, screen.colours) == (pane, colours))
+        };
+        let (set, hidden) = ((Some(1), Some(2)), (None, Some(3)));
+        peer.notices(&[
+            colours(PANE, set.0, set.1),
+            colours(PANE + 1, None, hidden.1),
+        ])
+        .unwrap();
+        assert!(turn_until(&mut link, |link| shows(link, PANE, set)));
+        assert!(link.screens()[0].dirty, "the pane is drawn again");
+        // The other tab's pane set its background while hidden, and shows it once shown.
+        peer.layout(1, PANE + 1, 2, &[PANE, PANE + 1], &[(PANE + 1, whole())])
+            .unwrap();
+        assert!(turn_until(&mut link, |link| shows(link, PANE + 1, hidden)));
+        // OSC 111 returns it to the theme.
+        peer.notices(&[colours(PANE + 1, None, None)]).unwrap();
+        let reset = (None, None);
+        assert!(turn_until(&mut link, |link| shows(link, PANE + 1, reset)));
+        assert_eq!(
+            link.state.colours,
+            [(PANE, set.0, set.1)],
+            "only panes with one set"
+        );
+        // Panes that closed with a colour set cannot add up.
+        let many = (0..=MAX_COLOURED as u32).map(|pane| colours(100 + pane, Some(0), None));
+        peer.notices(&many.collect::<Vec<_>>()).unwrap();
+        peer.notices(&[colours(PANE + 1, set.0, None)]).unwrap();
+        let last = (set.0, None);
+        assert!(turn_until(&mut link, |link| shows(link, PANE + 1, last)));
+        assert_eq!(link.state.colours.len(), MAX_COLOURED);
     }
 
     #[test]

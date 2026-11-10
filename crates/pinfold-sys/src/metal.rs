@@ -45,7 +45,8 @@ float linear(uint byte) {
 vertex Out cell(uint corner_id [[vertex_id]], uint id [[instance_id]],
                 const device Instance *instances [[buffer(0)]],
                 constant float2 &viewport [[buffer(1)]],
-                constant float &atlas_size [[buffer(2)]]) {
+                constant float &atlas_size [[buffer(2)]],
+                constant float &opacity [[buffer(3)]]) {
     Instance instance = instances[id];
     float2 corner = float2(corner_id & 1, corner_id >> 1);
     float2 at = float2(instance.position) + corner * float2(instance.size);
@@ -53,16 +54,28 @@ vertex Out cell(uint corner_id [[vertex_id]], uint id [[instance_id]],
     out.position = float4(at.x / viewport.x * 2 - 1, 1 - at.y / viewport.y * 2, 0, 1);
     out.atlas = (float2(instance.atlas) + corner * float2(instance.size)) / atlas_size;
     out.colour = float4(linear(instance.colour >> 16), linear(instance.colour >> 8),
-                        linear(instance.colour), 1);
+                        linear(instance.colour), (instance.colour >> 27 & 1) ? opacity : 1);
     out.textured = instance.textured;
     return out;
 }
-fragment float4 shade(Out in [[stage_in]], texture2d<float> atlas [[texture(0)]]) {
+struct Shaded {
+    float4 colour [[color(0), index(0)]];
+    float4 covered [[color(0), index(1)]];
+};
+fragment Shaded shade(Out in [[stage_in]], texture2d<float> atlas [[texture(0)]]) {
     constexpr sampler nearest(filter::nearest);
     float alpha = in.textured ? atlas.sample(nearest, in.atlas).r : 1;
-    return float4(in.colour.rgb * alpha, alpha);
+    Shaded out;
+    out.colour = float4(in.colour.rgb, 1) * alpha * in.colour.a;
+    // How much of what is under it a quad hides, which for glass is all of it.
+    out.covered = float4(alpha);
+    return out;
 }
 ";
+
+/// In [`Instance::colour`], draws a quad as the clear colour is drawn: at the opacity of
+/// [`Gpu::set_opacity`], in place of what is under it and not over it.
+pub const GLASS: u32 = 1 << 27;
 
 /// One quad: a solid rectangle, or a glyph from the atlas. All values are in pixels.
 #[repr(C)]
@@ -74,7 +87,7 @@ pub struct Instance {
     pub size: [f32; 2],
     /// Top-left corner in the atlas.
     pub atlas: [f32; 2],
-    /// Colour as `0x00RRGGBB`. The top byte is ignored.
+    /// Colour as `0x00RRGGBB`, with [`GLASS`] or not. The rest of the top byte is ignored.
     pub colour: u32,
     /// 1 to use the atlas as coverage, 0 for a solid rectangle.
     pub textured: u32,
@@ -130,9 +143,10 @@ impl Gpu {
         attachment.setPixelFormat(DRAWABLE);
         attachment.setBlendingEnabled(true);
         attachment.setSourceRGBBlendFactor(MTLBlendFactor::One);
-        attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+        // The shader's second output, so a glass quad can hide the clear and stay see-through.
+        attachment.setDestinationRGBBlendFactor(MTLBlendFactor::OneMinusSource1Alpha);
         attachment.setSourceAlphaBlendFactor(MTLBlendFactor::One);
-        attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSourceAlpha);
+        attachment.setDestinationAlphaBlendFactor(MTLBlendFactor::OneMinusSource1Alpha);
         let pipeline = device
             .newRenderPipelineStateWithDescriptor_error(&descriptor)
             .ok()?;
@@ -264,12 +278,14 @@ impl Gpu {
             let atlas_size = self.atlas_size as f32;
             let viewport = NonNull::from(&self.viewport).cast::<c_void>();
             let scale = NonNull::from(&atlas_size).cast::<c_void>();
+            let opacity = NonNull::from(&self.opacity).cast::<c_void>();
             // SAFETY: the buffers match the shader's bindings, the bytes are copied by the
             // call, and each index stays within the shader's declared buffers and texture.
             unsafe {
                 encoder.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
                 encoder.setVertexBytes_length_atIndex(viewport, size_of_val(&self.viewport), 1);
                 encoder.setVertexBytes_length_atIndex(scale, size_of::<f32>(), 2);
+                encoder.setVertexBytes_length_atIndex(opacity, size_of::<f32>(), 3);
                 encoder.setFragmentTexture_atIndex(Some(&self.atlas), 0);
                 encoder.drawPrimitives_vertexStart_vertexCount_instanceCount(
                     MTLPrimitiveType::TriangleStrip,
@@ -485,6 +501,29 @@ mod tests {
         assert_near(paper, expected(PAPER, 0.85, 0.0));
         assert_eq!(paper >> 24, 217);
         assert_eq!(solid, 0xff00_0000 | SOLID);
+    }
+
+    /// ADR-0049, section 4: a pane's OSC 11 background is glass as the clear is, not a layer
+    /// over it, and text on it mixes as it does on the clear.
+    #[test]
+    fn a_glass_quad_replaces_the_clear_at_its_opacity() {
+        let Some(mut gpu) = gpu() else {
+            eprintln!("skipped: no Metal device with readable pixels");
+            return;
+        };
+        let quads = [
+            solid(0.0, 0.0, SOLID | GLASS),
+            solid(1.0, 0.0, SOLID | GLASS),
+            glyph(1.0, 0.0, HALF),
+        ];
+        let [glass, ..] = pixels(&gpu, PAPER, &quads).unwrap();
+        assert_eq!(glass, 0xff00_0000 | SOLID, "opaque while the window is");
+        gpu.set_opacity(0.85);
+        let [glass, text, paper, _] = pixels(&gpu, PAPER, &quads).unwrap();
+        assert_near(glass, expected(SOLID, 0.85, 0.0));
+        assert_eq!(glass >> 24, 217);
+        assert_near(text, expected(SOLID, 0.85, 128.0 / 255.0));
+        assert_near(paper, expected(PAPER, 0.85, 0.0));
     }
 
     #[test]

@@ -530,6 +530,33 @@ mod tests {
         }
     }
 
+    /// ADR-0049, sections 4 and 6: a prompt reads only the theme, whatever OSC 10 and OSC 11
+    /// colours the pane under it set, and is never glass.
+    #[test]
+    fn a_prompt_keeps_the_themes_colours_over_a_pane_that_set_its_own() {
+        let mut frame = frame(6, 80);
+        for cell in &mut frame.cells {
+            // The pane's OSC 10 text on its OSC 11 background, as the window marks it.
+            (cell.foreground, cell.background) = (0x00ff_00ff, 0x0000_ff00 | pinfold_proto::GLASS);
+        }
+        let mut queue = Queue::default();
+        assert_eq!(queue.add(read(1)), None);
+        queue.draw(&mut frame, Instant::now(), &GRAPHITE);
+        let glass = 0x0000_ff00 | pinfold_proto::GLASS;
+        let text = [GRAPHITE.states.needs_you, GRAPHITE.prompt_text()];
+        for cell in &frame.cells {
+            if cell.background == glass {
+                // The pane keeps its background, and its text is muted under the prompt.
+                assert_eq!(cell.foreground, GRAPHITE.chrome.muted, "{cell:?}");
+            } else {
+                assert_eq!(cell.background, GRAPHITE.chrome.overlay, "{cell:?}");
+                assert!(text.contains(&cell.foreground), "{cell:?}");
+            }
+        }
+        let grounds = [frame.cells[0].background, frame.cells[479].background];
+        assert_eq!(grounds, [glass, GRAPHITE.chrome.overlay]);
+    }
+
     #[test]
     fn a_key_for_the_first_prompt_cannot_allow_the_next_before_it_is_armed() {
         let start = Instant::now();

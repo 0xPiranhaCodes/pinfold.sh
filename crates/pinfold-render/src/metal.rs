@@ -63,6 +63,9 @@ impl Shelves {
     }
 }
 
+// A glass cell goes to the GPU as it is.
+const _: () = assert!(pinfold_proto::GLASS == pinfold_sys::metal::GLASS);
+
 /// Turns cells into quads inside `padding`. `slot` finds each glyph, and `clear` is the
 /// frame's background, which needs no quad.
 fn instances(
@@ -429,6 +432,10 @@ mod tests {
         assert_eq!(drawn(&screen), [DEFAULT_BACKGROUND]);
         screen.cursor = Some((0, 0));
         assert_eq!(drawn(&screen), [0x00ff_0000, DEFAULT_BACKGROUND]);
+        // A pane's OSC 11 background goes to the GPU as glass.
+        screen.cells[1].background |= pinfold_proto::GLASS;
+        let glass = DEFAULT_BACKGROUND | pinfold_proto::GLASS;
+        assert_eq!(drawn(&screen), [0x00ff_0000, glass]);
     }
 
     #[test]
