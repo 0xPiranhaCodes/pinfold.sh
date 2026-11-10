@@ -77,6 +77,8 @@ The [configuration reference](https://0xpiranhacodes.github.io/pinfold.sh/config
   network. On macOS it can read the environment of your other processes, such as a token
   exported in another pane's shell
   ([ADR-0047](docs/adr/0047-macos-sandbox-reads-other-processes-environment.md)).
+  [`strip_secrets = true`](docs/configuration.md#strip_secrets) keeps secret-looking variables
+  out of what PinFold starts.
 
 Read the [known issues](docs/beta/known-issues.md) before you report a bug.
 
