@@ -59,7 +59,8 @@ keys!("A theme's colours" Theme Colors:
     bright_white cursor cursor_text selection_background selection_foreground;
     chrome: Chrome ChromeColors states: States StateColors);
 keys!("The chrome's colours" Chrome ChromeColors:
-    accent tab tab_hover tab_active overlay border dim muted);
+    accent tab tab_hover tab_active overlay border dim muted
+    tab_text key title title_unfocused rule palette);
 keys!("The agent states' colours" States StateColors: needs_you running done error idle);
 
 /// Graphite Grid, the default theme and the fallback (`docs/design/ui/`).
@@ -95,6 +96,12 @@ pub const GRAPHITE: Theme = Theme {
         border: 0x0034_3a44,
         dim: 0x009a_a1ac,
         muted: 0x0055_5a63,
+        tab_text: 0x00b0_b8c4,
+        key: 0x0090_9ba9,
+        title: 0x009b_a5b3,
+        title_unfocused: 0x0087_909e,
+        rule: 0x0026_2b33,
+        palette: 0x0015_1920,
     },
     states: States {
         needs_you: 0x00f5_b544,
@@ -104,6 +111,16 @@ pub const GRAPHITE: Theme = Theme {
         idle: 0x009a_a1ac,
     },
 };
+
+/// How far each chrome text added with the window (#399) sits from the foreground towards the
+/// background, and each surface from the background towards the foreground, where a theme
+/// leaves the key out. Each is inside the range of Graphite Grid's own colour, by channel.
+const TAB_TEXT: f64 = 0.20;
+const KEY: f64 = 0.35;
+const TITLE: f64 = 0.30;
+const TITLE_UNFOCUSED: f64 = 0.40;
+const RULE: f64 = 0.12;
+const PALETTE: f64 = 0.04;
 
 /// The lowest contrast of text, and of a state on a surface.
 const LEGIBLE: f64 = 4.5;
@@ -332,6 +349,7 @@ fn fill(colors: Colors) -> Result<Theme, crate::Error> {
         return colors.all().map_err(missing);
     };
     let toward_text = |share| Some(mix(ground, text, share));
+    let toward_ground = |share| Some(mix(text, ground, share));
     // The active tab is mixed from cyan, as in the script, even where the accent ends up the
     // foreground.
     let towards = colors.chrome.accent.unwrap_or(cyan);
@@ -353,8 +371,14 @@ fn fill(colors: Colors) -> Result<Theme, crate::Error> {
             tab_active: Some(tab_active),
             overlay: toward_text(0.04),
             border: toward_text(0.20),
-            dim: Some(mix(text, ground, 0.25)),
+            dim: toward_ground(0.25),
             muted: toward_text(0.30),
+            tab_text: toward_ground(TAB_TEXT),
+            key: toward_ground(KEY),
+            title: toward_ground(TITLE),
+            title_unfocused: toward_ground(TITLE_UNFOCUSED),
+            rule: toward_text(RULE),
+            palette: toward_text(PALETTE),
         },
         states: GRAPHITE.states.into(),
         ..Colors::default()
@@ -662,6 +686,12 @@ mod tests {
             border: 0x0029_2c31,
             dim: 0x006c_747c,
             muted: 0x0035_393f,
+            tab_text: 0x0072_7a83,
+            key: 0x0060_666e,
+            title: 0x0066_6d75,
+            title_unfocused: 0x005a_6068,
+            rule: 0x001f_2226,
+            palette: 0x0015_171b,
         };
         assert_eq!((theme.chrome, notes.as_str()), (chrome, ""));
         assert_eq!(
@@ -673,6 +703,38 @@ mod tests {
         assert_eq!(theme.states, GRAPHITE.states);
         let accent = row(0x0028_2a36, 0x00f8_f8f2, 0x008b_e9fd).0.chrome.accent;
         assert_eq!(accent, 0x008b_e9fd);
+    }
+
+    /// Each share of the keys #399 added is one Graphite Grid itself has: between the least
+    /// and the most its own colour sits along the way, over the three channels.
+    #[test]
+    fn the_shares_of_the_added_chrome_keys_are_graphite_grids_own() {
+        let (ground, text, chrome) = (GRAPHITE.background, GRAPHITE.foreground, GRAPHITE.chrome);
+        for (key, from, to, colour, share) in [
+            ("tab_text", text, ground, chrome.tab_text, TAB_TEXT),
+            ("key", text, ground, chrome.key, KEY),
+            ("title", text, ground, chrome.title, TITLE),
+            (
+                "title_unfocused",
+                text,
+                ground,
+                chrome.title_unfocused,
+                TITLE_UNFOCUSED,
+            ),
+            ("rule", ground, text, chrome.rule, RULE),
+            ("palette", ground, text, chrome.palette, PALETTE),
+        ] {
+            let channel = |colour: u32, i: usize| f64::from(colour.to_be_bytes()[i]);
+            let along = [1, 2, 3].map(|i| {
+                (channel(colour, i) - channel(from, i)) / (channel(to, i) - channel(from, i))
+            });
+            let (least, most) = (along[0].min(along[2]), along[0].max(along[2]));
+            assert!(least <= along[1] && along[1] <= most, "{key}: {along:?}");
+            assert!(
+                least <= share && share <= most,
+                "{key}: {share} in {along:?}"
+            );
+        }
     }
 
     #[test]

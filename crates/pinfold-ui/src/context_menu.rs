@@ -5,17 +5,11 @@
 //! would, apart from the two a hyperlink adds at the end. Those can join after the menu shows,
 //! so it keeps room for them from the start, and no item ever moves under the pointer.
 
+use pinfold_config::theme::Theme;
 use pinfold_proto::{Cell, Frame};
 use winit::keyboard::{Key, NamedKey};
 
 use crate::prefix::Command;
-
-/// The tab strip's surfaces, from `docs/design/ui/README.md`.
-const GROUND: u32 = 0x001c_2026;
-const TEXT: u32 = 0x00e2_e5ea;
-const SELECTED: u32 = 0x0025_3c3b;
-const ACCENT: u32 = 0x005c_d6cb;
-const BORDER: u32 = 0x0090_9ba9;
 
 const ITEMS: [Command; 9] = [
     Command::Copy,
@@ -170,7 +164,9 @@ impl Menu {
     }
 
     /// Draws the menu over the panes' grid in `frame`, cut off where the grid ends.
-    pub fn draw(&self, frame: &mut Frame) {
+    pub fn draw(&self, frame: &mut Frame, theme: &Theme) {
+        let (text, chrome) = (theme.foreground, theme.chrome);
+        let (ground, border) = (chrome.tab, chrome.key);
         let (top, left) = self.corner;
         let last = self.len() + 1;
         for line in 0..=last {
@@ -181,22 +177,22 @@ impl Menu {
             let item = line.checked_sub(1).filter(|&index| index < self.len());
             let selected = item == Some(self.selected);
             let (foreground, background) = if selected {
-                (ACCENT, SELECTED)
+                (chrome.accent, chrome.tab_active)
             } else {
-                (TEXT, GROUND)
+                (text, ground)
             };
             let label = item.map_or("", |index| self.label(index));
             let mut label = label.chars();
             for column in 0..WIDTH {
                 let edge = column == 0 || column == WIDTH - 1;
                 let (character, colour, ground) = match (line, column) {
-                    (0, 0) => ('┌', BORDER, GROUND),
-                    (0, c) if c == WIDTH - 1 => ('┐', BORDER, GROUND),
-                    (l, 0) if l == last => ('└', BORDER, GROUND),
-                    (l, c) if l == last && c == WIDTH - 1 => ('┘', BORDER, GROUND),
-                    (0, _) => ('─', BORDER, GROUND),
-                    (l, _) if l == last => ('─', BORDER, GROUND),
-                    _ if edge => ('│', BORDER, GROUND),
+                    (0, 0) => ('┌', border, ground),
+                    (0, c) if c == WIDTH - 1 => ('┐', border, ground),
+                    (l, 0) if l == last => ('└', border, ground),
+                    (l, c) if l == last && c == WIDTH - 1 => ('┘', border, ground),
+                    (0, _) => ('─', border, ground),
+                    (l, _) if l == last => ('─', border, ground),
+                    _ if edge => ('│', border, ground),
                     (_, 1) => (' ', foreground, background),
                     _ => (label.next().unwrap_or(' '), foreground, background),
                 };
@@ -231,6 +227,7 @@ fn put(
 mod tests {
     use super::*;
     use crate::selection;
+    use pinfold_config::theme::GRAPHITE;
     use pinfold_proto::MouseMode;
     use winit::keyboard::ModifiersState;
 
@@ -244,7 +241,7 @@ mod tests {
     fn drawn(menu: &Menu, rows: u16, columns: u16) -> Vec<Vec<char>> {
         let mut frame = Frame::default();
         crate::panes::blank(&mut frame, rows, columns);
-        menu.draw(&mut frame);
+        menu.draw(&mut frame, &GRAPHITE);
         frame
             .cells
             .chunks(usize::from(columns))

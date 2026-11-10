@@ -3,15 +3,11 @@
 //! A border belongs to no pane, so a program cannot reach it. The one around the focused pane
 //! takes the focus accent, as Foundations sets. Panes have no header yet, so no number either.
 
+use pinfold_config::theme::Theme;
 #[cfg(test)]
 use pinfold_proto::DEFAULT_BACKGROUND;
 use pinfold_proto::link::Rect;
 use pinfold_proto::{Cell, Frame};
-
-/// `Focus accent` in Foundations.
-const FOCUS: u32 = 0x005c_d6cb;
-/// `Rule, quiet fill` in Foundations.
-const RULE: u32 = 0x0026_2b33;
 
 /// Empties `frame` to `rows` by `columns` of the default background.
 #[cfg(test)]
@@ -111,7 +107,7 @@ const fn glyph(up: bool, down: bool, left: bool, right: bool) -> char {
 
 /// Draws the borders of the panes at `rects`, on the cells no pane holds along their right and
 /// bottom edges. Every border is one of those, as a layout divides the grid with no gaps.
-pub fn dividers(frame: &mut Frame, rects: &[Rect], focused: Option<Rect>) {
+pub fn dividers(frame: &mut Frame, rects: &[Rect], focused: Option<Rect>, theme: &Theme) {
     let (rows, columns) = (frame.rows, frame.columns);
     let width = usize::from(columns);
     let near = |at: u16, start: u16, length: u16| at + 1 >= start && at <= start + length;
@@ -128,7 +124,11 @@ pub fn dividers(frame: &mut Frame, rects: &[Rect], focused: Option<Rect>) {
         let at = usize::from(row) * width + usize::from(column);
         if let Some(cell) = frame.cells.get_mut(at) {
             cell.character = glyph(gap(y - 1, x), gap(y + 1, x), gap(y, x - 1), gap(y, x + 1));
-            cell.foreground = if touches(row, column) { FOCUS } else { RULE };
+            cell.foreground = if touches(row, column) {
+                theme.chrome.accent
+            } else {
+                theme.chrome.rule
+            };
         }
     };
     for rect in rects {
@@ -145,6 +145,7 @@ pub fn dividers(frame: &mut Frame, rects: &[Rect], focused: Option<Rect>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pinfold_config::theme::GRAPHITE;
 
     fn rect(x: u16, y: u16, columns: u16, rows: u16) -> Rect {
         Rect {
@@ -193,7 +194,7 @@ mod tests {
     #[test]
     fn panes_land_in_their_rectangles_with_borders_between() {
         let (mut grid, rects) = three();
-        dividers(&mut grid, &rects, None);
+        dividers(&mut grid, &rects, None, &GRAPHITE);
         assert_eq!(
             lines(&grid),
             ["aa│bbbb", "aa│bbbb", "aa├────", "aa│cccc", "aa│cccc"]
@@ -210,7 +211,7 @@ mod tests {
         ];
         let mut grid = Frame::default();
         blank(&mut grid, 3, 5);
-        dividers(&mut grid, &rects, None);
+        dividers(&mut grid, &rects, None, &GRAPHITE);
         assert_eq!(lines(&grid), ["  │  ", "──┼──", "  │  "]);
     }
 
@@ -220,20 +221,20 @@ mod tests {
         let mut grid = Frame::default();
         blank(&mut grid, 2, 3);
         blit(&mut grid, &pane('a', 2, 3), whole);
-        dividers(&mut grid, &[whole], Some(whole));
+        dividers(&mut grid, &[whole], Some(whole), &GRAPHITE);
         assert_eq!(lines(&grid), ["aaa", "aaa"]);
     }
 
     #[test]
     fn only_the_border_around_the_focused_pane_takes_the_accent() {
         let (mut grid, rects) = three();
-        dividers(&mut grid, &rects, Some(rects[1]));
+        dividers(&mut grid, &rects, Some(rects[1]), &GRAPHITE);
         let colour = |row: usize, column: usize| grid.cells[row * 7 + column].foreground;
-        assert_eq!(colour(0, 2), FOCUS);
-        assert_eq!(colour(2, 2), FOCUS);
-        assert_eq!(colour(2, 6), FOCUS);
-        assert_eq!(colour(4, 2), RULE);
-        assert_eq!(colour(3, 2), RULE);
+        assert_eq!(colour(0, 2), GRAPHITE.chrome.accent);
+        assert_eq!(colour(2, 2), GRAPHITE.chrome.accent);
+        assert_eq!(colour(2, 6), GRAPHITE.chrome.accent);
+        assert_eq!(colour(4, 2), GRAPHITE.chrome.rule);
+        assert_eq!(colour(3, 2), GRAPHITE.chrome.rule);
     }
 
     #[test]
@@ -269,7 +270,7 @@ mod tests {
         let far = rect(1000, 1000, 24, 24);
         blit(&mut grid, &pane('a', 24, 24), far);
         blit(&mut grid, &Frame::default(), rect(0, 0, 2, 2));
-        dividers(&mut grid, &[far], Some(far));
+        dividers(&mut grid, &[far], Some(far), &GRAPHITE);
         assert_eq!(lines(&grid), ["  ", "  "]);
     }
 }

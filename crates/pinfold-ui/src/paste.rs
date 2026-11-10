@@ -2,13 +2,9 @@
 //!
 //! That row is outside pane text, so program output cannot fake it (T7 in the threat model).
 
+use pinfold_config::theme::Theme;
 use pinfold_proto::link::MAX_PASTE;
 use pinfold_proto::{Cell, Frame};
-
-pub(crate) const GROUND: u32 = 0x0012_151a;
-pub(crate) const TEXT: u32 = 0x00e2_e5ea;
-pub(crate) const AMBER: u32 = 0x00f5_b544;
-pub(crate) const RED: u32 = 0x00ff_8a8a;
 
 const SHELLS: [&str; 6] = ["sh", "bash", "zsh", "dash", "fish", "ksh"];
 
@@ -80,40 +76,43 @@ pub fn check(text: String) -> Result<String, Prompt> {
 }
 
 /// Adds a row for `prompt` under the pane in `frame`.
-pub fn banner(frame: &mut Frame, prompt: &Prompt) {
+pub fn banner(frame: &mut Frame, prompt: &Prompt, theme: &Theme) {
+    let (text, states) = (theme.prompt_text(), theme.states);
+    let (amber, red) = (states.needs_you, states.error);
     let spans: [(String, u32); 3] = match prompt {
         Prompt::Confirm { lines, risk, .. } => [
-            (" ◆ needs you  ".to_owned(), AMBER),
+            (" ◆ needs you  ".to_owned(), amber),
             (
                 risk.map_or(format!("Paste {lines} lines?"), |risk| {
                     format!("Paste {lines} lines with {risk}?")
                 }),
-                if risk.is_some() { RED } else { TEXT },
+                if risk.is_some() { red } else { text },
             ),
-            ("  Enter pastes, Esc cancels".to_owned(), TEXT),
+            ("  Enter pastes, Esc cancels".to_owned(), text),
         ],
         Prompt::TooLarge => [
-            (" ✕ error  ".to_owned(), RED),
-            ("Paste refused: over 1 MiB".to_owned(), TEXT),
-            ("  Esc dismisses".to_owned(), TEXT),
+            (" ✕ error  ".to_owned(), red),
+            ("Paste refused: over 1 MiB".to_owned(), text),
+            ("  Esc dismisses".to_owned(), text),
         ],
         Prompt::Close { last: false, .. } => [
-            (" ◆ needs you  ".to_owned(), AMBER),
-            ("Close this pane?".to_owned(), TEXT),
-            ("  Enter closes, Esc cancels".to_owned(), TEXT),
+            (" ◆ needs you  ".to_owned(), amber),
+            ("Close this pane?".to_owned(), text),
+            ("  Enter closes, Esc cancels".to_owned(), text),
         ],
         Prompt::Close { last: true, .. } => [
-            (" ◆ needs you  ".to_owned(), AMBER),
-            ("Close the last pane and end the session?".to_owned(), RED),
-            ("  Enter closes, Esc cancels".to_owned(), TEXT),
+            (" ◆ needs you  ".to_owned(), amber),
+            ("Close the last pane and end the session?".to_owned(), red),
+            ("  Enter closes, Esc cancels".to_owned(), text),
         ],
-        Prompt::OpenLink(uri) => return crate::hyperlink::banner(frame, uri),
+        Prompt::OpenLink(uri) => return crate::hyperlink::banner(frame, uri, theme),
     };
-    row(frame, &spans);
+    row(frame, &spans, theme);
 }
 
 /// Adds a row of coloured `spans` under the pane in `frame`, cut to the window.
-pub(crate) fn row(frame: &mut Frame, spans: &[(String, u32)]) {
+pub(crate) fn row(frame: &mut Frame, spans: &[(String, u32)], theme: &Theme) {
+    let (ground, text) = (theme.chrome.overlay, theme.prompt_text());
     let columns = usize::from(frame.columns);
     let start = frame.cells.len();
     let characters = spans
@@ -125,15 +124,15 @@ pub(crate) fn row(frame: &mut Frame, spans: &[(String, u32)]) {
             .map(|(character, foreground)| Cell {
                 character,
                 foreground,
-                background: GROUND,
+                background: ground,
             }),
     );
     frame.cells.resize(
         start + columns,
         Cell {
             character: ' ',
-            foreground: TEXT,
-            background: GROUND,
+            foreground: text,
+            background: ground,
         },
     );
     frame.rows += 1;
@@ -142,6 +141,7 @@ pub(crate) fn row(frame: &mut Frame, spans: &[(String, u32)]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pinfold_config::theme::GRAPHITE;
 
     fn confirm(text: &str) -> (usize, Option<&'static str>) {
         match check(text.to_owned()) {
@@ -199,7 +199,7 @@ mod tests {
                 background: 0,
             },
         );
-        banner(&mut frame, prompt);
+        banner(&mut frame, prompt, &GRAPHITE);
         let text = frame.cells[usize::from(columns)..]
             .iter()
             .map(|cell| cell.character)
@@ -219,7 +219,7 @@ mod tests {
         assert_eq!(frame.cells.len(), 160);
         assert_eq!(frame.cells[0].character, 'x');
         assert!(text.starts_with(" ◆ needs you  Paste 3 lines with sudo?  Enter pastes"));
-        assert_eq!(frame.cells[81].foreground, AMBER);
+        assert_eq!(frame.cells[81].foreground, GRAPHITE.states.needs_you);
     }
 
     #[test]
@@ -246,7 +246,7 @@ mod tests {
         );
         let start = text.chars().position(|c| c == 'C').unwrap_or_default();
         let at = frame.cells.len() - usize::from(frame.columns) + start;
-        assert_eq!(frame.cells[at].foreground, RED);
+        assert_eq!(frame.cells[at].foreground, GRAPHITE.states.error);
     }
 
     #[test]
