@@ -20,8 +20,10 @@ keeps equal to what the encoder writes.
 fails on a panic, an out-of-memory or a hang, or if a snapshot that passed its check does not
 rebuild into a session.
 
-`config` parses any bytes as the user config file. It fails on a panic, an out-of-memory or
-a hang. Its seeds in `seeds/config/` are the examples in `docs/configuration.md`.
+`config` parses any bytes as the user config file, and again as a theme file, whose state
+colours it then steps and checks. It fails on a panic, an out-of-memory or a hang. Its seeds in
+`seeds/config/` are the examples in `docs/configuration.md`, and `theme.toml` is Graphite Grid
+as a theme file.
 
 `tool_keys` decodes any bytes as the keys a tool reads, once whole and once a byte at a time.
 It fails on a panic or a hang, or if the two give different keys.
