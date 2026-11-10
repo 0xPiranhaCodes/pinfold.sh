@@ -452,7 +452,8 @@ mod tests {
                 && found.is_ok_and(|found| found.members.iter().any(sleep))
         };
         assert!(turn_until(&mut reactor, started));
-        assert_eq!(reactor.send_lines(pane, "a\nb\n", Instant::now()), Ok(2));
+        let now = Instant::now();
+        assert_eq!(reactor.send_lines(pane, "a\nb\n", now), Ok(2));
         // Halving chunks, as a byte at a time is a million writes, which on a loaded machine
         // outlast `sleep 30`, and a pane whose program has ended is refused as a rule (#389).
         let mut chunk = crate::io::MAX_INPUT;
@@ -461,8 +462,11 @@ mod tests {
                 chunk /= 2;
             }
         }
-        let done = |reactor: &mut Reactor| !reactor.protect.is_sending(pane);
-        assert!(turn_until(&mut reactor, done));
+        // The refused byte left the queue exactly full, so the next line is checked now, with
+        // no turn between. A turn writes more of the queue to the PTY once Linux has moved
+        // what it holds on to the line discipline, and the line then finds room (#389).
+        reactor.send_due(now + LINE_GAP);
+        assert!(!reactor.protect.is_sending(pane));
         assert_eq!(reactor.take_refused(), vec![(pane, Reason::Busy)]);
         assert_eq!(Reason::Busy.refusal(), "the pane's input is full");
     }
