@@ -128,18 +128,28 @@ fn measure_once(budget: &Budget, args: &[&str]) -> io::Result<Reading> {
         BufReader::new(stdout).read_line(&mut line)?;
     }
     let window = budget.window.and_then(|_| line.trim().parse::<u32>().ok());
+    let runs = |pid| pinfold_sys::footprint(pid).is_ok_and(|bytes| bytes > 0);
     let target = match budget.window {
+        // A core says the pid once its window says hello, so without one nothing is linked.
+        Some(_) if window.is_none() => None,
         Some(Side::Window) => window,
         // A process that is gone has no footprint to read.
-        Some(Side::Closed) if window.is_none_or(|pid| pinfold_sys::footprint(pid).is_ok()) => None,
+        Some(Side::Closed) if window.is_some_and(runs) => None,
         _ => Some(child.id()),
     };
     thread::sleep(budget.settle);
     let exited = child.try_wait()?.is_some();
+    // A core whose window or tool has gone is an idle core, not the one the row names.
+    let beside = budget.window.is_some_and(|side| side != Side::Closed);
+    let alone = beside && !window.is_some_and(runs);
     let measured = target
-        .filter(|_| !exited)
+        .filter(|_| !exited && !alone)
         .ok_or_else(|| {
-            io::Error::other("exited before it could be measured, or a closed tool ran on")
+            io::Error::other(if beside {
+                "the window or tool beside the core never started or exited early, so nothing was measured"
+            } else {
+                "exited before it could be measured, or a closed tool ran on"
+            })
         })
         .and_then(|pid| Ok((pinfold_sys::footprint(pid)?, pid)));
     let no_font = match &measured {
@@ -329,6 +339,21 @@ mod tests {
             window: Some(Side::Window),
             ..sleep(u64::MAX, &[])
         };
+        assert!(!run(&[budget]));
+    }
+
+    #[test]
+    fn a_core_whose_window_exits_early_fails() {
+        // The printed pid is gone by the reading, as a window that crashes after its hello is.
+        let budget = Budget {
+            program: Path::new("/bin/sh"),
+            args: &["-c", "/bin/sleep 0 & echo $!; wait; exec sleep 30"],
+            wait_for_line: true,
+            window: Some(Side::Core),
+            ..sleep(u64::MAX, &[])
+        };
+        let error = measure_once(&budget, budget.args).unwrap_err();
+        assert!(error.to_string().contains("exited early"), "{error}");
         assert!(!run(&[budget]));
     }
 

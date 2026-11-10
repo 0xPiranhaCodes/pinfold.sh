@@ -709,6 +709,26 @@ fn a_launcher_reports_a_core_with_no_window_and_that_core_exits_with_its_shell()
     }
 }
 
+#[test]
+fn a_measuring_core_fails_if_its_window_ends_before_hello() {
+    // As a window with no display does: `cargo xtask mem-gate` must not read this core (#412).
+    let session = Session::new("mw", Some("exit 1")).unwrap();
+    let start = Instant::now();
+    let mut core = session
+        .start_core(&["--window", "1", "80x24"], "exec sleep 30")
+        .unwrap();
+    let status = loop {
+        if let Some(status) = core.try_wait().unwrap() {
+            break status;
+        }
+        assert!(start.elapsed() < PATIENCE, "the core ran on with no window");
+        thread::sleep(Duration::from_millis(100));
+    };
+    assert!(!status.success());
+    let log = session.read_log();
+    assert!(log.contains("before it said hello"), "{log}");
+}
+
 /// The core's `EMPTY_WAIT`, as [`Session::start_core`] shortens it.
 const EMPTY_WAIT: Duration = Duration::from_secs(2);
 
