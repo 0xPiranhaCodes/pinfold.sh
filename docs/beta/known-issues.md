@@ -100,13 +100,16 @@ Link (#171) and the About panel ([#185](https://github.com/0xPiranhaCodes/pinfol
 pass their automated tests, but nobody has yet clicked them in a signed install. The
 [manual checks](manual-checks.md) cover them, and their results table records each Mac checked.
 
-Themes ([#350](https://github.com/0xPiranhaCodes/pinfold.sh/issues/350)) are new in this beta,
-and two parts are tested only without a real window. Following a System Settings appearance
-switch with `theme = { light, dark }` is tested by driving the theme watch, not winit
-([#419](https://github.com/0xPiranhaCodes/pinfold.sh/pull/419)). A pane's OSC 11 background
-staying translucent under `background_opacity` below 1 is tested by reading pixels back from the
-GPU, not by looking at a translucent window
-([#417](https://github.com/0xPiranhaCodes/pinfold.sh/pull/417)). The manual checks cover both.
+Themes ([#350](https://github.com/0xPiranhaCodes/pinfold.sh/issues/350)) are new in this beta.
+On 2026-11-10 the maintainer checked them on an installed build of `main` on macOS 27 on Apple
+silicon: `theme = { light, dark }` applies (GitHub Dark loaded, confirmed by eye), switching
+the appearance in System Settings switches the theme
+([#419](https://github.com/0xPiranhaCodes/pinfold.sh/pull/419)), and
+`printf '\e]11;#203040\a'` recolours its pane
+([#417](https://github.com/0xPiranhaCodes/pinfold.sh/pull/417)). Intel Macs and older macOS
+versions are not yet checked, and an OSC 11 background staying translucent under
+`background_opacity` below 1 is still tested only by reading pixels back from the GPU. The
+[manual checks](manual-checks.md) cover them.
 
 ## Builds from source
 

@@ -10,7 +10,7 @@ A memory-first terminal for agentic coding, written in Rust, with a built-in mul
 ## Install the beta
 
 1. Download `PinFold.dmg` from the
-   [v0.1.0-beta.3 release](https://github.com/0xPiranhaCodes/pinfold.sh/releases/tag/v0.1.0-beta.3).
+   [v0.1.0-beta.4 release](https://github.com/0xPiranhaCodes/pinfold.sh/releases/tag/v0.1.0-beta.4).
 2. Optionally, check it. Download `SHA256SUMS` from the same release into the same folder, then:
 
    ```sh
@@ -119,7 +119,7 @@ The [configuration reference](https://0xpiranhacodes.github.io/pinfold.sh/config
 
 ### Themes
 
-Themes are on `main` and arrive in the next beta; `v0.1.0-beta.3` does not have them. Eleven
+Themes are new in `v0.1.0-beta.4`. Eleven
 come with PinFold beside the default, Graphite Grid: GitHub Dark, GitHub Light, Dracula,
 Solarized Dark, Solarized Light, One Dark, Nord, Gruvbox Dark, Tokyo Night, Catppuccin Mocha and
 Catppuccin Latte. Name one in `pinfold.toml`, or one each for the system's light and dark
