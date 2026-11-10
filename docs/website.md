@@ -16,23 +16,22 @@ Every pull request that touches `site/` runs `.github/scripts/check-site.py`, wh
 - anything but an `<a>` link or `<link rel="canonical">` points at another origin, so a page
   makes no third-party request.
 
-It also prints the site's total size. Run it locally before you push:
+It also prints the site's total size.
+
+`docs/configuration.md` is the configuration reference's single source of truth.
+`site/configuration.html` is built from it and is not committed: the workflow builds it from
+the commit it checks or deploys, so two merges cannot leave a stale copy. Build it before you
+check the site or open it locally, from the repository root:
 
 ```sh
+python3 .github/scripts/build-config-page.py
 python3 .github/scripts/check-site.py site
 python3 -B -m unittest discover -s .github/scripts
 ```
 
-`docs/configuration.md` is the configuration reference's single source of truth. After changing
-it, rebuild the website copy before running those checks:
-
-```sh
-python3 .github/scripts/build-config-page.py
-```
-
 ## Deploy
 
-A push to `main` that touches `site/` checks the site, uploads it with
+A push to `main` that touches `site/` checks the site, builds `configuration.html`, uploads it with
 `actions/upload-pages-artifact` and deploys it with `actions/deploy-pages` in the
 `github-pages` environment. Only the deploy job can write, and only to Pages. Deploys queue
 one at a time and none is cancelled midway. Without a `site/` directory the workflow checks

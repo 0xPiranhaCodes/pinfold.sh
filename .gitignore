@@ -4,3 +4,4 @@
 /fuzz/artifacts
 /docs/book/book
 __pycache__/
+/site/configuration.html
