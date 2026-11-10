@@ -2381,7 +2381,7 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let mut watch = theme::Watch::new(path.clone());
+        let mut watch = theme::Watch::new(path.clone(), true);
         let (mut app, inbox, _poll) = app();
         let told;
         (app.appearance, told) = mpsc::channel();

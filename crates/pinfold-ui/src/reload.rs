@@ -64,9 +64,10 @@ fn told(
 /// Calls `send` with the new settings each time the config file is saved well, and with the
 /// new theme each time it or the theme file in use is (ADR-0049, section 2).
 ///
-/// The sender takes the system's appearance, `true` for dark, at start and on each change:
-/// the half of `theme = { light, dark }` it chooses is then sent as a saved theme is.
-/// Dropping it ends the thread.
+/// The sender takes the system's appearance, `true` for dark, once the window has loaded its
+/// first theme and on each change: the half of `theme = { light, dark }` it chooses is then
+/// sent as a saved theme is. Nothing is polled before the first, so no save sends the other
+/// half of a light start (#421). Dropping it ends the thread.
 ///
 /// # Errors
 ///
@@ -76,11 +77,19 @@ pub fn watch(send: impl Fn(Saved) -> bool + Send + 'static) -> io::Result<Sender
     let Some(path) = pinfold_config::path() else {
         return Ok(appearance);
     };
-    let mut theme = theme::Watch::new(path.clone());
-    let mut watch = Watch::new(path);
+    let mut watch = Watch::new(path.clone());
     thread::Builder::new()
         .name("pinfold-config".into())
         .spawn(move || {
+            let Ok(dark) = changes.recv() else { return };
+            let mut theme = theme::Watch::new(path, dark);
+            // Made after the window's load, so a save between the two is read here. The window
+            // already said what is wrong with the theme, and drops one that did not change.
+            if let Some(Ok((loaded, _))) = theme.poll(true)
+                && !send(Saved::Theme(loaded))
+            {
+                return;
+            }
             while check(&mut watch, &mut theme, &send) {
                 // An appearance ends the wait early, so it applies at once.
                 match changes.recv_timeout(POLL) {
@@ -127,7 +136,10 @@ mod tests {
             });
             true
         };
-        let (mut watch, mut theme) = (Watch::new(path.into()), theme::Watch::new(path.into()));
+        let (mut watch, mut theme) = (
+            Watch::new(path.into()),
+            theme::Watch::new(path.into(), true),
+        );
         for text in saves {
             save(path, text);
             assert!(check(&mut watch, &mut theme, &send));
@@ -168,7 +180,7 @@ mod tests {
             &path,
             "theme = { light = \"GitHub Light\", dark = \"Nowhere\" }",
         );
-        let mut theme = theme::Watch::new(path.clone());
+        let mut theme = theme::Watch::new(path.clone(), true);
         let sent = RefCell::new(Vec::new());
         let send = |saved: Saved| {
             let Saved::Theme(theme) = saved else {
@@ -189,7 +201,10 @@ mod tests {
     fn a_closed_window_stops_the_thread() {
         let dir = dir("closed");
         let path = dir.join("pinfold.toml");
-        let (mut watch, mut theme) = (Watch::new(path.clone()), theme::Watch::new(path.clone()));
+        let (mut watch, mut theme) = (
+            Watch::new(path.clone()),
+            theme::Watch::new(path.clone(), true),
+        );
         save(&path, "");
         assert!(!check(&mut watch, &mut theme, &|_| false));
         fs::remove_dir_all(dir).unwrap();

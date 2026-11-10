@@ -624,21 +624,23 @@ pub struct Watch {
     config: PathBuf,
     file: Option<PathBuf>,
     seen: Option<(u64, u64, i64, i64)>,
-    /// Which half of a `theme` table is in use: `dark` until [`Watch::follow`] says otherwise.
+    /// Which half of a `theme` table is in use: as [`Watch::new`] is told, until
+    /// [`Watch::follow`] says otherwise.
     dark: bool,
 }
 
 impl Watch {
-    /// Starts from the theme file as it is now. Create this before the first [`load`], so a
-    /// save between the two is not missed.
-    pub fn new(config: PathBuf) -> Self {
-        let file = in_use(&config, true);
+    /// Starts from the theme file as it is now, for a system whose appearance is `dark`, so a
+    /// save before the first [`Watch::follow`] loads the half in use (ADR-0049, section 2).
+    /// Create this before the first [`load`], so a save between the two is not missed.
+    pub fn new(config: PathBuf, dark: bool) -> Self {
+        let file = in_use(&config, dark);
         let seen = file.as_deref().and_then(crate::stamp);
         Self {
             config,
             file,
             seen,
-            dark: true,
+            dark,
         }
     }
 
@@ -647,7 +649,7 @@ impl Watch {
     /// (ADR-0049, section 2). A plain `theme` follows nothing, so it is not loaded again.
     ///
     /// ```
-    /// let mut watch = pinfold_config::theme::Watch::new("/nowhere/pinfold.toml".into());
+    /// let mut watch = pinfold_config::theme::Watch::new("/nowhere/pinfold.toml".into(), true);
     /// // No config file, so no `theme` table, and light changes nothing.
     /// assert!(watch.follow(false).is_none());
     /// ```
@@ -978,7 +980,7 @@ mod tests {
             file(0x0028_2a36, 0x00f8_f8f2, 0).as_bytes(),
         );
         let path = dir.path().join("themes/My Theme-1.toml");
-        let mut watch = Watch::new(config.clone());
+        let mut watch = Watch::new(config.clone(), true);
         assert!(watch.poll(false).is_none(), "nothing was saved");
         let save = |path: &Path, text: &str| {
             let new = path.with_extension("new");
@@ -1010,7 +1012,7 @@ mod tests {
         );
         let write = |theme: &str| fs::write(&config, format!("theme = {theme}\n")).unwrap();
         write("{ light = \"My Theme-1\", dark = \"GitHub Dark\" }");
-        let mut watch = Watch::new(config.clone());
+        let mut watch = Watch::new(config.clone(), true);
         // Dark, and a system that does not say.
         let (dark, notes) = load(&config).unwrap();
         assert_eq!((dark.background, notes), (0x0010_1216, Vec::new()));
@@ -1058,6 +1060,29 @@ mod tests {
         // A plain name follows nothing.
         write("\"Nord\"");
         assert!(watch.follow(true).is_none());
+    }
+
+    /// #421: on a light system a save before any [`Watch::follow`] loads the light half.
+    #[test]
+    fn a_save_before_any_follow_on_a_light_start_loads_the_light_half() {
+        let (dir, config) = themes(
+            "My Theme-1.toml",
+            file(0x00fd_f6e3, 0x0065_7b83, 0).as_bytes(),
+        );
+        fs::write(
+            &config,
+            "theme = { light = \"My Theme-1\", dark = \"GitHub Dark\" }\n",
+        )
+        .unwrap();
+        let mut watch = Watch::new(config.clone(), false);
+        let (light, _) = watch.poll(true).unwrap().unwrap();
+        assert_eq!(light.background, 0x00fd_f6e3);
+        // The file watched is the light half's, so its save is seen too.
+        let path = dir.path().join("themes/My Theme-1.toml");
+        fs::write(&path, file(0x00ff_ffff, 0x001f_2328, 0)).unwrap();
+        let (light, _) = watch.poll(false).unwrap().unwrap();
+        assert_eq!(light.background, 0x00ff_ffff);
+        assert!(watch.follow(false).is_none(), "already light");
     }
 
     #[test]
