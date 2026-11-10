@@ -324,14 +324,13 @@ that composes text in an input method never counts as the prefix.
 
 ## Themes
 
-The window reads these keys when it starts. The theme colours the panes, history included,
+The theme colours the panes, history included,
 the padding, the cursor, the selection and the chrome: the bar, the borders, the menus, the
 palette, the prompts and the agent states. `background_opacity` and `background_blur` act on
 the theme's background. A cursor or a selection whose two colours are the theme's `foreground`
 and `background` inverts each cell it covers, and any other colours are drawn as they are. The
 ▲ mark of a core without the hardened runtime keeps its own violet under every theme. A saved
-change needs a new window until
-[#400](https://github.com/0xPiranhaCodes/pinfold.sh/issues/400). A core older than
+change to `pinfold.toml` or to the theme file in use applies [on save](#reload). A core older than
 the window (link version 13) cannot take a palette, so the window draws Graphite Grid and
 [reports](#where-problems-are-reported) that themes need the core updated. The rules are those
 of [ADR-0049](adr/0049-themes.md).
@@ -397,7 +396,8 @@ holds the colours to these rules whatever the theme says:
 
 A theme that cannot be used, for its name, its file, an absent required key, or a bad key or
 colour in `[colors]`, is [reported](#where-problems-are-reported) with the reason, and the
-other keys of `pinfold.toml` still apply.
+other keys of `pinfold.toml` still apply. At start PinFold then draws Graphite Grid, and on a
+save it keeps the theme it has.
 
 ### Ghostty themes
 
@@ -483,8 +483,14 @@ why in its [log](#where-problems-are-reported), once, and keeps the current sett
 save or `chmod` fixes it. A bad `font_path` file means the bundled font, as it does at startup.
 Deleting the file changes nothing until the next start.
 
-PinFold checks the file with one `stat` a second on a thread of its own, so an idle window
-wakes once a second for this. Changes to the font file itself are not noticed.
+The theme reloads with the rest: saving `pinfold.toml` or the theme file in use recolours the
+chrome and the panes, history included, within about a second. A theme file that a save breaks
+is reported once, and the theme in use stays until a later save fixes it. A theme file created
+after `theme` named it is picked up at the next save of `pinfold.toml`.
+
+PinFold checks `pinfold.toml` and the theme file in use with one `stat` each a second on a
+thread of its own, so an idle window wakes once a second for this. Changes to the font file
+itself are not noticed.
 
 ## Workspace layouts
 

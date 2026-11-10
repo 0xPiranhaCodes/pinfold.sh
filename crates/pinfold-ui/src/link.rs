@@ -335,6 +335,8 @@ pub struct Link {
     greeting: bool,
     /// The theme's palette, until it has followed the hello.
     palette: Option<Palette>,
+    /// Whether the hello has gone, so a palette no longer waits for it.
+    answered: bool,
     ended: Option<Disconnect>,
     state: State,
 }
@@ -379,6 +381,7 @@ impl Link {
             partial: false,
             greeting: false,
             palette: None,
+            answered: false,
             ended: None,
             state,
         })
@@ -392,10 +395,16 @@ impl Link {
         self.flush();
     }
 
-    /// Keeps the theme's `palette` to send right after the hello (ADR-0049). A core that speaks
+    /// Sends the theme's `palette`, or keeps it to send right after the hello if that has not
+    /// gone, so the latest theme is the one the core gets (ADR-0049). A core that speaks
     /// a version without it is sent none, and [`Link::take_unthemed`] then says so.
     pub fn theme(&mut self, palette: Palette) {
-        self.palette = Some(palette);
+        if self.answered {
+            // A core too old for it is sent none, and the window already draws Graphite Grid.
+            self.send(Request::Palette(palette));
+        } else {
+            self.palette = Some(palette);
+        }
     }
 
     /// Puts the hello, and the palette after it, ahead of any request queued while it waited
@@ -415,6 +424,7 @@ impl Link {
                 self.state.out.splice(..0, hello);
             }
             self.greeting = false;
+            self.answered = true;
         }
     }
 
@@ -917,6 +927,14 @@ mod tests {
             assert_eq!(peer.requests(sent.len()), sent);
             assert_eq!(link.take_unthemed(), theirs == 13);
             assert!(!link.take_unthemed(), "said once");
+            // A theme saved later goes at once, and a version 13 core is still sent none.
+            link.theme(Palette::GRAPHITE_GRID);
+            assert!(link.send(Request::Quit));
+            let mut sent = vec![shown(Request::Quit)];
+            if theirs == VERSION {
+                sent.insert(0, shown(Request::Palette(Palette::GRAPHITE_GRID)));
+            }
+            assert_eq!(peer.requests(sent.len()), sent);
         }
     }
 

@@ -81,6 +81,11 @@ impl Request {
             Self::OpenMarkdown(pane, name) => {
                 link.send(proto::Request::OpenMarkdown { pane, name: &name })
             }
+            // The link holds a palette that would overtake the hello.
+            Self::Core(proto::Request::Palette(palette)) => {
+                link.theme(palette);
+                true
+            }
             Self::Core(request) => link.send(request),
         };
     }

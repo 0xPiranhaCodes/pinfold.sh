@@ -2,7 +2,7 @@
 //!
 //! A theme file is untrusted input, so nothing here panics on what it holds.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, de};
 
@@ -484,19 +484,14 @@ fn named(
     let Some(name) = name else {
         return Ok(resolve(GRAPHITE.into(), overrides)?);
     };
-    // No `/`, and no leading `.`, so no name is a path.
-    let valid = |byte: u8| byte.is_ascii_alphanumeric() || b" -_+.".contains(&byte);
-    if !(1..=64).contains(&name.len()) || name.starts_with('.') || !name.bytes().all(valid) {
-        return Err(Error::Name);
-    }
-    let themes = config.with_file_name("themes");
-    if let Some(bytes) = crate::read(&themes.join(format!("{name}.toml")))? {
+    let [toml, itermcolors, ghostty] = files(config, name)?;
+    if let Some(bytes) = crate::read(&toml)? {
         return Ok(parse(&bytes, overrides)?);
     }
-    if let Some(bytes) = crate::read(&themes.join(format!("{name}.itermcolors")))? {
+    if let Some(bytes) = crate::read(&itermcolors)? {
         return Ok(crate::itermcolors::parse(&bytes, overrides)?);
     }
-    if let Some(bytes) = crate::read(&themes.join(name))? {
+    if let Some(bytes) = crate::read(&ghostty)? {
         return Ok(crate::ghostty::parse(&bytes, overrides)?);
     }
     if name != "Graphite Grid" {
@@ -505,11 +500,71 @@ fn named(
     Ok(resolve(GRAPHITE.into(), overrides)?)
 }
 
+/// The files a theme called `name` can be, in the order [`load`] looks for them.
+fn files(config: &Path, name: &str) -> Result<[PathBuf; 3], Error> {
+    // No `/`, and no leading `.`, so no name is a path.
+    let valid = |byte: u8| byte.is_ascii_alphanumeric() || b" -_+.".contains(&byte);
+    if !(1..=64).contains(&name.len()) || name.starts_with('.') || !name.bytes().all(valid) {
+        return Err(Error::Name);
+    }
+    let themes = config.with_file_name("themes");
+    Ok([
+        themes.join(format!("{name}.toml")),
+        themes.join(format!("{name}.itermcolors")),
+        themes.join(name),
+    ])
+}
+
+/// The theme file the config file at `config` has in use, if it names one that exists.
+fn in_use(config: &Path) -> Option<PathBuf> {
+    let chosen: Chosen = crate::parse_as(&crate::read(config).ok()??).ok()?;
+    let files = files(config, chosen.theme.as_deref()?).ok()?;
+    files.into_iter().find(|file| file.exists())
+}
+
+/// Notices saves to the theme file in use, with one `stat` a poll, as [`crate::Watch`] notices
+/// saves to the config file (ADR-0049, section 2).
+///
+/// shortcut: a theme file made after its name was chosen is seen at the next save of the
+/// config file, watch the themes directory if people trip on that.
+#[derive(Debug)]
+pub struct Watch {
+    config: PathBuf,
+    file: Option<PathBuf>,
+    seen: Option<(u64, u64, i64, i64)>,
+}
+
+impl Watch {
+    /// Starts from the theme file as it is now. Create this before the first [`load`], so a
+    /// save between the two is not missed.
+    pub fn new(config: PathBuf) -> Self {
+        let file = in_use(&config);
+        let seen = file.as_deref().and_then(crate::stamp);
+        Self { config, file, seen }
+    }
+
+    /// [`load`]s the theme again if the theme file in use changed since the last poll, or if
+    /// `saved` says the config file did, which may choose another theme. Each save is reported
+    /// once. On an error the caller keeps the theme it has.
+    pub fn poll(&mut self, saved: bool) -> Option<Result<(Theme, Vec<String>), Error>> {
+        if saved {
+            self.file = in_use(&self.config);
+        }
+        let now = self.file.as_deref().and_then(crate::stamp);
+        // A file that is gone can be the middle of a save, so it changes nothing.
+        if !saved && (now.is_none() || now == self.seen) {
+            return None;
+        }
+        // Stamped before the read, so a save during it is read by the next poll.
+        self.seen = now;
+        Some(load(&self.config))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs::{self, Permissions};
     use std::os::unix::fs::{PermissionsExt, symlink};
-    use std::path::PathBuf;
 
     use proptest::prelude::*;
     use tempfile::{TempDir, tempdir};
@@ -782,6 +837,38 @@ mod tests {
         assert_eq!(theme.background, 0x0028_2a36);
         let missing = named(&config, Some("Other"), Colors::default());
         assert!(matches!(missing, Err(Error::NotFound)));
+    }
+
+    /// ADR-0049, section 2: a save of either file loads the theme again, once, and a broken
+    /// theme file is an error, on which the window keeps the theme it has.
+    #[test]
+    fn a_save_of_the_config_or_the_theme_file_in_use_loads_the_theme_again() {
+        let (dir, config) = themes(
+            "My Theme-1.toml",
+            file(0x0028_2a36, 0x00f8_f8f2, 0).as_bytes(),
+        );
+        let path = dir.path().join("themes/My Theme-1.toml");
+        let mut watch = Watch::new(config.clone());
+        assert!(watch.poll(false).is_none(), "nothing was saved");
+        let save = |path: &Path, text: &str| {
+            let new = path.with_extension("new");
+            fs::write(&new, text).unwrap();
+            fs::set_permissions(&new, Permissions::from_mode(0o600)).unwrap();
+            fs::rename(&new, path).unwrap();
+        };
+        save(&path, &file(0x00fd_f6e3, 0x0065_7b83, 0));
+        let (theme, _) = watch.poll(false).unwrap().unwrap();
+        assert_eq!(theme.background, 0x00fd_f6e3);
+        assert!(watch.poll(false).is_none(), "said once");
+        save(&path, "background = 1");
+        assert!(watch.poll(false).unwrap().is_err());
+        assert!(watch.poll(false).is_none(), "a bad save is said once too");
+        // The config file's own watch says it was saved. It now names no theme file.
+        save(&config, "[colors]\nbackground = \"#0d1117\"\n");
+        let (theme, _) = watch.poll(true).unwrap().unwrap();
+        assert_eq!(theme.background, 0x000d_1117);
+        save(&path, &file(0x0028_2a36, 0x00f8_f8f2, 0));
+        assert!(watch.poll(false).is_none(), "that file is no longer in use");
     }
 
     #[test]
