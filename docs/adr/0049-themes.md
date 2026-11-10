@@ -3,6 +3,11 @@
 - **Status:** Accepted
 - **Date:** 2026-11-10
 - **Accepted by:** coordinator review, 2026-11-10
+- **Amended 2026-11-10**, approved by the maintainer, to say what was built and decide nothing
+  new. [#415] added six optional `[chrome]` keys, so a theme is 41 colours and 164 bytes
+  (sections 1 and 9). [#418] converts Solarized from `xresources/solarized`, bundles Dracula
+  with its preset's background `#1e1f29`, and the 11 theme files measure 679 to 904 bytes
+  (sections 5, 7 and 9).
 
 ## Context
 
@@ -39,7 +44,7 @@ licences were read at.
 
 ## Decision
 
-### 1. A theme is 18 required colours and 17 optional ones
+### 1. A theme is 18 required colours and 23 optional ones
 
 One schema, `pinfold_config::theme::Colors`, serves a theme file and the `[colors]` table. Each
 value is a string of `#` and six hex digits. There is no alpha, no colour name and no other
@@ -53,6 +58,7 @@ kind of key.
 | `cursor_text` | optional | `background` |
 | `selection_background`, `selection_foreground` | optional | `foreground` and `background`, which is today's inversion |
 | `[chrome]`: `accent`, `tab`, `tab_hover`, `tab_active`, `overlay`, `border`, `dim`, `muted` | optional | derived, below |
+| `[chrome]`: `tab_text`, `key`, `title`, `title_unfocused`, `rule`, `palette` ([#415]) | optional | derived, below |
 | `[states]`: `needs_you`, `running`, `done`, `error`, `idle` | optional | Graphite Grid's five colours |
 
 The 256-colour cube and the grey ramp stay computed and are not keys.
@@ -65,11 +71,19 @@ the foreground, and `dim` is the foreground moved 25% towards the background. `a
 follow Graphite Grid, whose hover surface `#2B323B` sits 12% to 19% of the way from its ground
 to its text, by channel. So a plain terminal theme is enough on its own.
 
+The six keys of [#415] are derived the same way, with the shares
+`crates/pinfold-config/src/theme.rs` holds as constants: `tab_text`, `key`, `title` and
+`title_unfocused` are the foreground moved 20%, 35%, 30% and 40% towards the background, and
+`rule` and `palette` are the background moved 12% and 4% towards the foreground. A test there
+holds each share inside the range Graphite Grid's own colour has over its three channels.
+
 **Graphite Grid** stays the default and is a theme like any other, built in, with every chrome
 key set to today's constants, so the default window does not change by a pixel. Its ANSI
 colours are the 16 now in `vt.rs`, recorded in `docs/design/ui/` as the design's palette, which
 retires that `shortcut:`. Where a constant has no key among the eight above, the slice adds
-the key, and the golden images are the test.
+the key, and the golden images are the test. [#415] added six that way, and Graphite Grid sets
+them to `tab_text` `#B0B8C4`, `key` `#909BA9`, `title` `#9BA5B3`, `title_unfocused` `#87909E`,
+`rule` `#262B33` and `palette` `#151920`.
 
 ### 2. Config
 
@@ -171,6 +185,10 @@ and the closest pair is 0.076, running and idle on Dracula and on Nord. 0.07 is 
 that. At 0.08 both would fall back, and Graphite Grid's own closest pair is 0.122. A ground near
 mid grey fails and takes the fallback, as the script's last two rows show.
 
+The script's Dracula row uses the collection's background `#282a36`. The bundled Dracula has
+`#1e1f29` (section 7), and `every_bundled_theme_is_legible_and_none_takes_the_fallback` in
+`theme.rs` holds it and the other ten bundled files to the same 4.5 and 0.07 ([#418]).
+
 A theme sets colours only. The glyph and the word of a state are not keys, so no theme can
 remove them, and they still tell the states apart for someone who cannot tell the colours
 apart. The ▲ mark of ADR-0044 takes the same step and joins the distance check in the slice
@@ -220,8 +238,8 @@ The repository is MIT OR Apache-2.0, and `deny.toml` allows only those two. All 
 | Nord | `Nord`, which gives nordtheme/iterm2 | MIT in `licenses.yml`; MIT, Copyright (c) 2016-present Sven Greb | yes |
 | Catppuccin Mocha, Catppuccin Latte | the schemes of those names, which give catppuccin/palette | MIT in `licenses.yml`; MIT, Copyright (c) 2021 Catppuccin | yes |
 | Gruvbox Dark | `Gruvbox Dark`, which gives morhetz/gruvbox | MIT in `licenses.yml`. Upstream has no licence file: its README says "MIT/X11" and its `package.json` says `"license": "MIT"`, author Pavel Pertsev | yes, with the MIT text under the author's name from `package.json`. Confirmed in review: the README's MIT/X11 statement is the grant. |
-| Dracula | `Dracula.itermcolors` in dracula/iterm at `e5749bcd0776` | MIT, Copyright (c) 2013-present Dracula Theme. The collection's own `Dracula` is `unknown`, so it is not the source | yes |
-| Solarized Dark, Solarized Light | `iterm2-colors-solarized/` in altercation/solarized at `62f656a02f93` | MIT, Copyright (c) 2011 Ethan Schoonover. The collection's `iTerm2 Solarized` pair is GPL-2.0-or-later and `Solarized Dark Patched` is `unknown`, so they are not the source | yes |
+| Dracula | `Dracula.itermcolors` in dracula/iterm at `e5749bcd0776` | MIT, Copyright (c) 2013-present Dracula Theme. The collection's own `Dracula` is `unknown`, so it is not the source | yes. Its background is `#1e1f29`, as that preset holds it, where the spike read `#282a36` from the collection, so its text contrasts 13.11 and not the spike's 13.36 ([#418]) |
+| Solarized Dark, Solarized Light | `xresources/solarized` in altercation/solarized at `62f656a02f93`, which holds Solarized's sRGB values. Not that repository's `iterm2-colors-solarized/*.itermcolors`: they hold calibrated Generic RGB values and no `Color Space` key, so read as sRGB they give a background of `#001e27` where Solarized's is `#002b36` ([#418]) | MIT, Copyright (c) 2011 Ethan Schoonover. The collection's `iTerm2 Solarized` pair is GPL-2.0-or-later and `Solarized Dark Patched` is `unknown`, so they are not the source | yes |
 | Tokyo Night | the terminal colours of `themes/tokyo-night-color-theme.json` in tokyo-night/tokyo-night-vscode-theme at `7c0f11eaef32` | MIT, Copyright (c) 2018-present Enkia. The collection's `TokyoNight` schemes are Apache-2.0, from the folke/tokyonight.nvim port; the MIT original keeps every bundled theme under one licence | yes |
 | iTerm2's defaults | `iTerm2 Default`, `iTerm2 Dark Background` | GPL-2.0-or-later in `licenses.yml`, from iTerm2's `ColorPresets.plist` | **no**: not compatible with MIT OR Apache-2.0 |
 | Terminal.app's defaults | `Terminal Basic`, `Terminal Basic Dark` | `nonfree` in `licenses.yml`: Apple's, with no licence | **no** |
@@ -268,10 +286,11 @@ spread. By arithmetic from the types above, to be replaced by the measured table
 - Core: one `Palette` of 18 colours, 72 bytes, whatever the number of panes. "Each idle pane"
   and "Core, 8 idle panes" should not change: a pane's OSC overrides already live in
   alacritty_terminal's table.
-- Window: one theme of 35 colours, 140 bytes. The "Window on macOS" and "Window on X11" rows
-  should not change. Cells stay 12 bytes.
-- Binary: 11 theme files of about 0.5 KB each as read-only text (the Ghostty file for GitHub
-  Dark is 475 bytes), and their licence texts are not in the binary.
+- Window: one theme of 41 colours, 164 bytes ([#415]). The "Window on macOS" and "Window on
+  X11" rows should not change. Cells stay 12 bytes.
+- Binary: 11 theme files of 679 to 904 bytes each with their headers, 9,048 bytes in all, as
+  read-only text (`wc -c crates/pinfold-config/themes/*.toml`, [#418]; the estimate was about
+  0.5 KB each), and their licence texts are not in the binary.
 
 Slices 1, 3 and 5 include the table.
 
@@ -324,3 +343,5 @@ Each is one issue and one PR of about 400 changed lines, in this order.
 [#402]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/402
 [#403]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/403
 [#404]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/404
+[#415]: https://github.com/0xPiranhaCodes/pinfold.sh/pull/415
+[#418]: https://github.com/0xPiranhaCodes/pinfold.sh/pull/418
