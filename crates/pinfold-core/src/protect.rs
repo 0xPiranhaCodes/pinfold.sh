@@ -442,14 +442,24 @@ mod tests {
     fn a_later_line_that_finds_the_input_full_is_told_of() {
         let mut reactor = Reactor::new().unwrap();
         // Raw, so the kernel queue fills without a line limit, and nothing reads it.
-        let pane = spawn(&mut reactor, "stty raw -echo; echo ready; sleep 30");
-        let ready = |reactor: &mut Reactor| reactor.read(pane, None).unwrap().contains("ready");
-        assert!(turn_until(&mut reactor, ready));
+        let pane = spawn(&mut reactor, "stty raw -echo; echo ready; exec sleep 30");
+        // A program still starting hides its arguments, which protects the pane, so wait
+        // until `sleep` holds the foreground with them readable.
+        let started = |reactor: &mut Reactor| {
+            let found = foreground::foreground(reactor.pty(pane).unwrap().master().as_fd());
+            let sleep = |m: &Process| m.name == "sleep" && m.argv.is_some();
+            reactor.read(pane, None).unwrap().contains("ready")
+                && found.is_ok_and(|found| found.members.iter().any(sleep))
+        };
+        assert!(turn_until(&mut reactor, started));
         assert_eq!(reactor.send_lines(pane, "a\nb\n", Instant::now()), Ok(2));
-        let mut writes = 0;
-        while reactor.write(pane, b"x") {
-            writes += 1;
-            assert!(writes < 10_000_000, "the input never filled");
+        // Halving chunks, as a byte at a time is a million writes, which on a loaded machine
+        // outlast `sleep 30`, and a pane whose program has ended is refused as a rule (#389).
+        let mut chunk = crate::io::MAX_INPUT;
+        while chunk > 0 {
+            if !reactor.write(pane, &vec![b'x'; chunk]) {
+                chunk /= 2;
+            }
         }
         let done = |reactor: &mut Reactor| !reactor.protect.is_sending(pane);
         assert!(turn_until(&mut reactor, done));
