@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Deserializer, de};
 
 pub mod ghostty;
+pub mod itermcolors;
 pub mod theme;
 pub mod workspace;
 
