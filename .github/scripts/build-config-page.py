@@ -232,7 +232,7 @@ def page(markdown: str) -> str:
     <div class="config-hero">
       <p class="eyebrow"><span class="dot"></span> full reference · generated from docs/configuration.md</p>
       <h1>Configure <em>PinFold</em>.</h1>
-      <p class="lede">One TOML file, every key optional, applied on save. Themes are on <code>main</code> and arrive <strong>in the next beta</strong>.</p>
+      <p class="lede">One TOML file, every key optional, applied on save. Themes are new <strong>in v0.1.0-beta.4</strong>.</p>
       <div class="config-path" aria-label="Configuration directories"><span>~/.config/pinfold/</span><b>pinfold.toml</b><span class="path-branch">└─ themes/</span></div>
     </div>
   </header>
