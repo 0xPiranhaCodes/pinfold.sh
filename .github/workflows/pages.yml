@@ -5,9 +5,9 @@ name: Pages
 on:
   push:
     branches: [main]
-    paths: ["site/**", ".github/workflows/pages.yml", ".github/scripts/*check-site.py"]
+    paths: ["site/**", "docs/configuration.md", ".github/workflows/pages.yml", ".github/scripts/*config-page.py", ".github/scripts/*check-site.py"]
   pull_request:
-    paths: ["site/**", ".github/workflows/pages.yml", ".github/scripts/*check-site.py"]
+    paths: ["site/**", "docs/configuration.md", ".github/workflows/pages.yml", ".github/scripts/*config-page.py", ".github/scripts/*check-site.py"]
 
 permissions:
   contents: read

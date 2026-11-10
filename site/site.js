@@ -9,7 +9,7 @@ const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">":
 const out = $("out");
 const input = $("cmd");
 const usage = out.textContent.slice(out.textContent.indexOf("PinFold: a memory-first")).trimEnd();
-const html = new Set(["states", "sudo"]);
+const html = new Set(["states", "sudo", "config"]);
 const cmds = {
   help: () => "commands: pinfold --help · keys · states · mem · themes · config · install · about · clear",
   "pinfold --help": () => usage,
@@ -17,7 +17,7 @@ const cmds = {
   states: () => '<span class="st-needs">◆ needs you</span>  <span class="st-run">● running</span>  <span class="st-done">✓ done</span>  <span class="st-err">✕ error</span>  <span class="st-idle">○ idle</span>',
   mem: () => [...document.querySelectorAll("#memory tbody tr")].map((tr) => { const c = tr.cells; return `${c[0].textContent.padEnd(26)}${c[2].textContent.padStart(9)} / ${c[3].textContent.padEnd(9)} (${c[1].textContent})`; }).join("\n") + "\nreproduce: cargo xtask mem-gate",
   themes: () => [...document.querySelectorAll("#themes .swatches b")].map((b) => b.textContent).join("\n") + '\nin pinfold.toml: theme = "Nord"   (on main, in the next beta)',
-  config: () => "~/.config/pinfold/pinfold.toml, applied on save\nfont_size = 14\n[keys]\nprefix = \"C-b\"\nevery key: docs/configuration.md",
+  config: () => '~/.config/pinfold/pinfold.toml, applied on save\nfont_size = 14\n[keys]\nprefix = "C-b"\n<a href="configuration.html">open every key, default and limit →</a>',
   install: () => "macOS beta: PinFold.dmg from github.com/0xPiranhaCodes/pinfold.sh/releases/tag/v0.1.0-beta.3\nfrom source: cargo build --release -p pinfold-cli",
   about: () => "PinFold: a memory-first terminal for agentic coding, written in Rust.",
   ls: () => "why/  memory/  agents/  try/  themes/  configure/  install/",

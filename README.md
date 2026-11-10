@@ -45,7 +45,7 @@ Linux packages come with the main release
 4. Press `Ctrl+a` then an arrow to move focus, and run something in the pane.
 5. Run `pinfold ctl list` to see each pane and its state.
 
-[docs/configuration.md](docs/configuration.md#keys) lists every key.
+The [configuration reference](https://0xpiranhacodes.github.io/pinfold.sh/configuration.html) lists every key.
 
 ## Why PinFold
 
@@ -115,7 +115,7 @@ on macOS `⌘T`, `⌘D` and `⇧⌘D` do the same.
 
 **Configure it:** every setting is a key in `pinfold.toml`, and a save applies within about a
 second, with no restart. On macOS, PinFold > Settings (`⌘,`) opens the file.
-[docs/configuration.md](docs/configuration.md) lists every key, its default and the paths above.
+The [configuration reference](https://0xpiranhacodes.github.io/pinfold.sh/configuration.html) lists every key, its default and the paths above.
 
 ### Themes
 
@@ -134,7 +134,7 @@ theme = { light = "GitHub Light", dark = "GitHub Dark" }
 A Ghostty theme file or an iTerm2 `.itermcolors` preset works as it is: copy it into
 `~/.config/pinfold/themes/` and name it. `[colors]` sets single colours on top of a theme, and
 the agent states stay legible on every theme.
-[docs/configuration.md](docs/configuration.md#themes) has the keys, the import rules and each
+The [configuration reference](https://0xpiranhacodes.github.io/pinfold.sh/configuration.html#themes) has the keys, the import rules and each
 bundled theme's source and licence.
 
 ## Uninstall

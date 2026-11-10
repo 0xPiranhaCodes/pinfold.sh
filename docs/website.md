@@ -23,6 +23,13 @@ python3 .github/scripts/check-site.py site
 python3 -B -m unittest discover -s .github/scripts
 ```
 
+`docs/configuration.md` is the configuration reference's single source of truth. After changing
+it, rebuild the website copy before running those checks:
+
+```sh
+python3 .github/scripts/build-config-page.py
+```
+
 ## Deploy
 
 A push to `main` that touches `site/` checks the site, uploads it with

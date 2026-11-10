@@ -9,6 +9,7 @@ origin, so a page makes no third-party request. Prints the site's total size. A 
 """
 import re
 import sys
+import importlib.util
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
@@ -90,6 +91,20 @@ def check(root):
 
     size = sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
     print(f"{len(pages)} pages, {len(refs)} links and assets, {size} bytes ({size / 1024:.1f} KiB) in total")
+    repo = Path(__file__).resolve().parents[2]
+    if root == (repo / "site").resolve():
+        source = repo / "docs/configuration.md"
+        output = root / "configuration.html"
+        generator = Path(__file__).with_name("build-config-page.py")
+        spec = importlib.util.spec_from_file_location("build_config_page", generator)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        expected = module.page(source.read_text(encoding="utf-8"))
+        if not output.is_file() or output.read_text(encoding="utf-8") != expected:
+            errors.append(
+                "configuration.html is stale; regenerate it with "
+                "python3 .github/scripts/build-config-page.py"
+            )
     return errors
 
 
