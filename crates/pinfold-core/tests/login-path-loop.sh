@@ -5,8 +5,8 @@
 #
 #   crates/pinfold-core/tests/login-path-loop.sh [runs] [copies] [test args...]
 #
-# `... 50 1 the_users_shell` runs the test alone; `... 50 8 --skip a_blocked_turn_wakes` runs
-# it under the rest of the suite, without the hang of #387. Before #342 the test gave the
+# `... 50 1 the_users_shell` runs the test alone; `... 50 8` runs it under the rest of the
+# suite, and `... 400 8 a_blocked_turn_wakes` checks for the hang of #387. Before #342 the test gave the
 # user's interactive login zsh LOGIN_WAIT, 10 s, and under `... 50 8` failed 50 of 50 runs
 # with `TimedOut: your shell took over 10 s to report its PATH`.
 set -eu
