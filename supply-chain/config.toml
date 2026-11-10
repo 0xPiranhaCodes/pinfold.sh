@@ -34,26 +34,32 @@ criteria = "safe-to-run"
 [[exemptions.ahash]]
 version = "0.8.12"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 2 of #302: a build script or proc macro that runs on the build machine for the Linux build. Awaiting maintainer review."
 
 [[exemptions.android-activity]]
 version = "0.6.1"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.android-properties]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.as-raw-xcb-connection]]
 version = "1.0.1"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the Linux build. Awaiting maintainer review."
 
 [[exemptions.autocfg]]
 version = "1.5.1"
 criteria = "safe-to-run"
+notes = "Added by Satheesh Kumar in #41, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 5 of #302: used only by tests, benches or xtask (safe-to-run), so it never ships. Awaiting maintainer review."
 
 [[exemptions.bitflags]]
 version = "2.13.2"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 1 of #302: vendored alacritty_terminal and most of the window tree use it. No import covers 2.13.2 and no import trusts its publisher; the 733-line diff from mozilla's 2.11.1 audit is queued in docs/security/vet-review-queue.md."
 
 [[exemptions.block2]]
 version = "0.5.1"
@@ -63,62 +69,77 @@ notes = "Kept by Satheesh Kumar because the backwards diff from mozilla's 0.6.2 
 [[exemptions.borsh]]
 version = "1.8.1"
 criteria = "safe-to-run"
+notes = "Added by Satheesh Kumar in #41, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 5 of #302: used only by tests, benches or xtask (safe-to-run), so it never ships. Awaiting maintainer review."
 
 [[exemptions.borsh-derive]]
 version = "1.8.1"
 criteria = "safe-to-run"
+notes = "Added by Satheesh Kumar in #41, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 5 of #302: used only by tests, benches or xtask (safe-to-run), so it never ships. Awaiting maintainer review."
 
 [[exemptions.bytemuck]]
 version = "1.25.2"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #33, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the macOS and Linux build. Awaiting maintainer review."
 
 [[exemptions.bytemuck_derive]]
 version = "1.12.1"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #33, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 2 of #302: a build script or proc macro that runs on the build machine for the macOS and Linux build. Awaiting maintainer review."
 
 [[exemptions.bytes]]
 version = "1.12.1"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.calloop]]
 version = "0.13.0"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the Linux build. Awaiting maintainer review."
 
 [[exemptions.calloop-wayland-source]]
 version = "0.3.0"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the Linux build. Awaiting maintainer review."
 
 [[exemptions.cc]]
 version = "1.10.0"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 2 of #302: a build script or proc macro that runs on the build machine for the Linux build. Awaiting maintainer review."
 
 [[exemptions.clipboard-win]]
 version = "5.4.3"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #51, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.combine]]
 version = "4.6.9"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.concurrent-queue]]
 version = "2.5.0"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.crc32fast]]
 version = "1.5.4"
 criteria = "safe-to-run"
+notes = "Added by Satheesh Kumar in #274, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 5 of #302: used only by tests, benches or xtask (safe-to-run), so it never ships. Awaiting maintainer review."
 
 [[exemptions.crossbeam-utils]]
 version = "0.8.23"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.ctor]]
 version = "0.10.1"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 2 of #302: a build script or proc macro that runs on the build machine for the Linux build. Awaiting maintainer review."
 
 [[exemptions.cursor-icon]]
 version = "1.2.0"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the macOS and Linux build. Awaiting maintainer review."
 
 [[exemptions.dispatch]]
 version = "0.2.0"
@@ -133,38 +154,47 @@ notes = "Kept by Satheesh Kumar because it has 243 unsafe tokens over libdispatc
 [[exemptions.dlib]]
 version = "0.5.3"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the Linux build. Awaiting maintainer review."
 
 [[exemptions.downcast-rs]]
 version = "1.2.1"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the Linux build. Awaiting maintainer review."
 
 [[exemptions.dpi]]
 version = "0.1.2"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the macOS and Linux build. Awaiting maintainer review."
 
 [[exemptions.dtor]]
 version = "0.8.1"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.equivalent]]
 version = "1.0.3"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.error-code]]
 version = "3.4.0"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #51, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.fastrand]]
 version = "2.5.0"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the Linux build. Awaiting maintainer review."
 
 [[exemptions.find-msvc-tools]]
 version = "0.1.15"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 2 of #302: a build script or proc macro that runs on the build machine for the Linux build. Awaiting maintainer review."
 
 [[exemptions.flate2]]
 version = "1.1.11"
 criteria = "safe-to-run"
+notes = "Added by Satheesh Kumar in #274, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 5 of #302: used only by tests, benches or xtask (safe-to-run), so it never ships. Awaiting maintainer review."
 
 [[exemptions.font-types]]
 version = "0.12.7"
@@ -174,110 +204,137 @@ notes = "Kept by Satheesh Kumar because only the new unsafe TableDataRef::header
 [[exemptions.foreign-types-macros]]
 version = "0.2.4"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 2 of #302: a build script or proc macro that runs on the build machine for the macOS build. Awaiting maintainer review."
 
 [[exemptions.futures-task]]
 version = "0.3.34"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.futures-util]]
 version = "0.3.34"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.gethostname]]
 version = "1.1.0"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the Linux build. Awaiting maintainer review."
 
 [[exemptions.getrandom]]
 version = "0.3.4"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 2 of #302: a build script or proc macro that runs on the build machine for the Linux build. Awaiting maintainer review."
 
 [[exemptions.hashbrown]]
 version = "0.17.1"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.hermit-abi]]
 version = "0.5.3"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.home]]
 version = "0.5.12"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 1 of #302: vendored alacritty_terminal uses it. No import covers 0.5.12 and no import trusts its publisher; the 37-line diff from the imported 0.5.11 audit is queued in docs/security/vet-review-queue.md."
 
 [[exemptions.indexmap]]
 version = "2.14.2"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.insta]]
 version = "1.49.0"
 criteria = "safe-to-run"
+notes = "Added by Satheesh Kumar in #54, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 5 of #302: used only by tests, benches or xtask (safe-to-run), so it never ships. Awaiting maintainer review."
 
 [[exemptions.jni]]
 version = "0.22.4"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.jni-macros]]
 version = "0.22.4"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.jni-sys]]
 version = "0.3.1"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.jni-sys]]
 version = "0.4.1"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.jni-sys-macros]]
 version = "0.4.1"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.jobserver]]
 version = "0.1.35"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.js-sys]]
 version = "0.3.107"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.libloading]]
 version = "0.8.9"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the Linux build. Awaiting maintainer review."
 
 [[exemptions.libredox]]
 version = "0.1.25"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.lock_api]]
 version = "0.4.14"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the macOS and Linux build. Awaiting maintainer review."
 
 [[exemptions.memmap2]]
 version = "0.9.12"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the Linux build. Awaiting maintainer review."
 
 [[exemptions.miniz_oxide]]
 version = "0.9.1"
 criteria = "safe-to-run"
+notes = "Added by Satheesh Kumar in #274, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 5 of #302: used only by tests, benches or xtask (safe-to-run), so it never ships. Awaiting maintainer review."
 
 [[exemptions.miow]]
 version = "0.6.1"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.ndk]]
 version = "0.9.0"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.ndk-sys]]
 version = "0.6.0+11769913"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.num_enum]]
 version = "0.7.6"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.num_enum_derive]]
 version = "0.7.6"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.objc2]]
 version = "0.5.3"
@@ -297,26 +354,32 @@ notes = "Kept by Satheesh Kumar because its 121,787 lines are generated AppKit b
 [[exemptions.objc2-cloud-kit]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.objc2-contacts]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.objc2-core-data]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.objc2-core-image]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.objc2-core-location]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.objc2-core-video]]
 version = "0.3.2"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #37, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the macOS build. Awaiting maintainer review."
 
 [[exemptions.objc2-foundation]]
 version = "0.2.2"
@@ -326,6 +389,7 @@ notes = "Kept by Satheesh Kumar because its 60,961 lines are generated Foundatio
 [[exemptions.objc2-link-presentation]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.objc2-metal]]
 version = "0.2.2"
@@ -340,70 +404,87 @@ notes = "Kept by Satheesh Kumar because it is 5,310 lines of generated QuartzCor
 [[exemptions.objc2-symbols]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.objc2-ui-kit]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.objc2-uniform-type-identifiers]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.objc2-user-notifications]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.once_cell]]
 version = "1.21.4"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #33, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the macOS and Linux build. Awaiting maintainer review."
 
 [[exemptions.orbclient]]
 version = "0.3.55"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.parking_lot]]
 version = "0.12.5"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 1 of #302: vendored alacritty_terminal locks the core's terminal with it. Imports trusted its publisher (Amanieu) until 2026-04-29 at the latest; re-trusting needs a maintainer policy change. Queued in docs/security/vet-review-queue.md."
 
 [[exemptions.parking_lot_core]]
 version = "0.9.12"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 1 of #302: parking_lot's thread parker (futex on Linux, pthread on macOS). Imports trusted its publisher (Amanieu) until 2024-07-06 at the latest; re-trusting needs a maintainer policy change. Queued in docs/security/vet-review-queue.md."
 
 [[exemptions.pin-project]]
 version = "1.1.13"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.pin-project-internal]]
 version = "1.1.13"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.pin-project-lite]]
 version = "0.2.17"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the macOS and Linux build. Awaiting maintainer review."
 
 [[exemptions.piper]]
 version = "0.2.5"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.plain]]
 version = "0.2.3"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.png]]
 version = "0.18.1"
 criteria = "safe-to-run"
+notes = "Added by Satheesh Kumar in #274, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 5 of #302: used only by tests, benches or xtask (safe-to-run), so it never ships. Awaiting maintainer review."
 
 [[exemptions.polling]]
 version = "3.11.0"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 1 of #302: vendored alacritty_terminal's event loop (epoll on Linux, kqueue on macOS, through rustix). No import covers it or trusts its publisher. Queued in docs/security/vet-review-queue.md."
 
 [[exemptions.proc-macro-crate]]
 version = "3.5.0"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.proptest]]
 version = "1.12.0"
 criteria = "safe-to-run"
+notes = "Added by Satheesh Kumar in #41, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 5 of #302: used only by tests, benches or xtask (safe-to-run), so it never ships. Awaiting maintainer review."
 
 [[exemptions.pulldown-cmark]]
 version = "0.13.6"
@@ -413,66 +494,82 @@ notes = "Added by Satheesh Kumar because pinfold md (#314, ADR-0045) parses mark
 [[exemptions.quick-xml]]
 version = "0.41.0"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the Linux build. Awaiting maintainer review."
 
 [[exemptions.r-efi]]
 version = "5.3.0"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.r-efi]]
 version = "6.0.0"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.rand_xorshift]]
 version = "0.5.0"
 criteria = "safe-to-run"
+notes = "Added by Satheesh Kumar in #41, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 5 of #302: used only by tests, benches or xtask (safe-to-run), so it never ships. Awaiting maintainer review."
 
 [[exemptions.redox_syscall]]
 version = "0.4.1"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.redox_syscall]]
 version = "0.5.18"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.redox_syscall]]
 version = "0.9.5"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.rusty-fork]]
 version = "0.3.1"
 criteria = "safe-to-run"
+notes = "Added by Satheesh Kumar in #41, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 5 of #302: used only by tests, benches or xtask (safe-to-run), so it never ships. Awaiting maintainer review."
 
 [[exemptions.scoped-tls]]
 version = "1.0.1"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the Linux build. Awaiting maintainer review."
 
 [[exemptions.scopeguard]]
 version = "1.2.0"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the macOS and Linux build. Awaiting maintainer review."
 
 [[exemptions.simd-adler32]]
 version = "0.3.10"
 criteria = "safe-to-run"
+notes = "Added by Satheesh Kumar in #274, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 5 of #302: used only by tests, benches or xtask (safe-to-run), so it never ships. Awaiting maintainer review."
 
 [[exemptions.simd_cesu8]]
 version = "1.2.0"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.slab]]
 version = "0.4.12"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the Linux build. Awaiting maintainer review."
 
 [[exemptions.smallvec]]
 version = "1.16.4"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the macOS and Linux build. Awaiting maintainer review."
 
 [[exemptions.smithay-client-toolkit]]
 version = "0.19.2"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 2 of #302: a build script or proc macro that runs on the build machine for the Linux build. Awaiting maintainer review."
 
 [[exemptions.smol_str]]
 version = "0.2.2"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the macOS and Linux build. Awaiting maintainer review."
 
 [[exemptions.softbuffer]]
 version = "0.4.8"
@@ -487,130 +584,162 @@ notes = "Kept by Satheesh Kumar because it is a 26,528-line font parser and scal
 [[exemptions.tiny-xlib]]
 version = "0.2.5"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 2 of #302: a build script or proc macro that runs on the build machine for the Linux build. Awaiting maintainer review."
 
 [[exemptions.tokio]]
 version = "1.54.1"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.tracing]]
 version = "0.1.44"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the macOS and Linux build. Awaiting maintainer review."
 
 [[exemptions.version_check]]
 version = "0.9.5"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 2 of #302: a build script or proc macro that runs on the build machine for the Linux build. Awaiting maintainer review."
 
 [[exemptions.wasi]]
 version = "0.11.1+wasi-snapshot-preview1"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #31, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.wasm-bindgen]]
 version = "0.2.130"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.wasm-bindgen-futures]]
 version = "0.4.80"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.wasm-bindgen-macro]]
 version = "0.2.130"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.wasm-bindgen-macro-support]]
 version = "0.2.130"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.wasm-bindgen-shared]]
 version = "0.2.130"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.wayland-backend]]
 version = "0.3.17"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 2 of #302: a build script or proc macro that runs on the build machine for the Linux build. Awaiting maintainer review."
 
 [[exemptions.wayland-client]]
 version = "0.31.15"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 2 of #302: a build script or proc macro that runs on the build machine for the Linux build. Awaiting maintainer review."
 
 [[exemptions.wayland-csd-frame]]
 version = "0.3.0"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the Linux build. Awaiting maintainer review."
 
 [[exemptions.wayland-cursor]]
 version = "0.31.14"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the Linux build. Awaiting maintainer review."
 
 [[exemptions.wayland-protocols]]
 version = "0.32.13"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the Linux build. Awaiting maintainer review."
 
 [[exemptions.wayland-protocols-plasma]]
 version = "0.3.12"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the Linux build. Awaiting maintainer review."
 
 [[exemptions.wayland-protocols-wlr]]
 version = "0.3.12"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the Linux build. Awaiting maintainer review."
 
 [[exemptions.wayland-scanner]]
 version = "0.31.11"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 2 of #302: a build script or proc macro that runs on the build machine for the Linux build. Awaiting maintainer review."
 
 [[exemptions.wayland-sys]]
 version = "0.31.11"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 2 of #302: a build script or proc macro that runs on the build machine for the Linux build. Awaiting maintainer review."
 
 [[exemptions.web-sys]]
 version = "0.3.107"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.windows-sys]]
 version = "0.52.0"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.windows-sys]]
 version = "0.59.0"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.windows-sys]]
 version = "0.61.2"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.windows-targets]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.windows_aarch64_gnullvm]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.windows_aarch64_msvc]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.windows_i686_gnu]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.windows_i686_gnullvm]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.windows_i686_msvc]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.windows_x86_64_gnu]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.windows_x86_64_gnullvm]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.windows_x86_64_msvc]]
 version = "0.52.6"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #30, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.winit]]
 version = "0.30.13"
@@ -620,26 +749,32 @@ notes = "Kept by Satheesh Kumar because winit is 62,412 lines of platform FFI ac
 [[exemptions.x11-dl]]
 version = "2.21.0"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 2 of #302: a build script or proc macro that runs on the build machine for the Linux build. Awaiting maintainer review."
 
 [[exemptions.x11rb]]
 version = "0.13.2"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the Linux build. Awaiting maintainer review."
 
 [[exemptions.x11rb-protocol]]
 version = "0.13.2"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the Linux build. Awaiting maintainer review."
 
 [[exemptions.xcursor]]
 version = "0.3.11"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the Linux build. Awaiting maintainer review."
 
 [[exemptions.xkbcommon-dl]]
 version = "0.4.2"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the Linux build. Awaiting maintainer review."
 
 [[exemptions.xkeysym]]
 version = "0.2.1"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 3 of #302: a transitive dependency of the Linux build. Awaiting maintainer review."
 
 [[exemptions.yazi]]
 version = "0.2.1"
@@ -654,11 +789,14 @@ notes = "Kept by Satheesh Kumar because raster.rs to_fixed calls f32::to_int_unc
 [[exemptions.zerocopy]]
 version = "0.8.63"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 2 of #302: a build script or proc macro that runs on the build machine for the Linux build. Awaiting maintainer review."
 
 [[exemptions.zerocopy-derive]]
 version = "0.8.63"
 criteria = "safe-to-deploy"
+notes = "Added by Satheesh Kumar in #36, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 4 of #302: not in the aarch64-apple-darwin or x86_64-unknown-linux-gnu tree, so only platforms Pinfold does not ship build it. Stays until the window's targets narrow or an import covers it."
 
 [[exemptions.zlib-rs]]
 version = "0.6.8"
 criteria = "safe-to-run"
+notes = "Added by Satheesh Kumar in #274, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 5 of #302: used only by tests, benches or xtask (safe-to-run), so it never ships. Awaiting maintainer review."
