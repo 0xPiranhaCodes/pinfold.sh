@@ -633,11 +633,19 @@ impl Watch {
     /// Takes the system's appearance, `dark` where it does not say, and loads the theme again
     /// if that changes which one a `theme` table chooses, as [`Watch::poll`] does for a save
     /// (ADR-0049, section 2). A plain `theme` follows nothing, so it is not loaded again.
+    ///
+    /// ```
+    /// let mut watch = pinfold_config::theme::Watch::new("/nowhere/pinfold.toml".into());
+    /// // No config file, so no `theme` table, and light changes nothing.
+    /// assert!(watch.follow(false).is_none());
+    /// ```
     pub fn follow(&mut self, dark: bool) -> Option<Result<(Theme, Vec<String>), Error>> {
-        if std::mem::replace(&mut self.dark, dark) == dark {
+        if dark == self.dark {
             return None;
         }
+        // A config file that cannot be read now leaves the appearance for a later call.
         let chosen: Chosen = crate::parse_as(&crate::read(&self.config).ok()??).ok()?;
+        self.dark = dark;
         matches!(chosen.theme, Some(Choice::System(_)))
             .then(|| self.poll(true))
             .flatten()
