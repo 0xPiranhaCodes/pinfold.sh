@@ -112,7 +112,30 @@ on macOS `⌘T`, `⌘D` and `⇧⌘D` do the same.
 | Socket and the logs, `default.log` and `.1` | `$TMPDIR/pinfold-$(id -u)`              |
 
 `XDG_CONFIG_HOME` and `XDG_DATA_HOME` move the first and third.
-[docs/configuration.md](docs/configuration.md) explains each of them.
+
+**Configure it:** every setting is a key in `pinfold.toml`, and a save applies within about a
+second, with no restart. On macOS, PinFold > Settings (`⌘,`) opens the file.
+[docs/configuration.md](docs/configuration.md) lists every key, its default and the paths above.
+
+### Themes
+
+Themes are on `main` and arrive in the next beta; `v0.1.0-beta.3` does not have them. Eleven
+come with PinFold beside the default, Graphite Grid: GitHub Dark, GitHub Light, Dracula,
+Solarized Dark, Solarized Light, One Dark, Nord, Gruvbox Dark, Tokyo Night, Catppuccin Mocha and
+Catppuccin Latte. Name one in `pinfold.toml`, or one each for the system's light and dark
+appearance:
+
+```toml
+theme = "Nord"
+# or
+theme = { light = "GitHub Light", dark = "GitHub Dark" }
+```
+
+A Ghostty theme file or an iTerm2 `.itermcolors` preset works as it is: copy it into
+`~/.config/pinfold/themes/` and name it. `[colors]` sets single colours on top of a theme, and
+the agent states stay legible on every theme.
+[docs/configuration.md](docs/configuration.md#themes) has the keys, the import rules and each
+bundled theme's source and licence.
 
 ## Uninstall
 
