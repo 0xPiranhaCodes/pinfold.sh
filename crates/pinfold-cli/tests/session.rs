@@ -168,7 +168,8 @@ impl Session {
                 let ended = core.try_wait().ok().flatten();
                 assert!(
                     ended.is_none(),
-                    "the core ended: {ended:?}\n{}",
+                    "the core of {} ended: {ended:?}\n{}",
+                    self.directory.display(),
                     self.read_log()
                 );
             }
@@ -2581,13 +2582,30 @@ fn send_to_a_sleeping_child(
     let client = "\"$PINFOLD_TEST_CLIENT\"";
     // The send waits until the child's shell has become `sleep`, so the check sees it.
     let shell = format!(
-        "if mkdir {client}/first; then {{ echo '{initialize}'; echo '{spawn}'; \
-         until pgrep -x -f 'sleep {number}' > /dev/null; do sleep 0.05; done; \
-         echo '{send}'; }} | {mcp} > {client}/o && mv {client}/o {client}/out; \
+        "if mkdir {client}/first; then {{ echo '{initialize}'; echo '{spawn}'; n=0; \
+         until pgrep -x -f 'sleep {number}' > /dev/null; do n=$((n + 1)); \
+         if [ $n -gt 1200 ]; then echo '{name}: no sleep in 60 s' > {client}/failed; exit; fi; \
+         sleep 0.05; done; echo '{send}'; }} | {mcp} > {client}/o && mv {client}/o {client}/out \
+         || echo \"{name}: pinfold mcp exited $?\" > {client}/failed; \
          exec sleep 30; fi; exec sleep {number}"
     );
     let mut core = session.start_core(&["--idle", "1"], &shell)?;
-    assert!(session.wait_for("out"), "{}", session.read_log());
+    // Beside the core, as macOS may kill it at exec and take the panes with it (#288).
+    if !session.wait_beside("out", Some(&mut core)) {
+        // Which call hung, how far its replies got, and whether the child became `sleep` (#354).
+        let child = Command::new("pgrep")
+            .args(["-x", "-f", &format!("sleep {number}")])
+            .output()?;
+        let failure = format!(
+            "{name}: no reply file; first pane started: {}; replies so far: {:?}; child \
+             running: {}\n{}",
+            session.directory.join("first").exists(),
+            session.read("o"),
+            child.status.success(),
+            session.read_log()
+        );
+        return Err(failure.into());
+    }
     core.kill()?;
     core.wait()?;
     let out = session.read("out");
