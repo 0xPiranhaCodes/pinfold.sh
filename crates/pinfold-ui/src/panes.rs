@@ -3,20 +3,28 @@
 //! A border belongs to no pane, so a program cannot reach it. The one around the focused pane
 //! takes the focus accent, as Foundations sets. Panes have no header yet, so no number either.
 
+#[cfg(test)]
+use pinfold_proto::DEFAULT_BACKGROUND;
 use pinfold_proto::link::Rect;
-use pinfold_proto::{Cell, DEFAULT_BACKGROUND, Frame};
+use pinfold_proto::{Cell, Frame};
 
 /// `Focus accent` in Foundations.
 const FOCUS: u32 = 0x005c_d6cb;
 /// `Rule, quiet fill` in Foundations.
 const RULE: u32 = 0x0026_2b33;
 
-/// Empties `frame` to `rows` by `columns`.
+/// Empties `frame` to `rows` by `columns` of the default background.
+#[cfg(test)]
 pub fn blank(frame: &mut Frame, rows: u16, columns: u16) {
+    clear(frame, rows, columns, DEFAULT_BACKGROUND);
+}
+
+/// Empties `frame` to `rows` by `columns` of `ground`, the theme's background.
+pub fn clear(frame: &mut Frame, rows: u16, columns: u16, ground: u32) {
     let cell = Cell {
         character: ' ',
-        foreground: DEFAULT_BACKGROUND,
-        background: DEFAULT_BACKGROUND,
+        foreground: ground,
+        background: ground,
     };
     frame.rows = rows;
     frame.columns = columns;

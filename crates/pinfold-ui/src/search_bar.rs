@@ -355,7 +355,7 @@ mod tests {
                 columns: view.columns,
                 rows: view.rows,
             };
-            selection::overlay(&mut view, rect, engine.position(0, 0).row, found);
+            selection::overlay(&mut view, rect, engine.position(0, 0).row, found, None);
             let cells = plain.cells.iter().zip(&view.cells);
             let picked = cells.filter(|(plain, drawn)| plain != drawn);
             let inverted: String = picked.map(|(_, drawn)| drawn.character).collect();

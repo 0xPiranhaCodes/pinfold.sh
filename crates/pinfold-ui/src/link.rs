@@ -33,11 +33,11 @@ use std::time::Duration;
 
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
-use pinfold_proto::Frame;
 use pinfold_proto::link::{
     ApprovalAction, Decoder, Error, Layout, MAX_DIMENSION, MAX_PANES, MAX_REQUEST, Notice, OLDEST,
     Position, Rect, Refusal, Request, Selection, VERSION,
 };
+use pinfold_proto::{Frame, Palette};
 
 /// Most bytes read per turn, so a flooding core cannot hold the window's thread.
 const READ_BUDGET: usize = 64 * 1024;
@@ -173,6 +173,8 @@ struct State {
     raised: bool,
     /// Set when the core lacks the hardened runtime: whether it could tell (ADR-0044).
     unhardened: Option<bool>,
+    /// Whether the core is too old to take a palette, so it draws Graphite Grid (ADR-0049).
+    unthemed: bool,
     refused: Option<Refusal>,
     /// Restored panes, whether Enter may run what each was running, and that command.
     was_running: Vec<(u32, bool, String)>,
@@ -331,6 +333,8 @@ pub struct Link {
     partial: bool,
     /// Whether [`Link::greet`] waits for the core's hello to answer it.
     greeting: bool,
+    /// The theme's palette, until it has followed the hello.
+    palette: Option<Palette>,
     ended: Option<Disconnect>,
     state: State,
 }
@@ -374,6 +378,7 @@ impl Link {
             readable: true,
             partial: false,
             greeting: false,
+            palette: None,
             ended: None,
             state,
         })
@@ -387,11 +392,25 @@ impl Link {
         self.flush();
     }
 
-    /// Puts the hello ahead of any request queued while it waited for the core's.
+    /// Keeps the theme's `palette` to send right after the hello (ADR-0049). A core that speaks
+    /// a version without it is sent none, and [`Link::take_unthemed`] then says so.
+    pub fn theme(&mut self, palette: Palette) {
+        self.palette = Some(palette);
+    }
+
+    /// Puts the hello, and the palette after it, ahead of any request queued while it waited
+    /// for the core's.
     fn answer(&mut self) {
         if let (true, Some(version)) = (self.greeting, self.decoder.version()) {
             let mut hello = Vec::new();
-            let encoded = Request::Hello { version }.encode(&mut hello);
+            let mut encoded = Request::Hello { version }.encode(&mut hello);
+            if let Some(palette) = self.palette.take().map(Request::Palette) {
+                if palette.since() <= version {
+                    encoded = encoded.and_then(|()| palette.encode(&mut hello));
+                } else {
+                    self.state.unthemed = true;
+                }
+            }
             if encoded.is_ok() {
                 self.state.out.splice(..0, hello);
             }
@@ -669,6 +688,12 @@ impl Link {
         self.state.unhardened.take()
     }
 
+    /// Returns whether the core turned out too old to take the theme's palette, once. Its
+    /// panes are then in Graphite Grid, and the window is to draw the same.
+    pub fn take_unthemed(&mut self) -> bool {
+        std::mem::take(&mut self.state.unthemed)
+    }
+
     /// Returns whether the core has answered the version check.
     #[must_use]
     pub fn is_greeted(&self) -> bool {
@@ -868,6 +893,30 @@ mod tests {
             assert_eq!(link.disconnected(), None);
             let open = Request::ListMarkdown { pane: 1 };
             assert_eq!(link.send(open), spoken >= open.since());
+        }
+    }
+
+    /// ADR-0049: the palette goes right after the hello, and a version 13 core gets none.
+    #[test]
+    fn the_palette_follows_the_hello_unless_the_core_is_too_old_for_it() {
+        let palette = Palette {
+            background: 0x000d_1117,
+            ..Palette::GRAPHITE_GRID
+        };
+        for theirs in [VERSION, 13] {
+            let (mut link, mut peer) = linked().unwrap();
+            link.theme(palette);
+            assert!(link.send(Request::Quit));
+            peer.notices(&[Notice::Hello { version: theirs }]).unwrap();
+            assert!(turn_until(&mut link, |link| link.is_greeted()));
+            let mut sent = vec![shown(Request::Hello { version: theirs })];
+            if theirs == VERSION {
+                sent.push(shown(Request::Palette(palette)));
+            }
+            sent.push(shown(Request::Quit));
+            assert_eq!(peer.requests(sent.len()), sent);
+            assert_eq!(link.take_unthemed(), theirs == 13);
+            assert!(!link.take_unthemed(), "said once");
         }
     }
 

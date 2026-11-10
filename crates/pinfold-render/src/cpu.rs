@@ -2,7 +2,7 @@
 
 use std::num::NonZeroU32;
 
-use pinfold_proto::{Cell, DEFAULT_BACKGROUND, Frame};
+use pinfold_proto::{Cell, Frame};
 use softbuffer::{Context, Rect, Surface};
 
 use crate::font::Font;
@@ -40,6 +40,11 @@ pub trait Renderer {
         false
     }
 
+    /// Sets the theme's colours: the default background, which is the clear, the padding and
+    /// the colour [`Renderer::set_background_opacity`] makes translucent, and the cursor's
+    /// background and text, or none for a cursor that inverts its cell.
+    fn set_colours(&mut self, background: u32, cursor: Option<(u32, u32)>);
+
     /// Draws `frame`, redrawing only rows that changed where the surface allows it.
     ///
     /// # Errors
@@ -48,8 +53,8 @@ pub trait Renderer {
     fn draw(&mut self, frame: &Frame) -> Result<(), RenderError>;
 }
 
-/// Copies a frame's cells into `cells`, with the cursor's cell inverted, as every renderer
-/// draws them.
+/// Copies a frame's cells into `cells`, with the cursor's cell in `cursor`, a background and a
+/// text colour, or inverted with none, as every renderer draws them.
 ///
 /// ```
 /// use pinfold_proto::{Cell, Frame};
@@ -58,10 +63,12 @@ pub trait Renderer {
 /// let cell = Cell { character: 'a', foreground: 1, background: 2 };
 /// let frame = Frame { rows: 1, columns: 1, cells: vec![cell], cursor: Some((0, 0)), ..Frame::default() };
 /// let mut cells = Vec::new();
-/// cells_with_cursor(&frame, &mut cells);
+/// cells_with_cursor(&frame, &mut cells, None);
 /// assert_eq!((cells[0].foreground, cells[0].background), (2, 1));
+/// cells_with_cursor(&frame, &mut cells, Some((3, 4)));
+/// assert_eq!((cells[0].foreground, cells[0].background), (4, 3));
 /// ```
-pub fn cells_with_cursor(frame: &Frame, cells: &mut Vec<Cell>) {
+pub fn cells_with_cursor(frame: &Frame, cells: &mut Vec<Cell>, cursor: Option<(u32, u32)>) {
     cells.clear();
     cells.extend_from_slice(&frame.cells);
     if let Some((row, column)) = frame.cursor {
@@ -69,7 +76,7 @@ pub fn cells_with_cursor(frame: &Frame, cells: &mut Vec<Cell>) {
         // A wide glyph's second half sits on the next cell, which must invert with it.
         let span = cells.get(at).map_or(1, |cell| cell_span(cell.character));
         for cell in cells.iter_mut().skip(at).take(span) {
-            cell.invert();
+            cell.recolour(cursor);
         }
     }
 }
@@ -84,6 +91,7 @@ pub struct CpuRenderer<D, W> {
     /// What the visible buffer holds, so unchanged rows can be skipped.
     drawn: Vec<Cell>,
     next: Vec<Cell>,
+    cursor: Option<(u32, u32)>,
 }
 
 impl<D, W> CpuRenderer<D, W>
@@ -106,6 +114,7 @@ where
             padding: Padding::default(),
             drawn: Vec::new(),
             next: Vec::new(),
+            cursor: None,
         })
     }
 }
@@ -140,6 +149,12 @@ where
         self.drawn.clear();
     }
 
+    fn set_colours(&mut self, background: u32, cursor: Option<(u32, u32)>) {
+        (self.painter.background, self.cursor) = (background, cursor);
+        // The padding and every row are to be drawn again.
+        self.drawn.clear();
+    }
+
     fn draw(&mut self, frame: &Frame) -> Result<(), RenderError> {
         let (Some(width), Some(height)) =
             (NonZeroU32::new(self.width), NonZeroU32::new(self.height))
@@ -147,7 +162,7 @@ where
             return Ok(());
         };
         let columns = usize::from(frame.columns).max(1);
-        cells_with_cursor(frame, &mut self.next);
+        cells_with_cursor(frame, &mut self.next, self.cursor);
         self.surface.resize(width, height)?;
         let mut buffer = self.surface.buffer_mut()?;
         // Only a buffer that holds the previous frame can keep its unchanged rows.
@@ -158,7 +173,7 @@ where
         };
         let mut canvas = canvas.inset(self.padding);
         if full {
-            canvas.clear(DEFAULT_BACKGROUND);
+            canvas.clear(self.painter.background);
         }
         let (_, cell_height) = self.painter.cell_size();
         let mut damage = Vec::new();
@@ -213,7 +228,7 @@ mod tests {
             ..Frame::default()
         };
         let mut cells = Vec::new();
-        cells_with_cursor(&frame, &mut cells);
+        cells_with_cursor(&frame, &mut cells, None);
         let backgrounds: Vec<u32> = cells.iter().map(|cell| cell.background).collect();
         assert_eq!(backgrounds, [1, 1, 2]);
     }
@@ -232,7 +247,7 @@ mod tests {
             ..Frame::default()
         };
         let mut cells = Vec::new();
-        cells_with_cursor(&frame, &mut cells);
+        cells_with_cursor(&frame, &mut cells, None);
         assert_eq!(cells[0].foreground, 2 | BOLD);
         assert_eq!(cells[0].background, 1);
     }
