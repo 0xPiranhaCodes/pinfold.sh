@@ -93,8 +93,10 @@ still welcome if it adds a case not listed here. Report bugs with the
   you run sandboxed agents. Linux is not affected. `strip_secrets = true` in `pinfold.toml`
   keeps secret-looking variables out of the core and every pane PinFold starts, but not out of
   what a shell's startup files export, and an agent's `keep_env` then cannot bring its key back
-  ([configuration](../configuration.md#strip_secrets)). A one-time warning is decided but not
-  yet built ([ADR-0047](../adr/0047-macos-sandbox-reads-other-processes-environment.md)).
+  ([configuration](../configuration.md#strip_secrets)). Without it, the first sandboxed agent of
+  a session shows a one-time notice naming the secret-looking variables PinFold's panes got,
+  never their values; it cannot see one a shell exports after it starts
+  ([ADR-0047](../adr/0047-macos-sandbox-reads-other-processes-environment.md)).
 
 ## Not yet checked on an installed build
 

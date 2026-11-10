@@ -142,6 +142,15 @@ is not stripped. PinFold never logs a variable's value. With
 [`strip_secrets`](#strip_secrets) on, `keep_env` cannot bring a variable back: the core never
 has it, so an agent that reads its API key from an exported variable must get it another way.
 
+On macOS a sandboxed agent can still read the environment of your other processes, every
+pane's shell among them, through `sysctl(KERN_PROCARGS2)`
+([ADR-0047](adr/0047-macos-sandbox-reads-other-processes-environment.md)). So the first time
+the core launches a sandboxed agent, if its own environment, which every pane gets, holds names
+that look like secrets and [`strip_secrets`](#strip_secrets) is off, the window shows a one-time notice under the pane that counts them and
+names the first five, never their values, and the core's log names them too. It cannot see a
+variable a shell exports after it starts, by hand or from its startup files, so no notice does
+not mean no secret in a pane. Linux shows none, as it is not affected.
+
 The sandbox hides `~/.ssh`, the directory of this file, PinFold's state directory, the common
 credential stores, and every other pane's terminal device, and where any of those, or this
 file, lead through a symlink ([ADR-0041](adr/0041-sandbox-hides-writes-not-secrets.md)). The

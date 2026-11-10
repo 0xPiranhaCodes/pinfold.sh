@@ -180,6 +180,9 @@ struct State {
     raised: bool,
     /// Set when the core lacks the hardened runtime: whether it could tell (ADR-0044).
     unhardened: Option<bool>,
+    /// How many secret-looking variables a sandboxed agent can read on macOS, and the first few
+    /// names (ADR-0047).
+    secrets: Option<(u32, String)>,
     /// Whether the core is too old to take a palette, so it draws Graphite Grid (ADR-0049).
     unthemed: bool,
     /// The OSC 12 and OSC 11 colours of each pane that has either, shown or not.
@@ -252,6 +255,7 @@ impl State {
             Notice::Markdown { pane, names } => self.markdown = Some((pane, names.to_owned())),
             Notice::Raise => self.raised = true,
             Notice::Unhardened { checked } => self.unhardened = Some(checked),
+            Notice::Secrets { count, names } => self.secrets = Some((count, names.to_owned())),
             Notice::Colours {
                 pane,
                 cursor,
@@ -728,6 +732,12 @@ impl Link {
         self.state.unhardened.take()
     }
 
+    /// Returns the secret-looking variables a sandboxed agent can read on macOS, if the core
+    /// said so since the last call: how many, and the first few names. It says so once a session.
+    pub fn take_secrets(&mut self) -> Option<(u32, String)> {
+        self.state.secrets.take()
+    }
+
     /// Returns whether the core turned out too old to take the theme's palette, once. Its
     /// panes are then in Graphite Grid, and the window is to draw the same.
     pub fn take_unthemed(&mut self) -> bool {
@@ -936,32 +946,34 @@ mod tests {
         }
     }
 
-    /// ADR-0049: the palette goes right after the hello, and a version 13 core gets none.
+    /// ADR-0049: the palette goes right after the hello, and a core too old for it, as
+    /// version 13 was before `OLDEST` passed it, gets none.
     #[test]
     fn the_palette_follows_the_hello_unless_the_core_is_too_old_for_it() {
         let palette = Palette {
             background: 0x000d_1117,
             ..Palette::GRAPHITE_GRID
         };
-        for theirs in [VERSION, 13] {
+        for theirs in [VERSION, OLDEST] {
+            let themed = theirs >= Request::Palette(palette).since();
             let (mut link, mut peer) = linked().unwrap();
             link.theme(palette);
             assert!(link.send(Request::Quit));
             peer.notices(&[Notice::Hello { version: theirs }]).unwrap();
             assert!(turn_until(&mut link, |link| link.is_greeted()));
             let mut sent = vec![shown(Request::Hello { version: theirs })];
-            if theirs == VERSION {
+            if themed {
                 sent.push(shown(Request::Palette(palette)));
             }
             sent.push(shown(Request::Quit));
             assert_eq!(peer.requests(sent.len()), sent);
-            assert_eq!(link.take_unthemed(), theirs == 13);
+            assert_eq!(link.take_unthemed(), !themed);
             assert!(!link.take_unthemed(), "said once");
-            // A theme saved later goes at once, and a version 13 core is still sent none.
+            // A theme saved later goes at once, and a core too old is still sent none.
             link.theme(Palette::GRAPHITE_GRID);
             assert!(link.send(Request::Quit));
             let mut sent = vec![shown(Request::Quit)];
-            if theirs == VERSION {
+            if themed {
                 sent.insert(0, shown(Request::Palette(Palette::GRAPHITE_GRID)));
             }
             assert_eq!(peer.requests(sent.len()), sent);

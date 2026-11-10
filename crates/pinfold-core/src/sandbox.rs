@@ -463,6 +463,60 @@ pub fn secret_name(name: &OsStr) -> bool {
         || SECRET_WORDS.iter().any(|word| name.contains(word))
 }
 
+/// Most names the macOS notice lists (ADR-0047).
+const LISTED: usize = 5;
+/// Longest name it shows whole, in characters.
+const NAME_SHOWN: usize = 40;
+
+/// What the window's one-time notice says of `names`, the variables the core started with and
+/// gives its panes, on macOS with `strip_secrets` off: how many [`secret_name`] matches, and the
+/// first few, sorted, escaped and capped, ending in `…` if more. Nothing on other systems, as
+/// only macOS lets a sandboxed agent read other processes' environment (ADR-0047), or when none
+/// match. It takes names alone, so no value can reach the notice or the log.
+///
+/// ```
+/// use pinfold_core::sandbox::exposed;
+/// let names = ["PATH", "GITHUB_TOKEN", "AWS_PROFILE"].map(Into::into);
+/// let told = exposed(false, names.clone());
+/// if cfg!(target_os = "macos") {
+///     assert_eq!(told, Some((2, "AWS_PROFILE, GITHUB_TOKEN".to_owned())));
+/// } else {
+///     assert_eq!(told, None);
+/// }
+/// assert_eq!(exposed(true, names), None);
+/// ```
+pub fn exposed(
+    strip_secrets: bool,
+    names: impl IntoIterator<Item = OsString>,
+) -> Option<(u32, String)> {
+    if !cfg!(target_os = "macos") || strip_secrets {
+        return None;
+    }
+    let mut found: Vec<String> = names
+        .into_iter()
+        .filter(|name| secret_name(name))
+        .map(|name| name.to_string_lossy().into_owned())
+        .collect();
+    found.sort_unstable();
+    found.dedup();
+    let mut listed = String::new();
+    for name in found.iter().take(LISTED) {
+        if !listed.is_empty() {
+            listed.push_str(", ");
+        }
+        let shown: String = name.chars().take(NAME_SHOWN).collect();
+        crate::tool::escape(&shown, &mut listed);
+        if shown.len() < name.len() {
+            listed.push('…');
+        }
+    }
+    if found.len() > LISTED {
+        listed.push_str(", …");
+    }
+    let count = u32::try_from(found.len()).unwrap_or(u32::MAX);
+    (count > 0).then_some((count, listed))
+}
+
 /// Whether [`strip_inherited`] strips: the config's `strip_secrets`, set once at start.
 static STRIP: AtomicBool = AtomicBool::new(false);
 
@@ -1034,6 +1088,53 @@ mod tests {
 
     /// The `PATH` launchd gives an app.
     const LAUNCHD: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+    #[test]
+    fn only_macos_names_secret_looking_variables_and_never_a_value() {
+        let value = "ghp_value_never_shown";
+        let env = [
+            ("GITHUB_TOKEN", value),
+            ("PATH", "/bin"),
+            ("OPENAI_API_KEY", value),
+            ("GITHUB_TOKEN", value),
+        ];
+        let names = env.map(|(name, _)| OsString::from(name));
+        let told = exposed(false, names.clone());
+        if cfg!(target_os = "macos") {
+            let (count, listed) = told.unwrap();
+            assert_eq!(
+                (count, listed.as_str()),
+                (2, "GITHUB_TOKEN, OPENAI_API_KEY")
+            );
+            assert!(!listed.contains(value));
+        } else {
+            assert_eq!(told, None, "Linux is not affected");
+        }
+        assert_eq!(exposed(true, names), None, "strip_secrets removes them");
+        assert_eq!(exposed(false, [OsString::from("PATH")]), None);
+    }
+
+    #[test]
+    fn the_notice_caps_its_names_and_escapes_them() {
+        if !cfg!(target_os = "macos") {
+            return;
+        }
+        let mut names: Vec<OsString> = (0..9).map(|n| format!("A{n}_TOKEN").into()).collect();
+        names.push(format!("{}_TOKEN\u{202e}", "X".repeat(60)).into());
+        let (count, listed) = exposed(false, names).unwrap();
+        assert_eq!(count, 10);
+        assert_eq!(
+            listed,
+            "A0_TOKEN, A1_TOKEN, A2_TOKEN, A3_TOKEN, A4_TOKEN, …"
+        );
+        let long = [format!("BAD\u{1b}_{}_TOKEN", "X".repeat(60)).into()];
+        let (_, listed) = exposed(false, long).unwrap();
+        assert!(
+            listed.starts_with("BAD^[_XXX") && listed.ends_with('…'),
+            "{listed}"
+        );
+        assert_eq!(listed.chars().count(), NAME_SHOWN + 2);
+    }
 
     fn strings(args: &[OsString]) -> Vec<&str> {
         args.iter().map(|arg| arg.to_str().unwrap()).collect()

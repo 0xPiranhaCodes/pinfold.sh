@@ -73,6 +73,12 @@ From 13, `OLDEST` is 12, so a version 11 core restarts the session.
 
 From 14, `OLDEST` is 13, so a version 12 core restarts the session.
 
+| Change in 15 | Spoken version 14 |
+|---|---|
+| `Notice::Secrets` ([ADR-0047](0047-macos-sandbox-reads-other-processes-environment.md)) | The core never sends it: the window shows no notice of secret-looking variables a sandboxed agent can read on macOS, and the core's log still names them. |
+
+From 15, `OLDEST` is 14, so a version 13 core restarts the session.
+
 **Raising the version.** A PR that changes the link raises `VERSION`, gives each new message or
 value a `since` of the new version, and adds a row to this table saying how the older version
 degrades. A change with no safe degradation, such as a new field every frame needs, says so
