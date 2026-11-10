@@ -1,7 +1,8 @@
 # ADR-0049: Themes are data the window resolves and the core is told
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-11-10
+- **Accepted by:** coordinator review, 2026-11-10
 
 ## Context
 
@@ -218,7 +219,7 @@ The repository is MIT OR Apache-2.0, and `deny.toml` allows only those two. All 
 | One Dark | `Atom One Dark`, which gives atom/atom `packages/one-dark-ui` | MIT in `licenses.yml`; MIT, Copyright (c) 2011-2022 GitHub Inc. | yes |
 | Nord | `Nord`, which gives nordtheme/iterm2 | MIT in `licenses.yml`; MIT, Copyright (c) 2016-present Sven Greb | yes |
 | Catppuccin Mocha, Catppuccin Latte | the schemes of those names, which give catppuccin/palette | MIT in `licenses.yml`; MIT, Copyright (c) 2021 Catppuccin | yes |
-| Gruvbox Dark | `Gruvbox Dark`, which gives morhetz/gruvbox | MIT in `licenses.yml`. Upstream has no licence file: its README says "MIT/X11" and its `package.json` says `"license": "MIT"`, author Pavel Pertsev | yes, with the MIT text under the author's name from `package.json`. The coordinator should confirm this one. |
+| Gruvbox Dark | `Gruvbox Dark`, which gives morhetz/gruvbox | MIT in `licenses.yml`. Upstream has no licence file: its README says "MIT/X11" and its `package.json` says `"license": "MIT"`, author Pavel Pertsev | yes, with the MIT text under the author's name from `package.json`. Confirmed in review: the README's MIT/X11 statement is the grant. |
 | Dracula | `Dracula.itermcolors` in dracula/iterm at `e5749bcd0776` | MIT, Copyright (c) 2013-present Dracula Theme. The collection's own `Dracula` is `unknown`, so it is not the source | yes |
 | Solarized Dark, Solarized Light | `iterm2-colors-solarized/` in altercation/solarized at `62f656a02f93` | MIT, Copyright (c) 2011 Ethan Schoonover. The collection's `iTerm2 Solarized` pair is GPL-2.0-or-later and `Solarized Dark Patched` is `unknown`, so they are not the source | yes |
 | Tokyo Night | the terminal colours of `themes/tokyo-night-color-theme.json` in tokyo-night/tokyo-night-vscode-theme at `7c0f11eaef32` | MIT, Copyright (c) 2018-present Enkia. The collection's `TokyoNight` schemes are Apache-2.0, from the folke/tokyonight.nvim port; the MIT original keeps every bundled theme under one licence | yes |
