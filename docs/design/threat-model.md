@@ -304,7 +304,11 @@ through, and an unconditional `(deny process-info*)` stops `python3` from runnin
 (`tests/macos/sandbox-procargs.sh`). [ADR-0047](../adr/0047-macos-sandbox-reads-other-processes-environment.md),
 accepted 2026-11-10, answers it with a one-time notice on macOS that names the secret-looking
 variables the core started with and gives panes, and an opt-in, `strip_secrets`, with which the
-launcher starts the core, and the core every pane, without them. Neither is built yet. Neither
+launcher starts the core, and the core every pane, without them. The opt-in is built
+([configuration](../configuration.md#strip_secrets), `tests/macos/strip-secrets.sh` shows a
+marker exported before launch HIDDEN from the core and a pane with it on, LEAKS with it off);
+the notice is not yet. With the opt-in on, `keep_env` cannot bring a stripped variable back, as
+the core never holds it. Neither
 sees a variable a shell exports after it starts, such as from its startup files, nor covers
 your processes outside PinFold; running agents as another user, which would, is left for after
 v0.1. Linux is not affected, as the agent has its own PID namespace and `/proc`. The
