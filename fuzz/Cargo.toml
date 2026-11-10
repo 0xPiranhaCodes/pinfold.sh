@@ -64,6 +64,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "ghostty_theme"
+path = "fuzz_targets/ghostty_theme.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "tool_keys"
 path = "fuzz_targets/tool_keys.rs"
 test = false
