@@ -49,13 +49,7 @@ pub(crate) fn open_pair() -> io::Result<(OwnedFd, OwnedFd)> {
     let flags = libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC;
     // SAFETY: posix_openpt takes integer flags and returns a new fd or -1.
     let open = || check(unsafe { libc::posix_openpt(flags) });
-    // macOS refuses with ENXIO when another PTY closes while this one opens with every slot
-    // in use: the kernel picks the slot past the end, then finds one free and grows nothing.
-    // Once more takes the freed slot; a table truly full refuses again.
-    let master = match open() {
-        Err(error) if error.raw_os_error() == Some(libc::ENXIO) => open(),
-        opened => opened,
-    }?;
+    let master = open_master(open)?;
     // SAFETY: posix_openpt succeeded, so the fd is open and owned only by this function.
     let master = unsafe { OwnedFd::from_raw_fd(master) };
     // SAFETY: `master` is an open PTY master.
@@ -76,6 +70,37 @@ pub(crate) fn open_pair() -> io::Result<(OwnedFd, OwnedFd)> {
     let slave = check(unsafe { libc::open(name.as_ptr(), flags) })?;
     // SAFETY: open succeeded, so the fd is open and owned only by this function.
     Ok((master, unsafe { OwnedFd::from_raw_fd(slave) }))
+}
+
+/// How many times in all a PTY master is opened while it loses the race for a slot. Under
+/// `tests/pty-loop.sh` two tries still lost once in 384,000 opens, and four never did.
+const OPEN_TRIES: usize = 4;
+
+/// errno -6, private to the macOS kernel: an open of `/dev/ptmx` that lost the race for a slot
+/// to another open ten times in a row, which the kernel returns instead of trying again.
+const EREDRIVEOPEN: i32 = -6;
+
+/// Opens a master with `open`, again while it loses the race for a slot. macOS refuses with
+/// ENXIO when another PTY closes while this one opens with every slot in use: the kernel picks
+/// the slot past the end, then finds one free and grows nothing. It refuses with EREDRIVEOPEN
+/// when other opens took the slot it picked. A later try takes a slot; a table truly full
+/// refuses each time. The kernel's private code is reported as a busy resource, not an errno.
+fn open_master(mut open: impl FnMut() -> io::Result<libc::c_int>) -> io::Result<libc::c_int> {
+    let raced =
+        |error: &io::Error| matches!(error.raw_os_error(), Some(libc::ENXIO | EREDRIVEOPEN));
+    let mut tries = 1;
+    loop {
+        match open() {
+            Err(error) if raced(&error) && tries < OPEN_TRIES => tries += 1,
+            Err(error) if error.raw_os_error() == Some(EREDRIVEOPEN) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::ResourceBusy,
+                    "other PTYs opening at once took every slot this one tried",
+                ));
+            }
+            opened => return opened,
+        }
+    }
 }
 
 impl Pty {
@@ -344,6 +369,44 @@ mod tests {
         // SAFETY: sysconf reads a limit and touches no memory.
         let limit = unsafe { libc::sysconf(libc::_SC_OPEN_MAX) };
         eprintln!("{runs} spawns, {each:?} each, open-files limit {limit}");
+    }
+
+    /// Many PTYs opened at once, as `tests/pty-loop.sh` runs it from several processes (#383).
+    /// Each closes its replica first: a master closed first can leave another process's grantpt
+    /// restarting forever on macOS, which the loop counts apart as a hang.
+    #[test]
+    #[ignore = "a load for tests/pty-loop.sh, not a check on its own"]
+    fn many_ptys_open_at_once() {
+        let open = || open_pair().map(|(master, slave)| drop((slave, master)));
+        let threads: Vec<_> = (0..16)
+            .map(|_| thread::spawn(move || (0..1000).try_for_each(|_| open())))
+            .collect();
+        for thread in threads {
+            thread.join().unwrap().unwrap();
+        }
+    }
+
+    #[test]
+    fn a_master_that_lost_the_race_for_a_slot_is_opened_again() {
+        let failing = |codes: Vec<i32>| {
+            let mut codes = codes.into_iter();
+            move || {
+                codes
+                    .next()
+                    .map_or(Ok(7), |code| Err(io::Error::from_raw_os_error(code)))
+            }
+        };
+        assert_eq!(
+            open_master(failing(vec![EREDRIVEOPEN, libc::ENXIO, EREDRIVEOPEN])).unwrap(),
+            7
+        );
+        let refused = open_master(failing(vec![EREDRIVEOPEN; OPEN_TRIES])).unwrap_err();
+        assert_eq!(refused.kind(), ErrorKind::ResourceBusy);
+        assert_eq!(refused.raw_os_error(), None);
+        let full = open_master(failing(vec![libc::ENXIO; OPEN_TRIES])).unwrap_err();
+        assert_eq!(full.raw_os_error(), Some(libc::ENXIO));
+        let denied = open_master(failing(vec![libc::EACCES, EREDRIVEOPEN])).unwrap_err();
+        assert_eq!(denied.raw_os_error(), Some(libc::EACCES));
     }
 
     #[test]
