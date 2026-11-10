@@ -8,7 +8,9 @@
 # `... 50 1 the_users_shell` runs the test alone; `... 50 8` runs it under the rest of the
 # suite, and `... 400 8 a_blocked_turn_wakes` checks for the hang of #387. Before #342 the test gave the
 # user's interactive login zsh LOGIN_WAIT, 10 s, and under `... 50 8` failed 50 of 50 runs
-# with `TimedOut: your shell took over 10 s to report its PATH`.
+# with `TimedOut: your shell took over 10 s to report its PATH`. It then prints how many runs
+# each test failed in and each panic message's count (#389): `Spawn` and `Os { code: -6 }`
+# are PTY exhaustion (#383, #392).
 set -eu
 runs=${1:-50}
 copies=${2:-8}
@@ -25,3 +27,8 @@ failed=$(find "$out" -name 'run*.txt' | wc -l | tr -d ' ')
 path=$(grep -l "the_users_shell_reports_its_path --- FAILED" "$out"/run*.txt 2>/dev/null | wc -l | tr -d ' ')
 echo "runs=$runs copies=$copies failed=$failed path_test_failed=$path"
 grep -h -A3 "the_users_shell_reports_its_path' panicked" "$out"/run*.txt 2>/dev/null || true
+# Runs each test failed in, then each distinct panic message with its count (#389).
+echo "failing tests:"
+sed -n "s/^thread '\([^']*\)' .*panicked at.*/\1/p" "$out"/run*.txt 2>/dev/null | sort | uniq -c | sort -rn
+echo "panic messages:"
+grep -h -A1 "panicked at" "$out"/run*.txt 2>/dev/null | grep -v -e "panicked at" -e "^--" | sort | uniq -c | sort -rn | head -30
