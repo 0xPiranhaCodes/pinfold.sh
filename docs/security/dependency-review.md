@@ -115,6 +115,9 @@ new trusted entry needs the same notes as an exemption.
 `regenerate imports` and after certifying. Never add an exemption to make CI green for a
 crate you could review in the same PR.
 
+Tier 1 of #302, the exempt crates that ship with `unsafe`, FFI or a build script, is
+queued for review in [vet-review-queue.md](vet-review-queue.md), with a pre-read of each.
+
 The exemption count, by criteria, comes from:
 
 ```sh
