@@ -11,15 +11,16 @@ use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::{Cell as GridCell, Flags, LineLength};
 use alacritty_terminal::term::color;
 use alacritty_terminal::term::{Config, Term, TermMode};
-use alacritty_terminal::vte::ansi::{Color, Processor};
-use pinfold_proto::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode};
+use alacritty_terminal::vte::ansi::{Color, Processor, Rgb};
+use pinfold_proto::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode, Palette};
 
 use crate::marks::{AgentMarks, Marks, ShellMarks, ShellPhase, WorkingDirectory};
 use crate::scrollback::Scrollback;
 use crate::search::{self, CopyStep, Copying, Position, Search, SearchStep, Selection};
 
-/// The slot Alacritty's colour table gives the default background.
+/// The slots Alacritty's colour table gives the default background and the cursor.
 const BACKGROUND_SLOT: usize = 257;
+const CURSOR_SLOT: usize = 258;
 
 /// Larger sizes are clamped, so a bad resize cannot allocate gigabytes of cells.
 pub const MAX_DIMENSION: u16 = pinfold_proto::link::MAX_DIMENSION;
@@ -122,44 +123,30 @@ pub trait VtEngine {
     /// Nothing if no command has started. Output can fake the marks, and the range is empty
     /// when its focus comes before its anchor.
     fn last_output(&self) -> Option<Selection>;
+
+    /// Returns the cursor colour and the default background the program set with OSC 12 and
+    /// OSC 11, each nothing until set and again once reset.
+    fn colours(&self) -> (Option<u32>, Option<u32>);
 }
 
-/// The "Graphite Grid" ground and text colours (`docs/design/ui/`).
-const BACKGROUND: u32 = 0x0012_1212;
-const FOREGROUND: u32 = 0x00e2_e5ea;
-
-// shortcut: the design has no ANSI palette, so this reuses its tokens, and magenta is a stand-in.
-const ANSI: [u32; 16] = [
-    0x0012_151a,
-    0x00ff_8a8a,
-    0x0063_d29a,
-    0x00f5_b544,
-    0x007a_a7ff,
-    0x00d9_a7e0,
-    0x009c_c0ff,
-    0x00c9_cdd4,
-    0x0034_3a44,
-    0x00ff_8a8a,
-    0x0063_d29a,
-    0x00f5_b544,
-    0x009c_c0ff,
-    0x00d9_a7e0,
-    0x00c4_d9ff,
-    0x00e2_e5ea,
-];
-
-/// The standard 256-colour table: 16 ANSI colours, a 6×6×6 cube and a grey ramp.
-fn indexed(index: usize) -> u32 {
+/// The standard 256-colour table: the palette's 16 ANSI colours, a 6×6×6 cube and a grey ramp.
+/// Past it, the default background is the palette's and every other slot is its foreground.
+fn indexed(palette: &Palette, index: usize) -> u32 {
     let level = |step: usize| if step == 0 { 0 } else { 55 + 40 * step as u32 };
     match index {
-        0..=15 => ANSI[index],
+        0..=15 => palette.ansi[index],
         16..=231 => {
             let offset = index - 16;
             level(offset / 36) << 16 | level(offset / 6 % 6) << 8 | level(offset % 6)
         }
         232..=255 => (8 + 10 * (index as u32 - 232)) * 0x0001_0101,
-        _ => FOREGROUND,
+        BACKGROUND_SLOT => palette.background,
+        _ => palette.foreground,
     }
+}
+
+fn rgb(rgb: Rgb) -> u32 {
+    u32::from(rgb.r) << 16 | u32::from(rgb.g) << 8 | u32::from(rgb.b)
 }
 
 #[derive(Clone, Copy)]
@@ -333,6 +320,8 @@ pub struct AlacrittyEngine {
     marks: Marks,
     replies: Replies,
     scrollback: Arc<Mutex<Scrollback>>,
+    /// What named and indexed colours resolve through, which every pane of a core shares.
+    palette: Arc<Mutex<Palette>>,
     /// The store's number for the view's top row, or nothing at the live screen. A number
     /// stays on its row as output arrives, so the view holds still without being told.
     view: Option<usize>,
@@ -346,6 +335,13 @@ impl AlacrittyEngine {
     /// Creates a blank terminal. Rows leaving the primary screen go to its scrollback store.
     #[must_use]
     pub fn new(rows: u16, columns: u16) -> Self {
+        let palette = Arc::new(Mutex::new(Palette::GRAPHITE_GRID));
+        Self::with_palette(rows, columns, palette)
+    }
+
+    /// Creates a blank terminal that draws in `palette`, as it is at each frame (ADR-0049).
+    #[must_use]
+    pub fn with_palette(rows: u16, columns: u16, palette: Arc<Mutex<Palette>>) -> Self {
         let replies = Replies::default();
         let config = Config {
             scrolling_history: 0,
@@ -363,6 +359,7 @@ impl AlacrittyEngine {
             marks: Marks::default(),
             replies,
             scrollback,
+            palette,
             view: None,
             output: None,
         }
@@ -383,18 +380,20 @@ impl AlacrittyEngine {
     }
 
     /// Copies the view's rows of history into `frame`, and returns how many there are.
-    fn frame_history(&self, frame: &mut Frame) -> usize {
+    fn frame_history(&self, frame: &mut Frame, palette: &Palette) -> usize {
         let Ok(mut store) = self.scrollback.lock() else {
             return 0;
         };
         let back = self.rows_back(&store);
         let first = store.len() - back;
-        let blank = self.cell(&GridCell::default());
+        let blank = self.cell(palette, &GridCell::default());
         let columns = usize::from(frame.columns);
         store.read_rows(first, back.min(usize::from(frame.rows)), |row| {
             let end = frame.cells.len() + columns;
             let cells = row.iter().take(columns);
-            frame.cells.extend(cells.map(|cell| self.cell(cell)));
+            frame
+                .cells
+                .extend(cells.map(|cell| self.cell(palette, cell)));
             frame.cells.resize(end, blank);
         });
         frame.cells.len() / columns.max(1)
@@ -475,23 +474,20 @@ impl AlacrittyEngine {
 }
 
 impl AlacrittyEngine {
-    fn colour(&self, colour: Color) -> u32 {
+    /// A program's own colour for a slot, from OSC 4, 10, 11 or 12, comes before the palette's.
+    fn colour(&self, palette: &Palette, colour: Color) -> u32 {
         let index = match colour {
-            Color::Spec(rgb) => {
-                return u32::from(rgb.r) << 16 | u32::from(rgb.g) << 8 | u32::from(rgb.b);
-            }
+            Color::Spec(direct) => return rgb(direct),
             Color::Indexed(index) => usize::from(index),
             Color::Named(name) => name as usize,
         };
-        match self.term.colors()[index.min(color::COUNT - 1)] {
-            Some(rgb) => u32::from(rgb.r) << 16 | u32::from(rgb.g) << 8 | u32::from(rgb.b),
-            None if index == BACKGROUND_SLOT => BACKGROUND,
-            None => indexed(index),
-        }
+        let set = self.term.colors()[index.min(color::COUNT - 1)];
+        set.map_or_else(|| indexed(palette, index), rgb)
     }
 
-    fn cell(&self, cell: &GridCell) -> Cell {
-        let (mut foreground, mut background) = (self.colour(cell.fg), self.colour(cell.bg));
+    fn cell(&self, palette: &Palette, cell: &GridCell) -> Cell {
+        let mut foreground = self.colour(palette, cell.fg);
+        let mut background = self.colour(palette, cell.bg);
         if cell.flags.contains(Flags::INVERSE) {
             std::mem::swap(&mut foreground, &mut background);
         }
@@ -572,12 +568,17 @@ impl VtEngine for AlacrittyEngine {
         let grid = self.term.grid();
         (frame.rows, frame.columns) = self.size();
         frame.cells.clear();
-        let history = self.frame_history(frame);
+        // A poisoned lock still holds a whole palette, as a palette is set in one write.
+        let palette = *self
+            .palette
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let history = self.frame_history(frame, &palette);
         for line in 0..frame.rows.saturating_sub(history as u16) {
             let row = &grid[Line(i32::from(line))];
-            frame
-                .cells
-                .extend((0..grid.columns()).map(|column| self.cell(&row[Column(column)])));
+            frame.cells.extend(
+                (0..grid.columns()).map(|column| self.cell(&palette, &row[Column(column)])),
+            );
         }
         let point = grid.cursor.point;
         // Input lands at the live cursor, so none is shown over history.
@@ -738,6 +739,14 @@ impl VtEngine for AlacrittyEngine {
         };
         Some(Selection { anchor, focus })
     }
+
+    fn colours(&self) -> (Option<u32>, Option<u32>) {
+        let colours = self.term.colors();
+        (
+            colours[CURSOR_SLOT].map(rgb),
+            colours[BACKGROUND_SLOT].map(rgb),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -746,6 +755,10 @@ mod tests {
 
     use super::*;
     use crate::marks::AgentSignal;
+
+    const BACKGROUND: u32 = Palette::GRAPHITE_GRID.background;
+    const FOREGROUND: u32 = Palette::GRAPHITE_GRID.foreground;
+    const ANSI: [u32; 16] = Palette::GRAPHITE_GRID.ansi;
 
     fn feed(engine: &mut AlacrittyEngine, bytes: &[u8]) -> Vec<u8> {
         let mut replies = Vec::new();
@@ -1133,6 +1146,84 @@ mod tests {
         );
     }
 
+    const THEME: Palette = Palette {
+        background: 0x0010_1010,
+        foreground: 0x0020_2020,
+        ansi: [
+            0x30, 0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38, 0x39, 0x3a, 0x3b, 0x3c, 0x3d,
+            0x3e, 0x3f,
+        ],
+    };
+
+    /// The text colours of a row's first 21 cells, then its background.
+    fn row_colours(engine: &AlacrittyEngine) -> Vec<u32> {
+        let mut frame = Frame::default();
+        engine.frame(&mut frame);
+        let text = frame.cells[..21].iter().map(|cell| cell.foreground);
+        text.chain([frame.cells[0].background]).collect()
+    }
+
+    #[test]
+    fn a_palette_recolours_the_screen_and_history_and_leaves_computed_colours() {
+        // Default, red by name, 0 to 15 by index, then a direct colour, the cube and the ramp.
+        let indexed: String = (0..16)
+            .map(|index| format!("\x1b[38;5;{index}mi"))
+            .collect();
+        let line =
+            format!("d\x1b[31mn{indexed}\x1b[38;2;1;2;3mx\x1b[38;5;196mc\x1b[38;5;232mg\x1b[0m");
+        let mut engine = AlacrittyEngine::new(2, 40);
+        feed(
+            &mut engine,
+            format!("{line}\r\n{line}\r\n{line}").as_bytes(),
+        );
+        let expected = |palette: Palette| -> Vec<u32> {
+            let named = [palette.foreground, palette.ansi[1]];
+            let fixed = [0x0001_0203, 0x00ff_0000, 0x0008_0808, palette.background];
+            named.into_iter().chain(palette.ansi).chain(fixed).collect()
+        };
+        assert_eq!(row_colours(&engine), expected(Palette::GRAPHITE_GRID));
+        *engine.palette.lock().unwrap() = THEME;
+        assert_eq!(row_colours(&engine), expected(THEME), "on screen");
+        assert!(engine.scroll(1));
+        assert_eq!(engine.view_rows().start, 0);
+        assert_eq!(row_colours(&engine), expected(THEME), "in scrollback");
+    }
+
+    #[test]
+    fn osc_colours_override_one_pane_until_reset_to_the_palette_sent_since() {
+        let palette = Arc::new(Mutex::new(Palette::GRAPHITE_GRID));
+        let mut pane = AlacrittyEngine::with_palette(1, 40, palette.clone());
+        let mut other = AlacrittyEngine::with_palette(1, 40, palette.clone());
+        let text = b"d\x1b[31mn\x1b[0m";
+        feed(&mut other, text);
+        feed(
+            &mut pane,
+            b"\x1b]4;1;#010101\x07\x1b]10;#020202\x07\x1b]11;#030303\x07",
+        );
+        feed(&mut pane, text);
+        let colours = |engine: &AlacrittyEngine| {
+            let row = row_colours(engine);
+            (row[0], row[1], row[21])
+        };
+        assert_eq!(colours(&pane), (0x0002_0202, 0x0001_0101, 0x0003_0303));
+        assert_eq!(colours(&other), (FOREGROUND, ANSI[1], BACKGROUND));
+        assert_eq!(pane.colours(), (None, Some(0x0003_0303)));
+        feed(&mut pane, b"\x1b]12;#040404\x07");
+        assert_eq!(pane.colours(), (Some(0x0004_0404), Some(0x0003_0303)));
+        assert_eq!(other.colours(), (None, None));
+
+        *palette.lock().unwrap() = THEME;
+        assert_eq!(colours(&pane), (0x0002_0202, 0x0001_0101, 0x0003_0303));
+        let theme = (THEME.foreground, THEME.ansi[1], THEME.background);
+        assert_eq!(colours(&other), theme);
+        feed(
+            &mut pane,
+            b"\x1b]104;1\x07\x1b]110\x07\x1b]111\x07\x1b]112\x07",
+        );
+        assert_eq!(colours(&pane), theme);
+        assert_eq!(pane.colours(), (None, None));
+    }
+
     #[test]
     fn inverse_and_hidden_text_apply() {
         let inverse = screen(b"\x1b[7mx").cells[0];
@@ -1194,7 +1285,7 @@ mod tests {
     #[test]
     fn every_colour_index_is_safe() {
         for index in 0..=300 {
-            let _ = indexed(index);
+            let _ = indexed(&Palette::GRAPHITE_GRID, index);
         }
         for byte in 0..=255 {
             screen(format!("\x1b[38;5;{byte}m\x1b[48;5;{byte}mx").as_bytes());

@@ -15,6 +15,51 @@ pub const TALL: u32 = 1 << 26;
 /// as a cell colour and stays opaque, carry the live colour in `Frame` when the core next changes.
 pub const DEFAULT_BACKGROUND: u32 = 0x0012_1212;
 
+/// The colours a pane's named and indexed colours resolve through, as `0x00RRGGBB` (ADR-0049).
+/// The 256-colour cube and the grey ramp are computed, and are not here.
+///
+/// ```
+/// use pinfold_proto::{DEFAULT_BACKGROUND, Palette};
+///
+/// assert_eq!(Palette::GRAPHITE_GRID.background, DEFAULT_BACKGROUND);
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Palette {
+    /// The colour of a cell no program has coloured.
+    pub background: u32,
+    /// The colour of text no program has coloured.
+    pub foreground: u32,
+    /// Black, red, green, yellow, blue, magenta, cyan and white, then the bright eight.
+    pub ansi: [u32; 16],
+}
+
+impl Palette {
+    /// "Graphite Grid", the default (`docs/design/ui/`), which the core uses until a window
+    /// sends another.
+    pub const GRAPHITE_GRID: Self = Self {
+        background: DEFAULT_BACKGROUND,
+        foreground: 0x00e2_e5ea,
+        ansi: [
+            0x0012_151a,
+            0x00ff_8a8a,
+            0x0063_d29a,
+            0x00f5_b544,
+            0x007a_a7ff,
+            0x00d9_a7e0,
+            0x009c_c0ff,
+            0x00c9_cdd4,
+            0x0034_3a44,
+            0x00ff_8a8a,
+            0x0063_d29a,
+            0x00f5_b544,
+            0x009c_c0ff,
+            0x00d9_a7e0,
+            0x00c4_d9ff,
+            0x00e2_e5ea,
+        ],
+    };
+}
+
 /// The round left end of a pill, which the renderer draws to fill its cell in the foreground
 /// colour, as a font would not fit it to the grid.
 pub const LEFT_CAP: char = '\u{e0b6}';

@@ -12,7 +12,9 @@ than tab or a line end comes out, or if the brackets are not exactly at the two 
 
 `link` feeds any bytes in chunks to the decoders of the window link, after a good version
 check. It fails on a panic, an out-of-memory or a hang, if a decoded message does not encode
-back to the bytes it came from, or if an applied frame's cells do not fit its size.
+back to the bytes it came from, or if an applied frame's cells do not fit its size. Its seeds in
+`seeds/link/` are a palette request and a pane's colours notice, which a `pinfold-proto` test
+keeps equal to what the encoder writes.
 
 `session_snapshot` parses and checks any bytes as a saved session, as a core does at start. It
 fails on a panic, an out-of-memory or a hang, or if a snapshot that passed its check does not
