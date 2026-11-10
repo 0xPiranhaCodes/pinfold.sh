@@ -709,6 +709,7 @@ impl Reactor {
         self.host.other_version = None;
         let (ours, theirs) = socket::pair()?;
         command.stdin(Stdio::null());
+        crate::sandbox::strip_inherited(&mut command);
         let child = socket::spawn_with_link(command, theirs)?;
         self.attach_window(ours, Some(child))?;
         Ok(WindowOpen::Started)

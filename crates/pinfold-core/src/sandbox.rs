@@ -29,6 +29,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -370,6 +371,7 @@ fn ask_shell(mut shell: Command, private: &Path) -> io::Result<Asked> {
         // Not in the core's group, so it never takes a terminal the core was started from.
         .process_group(0);
     pinfold_sys::mark_strays(&mut shell);
+    strip_inherited(&mut shell);
     Ok((shell.spawn()?, file, Instant::now()))
 }
 
@@ -515,6 +517,44 @@ pub fn exposed(
     (count > 0).then_some((count, listed))
 }
 
+/// Whether [`strip_inherited`] strips: the config's `strip_secrets`, set once at start.
+static STRIP: AtomicBool = AtomicBool::new(false);
+
+/// Makes every program the core starts, after this, go without the variables [`secret_name`]
+/// matches if `on` (`strip_secrets`, ADR-0047). Not even a profile's `keep_env` brings one
+/// back. Call it once at start, before any pane runs.
+pub fn strip_secrets(on: bool) {
+    STRIP.store(on, Ordering::Relaxed);
+}
+
+/// Removes from `command` each of `names` that [`secret_name`] matches. Names only: no value
+/// is read.
+///
+/// ```
+/// use std::process::Command;
+/// use pinfold_core::sandbox::remove_secrets;
+///
+/// let mut command = Command::new("/usr/bin/env");
+/// remove_secrets(&mut command, ["GITHUB_TOKEN".into(), "PATH".into()]);
+/// let changed: Vec<_> = command.get_envs().collect();
+/// assert_eq!(changed, [("GITHUB_TOKEN".as_ref(), None)]);
+/// ```
+pub fn remove_secrets(command: &mut Command, names: impl IntoIterator<Item = OsString>) {
+    for name in names {
+        if secret_name(&name) {
+            command.env_remove(name);
+        }
+    }
+}
+
+/// Removes the secret-looking variables `command` would inherit from the core, if
+/// [`strip_secrets`] turned stripping on. Every program the core starts passes through here.
+pub(crate) fn strip_inherited(command: &mut Command) {
+    if STRIP.load(Ordering::Relaxed) {
+        remove_secrets(command, std::env::vars_os().map(|(name, _)| name));
+    }
+}
+
 /// Returns the command that runs `program` with `hidden` unreadable, only `work` and temporary
 /// directories writable, no variable whose [`secret_name`] is not in `keep` and, of Unix
 /// sockets, only the API's at `api` reachable, for
@@ -586,7 +626,9 @@ pub fn command(
                  change, so the sandboxed agent does not start",
             )
         })?;
-        let version = Command::new(&tool).arg("--version").output()?.stdout;
+        let mut version = Command::new(&tool);
+        strip_inherited(&mut version);
+        let version = version.arg("--version").output()?.stdout;
         new_enough(&String::from_utf8_lossy(&version))?;
         let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
         let runtime = runtime.as_deref();

@@ -93,8 +93,7 @@ plus fixed non-secret variables, and the first sandboxed launch of the session m
 due. Link version 15 adds `Notice::Secrets { count, names }`, where `names` is the first five,
 sorted, each escaped and cut at 40 characters, ending in `…` if more. The window shows it under
 the pane for 30 seconds behind `▲ secrets` in violet, as ADR-0044's notice is drawn. The log line
-is `warn secret_names=<count> [<names>]`. `pinfold-config` has `strip_secrets`, which so far
-only turns the notice off.
+is `warn secret_names=<count> [<names>]`. With `strip_secrets` on there is no notice.
 
 ## Consequences
 

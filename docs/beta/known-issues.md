@@ -90,10 +90,13 @@ still welcome if it adds a case not listed here. Report bugs with the
   programs you run that are not part of macOS, so a token you exported in a shell reaches it even
   though its own environment is stripped. No sandbox rule stops this without stopping the agent's
   own programs (`tests/macos/sandbox-procargs.sh`). Do not export secrets in your shells while
-  you run sandboxed agents. Linux is not affected. The first sandboxed agent of a session
-  shows a one-time notice naming the secret-looking variables PinFold's panes got, never their
-  values; it cannot see one a shell exports after it starts. An opt-in, `strip_secrets`, that
-  keeps such variables out of what PinFold starts is decided but not yet built ([ADR-0047](../adr/0047-macos-sandbox-reads-other-processes-environment.md)).
+  you run sandboxed agents. Linux is not affected. `strip_secrets = true` in `pinfold.toml`
+  keeps secret-looking variables out of the core and every pane PinFold starts, but not out of
+  what a shell's startup files export, and an agent's `keep_env` then cannot bring its key back
+  ([configuration](../configuration.md#strip_secrets)). Without it, the first sandboxed agent of
+  a session shows a one-time notice naming the secret-looking variables PinFold's panes got,
+  never their values; it cannot see one a shell exports after it starts
+  ([ADR-0047](../adr/0047-macos-sandbox-reads-other-processes-environment.md)).
 
 ## Not yet checked on an installed build
 

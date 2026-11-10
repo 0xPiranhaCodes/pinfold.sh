@@ -17,6 +17,7 @@ variable is unset. Saving the file applies it to the running window within about
 | `api.audit_log`       | bool   | `false` | Also write the API audit log to disk                     |
 | `api.protect`         | list   | below   | Command-line text that protects a pane from API sends    |
 | `agents.<name>`       | table  | none    | An [agent profile](#agent-profiles)                      |
+| `strip_secrets`       | bool   | `false` | Start the core and its panes without [secret-looking variables](#strip_secrets) |
 
 ```toml
 font_size = 14
@@ -137,13 +138,15 @@ starts with `AWS_`, in any case. `keep_env` names the ones it still gets, such a
 key: at most 16 exact names of letters, digits and `_`, not starting with a digit, and no
 patterns. It does nothing without `sandbox = true`. Other variables reach the agent as before,
 so a secret under a name that matches none of these, such as a password inside `DATABASE_URL`,
-is not stripped. PinFold never logs a variable's value.
+is not stripped. PinFold never logs a variable's value. With
+[`strip_secrets`](#strip_secrets) on, `keep_env` cannot bring a variable back: the core never
+has it, so an agent that reads its API key from an exported variable must get it another way.
 
 On macOS a sandboxed agent can still read the environment of your other processes, every
 pane's shell among them, through `sysctl(KERN_PROCARGS2)`
 ([ADR-0047](adr/0047-macos-sandbox-reads-other-processes-environment.md)). So the first time
 the core launches a sandboxed agent, if its own environment, which every pane gets, holds names
-that look like secrets, the window shows a one-time notice under the pane that counts them and
+that look like secrets and [`strip_secrets`](#strip_secrets) is off, the window shows a one-time notice under the pane that counts them and
 names the first five, never their values, and the core's log names them too. It cannot see a
 variable a shell exports after it starts, by hand or from its startup files, so no notice does
 not mean no secret in a pane. Linux shows none, as it is not affected.
@@ -260,6 +263,39 @@ it fails, the agent does not start. Landlock needs `no_new_privs` before `bwrap`
 setuid `bwrap` runs without its setuid rights and needs unprivileged user namespaces like any
 other. The agent also gets its own IPC, host name and cgroup namespaces, and ends when the core
 does.
+
+## strip_secrets
+
+On macOS a sandboxed agent can read the environment of your other processes that are not part
+of macOS, `pinfold-core` and every pane's shell among them, through `sysctl(KERN_PROCARGS2)`, so
+a token exported in one pane reaches an agent in another
+([ADR-0047](adr/0047-macos-sandbox-reads-other-processes-environment.md)). With
+`strip_secrets = true`, the `pinfold` launcher starts the core without the variables whose names
+look like secrets, by the rule of [agent profiles](#agent-profiles), and the core starts every
+pane, sandboxed or not, and everything else it starts, such as tools and the window, without
+them. Off, the default, changes nothing.
+
+```toml
+strip_secrets = true
+```
+
+What it breaks: a token you export before starting PinFold, such as `GITHUB_TOKEN` set in the
+shell that runs `pinfold`, no longer reaches any pane. Set such tokens in your shell's startup
+files instead (`~/.zshrc`, `~/.bashrc`), which a pane's shell reads itself. A variable a shell
+sets there, or you export by hand in a pane, is in that shell's environment again, which a
+sandboxed agent can read on macOS; this setting protects only what PinFold hands out. Not even
+an agent profile's `keep_env` brings a stripped variable back, as no value ever reaches the core,
+so an agent that reads its API key from an exported variable, such as `ANTHROPIC_API_KEY`, must
+get it another way: through its own login, which keeps the key in its own files, or from the
+startup file of the shell in its pane, which on macOS is again readable.
+
+The macOS process table shows the environment a process was given when it started, so the
+launcher has to leave the variables out before the core starts: the core cannot hide them from
+itself later. A core started another way, not by `pinfold`, still holds them. It then names
+them, never their values, in its [log](#where-problems-are-reported), and still keeps them from
+its panes. The core reads this key when it starts, unlike the window's keys: a change takes
+effect at the next core start, for the core and for every pane it starts after that. Panes
+already running keep what they were given. It works on Linux too, which does not need it.
 
 ## Keys
 
@@ -542,7 +578,8 @@ four levels and 4096 elements, and only the entities `&amp;`, `&lt;`, `&gt;`, `&
 
 ## Reload
 
-Every key applies on save, with no restart. The window keeps its size, so a new font or font
+Every key the window reads applies on save, with no restart. The core reads `api`, `agents` and
+`strip_secrets` only when it starts. The window keeps its size, so a new font or font
 size changes how many rows and columns fit, and programs get a resize. Editors that write the
 file in place and editors that save by rename both work, and so does a symlink.
 
