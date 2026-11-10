@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::Instant;
 
@@ -372,6 +372,8 @@ struct App {
     theme: Theme,
     /// Whether the core is too old for a palette, so the theme stays Graphite Grid.
     unthemed: bool,
+    /// Tells the watch the system's appearance, `true` for dark (ADR-0049, section 2).
+    appearance: mpsc::Sender<bool>,
     size: Option<(u32, u32)>,
     outbox: Outbox,
     latest: Arc<Latest>,
@@ -490,6 +492,8 @@ impl App {
             config,
             theme: GRAPHITE,
             unthemed: false,
+            // Heard by no one until `run` swaps in the watch's.
+            appearance: mpsc::channel().0,
             size,
             outbox,
             latest,
@@ -578,6 +582,8 @@ impl App {
             .with_titlebar_transparent(true)
             .with_title_hidden(true);
         let window = Rc::new(event_loop.create_window(attributes)?);
+        // Before the renderer is made, so a light theme is here by the first frame.
+        self.appear(window.theme());
         window.set_ime_allowed(true);
         let size = self.font_size() * font_scale(self.size, window.scale_factor());
         let renderer = renderer(&window, size, self.config.font_path.as_deref())?;
@@ -609,6 +615,14 @@ impl App {
             open.apply_theme(&self.theme);
         }
         self.redraw_soon();
+    }
+
+    /// Tells the watch the system's appearance, dark where it does not say. The watch answers
+    /// with the matching half of `theme = { light, dark }`, as it answers a save, so a half
+    /// that cannot be used is reported and keeps the theme in use (ADR-0049, section 2).
+    fn appear(&self, appearance: Option<winit::window::Theme>) {
+        let dark = appearance != Some(winit::window::Theme::Light);
+        let _ = self.appearance.send(dark);
     }
 
     /// Draws from `theme`, saved while the window was open, and sends the core its palette
@@ -1728,6 +1742,7 @@ impl ApplicationHandler<Notice> for App {
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.scale_changed(scale_factor);
             }
+            WindowEvent::ThemeChanged(appearance) => self.appear(Some(appearance)),
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::Focused(focused) => {
                 self.has_focus = focused;
@@ -1925,7 +1940,7 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
     let event_loop = builder.build()?;
     // Before either file is first read, so a save between the two is not missed.
     let proxy = event_loop.create_proxy();
-    reload::watch(move |saved| {
+    let appearance = reload::watch(move |saved| {
         let notice = match saved {
             reload::Saved::Config(config) => Notice::Config(config),
             reload::Saved::Theme(theme) => Notice::Theme(theme),
@@ -1964,7 +1979,7 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
         dock,
         notifier,
     );
-    app.theme = theme;
+    (app.theme, app.appearance) = (theme, appearance);
     event_loop.run_app(&mut app)?;
     app.result
 }
@@ -2339,6 +2354,42 @@ mod tests {
         assert_eq!(palette_of(&GRAPHITE), pinfold_proto::Palette::GRAPHITE_GRID);
         // No theme has a name that is a path, so this one is refused.
         assert_eq!(write("theme = \"../other\""), GRAPHITE);
+    }
+
+    /// ADR-0049, section 2: the window tells the watch the system's appearance, dark where it
+    /// does not say, and the half of `theme = { light, dark }` that comes back is a new palette.
+    #[test]
+    fn a_change_of_appearance_sends_a_new_palette() {
+        use std::os::unix::fs::PermissionsExt;
+        use winit::window::Theme::{Dark, Light};
+        let path = opener_dir("appearance").join("pinfold.toml");
+        std::fs::write(
+            &path,
+            "theme = { light = \"GitHub Light\", dark = \"GitHub Dark\" }",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let mut watch = theme::Watch::new(path.clone());
+        let (mut app, inbox, _poll) = app();
+        let told;
+        (app.appearance, told) = mpsc::channel();
+        // What `run` loads at start is the dark half.
+        app.theme = theme_at(&path);
+        assert_eq!(app.theme.background, 0x0010_1216);
+        let mut grounds = Vec::new();
+        for appearance in [None, Some(Dark), Some(Light), Some(Light), Some(Dark)] {
+            app.appear(appearance);
+            // The watch thread's part: the theme that appearance now chooses, if it changed.
+            if let Some(Ok((theme, _))) = watch.follow(told.try_recv().unwrap()) {
+                app.retheme(theme);
+            }
+            grounds.extend(inbox.take().into_iter().map(|request| match request {
+                Request::Core(proto::Request::Palette(palette)) => palette.background,
+                _ => 0,
+            }));
+        }
+        assert_eq!(grounds, [0x00ff_ffff, 0x0010_1216]);
+        assert_eq!(app.theme.background, 0x0010_1216);
     }
 
     #[test]

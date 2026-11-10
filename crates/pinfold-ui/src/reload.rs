@@ -2,6 +2,7 @@
 //! disk cannot stall the window.
 
 use std::io::{self, Write};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::thread;
 use std::time::Duration;
 
@@ -34,7 +35,15 @@ fn check(watch: &mut Watch, theme: &mut theme::Watch, send: &impl Fn(Saved) -> b
             true
         }
     };
-    open && match theme.poll(saved) {
+    open && told(theme.poll(saved), send)
+}
+
+/// Sends the theme a poll loaded, or says why the one in use stays. Returns whether to go on.
+fn told(
+    loaded: Option<Result<(Theme, Vec<String>), theme::Error>>,
+    send: &impl Fn(Saved) -> bool,
+) -> bool {
+    match loaded {
         None => true,
         Some(Ok((theme, notes))) => {
             for note in notes {
@@ -55,12 +64,17 @@ fn check(watch: &mut Watch, theme: &mut theme::Watch, send: &impl Fn(Saved) -> b
 /// Calls `send` with the new settings each time the config file is saved well, and with the
 /// new theme each time it or the theme file in use is (ADR-0049, section 2).
 ///
+/// The sender takes the system's appearance, `true` for dark, at start and on each change:
+/// the half of `theme = { light, dark }` it chooses is then sent as a saved theme is.
+/// Dropping it ends the thread.
+///
 /// # Errors
 ///
 /// Returns an error if the thread cannot start.
-pub fn watch(send: impl Fn(Saved) -> bool + Send + 'static) -> io::Result<()> {
+pub fn watch(send: impl Fn(Saved) -> bool + Send + 'static) -> io::Result<Sender<bool>> {
+    let (appearance, changes) = mpsc::channel();
     let Some(path) = pinfold_config::path() else {
-        return Ok(());
+        return Ok(appearance);
     };
     let mut theme = theme::Watch::new(path.clone());
     let mut watch = Watch::new(path);
@@ -68,10 +82,15 @@ pub fn watch(send: impl Fn(Saved) -> bool + Send + 'static) -> io::Result<()> {
         .name("pinfold-config".into())
         .spawn(move || {
             while check(&mut watch, &mut theme, &send) {
-                thread::sleep(POLL);
+                // An appearance ends the wait early, so it applies at once.
+                match changes.recv_timeout(POLL) {
+                    Ok(dark) if !told(theme.follow(dark), &send) => break,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                    _ => {}
+                }
             }
         })?;
-    Ok(())
+    Ok(appearance)
 }
 
 #[cfg(test)]
@@ -136,6 +155,33 @@ mod tests {
         let good = "font_size = 22\n[colors]\nbackground = \"#0d1117\"";
         let sent = sent(&path, &[bad, good]);
         assert_eq!(sent, ["font 22", "font 22", "ground 0d1117"]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// ADR-0049, section 2: the system's appearance picks a half of `theme = { light, dark }`,
+    /// and a half that cannot be used keeps the theme in use.
+    #[test]
+    fn an_appearance_sends_its_theme_and_a_bad_half_sends_nothing() {
+        let dir = dir("appearance");
+        let path = dir.join("pinfold.toml");
+        save(
+            &path,
+            "theme = { light = \"GitHub Light\", dark = \"Nowhere\" }",
+        );
+        let mut theme = theme::Watch::new(path.clone());
+        let sent = RefCell::new(Vec::new());
+        let send = |saved: Saved| {
+            let Saved::Theme(theme) = saved else {
+                return false;
+            };
+            sent.borrow_mut().push(theme.background);
+            true
+        };
+        for dark in [false, false, true, false] {
+            assert!(told(theme.follow(dark), &send));
+        }
+        // Light, nothing for the bad dark half, and light again.
+        assert_eq!(sent.into_inner(), [0x00ff_ffff, 0x00ff_ffff]);
         fs::remove_dir_all(dir).unwrap();
     }
 

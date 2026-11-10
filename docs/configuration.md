@@ -11,7 +11,7 @@ variable is unset. Saving the file applies it to the running window within about
 | `macos_option_as_alt` | bool   | `false` | Option sends Alt instead of composing text. macOS only   |
 | `background_opacity`  | number | `1`     | Default background opacity, from 0 to 1. macOS only      |
 | `background_blur`     | bool   | `false` | Blur what shows through the background. macOS only       |
-| `theme`               | string | none    | A [theme](#themes) by name. Without it, Graphite Grid    |
+| `theme`               | string or table | none | A [theme](#themes) by name, or [one each](#light-and-dark) for light and dark. Without it, Graphite Grid |
 | `colors`              | table  | none    | Single [colours](#themes) on top of the theme            |
 | `keys.prefix`         | string | `"C-a"` | Prefix, `C-` and a lowercase letter                      |
 | `api.audit_log`       | bool   | `false` | Also write the API audit log to disk                     |
@@ -405,6 +405,24 @@ A theme that cannot be used, for its name, its file, an absent required key, or 
 colour in `[colors]`, is [reported](#where-problems-are-reported) with the reason, and the
 other keys of `pinfold.toml` still apply. At start PinFold then draws Graphite Grid, and on a
 save it keeps the theme it has.
+
+### Light and dark
+
+`theme` can also be a table of two names, and PinFold then follows the system's appearance:
+
+```toml
+theme = { light = "GitHub Light", dark = "GitHub Dark" }
+```
+
+The window asks the system at start and each time the appearance changes, and applies the
+matching theme as it applies a [save](#reload): the chrome and the panes are recoloured,
+history included. Where the system does not say, as on X11, PinFold uses `dark`. Both keys are
+required, each is a name as above, and `[colors]` goes on top of whichever is in use.
+
+A name that cannot be used is [reported](#where-problems-are-reported) for either half, the
+one not in use included. If it is the half the system asks for, PinFold keeps the theme it
+has, and at start that is Graphite Grid. [Reload](#reload) follows the half in use: saving
+`pinfold.toml` or that half's theme file applies within about a second.
 
 ### Bundled themes
 

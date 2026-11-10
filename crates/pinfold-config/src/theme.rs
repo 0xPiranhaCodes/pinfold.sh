@@ -458,16 +458,65 @@ pub fn parse(bytes: &[u8], overrides: Colors) -> Result<(Theme, Vec<String>), cr
     resolve(crate::parse_as(bytes)?, overrides)
 }
 
+/// The `theme` key: one name, or a name for each appearance of the system.
+enum Choice {
+    Name(String),
+    System(System),
+}
+
+// By hand: serde's untagged enums need its `alloc` feature, which this crate leaves off.
+impl<'de> Deserialize<'de> for Choice {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> de::Visitor<'de> for Visitor {
+            type Value = Choice;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a theme name, or a table of `light` and `dark` names")
+            }
+
+            fn visit_str<E: de::Error>(self, name: &str) -> Result<Choice, E> {
+                Ok(Choice::Name(name.into()))
+            }
+
+            fn visit_map<A: de::MapAccess<'de>>(self, map: A) -> Result<Choice, A::Error> {
+                System::deserialize(de::value::MapAccessDeserializer::new(map)).map(Choice::System)
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct System {
+    light: String,
+    dark: String,
+}
+
+impl Choice {
+    /// The name in use while the system is `dark`, and the other half with its key, if any.
+    fn names(&self, dark: bool) -> (&str, Option<(&'static str, &str)>) {
+        match self {
+            Self::Name(name) => (name, None),
+            Self::System(system) if dark => (&system.dark, Some(("light", &system.light))),
+            Self::System(system) => (&system.light, Some(("dark", &system.dark))),
+        }
+    }
+}
+
 /// The two keys of `pinfold.toml` that choose a theme. Its other keys are ignored here.
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct Chosen {
-    theme: Option<String>,
+    theme: Option<Choice>,
     colors: Colors,
 }
 
 /// Loads the theme `config`, the path of `pinfold.toml`, chooses: its `theme`, or Graphite Grid
-/// without one, with its `[colors]` on top, as [`parse`] does. A named theme is
+/// without one, with its `[colors]` on top, as [`parse`] does. Where `theme` is a table of
+/// `light` and `dark`, this is the `dark` theme, which is also the one for a system that does
+/// not say, and [`Watch::follow`] loads the other. A named theme is
 /// `themes/<name>.toml` beside `config`, then `themes/<name>.itermcolors`
 /// ([`crate::itermcolors::parse`]), then `themes/<name>` as a Ghostty theme file
 /// ([`crate::ghostty::parse`]), each read with the checks of [`crate::load`], and then a
@@ -481,11 +530,26 @@ struct Chosen {
 /// Returns an error if `config` or the theme file is refused, `theme` or `[colors]` is bad, or
 /// no theme has the name. The caller then keeps the theme it has, or Graphite Grid at start.
 pub fn load(config: &Path) -> Result<(Theme, Vec<String>), Error> {
+    load_as(config, true)
+}
+
+/// [`load`], with the `dark` or the `light` half of a `theme` table.
+fn load_as(config: &Path, dark: bool) -> Result<(Theme, Vec<String>), Error> {
     let chosen: Chosen = match crate::read(config)? {
         Some(bytes) => crate::parse_as(&bytes)?,
         None => Chosen::default(),
     };
-    named(config, chosen.theme.as_deref(), chosen.colors)
+    let Some((name, other)) = chosen.theme.as_ref().map(|theme| theme.names(dark)) else {
+        return named(config, None, chosen.colors);
+    };
+    let (theme, mut notes) = named(config, Some(name), chosen.colors)?;
+    // The half not in use is read too, so a slip in it is said now and not at dusk.
+    if let Some((key, other)) = other
+        && let Err(error) = named(config, Some(other), Colors::default())
+    {
+        notes.push(format!("the `{key}` theme cannot be used: {error}"));
+    }
+    Ok((theme, notes))
 }
 
 fn named(
@@ -530,10 +594,11 @@ fn files(config: &Path, name: &str) -> Result<[PathBuf; 3], Error> {
     ])
 }
 
-/// The theme file the config file at `config` has in use, if it names one that exists.
-fn in_use(config: &Path) -> Option<PathBuf> {
+/// The theme file the config file at `config` has in use while the system is `dark`, if it
+/// names one that exists.
+fn in_use(config: &Path, dark: bool) -> Option<PathBuf> {
     let chosen: Chosen = crate::parse_as(&crate::read(config).ok()??).ok()?;
-    let files = files(config, chosen.theme.as_deref()?).ok()?;
+    let files = files(config, chosen.theme?.names(dark).0).ok()?;
     files.into_iter().find(|file| file.exists())
 }
 
@@ -547,15 +612,43 @@ pub struct Watch {
     config: PathBuf,
     file: Option<PathBuf>,
     seen: Option<(u64, u64, i64, i64)>,
+    /// Which half of a `theme` table is in use: `dark` until [`Watch::follow`] says otherwise.
+    dark: bool,
 }
 
 impl Watch {
     /// Starts from the theme file as it is now. Create this before the first [`load`], so a
     /// save between the two is not missed.
     pub fn new(config: PathBuf) -> Self {
-        let file = in_use(&config);
+        let file = in_use(&config, true);
         let seen = file.as_deref().and_then(crate::stamp);
-        Self { config, file, seen }
+        Self {
+            config,
+            file,
+            seen,
+            dark: true,
+        }
+    }
+
+    /// Takes the system's appearance, `dark` where it does not say, and loads the theme again
+    /// if that changes which one a `theme` table chooses, as [`Watch::poll`] does for a save
+    /// (ADR-0049, section 2). A plain `theme` follows nothing, so it is not loaded again.
+    ///
+    /// ```
+    /// let mut watch = pinfold_config::theme::Watch::new("/nowhere/pinfold.toml".into());
+    /// // No config file, so no `theme` table, and light changes nothing.
+    /// assert!(watch.follow(false).is_none());
+    /// ```
+    pub fn follow(&mut self, dark: bool) -> Option<Result<(Theme, Vec<String>), Error>> {
+        if dark == self.dark {
+            return None;
+        }
+        // A config file that cannot be read now leaves the appearance for a later call.
+        let chosen: Chosen = crate::parse_as(&crate::read(&self.config).ok()??).ok()?;
+        self.dark = dark;
+        matches!(chosen.theme, Some(Choice::System(_)))
+            .then(|| self.poll(true))
+            .flatten()
     }
 
     /// [`load`]s the theme again if the theme file in use changed since the last poll, or if
@@ -563,7 +656,7 @@ impl Watch {
     /// once. On an error the caller keeps the theme it has.
     pub fn poll(&mut self, saved: bool) -> Option<Result<(Theme, Vec<String>), Error>> {
         if saved {
-            self.file = in_use(&self.config);
+            self.file = in_use(&self.config, self.dark);
         }
         let now = self.file.as_deref().and_then(crate::stamp);
         // A file that is gone can be the middle of a save, so it changes nothing.
@@ -572,7 +665,7 @@ impl Watch {
         }
         // Stamped before the read, so a save during it is read by the next poll.
         self.seen = now;
-        Some(load(&self.config))
+        Some(load_as(&self.config, self.dark))
     }
 }
 
@@ -894,6 +987,65 @@ mod tests {
         assert_eq!(theme.background, 0x000d_1117);
         save(&path, &file(0x0028_2a36, 0x00f8_f8f2, 0));
         assert!(watch.poll(false).is_none(), "that file is no longer in use");
+    }
+
+    /// ADR-0049, section 2: `theme = { light, dark }` follows the system's appearance.
+    #[test]
+    fn each_appearance_picks_its_theme_and_a_bad_half_keeps_the_theme_in_use() {
+        let (dir, config) = themes(
+            "My Theme-1.toml",
+            file(0x00fd_f6e3, 0x0065_7b83, 0).as_bytes(),
+        );
+        let write = |theme: &str| fs::write(&config, format!("theme = {theme}\n")).unwrap();
+        write("{ light = \"My Theme-1\", dark = \"GitHub Dark\" }");
+        let mut watch = Watch::new(config.clone());
+        // Dark, and a system that does not say.
+        let (dark, notes) = load(&config).unwrap();
+        assert_eq!((dark.background, notes), (0x0010_1216, Vec::new()));
+        assert!(
+            watch.follow(true).is_none(),
+            "the appearance did not change"
+        );
+        let (light, _) = watch.follow(false).unwrap().unwrap();
+        assert_eq!(light.background, 0x00fd_f6e3);
+        assert!(watch.follow(false).is_none(), "said once");
+        // The file in use is now the light half's, and a save of it loads it again.
+        let path = dir.path().join("themes/My Theme-1.toml");
+        fs::write(&path, file(0x00ff_ffff, 0x001f_2328, 0)).unwrap();
+        let (light, _) = watch.poll(false).unwrap().unwrap();
+        assert_eq!(light.background, 0x00ff_ffff);
+
+        // A bad name in the half in use is an error, so the caller keeps its theme.
+        write("{ light = \"Nowhere\", dark = \"GitHub Dark\" }");
+        assert!(matches!(watch.poll(true), Some(Err(Error::NotFound))));
+        // In the other half it is said, and the half in use still applies.
+        let (dark, notes) = watch.follow(true).unwrap().unwrap();
+        assert_eq!(dark.background, 0x0010_1216);
+        assert_eq!(
+            notes,
+            ["the `light` theme cannot be used: there is no theme of that name"]
+        );
+        write("{ light = \"GitHub Light\", dark = \"../other\" }");
+        assert!(matches!(load(&config), Err(Error::Name)));
+        let (_, notes) = watch.follow(false).unwrap().unwrap();
+        assert!(notes[0].starts_with("the `dark` theme cannot be used"));
+
+        // Both halves are required, and no other key is taken.
+        for (table, why) in [
+            ("{ light = \"GitHub Light\" }", "missing field `dark`"),
+            (
+                "{ light = \"Nord\", dark = \"Nord\", dusk = \"Nord\" }",
+                "unknown field `dusk`",
+            ),
+            ("7", "a table of `light` and `dark` names"),
+        ] {
+            write(table);
+            let text = load(&config).unwrap_err().to_string();
+            assert!(text.contains(why), "{text}");
+        }
+        // A plain name follows nothing.
+        write("\"Nord\"");
+        assert!(watch.follow(true).is_none());
     }
 
     #[test]
