@@ -25,6 +25,16 @@ colours it then steps and checks. It fails on a panic, an out-of-memory or a han
 `seeds/config/` are the examples in `docs/configuration.md`, and `theme.toml` is Graphite Grid
 as a theme file.
 
+`ghostty_theme` parses any bytes as a Ghostty theme file, and steps and checks the colours of
+one that parses. It fails on a panic, an out-of-memory or a hang. Of its seeds in
+`seeds/ghostty_theme/`, which the `pinfold-config` tests also read, `Nord` and `GitHub Dark`
+are `ghostty/Nord` and `ghostty/GitHub Dark` of
+[iTerm2-Color-Schemes](https://github.com/mbadolato/iTerm2-Color-Schemes) at
+`bc5531d8ec26e6031c698c61eb7d82c9a9cd092d`, unchanged: MIT, Copyright (c) 2011 to Present Mark
+Badolato, whose `licenses.yml` gives both schemes as MIT, from nordtheme/iterm2 (Copyright (c)
+2016-present Sven Greb) and primer/github-vscode-theme (Copyright (c) 2020 Primer). The MIT
+text is `LICENSE-MIT`. `other-keys` is our own.
+
 `tool_keys` decodes any bytes as the keys a tool reads, once whole and once a byte at a time.
 It fails on a panic or a hang, or if the two give different keys.
 

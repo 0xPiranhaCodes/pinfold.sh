@@ -365,7 +365,10 @@ fn fill(colors: Colors) -> Result<Theme, crate::Error> {
 /// Makes a theme of `colors` with `overrides`, the `[colors]` table, on top, and says what the
 /// log should: the state colours are stepped until legible, and a theme whose chrome fails the
 /// checks keeps its pane colours and gets Graphite Grid's chrome and states.
-fn resolve(colors: Colors, overrides: Colors) -> Result<(Theme, Vec<String>), crate::Error> {
+pub(crate) fn resolve(
+    colors: Colors,
+    overrides: Colors,
+) -> Result<(Theme, Vec<String>), crate::Error> {
     // A theme holds its required keys itself, whatever `[colors]` adds.
     fill(colors)?;
     let mut theme = fill(overrides.or(colors))?;
@@ -429,7 +432,8 @@ struct Chosen {
 
 /// Loads the theme `config`, the path of `pinfold.toml`, chooses: its `theme`, or Graphite Grid
 /// without one, with its `[colors]` on top, as [`parse`] does. A named theme is
-/// `themes/<name>.toml` beside `config`, read with the checks of [`crate::load`], and then a
+/// `themes/<name>.toml` beside `config`, then `themes/<name>` as a Ghostty theme file
+/// ([`crate::ghostty::parse`]), each read with the checks of [`crate::load`], and then a
 /// built-in theme.
 ///
 /// This reads `config` itself, and [`crate::Config`] holds neither key, so the core, which
@@ -460,13 +464,18 @@ fn named(
     if !(1..=64).contains(&name.len()) || name.starts_with('.') || !name.bytes().all(valid) {
         return Err(Error::Name);
     }
-    let file = config.with_file_name("themes").join(format!("{name}.toml"));
-    let colors = match crate::read(&file)? {
-        Some(bytes) => crate::parse_as(&bytes)?,
-        None if name == "Graphite Grid" => GRAPHITE.into(),
-        None => return Err(Error::NotFound),
-    };
-    Ok(resolve(colors, overrides)?)
+    let themes = config.with_file_name("themes");
+    if let Some(bytes) = crate::read(&themes.join(format!("{name}.toml")))? {
+        return Ok(parse(&bytes, overrides)?);
+    }
+    // `<name>.itermcolors` is tried here, between the two (#403).
+    if let Some(bytes) = crate::read(&themes.join(name))? {
+        return Ok(crate::ghostty::parse(&bytes, overrides)?);
+    }
+    if name != "Graphite Grid" {
+        return Err(Error::NotFound);
+    }
+    Ok(resolve(GRAPHITE.into(), overrides)?)
 }
 
 #[cfg(test)]
@@ -708,6 +717,33 @@ mod tests {
         assert_eq!(theme.background, 0x0028_2a36);
         let missing = named(&config, Some("Other"), Colors::default());
         assert!(matches!(missing, Err(Error::NotFound)));
+    }
+
+    #[test]
+    fn a_ghostty_theme_is_found_after_the_toml_file_and_gets_its_checks() {
+        let seed = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../fuzz/seeds/ghostty_theme/other-keys"
+        );
+        let (dir, config) = themes("My Theme-1", &fs::read(seed).unwrap());
+        let (theme, notes) = load(&config).unwrap();
+        assert_eq!((theme.background, theme.cyan), (0x001d_1f21, 0x008a_beb7));
+        assert!(
+            notes
+                .iter()
+                .any(|note| note.starts_with("7 other Ghostty keys")),
+            "{notes:?}"
+        );
+        // The same checks as the `.toml` file, and the `.toml` file first.
+        let path = dir.path().join("themes/My Theme-1");
+        fs::set_permissions(&path, Permissions::from_mode(0o666)).unwrap();
+        assert!(matches!(
+            load(&config),
+            Err(Error::File(crate::Error::Writable))
+        ));
+        let text = file(0x0028_2a36, 0x00f8_f8f2, 0x008b_e9fd);
+        fs::write(path.with_extension("toml"), text).unwrap();
+        assert_eq!(load(&config).unwrap().0.background, 0x0028_2a36);
     }
 
     #[test]

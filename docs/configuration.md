@@ -339,10 +339,11 @@ needs_you = "#f5b544"
 
 `theme` names a theme: 1 to 64 ASCII letters, digits, spaces and `-`, `_`, `+`, `.`, not
 starting with `.`, so no name is a path. PinFold looks for `themes/<name>.toml` beside
-`pinfold.toml`, then among the built-in themes, of which `Graphite Grid`, the default, is the
-only one so far. A theme file gets the checks `pinfold.toml` gets: a regular file after links
-are followed, at most 64 KiB, UTF-8, yours, and not writable by group or others, with an unknown
-key refused and named with its line.
+`pinfold.toml`, then for `themes/<name>` as a [Ghostty theme](#ghostty-themes), then among the
+built-in themes, of which `Graphite Grid`, the default, is the only one so far. A theme file
+gets the checks `pinfold.toml` gets: a regular file after links are followed, at most 64 KiB,
+UTF-8, yours, and not writable by group or others, with an unknown key refused and named with
+its line.
 
 `[colors]` sets single keys on top of the named theme, or on top of Graphite Grid. A theme file
 and `[colors]` take the same keys, each a string of `#` and six hex digits:
@@ -384,6 +385,39 @@ holds the colours to these rules whatever the theme says:
 A theme that cannot be used, for its name, its file, an absent required key, or a bad key or
 colour in `[colors]`, is [reported](#where-problems-are-reported) with the reason, and the
 other keys of `pinfold.toml` still apply.
+
+### Ghostty themes
+
+A Ghostty theme file works as it is. Copy it into `themes/` beside `pinfold.toml` under its own
+name, with no extension, and name it:
+
+```sh
+mkdir -p ~/.config/pinfold/themes
+cp "/Applications/Ghostty.app/Contents/Resources/ghostty/themes/Nord" ~/.config/pinfold/themes/
+```
+
+```toml
+theme = "Nord"
+```
+
+PinFold reads these keys and no others:
+
+| Ghostty key | Theme key |
+| --- | --- |
+| `background`, `foreground` | the same |
+| `palette = N=#rrggbb`, N from 0 to 15 | `black` to `white` for 0 to 7, `bright_black` to `bright_white` for 8 to 15 |
+| `cursor-color`, `cursor-text` | `cursor`, `cursor_text` |
+| `selection-background`, `selection-foreground` | `selection_background`, `selection_foreground` |
+
+A colour is six hex digits, with or without the `#`, and may sit in double quotes. A name such
+as `red`, or the short `#rgb`, is refused with its line, and so is a `palette` entry that is not
+`N=colour` with N from 0 to 255. The file needs `background`, `foreground` and all 16 palette
+colours; the chrome and the agent states are derived, as for any theme, and `[colors]` goes on
+top.
+
+A Ghostty theme may hold any Ghostty setting, such as `font-size` or `command`. PinFold acts on
+none of them: every other key, and a palette colour from 16 to 255, is ignored, and one log
+line says how many. A `themes/<name>.toml` of the same name is used first.
 
 ## Reload
 
