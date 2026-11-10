@@ -89,6 +89,8 @@ struct PaneLink {
     told: Option<(u8, bool)>,
     /// The message the window last heard of, while `naming`.
     message: String,
+    /// The OSC 12 cursor colour and OSC 11 background the window last heard of.
+    colours: (Option<u32>, Option<u32>),
 }
 
 /// A copy, which takes a step per pass so a window cannot hold up PTYs with long ones.
@@ -124,6 +126,8 @@ struct Session {
     refused: Option<Refusal>,
     /// Whether this window was told the core lacks the hardened runtime, if it does.
     told_unhardened: bool,
+    /// The version in the window's hello, which is never above the core's.
+    version: u16,
 }
 
 impl Session {
@@ -168,7 +172,13 @@ impl Session {
     /// and `get_mut` finds nothing here.
     fn apply(&mut self, request: Request<'_>, reactor: &mut Reactor) -> Result<(), Ended> {
         match request {
-            Request::Hello { .. } => self.greeted = true,
+            Request::Hello { version } => (self.greeted, self.version) = (true, version),
+            // A full frame, not a diff: a hidden pane with no output must not look like news.
+            Request::Palette(palette) => {
+                if reactor.set_palette(palette) {
+                    self.panes.iter_mut().for_each(|state| state.synced = false);
+                }
+            }
             Request::Input { pane, bytes } => {
                 let taken = reactor.write(pane as usize, bytes);
                 self.note_input(reactor, pane, taken);
@@ -451,6 +461,19 @@ impl Session {
                     reported,
                     message: &state.message,
                 };
+                notice.encode(&mut self.out).map_err(|_| Ended)?;
+            }
+        }
+        let colours = reactor.engine(pane).map(|engine| engine.colours());
+        if let Some((cursor, background)) = colours.filter(|colours| *colours != state.colours) {
+            state.colours = (cursor, background);
+            let notice = Notice::Colours {
+                pane: pane as u32,
+                cursor,
+                background,
+            };
+            // A window a version older draws OSC 11 as cells and no OSC 12, as before.
+            if self.version >= notice.since() {
                 notice.encode(&mut self.out).map_err(|_| Ended)?;
             }
         }
@@ -771,6 +794,7 @@ impl Reactor {
                 activity_changed: false,
                 refused: None,
                 told_unhardened: false,
+                version: 0,
             },
         };
         let interest = Interest::READABLE | Interest::WRITABLE;
@@ -816,6 +840,7 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
+    use pinfold_proto::Palette;
     use pinfold_proto::link::{
         MAX_INPUT, MAX_MESSAGE, MAX_PANES, MAX_TABS, OLDEST, Rect, Side, SplitWay,
     };
@@ -851,6 +876,8 @@ mod tests {
         refused: Vec<Refusal>,
         was_running: Vec<(u32, bool, String)>,
         unhardened: Vec<bool>,
+        /// Each pane's OSC 12 cursor colour and OSC 11 background, as told.
+        colours: Vec<(u32, Option<u32>, Option<u32>)>,
     }
 
     impl Peer {
@@ -881,6 +908,7 @@ mod tests {
                 refused: Vec::new(),
                 was_running: Vec::new(),
                 unhardened: Vec::new(),
+                colours: Vec::new(),
             }
         }
 
@@ -942,6 +970,11 @@ mod tests {
                             self.markdown.push((pane, names.to_owned()));
                         }
                         Notice::Raise => self.raises += 1,
+                        Notice::Colours {
+                            pane,
+                            cursor,
+                            background,
+                        } => self.colours.push((pane, cursor, background)),
                         Notice::Activity { tabs, alerts } => {
                             (self.activity, self.alerts) = (tabs, alerts);
                         }
@@ -1052,20 +1085,70 @@ mod tests {
     /// which its version does not have.
     #[test]
     fn an_older_window_is_served_without_what_it_cannot_read() {
-        // The one notice newer than `OLDEST`, `Markdown`, answers a request only a window of
-        // version 13 sends, so this checks the link stays up.
         let mut reactor = Reactor::new().unwrap();
-        let pane = reactor
-            .open_tab(shell("echo hi; sleep 30"), 24, 80)
-            .unwrap();
+        let pane = reactor.open_tab(shell(OSC_COLOURS), 24, 80).unwrap();
         let mut peer = Peer::attach(&mut reactor);
         peer.send(Request::Hello { version: OLDEST });
         peer.fit(&reactor, pane);
-        serve(&mut reactor, &mut peer, |r, p| p.matches(r, pane));
+        serve(&mut reactor, &mut peer, |r, p| {
+            on_screen(r, pane, "set") && p.matches(r, pane)
+        });
         assert!(reactor.is_window_ready());
         assert_eq!(reactor.take_other_version(), None);
         assert!(reactor.can_ask(ApprovalAction::Owner));
+        let colours = reactor.engine(pane).unwrap().colours();
+        assert_eq!(colours, (Some(0x0001_0203), Some(0x0004_0506)));
+        assert!(peer.colours.is_empty(), "sent what version 13 cannot read");
         assert!(reactor.is_window_ready(), "the link ended");
+    }
+
+    /// Sets a cursor colour and a background, and resets both after a line of input.
+    const OSC_COLOURS: &str = r"printf '\033]12;#010203\007\033]11;#040506\007set'; read line; printf '\033]112\007\033]111\007reset'; sleep 30";
+
+    #[test]
+    fn a_pane_s_osc_11_and_12_colours_reach_the_window_set_and_reset() {
+        let mut reactor = Reactor::new().unwrap();
+        let pane = reactor.open_tab(shell(OSC_COLOURS), 24, 80).unwrap();
+        let mut peer = Peer::watching(&mut reactor, pane);
+        let number = pane as u32;
+        let set = (number, Some(0x0001_0203), Some(0x0004_0506));
+        serve(&mut reactor, &mut peer, |_, p| {
+            p.colours.last() == Some(&set)
+        });
+        assert!(reactor.write(pane, b"\n"));
+        serve(&mut reactor, &mut peer, |_, p| {
+            p.colours.last() == Some(&(number, None, None))
+        });
+        assert!(
+            peer.colours.len() <= 4,
+            "told of colours that did not change"
+        );
+    }
+
+    #[test]
+    fn a_palette_recolours_every_pane_and_one_opened_later_and_is_no_news() {
+        const THEME: Palette = Palette {
+            background: 0x0010_1010,
+            ..Palette::GRAPHITE_GRID
+        };
+        let (mut reactor, mut peer, first) = session(24, 80);
+        peer.send(Request::Palette(THEME));
+        let themed = |r: &Reactor, p: &Peer, pane: u32| {
+            p.matches(r, pane as usize) && p.frames[&pane].cells[0].background == THEME.background
+        };
+        serve(&mut reactor, &mut peer, |r, p| themed(r, p, first));
+        peer.send(Request::NewTab);
+        serve(&mut reactor, &mut peer, |r, p| {
+            p.shown.len() == 1 && p.shown[0].0 != first && themed(r, p, p.shown[0].0)
+        });
+        // The first pane is hidden now, and a palette it has not drawn is not output.
+        peer.send(Request::Palette(Palette::GRAPHITE_GRID));
+        peer.send(Request::Palette(THEME));
+        peer.send(Request::SwitchTab { index: 0 });
+        serve(&mut reactor, &mut peer, |r, p| {
+            p.shown.first().map(|shown| shown.0) == Some(first) && themed(r, p, first)
+        });
+        assert_eq!(peer.activity, 0, "a palette marked a tab as having news");
     }
 
     #[test]

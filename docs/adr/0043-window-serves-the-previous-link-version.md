@@ -67,6 +67,12 @@ From 12, `OLDEST` is 11, so a version 10 core restarts the session.
 
 From 13, `OLDEST` is 12, so a version 11 core restarts the session.
 
+| Change in 14 | Spoken version 13 |
+|---|---|
+| `Request::Palette` and `Notice::Colours` ([ADR-0049](0049-themes.md)) | The window never sends the first and the core never sends the second. The window draws everything in Graphite Grid whatever `theme` says, and says in its log that themes need the core updated. OSC 11 and 12 behave as before. |
+
+From 14, `OLDEST` is 13, so a version 12 core restarts the session.
+
 **Raising the version.** A PR that changes the link raises `VERSION`, gives each new message or
 value a `since` of the new version, and adds a row to this table saying how the older version
 degrades. A change with no safe degradation, such as a new field every frame needs, says so

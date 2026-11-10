@@ -9,13 +9,14 @@ use std::mem;
 use std::os::fd::{AsFd, AsRawFd};
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use mio::unix::{SourceFd, pipe};
 use mio::{Events, Interest, Poll, Token};
 use pinfold_api::tool::Run;
 use pinfold_mux::{Session, Size};
+use pinfold_proto::Palette;
 use pinfold_proto::link::ApprovalAnswer;
 use pinfold_sys::Terminal;
 use pinfold_sys::pty::Pty;
@@ -221,6 +222,8 @@ pub struct Reactor {
     pub(crate) protect: Protect,
     /// Set when this core lacks the hardened runtime: whether it could tell (ADR-0044).
     pub(crate) unhardened: Option<bool>,
+    /// The one palette every pane draws in: Graphite Grid until a window sends another.
+    palette: Arc<Mutex<Palette>>,
     /// The `pinfold` binary that runs the built-in tools.
     tools: Option<PathBuf>,
     /// The directory last listed for a window's markdown picker.
@@ -256,6 +259,7 @@ impl Reactor {
             approval_answers: Vec::new(),
             protect: Protect::default(),
             unhardened: None,
+            palette: Arc::new(Mutex::new(Palette::GRAPHITE_GRID)),
             tools: None,
             markdown: None,
         })
@@ -290,7 +294,11 @@ impl Reactor {
             number: pane,
             pty,
             program,
-            engine: Box::new(AlacrittyEngine::new(rows, columns)),
+            engine: Box::new(AlacrittyEngine::with_palette(
+                rows,
+                columns,
+                self.palette.clone(),
+            )),
             replies: Vec::new(),
             input: Vec::new(),
             readable: true,
@@ -585,6 +593,16 @@ impl Reactor {
     /// Returns whether a pane changed since the last call, and clears that.
     pub fn take_dirty(&mut self, pane: usize) -> bool {
         pane_mut(&mut self.panes, pane).is_some_and(|pane| std::mem::take(&mut pane.dirty))
+    }
+
+    /// Sets the palette every pane draws in, now and for panes opened later, and returns
+    /// whether it changed (ADR-0049). The caller sends the frames again.
+    pub fn set_palette(&mut self, palette: Palette) -> bool {
+        let mut held = self
+            .palette
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        mem::replace(&mut *held, palette) != palette
     }
 
     /// Returns a pane's terminal.
