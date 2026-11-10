@@ -42,13 +42,11 @@ pub struct Config {
     pub background_opacity: f32,
     /// Whether to blur what shows through a translucent background on macOS. Ignored elsewhere.
     pub background_blur: bool,
-    /// The theme's name: a file in `themes/` beside the config file, or a built-in theme.
-    /// Nothing means Graphite Grid. [`theme::load`] checks it, so a bad name leaves the other
-    /// keys applied.
-    pub theme: Option<String>,
-    /// The `[colors]` table: single colours on top of the theme. Boxed, as it is 280 bytes and
-    /// a config is passed about by value.
-    pub colors: Box<theme::Colors>,
+    /// The `theme` key, which is only allowed here: [`theme::load`] reads it from the file, so
+    /// a bad theme leaves the other keys applied and the core carries no theme code.
+    pub theme: de::IgnoredAny,
+    /// The `[colors]` table, allowed here and read by [`theme::load`], as `theme` is.
+    pub colors: de::IgnoredAny,
     /// The `[keys]` table.
     pub keys: Keys,
     /// The `[api]` table.
@@ -128,8 +126,8 @@ impl Default for Config {
             // Opaque, because memory is the first goal.
             background_opacity: 1.0,
             background_blur: false,
-            theme: None,
-            colors: Box::default(),
+            theme: de::IgnoredAny,
+            colors: de::IgnoredAny,
             keys: Keys::default(),
             api: Api::default(),
             agents: BTreeMap::new(),

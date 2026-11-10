@@ -411,7 +411,7 @@ fn resolve(colors: Colors, overrides: Colors) -> Result<(Theme, Vec<String>), cr
 /// use pinfold_config::theme::{self, Colors, GRAPHITE};
 /// let text = b"background = \"#101216\"\nforeground = \"#8b949e\"";
 /// assert!(theme::parse(text, Colors::default()).is_err());
-/// let (theme, notes) = theme::load(std::path::Path::new("/nowhere"), None, Colors::default())?;
+/// let (theme, notes) = theme::load(std::path::Path::new("/nowhere/pinfold.toml"))?;
 /// assert!(theme == GRAPHITE && notes.is_empty());
 /// # Ok::<(), theme::Error>(())
 /// ```
@@ -419,15 +419,35 @@ pub fn parse(bytes: &[u8], overrides: Colors) -> Result<(Theme, Vec<String>), cr
     resolve(crate::parse_as(bytes)?, overrides)
 }
 
-/// Loads the theme `name`, or Graphite Grid without one, with `overrides` on top, as [`parse`]
-/// does. A named theme is `themes/<name>.toml` beside `config`, the path of `pinfold.toml`,
-/// read with the checks of [`crate::load`], and then a built-in theme.
+/// The two keys of `pinfold.toml` that choose a theme. Its other keys are ignored here.
+#[derive(Default, Deserialize)]
+#[serde(default)]
+struct Chosen {
+    theme: Option<String>,
+    colors: Colors,
+}
+
+/// Loads the theme `config`, the path of `pinfold.toml`, chooses: its `theme`, or Graphite Grid
+/// without one, with its `[colors]` on top, as [`parse`] does. A named theme is
+/// `themes/<name>.toml` beside `config`, read with the checks of [`crate::load`], and then a
+/// built-in theme.
+///
+/// This reads `config` itself, and [`crate::Config`] holds neither key, so the core, which
+/// never calls this, carries no theme code.
 ///
 /// # Errors
 ///
-/// Returns an error if the name is refused, no theme has it, or its file is refused. The
-/// caller then keeps the theme it has, or Graphite Grid at start.
-pub fn load(
+/// Returns an error if `config` or the theme file is refused, `theme` or `[colors]` is bad, or
+/// no theme has the name. The caller then keeps the theme it has, or Graphite Grid at start.
+pub fn load(config: &Path) -> Result<(Theme, Vec<String>), Error> {
+    let chosen: Chosen = match crate::read(config)? {
+        Some(bytes) => crate::parse_as(&bytes)?,
+        None => Chosen::default(),
+    };
+    named(config, chosen.theme.as_deref(), chosen.colors)
+}
+
+fn named(
     config: &Path,
     name: Option<&str>,
     overrides: Colors,
@@ -489,6 +509,8 @@ mod tests {
         fs::write(&path, contents).unwrap();
         fs::set_permissions(&path, Permissions::from_mode(0o600)).unwrap();
         let config = dir.path().join("pinfold.toml");
+        fs::write(&config, "theme = \"My Theme-1\"\nfont_size = 20\n").unwrap();
+        fs::set_permissions(&config, Permissions::from_mode(0o600)).unwrap();
         (dir, config)
     }
 
@@ -659,31 +681,32 @@ mod tests {
         let text = "theme = \"../x\"\nfont_size = 20\n[colors]\ncursor = \"#ff0000\"\n[colors.states]\nidle = \"#9aa1ac\"\n";
         let config = crate::parse(text.as_bytes()).unwrap();
         assert_eq!(config.font_size, 20.0);
-        let path = Path::new("/nowhere/pinfold.toml");
-        let named = load(path, config.theme.as_deref(), *config.colors);
-        assert!(matches!(named, Err(Error::Name)));
-        let (theme, notes) = load(path, None, *config.colors).unwrap();
+        let (_dir, path) = themes("unused.toml", b"");
+        fs::write(&path, text).unwrap();
+        assert!(matches!(load(&path), Err(Error::Name)));
+        fs::write(&path, text.replace("../x", "Graphite Grid")).unwrap();
+        let (theme, notes) = load(&path).unwrap();
         let expected = Theme {
             cursor: 0x00ff_0000,
             ..GRAPHITE
         };
         assert_eq!((theme, notes), (expected, Vec::new()));
-        assert_eq!(
-            load(path, Some("Graphite Grid"), Colors::default())
-                .unwrap()
-                .0,
-            GRAPHITE
-        );
-        assert!(crate::parse(b"[colors]\nglow = \"#000000\"").is_err());
+        // A bad `[colors]` is the theme's problem, named with its line, and no other key's.
+        fs::write(&path, "font_size = 20\n[colors]\nglow = \"#000000\"\n").unwrap();
+        assert_eq!(crate::load(&path).unwrap().font_size, 20.0);
+        let text = load(&path).unwrap_err().to_string();
+        assert!(text.contains("line 3") && text.contains("glow"), "{text}");
+        fs::remove_file(&path).unwrap();
+        assert_eq!(load(&path).unwrap(), (GRAPHITE, Vec::new()));
     }
 
     #[test]
     fn a_user_theme_is_read_from_beside_the_config_file() {
         let text = file(0x0028_2a36, 0x00f8_f8f2, 0x008b_e9fd);
         let (_dir, config) = themes("My Theme-1.toml", text.as_bytes());
-        let (theme, _) = load(&config, Some("My Theme-1"), Colors::default()).unwrap();
+        let (theme, _) = load(&config).unwrap();
         assert_eq!(theme.background, 0x0028_2a36);
-        let missing = load(&config, Some("Other"), Colors::default());
+        let missing = named(&config, Some("Other"), Colors::default());
         assert!(matches!(missing, Err(Error::NotFound)));
     }
 
@@ -691,14 +714,14 @@ mod tests {
     fn a_name_that_could_be_a_path_is_refused() {
         let long = "a".repeat(65);
         for name in ["", ".", ".hidden", "a/b", "../a", "a\0", "é", "a\n", &long] {
-            let refused = load(Path::new("/nowhere/c"), Some(name), Colors::default());
+            let refused = named(Path::new("/nowhere/c"), Some(name), Colors::default());
             assert!(matches!(refused, Err(Error::Name)), "{name:?}");
         }
     }
 
     #[test]
     fn a_theme_file_gets_the_checks_of_the_config_file() {
-        let load = |config: &Path| load(config, Some("t"), Colors::default());
+        let load = |config: &Path| named(config, Some("t"), Colors::default());
         let (_dir, config) = themes("t.toml", &vec![b'\n'; crate::MAX_BYTES as usize + 1]);
         assert!(matches!(
             load(&config),

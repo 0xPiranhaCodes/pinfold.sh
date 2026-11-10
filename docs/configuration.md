@@ -381,10 +381,9 @@ holds the colours to these rules whatever the theme says:
   otherwise black or white, whichever contrasts more.
 - `foreground` under 4.5 on `background` is only reported, with the ratio.
 
-A theme that cannot be used, for its name, its file or an absent required key, is
-[reported](#where-problems-are-reported) with the reason, and the other keys of `pinfold.toml`
-still apply. A bad key or colour in `[colors]` is a problem in `pinfold.toml` itself, like any
-other key.
+A theme that cannot be used, for its name, its file, an absent required key, or a bad key or
+colour in `[colors]`, is [reported](#where-problems-are-reported) with the reason, and the
+other keys of `pinfold.toml` still apply.
 
 ## Reload
 
