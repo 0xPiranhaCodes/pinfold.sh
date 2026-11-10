@@ -1504,7 +1504,7 @@ mod tests {
         loop {
             match next() {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                    assert!(start.elapsed() < Duration::from_secs(20), "{error}");
+                    assert!(start.elapsed() < Duration::from_secs(90), "{error}");
                     std::thread::sleep(Duration::from_millis(20));
                 }
                 done => return done,
@@ -1516,12 +1516,17 @@ mod tests {
     fn the_users_shell_reports_its_path() {
         let temp = tempfile::tempdir().unwrap();
         let private = temp.path();
-        let path = answered(|| login_path(private)).unwrap();
+        let ask = || ask_shell(crate::shell::command(), private);
+        let mut login = None;
+        // Under load the user's startup files can take over LOGIN_WAIT, which would kill the
+        // shell every time (#342); the deadline has its own test below.
+        let wait = Duration::from_secs(60);
+        let path = answered(|| next_path(&mut login, &ask, wait)).unwrap();
         assert!(
             std::env::split_paths(&path).any(|entry| entry.ends_with("bin")),
             "{path:?}"
         );
-        assert_eq!(login_path(private).unwrap(), path);
+        assert_eq!(next_path(&mut login, &ask, wait).unwrap(), path);
     }
 
     /// A shell that takes `seconds` to print `/slow/bin` as its `PATH`.
