@@ -11,6 +11,8 @@ variable is unset. Saving the file applies it to the running window within about
 | `macos_option_as_alt` | bool   | `false` | Option sends Alt instead of composing text. macOS only   |
 | `background_opacity`  | number | `1`     | Default background opacity, from 0 to 1. macOS only      |
 | `background_blur`     | bool   | `false` | Blur what shows through the background. macOS only       |
+| `theme`               | string | none    | A [theme](#themes) by name. Without it, Graphite Grid    |
+| `colors`              | table  | none    | Single [colours](#themes) on top of the theme            |
 | `keys.prefix`         | string | `"C-a"` | Prefix, `C-` and a lowercase letter                      |
 | `api.audit_log`       | bool   | `false` | Also write the API audit log to disk                     |
 | `api.protect`         | list   | below   | Command-line text that protects a pane from API sends    |
@@ -318,6 +320,71 @@ than 2,048 bytes, or one that is not a URI, gets neither item.
 
 Paste, copy, find and vi mode keys always work, and they cancel a pressed prefix. A key
 that composes text in an input method never counts as the prefix.
+
+## Themes
+
+PinFold reads and checks these keys, but the window does not draw from them yet
+([#399](https://github.com/0xPiranhaCodes/pinfold.sh/issues/399)), so for now they change
+nothing on screen. The rules are those of [ADR-0049](adr/0049-themes.md).
+
+```toml
+theme = "My Theme"
+
+[colors]
+background = "#0d1117"
+
+[colors.states]
+needs_you = "#f5b544"
+```
+
+`theme` names a theme: 1 to 64 ASCII letters, digits, spaces and `-`, `_`, `+`, `.`, not
+starting with `.`, so no name is a path. PinFold looks for `themes/<name>.toml` beside
+`pinfold.toml`, then among the built-in themes, of which `Graphite Grid`, the default, is the
+only one so far. A theme file gets the checks `pinfold.toml` gets: a regular file after links
+are followed, at most 64 KiB, UTF-8, yours, and not writable by group or others, with an unknown
+key refused and named with its line.
+
+`[colors]` sets single keys on top of the named theme, or on top of Graphite Grid. A theme file
+and `[colors]` take the same keys, each a string of `#` and six hex digits:
+
+| Keys | In a theme file | When absent |
+| --- | --- | --- |
+| `background`, `foreground` | required | |
+| `black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white` | required | |
+| `bright_black`, `bright_red`, `bright_green`, `bright_yellow`, `bright_blue`, `bright_magenta`, `bright_cyan`, `bright_white` | required | |
+| `cursor` | optional | `foreground` |
+| `cursor_text` | optional | `background` |
+| `selection_background` | optional | `foreground` |
+| `selection_foreground` | optional | `background` |
+| `chrome.accent` | optional | `cyan`, or `foreground` where `cyan` contrasts under 4.5 with `chrome.tab_active` |
+| `chrome.tab`, `chrome.tab_hover`, `chrome.overlay` | optional | `background` moved 6%, 14% and 4% towards `foreground` |
+| `chrome.tab_active` | optional | `background` moved 22% towards `chrome.accent` if set, else `cyan` |
+| `chrome.border`, `chrome.muted` | optional | `background` moved 20% and 30% towards `foreground` |
+| `chrome.dim` | optional | `foreground` moved 25% towards `background` |
+| `states.needs_you`, `states.running`, `states.done`, `states.error`, `states.idle` | optional | Graphite Grid's five colours |
+
+In a theme file the last two groups are the tables `[chrome]` and `[states]`, and in
+`pinfold.toml` they are `[colors.chrome]` and `[colors.states]`. A mix is done per sRGB channel
+and rounded, a half to even.
+
+A theme sets colours only. The glyph and the word of an agent state are not keys, and PinFold
+holds the colours to these rules whatever the theme says:
+
+- Each state colour is made lighter on a dark theme, or darker on a light one, in steps of 0.01
+  of OKLab lightness, until it contrasts at least 4.5 with the background, the three tab
+  surfaces and the overlay. A theme is dark when its background's relative luminance is under
+  0.179.
+- If a state still contrasts under 4.5 on one of them, if two states end up under 0.07 apart in
+  OKLab, or if `chrome.muted` contrasts 3 or more with the background, the chrome and the states
+  are Graphite Grid's and the panes keep the theme. A background near mid grey does this.
+- A prompt's text is `foreground` where that contrasts at least 4.5 with `chrome.overlay`, and
+  otherwise black or white, whichever contrasts more.
+- `foreground` under 4.5 on `background` is only reported, with the ratio.
+
+A theme that cannot be used, for its name, its file or an absent required key, is
+[reported](#where-problems-are-reported) with the reason, and the other keys of `pinfold.toml`
+still apply. A bad key or colour in `[colors]` is a problem in `pinfold.toml` itself, like any
+other key.
 
 ## Reload
 

@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Deserializer, de};
 
+pub mod theme;
 pub mod workspace;
 
 /// The largest file read. A file written by hand is a few KiB, and this bounds startup.
@@ -41,6 +42,13 @@ pub struct Config {
     pub background_opacity: f32,
     /// Whether to blur what shows through a translucent background on macOS. Ignored elsewhere.
     pub background_blur: bool,
+    /// The theme's name: a file in `themes/` beside the config file, or a built-in theme.
+    /// Nothing means Graphite Grid. [`theme::load`] checks it, so a bad name leaves the other
+    /// keys applied.
+    pub theme: Option<String>,
+    /// The `[colors]` table: single colours on top of the theme. Boxed, as it is 280 bytes and
+    /// a config is passed about by value.
+    pub colors: Box<theme::Colors>,
     /// The `[keys]` table.
     pub keys: Keys,
     /// The `[api]` table.
@@ -120,6 +128,8 @@ impl Default for Config {
             // Opaque, because memory is the first goal.
             background_opacity: 1.0,
             background_blur: false,
+            theme: None,
+            colors: Box::default(),
             keys: Keys::default(),
             api: Api::default(),
             agents: BTreeMap::new(),
@@ -440,13 +450,18 @@ fn private_dirs_from(
 ///
 /// Returns an error if the file cannot be read, is refused, or is invalid.
 pub fn load(path: &Path) -> Result<Config, Error> {
+    read(path)?.map_or_else(|| Ok(Config::default()), |bytes| parse(&bytes))
+}
+
+/// Reads a file with the checks of [`load`], or nothing if there is none.
+fn read(path: &Path) -> Result<Option<Vec<u8>>, Error> {
     // Non-blocking, so a FIFO in the file's place cannot hang startup.
     let opened = OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NONBLOCK)
         .open(path);
     let file = match opened {
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Config::default()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
         file => file?,
     };
     // Asked of the open file, so what is checked is what is read.
@@ -456,7 +471,7 @@ pub fn load(path: &Path) -> Result<Config, Error> {
     if bytes.len() as u64 > MAX_BYTES {
         return Err(Error::TooLarge);
     }
-    parse(&bytes)
+    Ok(Some(bytes))
 }
 
 fn check(metadata: &Metadata) -> Result<(), Error> {
@@ -534,6 +549,11 @@ impl Watch {
 /// # Ok::<(), pinfold_config::Error>(())
 /// ```
 pub fn parse(bytes: &[u8]) -> Result<Config, Error> {
+    parse_as(bytes)
+}
+
+/// Parses a config file or a theme file.
+fn parse_as<T: de::DeserializeOwned>(bytes: &[u8]) -> Result<T, Error> {
     let text = std::str::from_utf8(bytes).map_err(|_| Error::NotUtf8)?;
     toml::from_str(text).map_err(|error| {
         // The message quotes the file, and it goes to the terminal Pinfold started from.
