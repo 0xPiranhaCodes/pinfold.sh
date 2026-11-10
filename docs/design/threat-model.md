@@ -270,7 +270,10 @@ else; its mode is set through the open file.
 
 **Limits.** A request line over 32 KiB is rejected. `pane.send` is capped at 4 KB per call and
 20 calls per second per caller, and reads at 2 MB per call. Cold scrollback is capped at 2
-MB per pane by default, because hostile output can defeat a line limit.
+MB per pane by default, because hostile output can defeat a line limit. A PTY open still
+stuck in the kernel after 5 s fails its pane, and while 4 are stuck new panes are refused, so
+no open stalls the core (ADR-0048; `a_pty_open_stuck_in_the_kernel_fails_its_pane_and_the_others_run_on`,
+`past_the_cap_of_stuck_threads_a_pane_is_refused_without_a_thread`).
 
 **Sandbox.** An agent profile may set `sandbox`, which launches the agent under
 bubblewrap or Landlock on Linux and `sandbox-exec` on macOS, or under the agent CLI's own

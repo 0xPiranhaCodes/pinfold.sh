@@ -5,6 +5,7 @@ pub mod grants;
 pub mod io;
 pub mod link;
 pub mod marks;
+mod opener;
 pub mod paste;
 pub mod protect;
 mod reflow;

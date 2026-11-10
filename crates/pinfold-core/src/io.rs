@@ -22,6 +22,7 @@ use pinfold_sys::pty::Pty;
 
 use crate::link::{Host, LINK};
 use crate::marks::ShellMarks;
+use crate::opener::{OPEN_DEADLINE, Opener};
 use crate::protect::Protect;
 use crate::search::{CopyStep, Copying, Direction, Position, Search, SearchStep, Selection};
 use crate::status::{self, Status, Tracker};
@@ -206,6 +207,8 @@ pub struct Reactor {
     focus_clock: u64,
     /// Starts the shell of each pane a window opens.
     pub(crate) shell: fn() -> Command,
+    /// Opens each pane's PTY on the spawn thread, with a deadline (ADR-0048).
+    opener: Opener,
     buffer: Vec<u8>,
     pub(crate) host: Host,
     /// The read end of the self-pipe, kept open while it is polled.
@@ -244,6 +247,7 @@ impl Reactor {
             revision: 0,
             focus_clock: 0,
             shell: shell::command,
+            opener: Opener::new(pinfold_sys::pty::open_pair, OPEN_DEADLINE),
             buffer: vec![0; READ_BUDGET],
             host: Host::default(),
             signals: None,
@@ -269,11 +273,12 @@ impl Reactor {
     /// # Errors
     ///
     /// Returns an error if the PTY cannot be created or polled, or the program cannot start.
+    /// An open still stuck in the kernel after five seconds is `TimedOut` (ADR-0048).
     pub fn spawn(&mut self, mut command: Command, rows: u16, columns: u16) -> io::Result<usize> {
         command.env("TERM", "xterm-256color");
         // The program alone: its arguments can hold secrets.
         let program = command.get_program().to_string_lossy().into_owned();
-        let pty = Pty::spawn(command, rows, columns)?;
+        let pty = Pty::spawn_on(self.opener.open()?, command, rows, columns)?;
         let pane = self.next_pane;
         let fd = pty.master().as_raw_fd();
         let interest = Interest::READABLE | Interest::WRITABLE;
@@ -1242,6 +1247,28 @@ mod tests {
         reactor.write(2, b"key\n");
         assert!(turn_until(&mut reactor, |r| on_screen(r, 2, "key")));
         assert_eq!(reactor.spawn(shell("cat"), 24, 80).unwrap(), 3);
+    }
+
+    #[test]
+    fn a_pty_open_stuck_in_the_kernel_fails_its_pane_and_the_others_run_on() {
+        fn stuck() -> io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+            loop {
+                std::thread::park();
+            }
+        }
+        let mut reactor = Reactor::new().unwrap();
+        let pane = reactor.spawn(shell("cat"), 24, 80).unwrap();
+        let deadline = Duration::from_millis(200);
+        reactor.opener = Opener::new(stuck, deadline);
+        let start = Instant::now();
+        let error = reactor.spawn(shell("cat"), 24, 80).unwrap_err();
+        assert!(start.elapsed() < deadline * 5, "{:?}", start.elapsed());
+        assert_eq!(error.kind(), ErrorKind::TimedOut);
+        assert_eq!(reactor.pane_count(), 1);
+        reactor.write(pane, b"still\n");
+        assert!(turn_until(&mut reactor, |r| on_screen(r, pane, "still")));
+        reactor.opener = Opener::new(pinfold_sys::pty::open_pair, OPEN_DEADLINE);
+        assert_eq!(reactor.spawn(shell("cat"), 24, 80).unwrap(), 1);
     }
 
     #[test]

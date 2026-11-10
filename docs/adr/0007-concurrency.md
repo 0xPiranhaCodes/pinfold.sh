@@ -20,3 +20,6 @@ and a flooding pane gets backpressure.
 
 Dependencies that bring an executor are excluded, which rules out `notify-rust` with
 `zbus` on Linux (finding M2). `cargo-deny` enforces this ban.
+
+PTYs open on a spawn thread with a deadline, so a stuck `grantpt` cannot stall the I/O
+thread ([ADR-0048](0048-pty-opens-on-a-spawn-thread-with-a-deadline.md)).
