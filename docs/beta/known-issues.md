@@ -1,6 +1,6 @@
 # Known issues in the macOS beta
 
-What testers of `0.1.0-beta.3` should know before reporting a bug. A report about any of these is
+What testers of `0.1.0-beta.4` should know before reporting a bug. A report about any of these is
 still welcome if it adds a case not listed here. Report bugs with the
 [beta bug form](https://github.com/0xPiranhaCodes/pinfold.sh/issues/new?template=beta-bug.yml).
 
@@ -99,6 +99,14 @@ The Dock menu ([#170](https://github.com/0xPiranhaCodes/pinfold.sh/pull/170)), O
 Link (#171) and the About panel ([#185](https://github.com/0xPiranhaCodes/pinfold.sh/pull/185))
 pass their automated tests, but nobody has yet clicked them in a signed install. The
 [manual checks](manual-checks.md) cover them, and their results table records each Mac checked.
+
+Themes ([#350](https://github.com/0xPiranhaCodes/pinfold.sh/issues/350)) are new in this beta,
+and two parts are tested only without a real window. Following a System Settings appearance
+switch with `theme = { light, dark }` is tested by driving the theme watch, not winit
+([#419](https://github.com/0xPiranhaCodes/pinfold.sh/pull/419)). A pane's OSC 11 background
+staying translucent under `background_opacity` below 1 is tested by reading pixels back from the
+GPU, not by looking at a translucent window
+([#417](https://github.com/0xPiranhaCodes/pinfold.sh/pull/417)). The manual checks cover both.
 
 ## Builds from source
 

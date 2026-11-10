@@ -8,8 +8,8 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
-pinfold-api = { path = "../crates/pinfold-api", version = "0.1.0-beta.3" }
-pinfold-sys = { path = "../crates/pinfold-sys", version = "0.1.0-beta.3" }
+pinfold-api = { path = "../crates/pinfold-api", version = "0.1.0-beta.4" }
+pinfold-sys = { path = "../crates/pinfold-sys", version = "0.1.0-beta.4" }
 serde_json = "1.0.154"
 
 [lints]

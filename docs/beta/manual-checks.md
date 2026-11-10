@@ -3,7 +3,7 @@
 [ADR-0031](../adr/0031-macos-beta-first.md) makes these checks a beta blocker. Run them on the
 signed, notarized `PinFold.dmg` from the draft release, after the checks in
 [Cutting the beta](../../packaging/README.md#cutting-the-beta), on at least one Apple Silicon Mac
-and one Intel Mac. Start each Mac with no earlier PinFold: do [Uninstall](#13-uninstall) first if
+and one Intel Mac. Start each Mac with no earlier PinFold: do [Uninstall](#14-uninstall) first if
 one was there. Record each run in the [results](#results) table.
 
 ## 1. Install and first launch
@@ -22,7 +22,7 @@ one was there. Record each run in the [results](#results) table.
 4. Quit with `⌘Q` and open PinFold again. Expected: no Gatekeeper prompt this time.
 5. Add the CLI, as the [README](../../README.md#install-the-beta) says, and run `pinfold ctl list`
    in a new Terminal.app window. Expected: the one pane is listed. `pinfold --version` prints
-   `pinfold 0.1.0-beta.3`, and `pinfold --help` lists every command.
+   `pinfold 0.1.0-beta.4`, and `pinfold --help` lists every command.
 
 ## 2. Menu bar
 
@@ -127,11 +127,35 @@ The steps from [#171](https://github.com/0xPiranhaCodes/pinfold.sh/pull/171). In
 
 ## 10. About panel
 
-PinFold > About PinFold. Expected: the icon, the name, `PinFold 0.1.0-beta.3` above the
+PinFold > About PinFold. Expected: the icon, the name, `PinFold 0.1.0-beta.4` above the
 copyright, the getting started text with coloured state glyphs, three working links, and the
 licenses. Check it in light and dark mode.
 
-## 11. Memory
+## 11. Themes
+
+The checks from [#350](https://github.com/0xPiranhaCodes/pinfold.sh/issues/350) that no test
+makes on a real window. Open `~/.config/pinfold/pinfold.toml` with PinFold > Settings… and keep
+PinFold beside the editor.
+
+1. Set `theme = { light = "GitHub Light", dark = "GitHub Dark" }` and save. Switch System
+   Settings > Appearance between Light and Dark. Expected: within about a second of each switch,
+   the chrome and the panes, history included, take the matching theme
+   ([#404](https://github.com/0xPiranhaCodes/pinfold.sh/issues/404)).
+2. Quit with `⌘Q` while the system is light, then open PinFold. Expected: the first frame is
+   already GitHub Light, with no dark flash
+   ([#421](https://github.com/0xPiranhaCodes/pinfold.sh/issues/421)).
+3. Set `theme = "Dracula"` and save, then `theme = "Solarized Light"` and save. Expected: each
+   save recolours the window within about a second, with no new window.
+4. Set `background_opacity = 0.8` and save. In one pane run `printf '\e]11;#203040\a'`.
+   Expected: that pane's background turns dark blue and the desktop still shows through it; the
+   padding and the other panes keep the theme. Run `printf '\e]111\a'`. Expected: the pane is
+   back to the theme's background, still translucent
+   ([#400](https://github.com/0xPiranhaCodes/pinfold.sh/issues/400)).
+5. Set `theme = "No Such Theme"` and save. Expected: the window keeps Solarized Light, and
+   `$TMPDIR/pinfold-$(id -u)/default.log` says why the theme cannot be used. Remove the
+   `theme` and `background_opacity` lines and save.
+
+## 12. Memory
 
 In a checkout of the release tag on the same Mac, with nothing else heavy running:
 
@@ -142,13 +166,13 @@ XDG_CONFIG_HOME="$(mktemp -d)" cargo xtask mem-gate
 Expected: every row passes. Paste the table into the notes, with `uptime`'s load average. This
 measures a build from the checkout, not the installed app.
 
-## 12. Crash isolation
+## 13. Crash isolation
 
 1. With a `sleep 600` pane open, find the window's process with `pgrep -x pinfold-window` and
    `kill -9` it. Expected: the window goes, and `pinfold ctl list` still lists the pane.
 2. Run `pinfold`. Expected: the window returns with `sleep` still running.
 
-## 13. Uninstall
+## 14. Uninstall
 
 Follow [Uninstall](../../README.md#uninstall) in the README. Expected: `pgrep -x pinfold-core`
 prints nothing, and none of the listed paths are left.

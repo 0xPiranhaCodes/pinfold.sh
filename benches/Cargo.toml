@@ -24,11 +24,11 @@ path = "echo.rs"
 
 [dependencies]
 alacritty_terminal = "=0.26.0"
-pinfold-api = { path = "../crates/pinfold-api", version = "0.1.0-beta.3" }
-pinfold-core = { path = "../crates/pinfold-core", version = "0.1.0-beta.3" }
-pinfold-proto = { path = "../crates/pinfold-proto", version = "0.1.0-beta.3" }
-pinfold-sys = { path = "../crates/pinfold-sys", version = "0.1.0-beta.3" }
-pinfold-ui = { path = "../crates/pinfold-ui", version = "0.1.0-beta.3" }
+pinfold-api = { path = "../crates/pinfold-api", version = "0.1.0-beta.4" }
+pinfold-core = { path = "../crates/pinfold-core", version = "0.1.0-beta.4" }
+pinfold-proto = { path = "../crates/pinfold-proto", version = "0.1.0-beta.4" }
+pinfold-sys = { path = "../crates/pinfold-sys", version = "0.1.0-beta.4" }
+pinfold-ui = { path = "../crates/pinfold-ui", version = "0.1.0-beta.4" }
 
 [lints]
 workspace = true

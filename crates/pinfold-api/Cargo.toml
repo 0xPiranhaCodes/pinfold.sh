@@ -12,7 +12,7 @@ publish.workspace = true
 [dependencies]
 libc = "0.2.191"
 mio = { version = "1.2.4", features = ["os-ext", "os-poll"] }
-pinfold-sys = { path = "../pinfold-sys", version = "0.1.0-beta.3" }
+pinfold-sys = { path = "../pinfold-sys", version = "0.1.0-beta.4" }
 serde_json = "1.0.154"
 sha2 = "0.11.1"
 thiserror = "2.0.21"
