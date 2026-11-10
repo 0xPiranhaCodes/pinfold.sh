@@ -11,14 +11,16 @@ const input = $("cmd");
 const usage = out.textContent.slice(out.textContent.indexOf("PinFold: a memory-first")).trimEnd();
 const html = new Set(["states", "sudo"]);
 const cmds = {
-  help: () => "commands: pinfold --help · keys · states · mem · install · about · clear",
+  help: () => "commands: pinfold --help · keys · states · mem · themes · config · install · about · clear",
   "pinfold --help": () => usage,
   keys: () => "⌘T new tab\n⌘D split right\n⇧⌘D split down\nCtrl+a, then c · | · -   tab · right · down",
   states: () => '<span class="st-needs">◆ needs you</span>  <span class="st-run">● running</span>  <span class="st-done">✓ done</span>  <span class="st-err">✕ error</span>  <span class="st-idle">○ idle</span>',
   mem: () => [...document.querySelectorAll("#memory tbody tr")].map((tr) => { const c = tr.cells; return `${c[0].textContent.padEnd(26)}${c[2].textContent.padStart(9)} / ${c[3].textContent.padEnd(9)} (${c[1].textContent})`; }).join("\n") + "\nreproduce: cargo xtask mem-gate",
+  themes: () => [...document.querySelectorAll("#themes .swatches b")].map((b) => b.textContent).join("\n") + '\nin pinfold.toml: theme = "Nord"   (on main, in the next beta)',
+  config: () => "~/.config/pinfold/pinfold.toml, applied on save\nfont_size = 14\n[keys]\nprefix = \"C-b\"\nevery key: docs/configuration.md",
   install: () => "macOS beta: PinFold.dmg from github.com/0xPiranhaCodes/pinfold.sh/releases/tag/v0.1.0-beta.3\nfrom source: cargo build --release -p pinfold-cli",
   about: () => "PinFold: a memory-first terminal for agentic coding, written in Rust.",
-  ls: () => "why/  memory/  agents/  try/  install/",
+  ls: () => "why/  memory/  agents/  try/  themes/  configure/  install/",
   whoami: () => "you, the one the ◆ prompt is for",
   sudo: () => '<span class="st-err">✕ error</span>  agents ask first. so do you.',
 };
@@ -60,7 +62,7 @@ copyBtn.addEventListener("click", async () => {
   setTimeout(() => { copyBtn.textContent = "copy"; }, 1400);
 });
 
-// Tab strip: scroll-spy, and ⌘1..6 or Ctrl+1..6.
+// Tab strip: scroll-spy, and ⌘1..8 or Ctrl+1..8.
 const links = [...document.querySelectorAll("#tabs a")];
 const targets = links.map((a) => document.querySelector(a.hash)).filter(Boolean);
 const setCurrent = (id) => links.forEach((a) => (a.hash === `#${id}` ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current")));
