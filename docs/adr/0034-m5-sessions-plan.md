@@ -158,3 +158,13 @@ the security model, so it waits for the maintainer to accept this ADR.
 Revisit point 1 if people miss scrollback after a reboot, then with point 3's encryption and a key
 that does not sit beside the file. Revisit point 8 if one session is too few for people with
 several projects open.
+
+**Note, 2026-11-10 ([#395](https://github.com/0xPiranhaCodes/pinfold.sh/issues/395)).** The
+decision stands; this fills a gap in points 2 and 5. A snapshot that parses but whose restore
+fails, such as a PTY open past its deadline ([ADR-0048](0048-pty-opens-on-a-spawn-thread-with-a-deadline.md)),
+left the core to start fresh, and the fresh session's next save replaced the file. The core now
+moves the file aside first, as `default.json.failed-<unix seconds>` in the same directory, with a
+rename that replaces nothing, so it keeps its 0600 mode. The newest 3 are kept
+(`KEPT_FAILED` in `snapshot.rs`). If the move fails, the core saves nothing until it exits, and
+`session.save` is refused. Nothing restores a `.failed` file: a person renames it back to
+`default.json`, and it is then read and checked as any snapshot.

@@ -513,7 +513,9 @@ fn answer_released(
                     }
                     Err(error) => Err(format!("cannot save the session: {error}")),
                 },
-                None => Err("HOME is not set".to_owned()),
+                None => {
+                    Err("HOME is not set, or a failed restore's file is still in place".to_owned())
+                }
             },
             Method::WorkspaceAskTrust(workspace, _) if released.allowed => {
                 trust_path().and_then(|path| {
@@ -804,8 +806,18 @@ fn save(saver: &mut Saver, reactor: &Reactor, workspaces: &Workspaces) {
 
 /// Restores the saved session (ADR-0034), runs the trusted `run` lines of its workspaces once,
 /// and says whether it did. A failure is logged by its kind alone, which names no path or pane,
-/// and leaves the core to start fresh.
-fn restore_session(reactor: &mut Reactor, workspaces: &mut Workspaces, state: &Path) -> bool {
+/// and leaves the core to start fresh, with the saved file moved aside so the fresh session's
+/// saves do not replace it (#395).
+///
+/// # Errors
+///
+/// Returns an error if a restore failed and its file could not be moved aside. The caller
+/// must then not save.
+fn restore_session(
+    reactor: &mut Reactor,
+    workspaces: &mut Workspaces,
+    state: &Path,
+) -> io::Result<bool> {
     let restored = snapshot::load(state, control::SESSION).and_then(|snapshot| {
         snapshot
             .map(|mut snapshot| {
@@ -836,16 +848,15 @@ fn restore_session(reactor: &mut Reactor, workspaces: &mut Workspaces, state: &P
             })
             .transpose()
     });
-    restored
-        .unwrap_or_else(|error| {
-            let _ = writeln!(
-                io::stderr(),
-                "pinfold-core: cannot restore the session: {}",
-                error.kind()
-            );
-            None
-        })
-        .is_some()
+    restored.map(|restored| restored.is_some()).or_else(|error| {
+        let _ = writeln!(
+            io::stderr(),
+            "pinfold-core: cannot restore the session: {}; its file is kept as a .failed or .bad file beside it",
+            error.kind()
+        );
+        // A file that did not parse is already `.bad`, and then there is nothing to move.
+        snapshot::set_aside(state, control::SESSION).map(|()| false)
+    })
 }
 
 /// Runs the saved session if `restore` and there is one, else `panes` shells, a tab each, until every pane has gone and no window is left to tell, or
@@ -872,9 +883,20 @@ fn daemon(
     let mut parked = VecDeque::new();
     let asked = listen(reactor.waker())?;
     let mut workspaces = Workspaces::default();
-    if restore && state.is_some_and(|state| restore_session(&mut reactor, &mut workspaces, &state))
-    {
-        panes = 0;
+    if restore && let Some(state) = &state {
+        match restore_session(&mut reactor, &mut workspaces, state) {
+            Ok(true) => panes = 0,
+            Ok(false) => {}
+            Err(error) => {
+                // Fail safe: the saved session is still in place, so this core never saves.
+                let _ = writeln!(
+                    io::stderr(),
+                    "pinfold-core: cannot move the saved session aside: {}; this session is not saved",
+                    error.kind()
+                );
+                saver = None;
+            }
+        }
     }
     for _ in 0..panes {
         reactor
@@ -1230,6 +1252,38 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_restore_whose_file_cannot_move_is_an_error_and_the_file_stays() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        let state = std::env::temp_dir().join(format!("pinfold-stays-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        let sessions = state.join("sessions");
+        fs::create_dir_all(&sessions).unwrap();
+        let path = sessions.join(format!("{}.json", control::SESSION));
+        fs::write(&path, "{").unwrap();
+        let mut reactor = Reactor::new().unwrap();
+        let mut workspaces = Workspaces::default();
+        // No rename works in a directory that cannot be written, except as root.
+        fs::set_permissions(&sessions, fs::Permissions::from_mode(0o500)).unwrap();
+        let stuck = restore_session(&mut reactor, &mut workspaces, &state);
+        fs::set_permissions(&sessions, fs::Permissions::from_mode(0o700)).unwrap();
+        if pinfold_sys::effective_uid() != 0 {
+            assert!(stuck.is_err(), "the caller must be told not to save");
+            assert_eq!(fs::read_to_string(&path).unwrap(), "{");
+            // Once the directory can be written, the file is set aside and a fresh core saves.
+            assert!(matches!(
+                restore_session(&mut reactor, &mut workspaces, &state),
+                Ok(false)
+            ));
+        }
+        assert!(!path.exists());
+        assert_eq!(fs::read_dir(&sessions).unwrap().count(), 1);
+        assert_eq!(reactor.pane_count(), 0);
+        fs::remove_dir_all(&state).unwrap();
+    }
 
     #[test]
     fn only_reads_and_sends_of_a_pane_are_cross_pane() {

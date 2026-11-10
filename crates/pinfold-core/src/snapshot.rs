@@ -10,7 +10,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use pinfold_api::control::{self, MAX_SEND};
 use pinfold_api::redact;
@@ -28,6 +28,8 @@ pub const VERSION: u32 = 1;
 pub const MAX_BYTES: usize = 1024 * 1024;
 /// How long after a change a snapshot is taken, the period in `architecture.md`.
 pub const PERIOD: Duration = Duration::from_secs(60);
+/// Most files [`set_aside`] keeps.
+pub const KEPT_FAILED: usize = 3;
 /// Longest directory kept. A longer one is dropped, as a cut path names another directory.
 const MAX_CWD: usize = 4096;
 
@@ -250,6 +252,54 @@ pub fn load(state: &Path, session: &str) -> io::Result<Option<Snapshot>> {
             Err(error)
         }
     }
+}
+
+/// Moves `sessions/<session>.json` in `state` aside as `<session>.json.failed-<unix seconds>`
+/// after a restore failed, so the next save does not replace the only copy (#395). The rename
+/// never replaces a file and moves a link itself, so the file keeps its mode and directory. The
+/// newest [`KEPT_FAILED`] are kept and older ones removed. No file to move is not an error.
+/// Nothing restores a moved file: a person renames it back, and then [`load`] and
+/// [`Reactor::restore`] check it as any other.
+///
+/// ```
+/// let state = std::env::temp_dir().join("pinfold-doc-set-aside");
+/// assert!(pinfold_core::snapshot::set_aside(&state, "doc").is_ok());
+/// ```
+///
+/// # Errors
+///
+/// Returns why the file could not be moved. It is then still in place, and the caller must not
+/// save over it.
+pub fn set_aside(state: &Path, session: &str) -> io::Result<()> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH);
+    set_aside_at(state, session, now.map_or(0, |now| now.as_secs()))
+}
+
+fn set_aside_at(state: &Path, session: &str, now: u64) -> io::Result<()> {
+    let dir = state.join("sessions");
+    let prefix = format!("{session}.json.failed-");
+    let path = dir.join(format!("{session}.json"));
+    match pinfold_sys::rename_no_replace(&path, &dir.join(format!("{prefix}{now}"))) {
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(()),
+        moved => moved?,
+    }
+    // The file is safe by now, so a failure to list or remove older ones is left for next time.
+    let failed = |entry: fs::DirEntry| {
+        entry
+            .file_name()
+            .to_str()?
+            .strip_prefix(&prefix)?
+            .parse()
+            .ok()
+    };
+    let mut times: Vec<u64> = fs::read_dir(&dir)
+        .map(|entries| entries.flatten().filter_map(failed).collect())
+        .unwrap_or_default();
+    times.sort_unstable();
+    for old in times.iter().rev().skip(KEPT_FAILED) {
+        let _ = fs::remove_file(dir.join(format!("{prefix}{old}")));
+    }
+    Ok(())
 }
 
 /// Whether `path` and each directory above it is a real directory, not a symlink, owned by
@@ -701,6 +751,7 @@ mod tests {
     use std::process::Command;
 
     use super::*;
+    use crate::opener::Opener;
 
     fn sample() -> Snapshot {
         let split = Layout::Split {
@@ -859,6 +910,55 @@ mod tests {
         assert!(reactor.restore(&layout).is_err());
         assert_eq!(reactor.pane_count(), 0);
         assert!(reactor.open_tab(Command::new("cat"), 24, 80).is_ok());
+        fs::remove_dir_all(&state).unwrap();
+    }
+
+    #[test]
+    fn a_failed_restore_moves_the_file_aside_and_a_save_never_replaces_it() {
+        fn stuck() -> io::Result<(std::os::fd::OwnedFd, std::os::fd::OwnedFd)> {
+            loop {
+                thread::park();
+            }
+        }
+        let state = std::env::temp_dir().join(format!("pinfold-failed-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&state);
+        let path = sample().write(&state, "default").unwrap();
+        let saved = fs::read(&path).unwrap();
+        let snapshot = load(&state, "default").unwrap().unwrap();
+        let mut reactor = Reactor::new().unwrap();
+        reactor.shell = || Command::new("cat");
+        reactor.opener = Opener::new(stuck, Duration::from_millis(50));
+        let error = reactor.restore(&snapshot).unwrap_err();
+        assert_eq!(error.kind(), ErrorKind::TimedOut);
+        assert_eq!(reactor.pane_count(), 0, "a failed restore keeps no pane");
+        set_aside_at(&state, "default", 5).unwrap();
+        // The fresh session's save, which used to replace the saved one.
+        let mut fresh = sample();
+        fresh.panes[0].cwd = Some("/fresh".to_owned());
+        let mut saver = Saver::new(state.clone(), "default", None);
+        saver.save(&fresh).unwrap();
+        saver.finish().unwrap();
+        assert!(fs::read_to_string(&path).unwrap().contains("/fresh"));
+        let aside = |time: u64| state.join(format!("sessions/default.json.failed-{time}"));
+        assert_eq!(fs::read(aside(5)).unwrap(), saved);
+        let mode = fs::metadata(aside(5)).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+        // A name that is taken is never replaced: the file stays, and the caller is told.
+        fs::write(aside(6), "older").unwrap();
+        let taken = set_aside_at(&state, "default", 6).unwrap_err();
+        assert_eq!(taken.kind(), ErrorKind::AlreadyExists);
+        assert_eq!(fs::read_to_string(aside(6)).unwrap(), "older");
+        assert!(path.exists());
+        // Only the newest few are kept, and no file to move is fine.
+        for time in 7..10 {
+            fresh.write(&state, "default").unwrap();
+            set_aside_at(&state, "default", time).unwrap();
+        }
+        let kept: Vec<bool> = (5..10).map(|time| aside(time).exists()).collect();
+        assert_eq!(kept, [false, false, true, true, true]);
+        assert_eq!(KEPT_FAILED, 3);
+        assert!(!path.exists());
+        set_aside_at(&state, "default", 10).unwrap();
         fs::remove_dir_all(&state).unwrap();
     }
 
