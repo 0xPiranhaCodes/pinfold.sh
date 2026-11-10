@@ -43,6 +43,12 @@ under 4.5 for 10 of the 11 other themes to bundle, and only GitHub Dark passes, 
 the ADR does not fix the state colours. At a distance of 0.08, Dracula and Nord would fall
 back: their closest pair is running and idle, at 0.076.
 
+The Dracula row measures the collection's background `#282a36`, which is what the script holds.
+The bundled Dracula uses `#1e1f29` from dracula/iterm's preset, with text contrast 13.11, which
+`every_bundled_theme_is_legible_and_none_takes_the_fallback` in
+`crates/pinfold-config/src/theme.rs` pins. See [ADR-0049](../../adr/0049-themes.md) sections 5
+and 7.
+
 The last two rows are not themes to bundle. A background near mid grey cannot pass: either the
 states stay under 4.5 on the lightest surface, or they pass only once all five are nearly the
 same colour. Those themes take the fallback.
