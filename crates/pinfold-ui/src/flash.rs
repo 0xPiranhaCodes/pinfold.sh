@@ -1,5 +1,6 @@
 //! Short notes in the row under the pane: a blocked clipboard write, a command the core
-//! refused, or, once, that the core lacks the hardened runtime and how to sign it (ADR-0044).
+//! refused, or, once, that the core lacks the hardened runtime and how to sign it (ADR-0044),
+//! or that sandboxed agents can read secret-looking variables in other panes (ADR-0047).
 //!
 //! That row is outside pane text, so program output cannot fake or hide it. It says blocked
 //! because the core drops OSC 52 writes, and a paste prompt in that row takes priority.
@@ -25,6 +26,8 @@ enum Said {
     Refused(Refusal),
     /// Whether the core could tell, and the command that signs this build.
     Unhardened(bool, String),
+    /// How many secret-looking variables, and the first few names.
+    Secrets(u32, String),
 }
 
 // shortcut: writes stay blocked though the threat model allows them, until the core hands
@@ -54,6 +57,13 @@ impl Flash {
     pub fn unhardened(&mut self, checked: bool, command: String, now: Instant) {
         self.until = Some(now + UNHARDENED_SHOWN);
         self.said = Said::Unhardened(checked, command);
+    }
+
+    /// Shows that on macOS sandboxed agents can read `count` secret-looking variables in other
+    /// panes, `names` first, and how to remove them. As long as the hardened runtime's notice.
+    pub fn secrets(&mut self, count: u32, names: String, now: Instant) {
+        self.until = Some(now + UNHARDENED_SHOWN);
+        self.said = Said::Secrets(count, names);
     }
 
     /// Ends the flash once due.
@@ -90,6 +100,20 @@ impl Flash {
                         VIOLET,
                     ),
                     (format!("Sign this build: {command}"), text),
+                ],
+                theme,
+            ),
+            Said::Secrets(count, names) => paste::row(
+                frame,
+                &[
+                    (format!(" {UNHARDENED} secrets  "), VIOLET),
+                    (
+                        format!(
+                            "On macOS, sandboxed agents can read {count} secret-looking variables \
+                             in your other panes: {names} (strip_secrets = true removes them)"
+                        ),
+                        text,
+                    ),
                 ],
                 theme,
             ),
@@ -164,6 +188,30 @@ mod tests {
         let text: String = frame.cells.iter().map(|cell| cell.character).collect();
         assert!(
             text.starts_with(" ▲ unhardened  Sign this build: codesign x"),
+            "{text}"
+        );
+        assert_eq!(frame.cells[1].foreground, VIOLET);
+        flash.tick(start + UNHARDENED_SHOWN);
+        assert_eq!(flash.until(), None);
+    }
+
+    #[test]
+    fn exposed_secrets_are_named_with_how_to_remove_them() {
+        let (mut flash, start) = (Flash::default(), Instant::now());
+        let mut frame = Frame {
+            rows: 1,
+            columns: 160,
+            ..Frame::default()
+        };
+        flash.secrets(7, "AWS_PROFILE, GITHUB_TOKEN, …".to_owned(), start);
+        flash.tick(start + SHOWN);
+        flash.banner(&mut frame, &GRAPHITE);
+        let text: String = frame.cells.iter().map(|cell| cell.character).collect();
+        assert!(
+            text.starts_with(
+                " ▲ secrets  On macOS, sandboxed agents can read 7 secret-looking variables in \
+                 your other panes: AWS_PROFILE, GITHUB_TOKEN, … (strip_secrets = true removes them)"
+            ),
             "{text}"
         );
         assert_eq!(frame.cells[1].foreground, VIOLET);

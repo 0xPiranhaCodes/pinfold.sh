@@ -39,7 +39,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode, Palette};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 14;
+pub const VERSION: u16 = 15;
 
 /// The oldest version this side still speaks, one before [`VERSION`] (ADR-0043).
 pub const OLDEST: u16 = VERSION - 1;
@@ -154,6 +154,7 @@ const LINKED: u8 = 12;
 const UNHARDENED: u8 = 13;
 const MARKDOWN: u8 = 14;
 const COLOURS: u8 = 15;
+const SECRETS: u8 = 16;
 
 /// How many agent states there are. [`Notice::Status`] numbers them in the order of the
 /// contributor rule: needs you, running, done, error, idle.
@@ -713,6 +714,14 @@ pub enum Notice<'a> {
         /// The pane's default background, or nothing for the palette's.
         background: Option<u32>,
     },
+    /// On macOS, a sandboxed agent can read secret-looking variables in the user's other panes
+    /// (ADR-0047). Sent at most once a core session, never a value. Since version 15.
+    Secrets {
+        /// How many names look like secrets.
+        count: u32,
+        /// The first few, escaped and joined by `, `, ending in `…` if more.
+        names: &'a str,
+    },
 }
 
 /// The session as the window draws it.
@@ -1184,6 +1193,7 @@ impl Notice<'_> {
             Self::Approval(approval) => approval.action.since(),
             Self::Markdown { .. } => 13,
             Self::Colours { .. } => 14,
+            Self::Secrets { .. } => 15,
             _ => OLDEST,
         }
     }
@@ -1258,6 +1268,9 @@ impl Notice<'_> {
             }
             Self::Markdown { pane, names } => {
                 put_tail(out, start, MAX_MESSAGE, MARKDOWN, *pane, names.as_bytes())?
+            }
+            Self::Secrets { count, names } => {
+                put_tail(out, start, MAX_MESSAGE, SECRETS, *count, names.as_bytes())?
             }
             Self::Activity { tabs, alerts } => put!(out, ACTIVITY, tabs, alerts),
             Self::Refused { reason } => {
@@ -1361,6 +1374,10 @@ impl Notice<'_> {
                 pane: body.u32()?,
                 cursor: body.optional_colour()?,
                 background: body.optional_colour()?,
+            },
+            SECRETS => Notice::Secrets {
+                count: body.u32()?,
+                names: body.text()?,
             },
             UNHARDENED => Notice::Unhardened {
                 checked: body.tag("checked", &[false, true])?,
@@ -2054,7 +2071,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 14, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 15, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -2277,21 +2294,22 @@ mod tests {
             names: "a.md",
         };
         assert_eq!(at_oldest(markdown), Ok(true));
-        let newer = Error::Newer {
-            kind: COLOURS,
-            since: 14,
+        assert_eq!(at_oldest(COLOURS_SEED), Ok(true));
+        let secrets = Notice::Secrets {
+            count: 1,
+            names: "GITHUB_TOKEN",
         };
-        assert_eq!(at_oldest(COLOURS_SEED), Err(newer));
+        let newer = Error::Newer {
+            kind: SECRETS,
+            since: 15,
+        };
+        assert_eq!(at_oldest(secrets), Err(newer));
         let mut wire = raw(HELLO, &OLDEST.to_le_bytes());
         PALETTE_SEED.encode(&mut wire).unwrap();
         let mut decoder = Decoder::default();
         let mut input = wire.as_slice();
         decoder.next_request(&mut input).unwrap();
-        let newer = Error::Newer {
-            kind: PALETTE,
-            since: 14,
-        };
-        assert_eq!(decoder.next_request(&mut input), Err(newer));
+        assert_eq!(decoder.next_request(&mut input), Ok(Some(PALETTE_SEED)));
     }
 
     const PALETTE_SEED: Request<'static> = Request::Palette(Palette::GRAPHITE_GRID);
@@ -3323,6 +3341,11 @@ mod tests {
         #[test]
         fn raise_round_trips(chunk in chunks()) {
             prop_assert!(notice_survives(&Notice::Raise, chunk), "changed on the link");
+        }
+
+        #[test]
+        fn secrets_round_trip(count in any::<u32>(), names in any::<String>(), chunk in chunks()) {
+            prop_assert!(notice_survives(&Notice::Secrets { count, names: &names }, chunk), "changed on the link");
         }
 
         #[test]

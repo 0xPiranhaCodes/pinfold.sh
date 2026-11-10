@@ -97,6 +97,9 @@ enum Notice {
     Raise,
     /// The core lacks the hardened runtime, and whether it could tell (ADR-0044).
     Unhardened(bool),
+    /// A sandboxed agent can read this many secret-looking variables, these first, on macOS
+    /// (ADR-0047).
+    Secrets(u32, String),
     /// The core is too old to take the theme's palette (ADR-0049).
     Unthemed,
     /// The config file or the theme file in use was saved, and this is the theme now.
@@ -195,6 +198,7 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
         let markdown = (link.take_markdown()).map(|(pane, names)| Notice::Markdown(pane, names));
         let raised = link.take_raised().then_some(Notice::Raise);
         let unhardened = link.take_unhardened().map(Notice::Unhardened);
+        let secrets = (link.take_secrets()).map(|(count, names)| Notice::Secrets(count, names));
         let refused = link.take_refused().map(Notice::Refused);
         let unthemed = link.take_unthemed().then_some(Notice::Unthemed);
         while let Some(approval) = link.take_approval() {
@@ -205,7 +209,7 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
         let ran = link.take_was_running().into_iter();
         let ran = ran.map(|(pane, runnable, command)| Notice::WasRunning(pane, runnable, command));
         let notices = [
-            searched, copied, linked, markdown, raised, unhardened, refused, unthemed,
+            searched, copied, linked, markdown, raised, unhardened, secrets, refused, unthemed,
         ]
         .into_iter()
         .flatten();
@@ -1703,6 +1707,10 @@ impl ApplicationHandler<Notice> for App {
                 self.unhardened = Some(checked);
                 self.flash
                     .unhardened(checked, pinfold_sys::sign_command(), Instant::now());
+                self.redraw_soon();
+            }
+            Notice::Secrets(count, names) => {
+                self.flash.secrets(count, names, Instant::now());
                 self.redraw_soon();
             }
             Notice::Approval(approval) => {

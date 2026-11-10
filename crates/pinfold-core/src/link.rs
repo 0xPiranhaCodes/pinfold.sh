@@ -589,6 +589,16 @@ impl Window {
                     self.session.notice(&notice)?;
                 }
             }
+            if let Some((count, names)) = reactor.secrets.take() {
+                let notice = Notice::Secrets {
+                    count,
+                    names: &names,
+                };
+                // As for the hardened runtime: an older window cannot show it, and the log said it.
+                if self.decoder.version() >= Some(notice.since()) {
+                    self.session.notice(&notice)?;
+                }
+            }
             self.session.report(reactor)?;
             self.session.send_panes(reactor)
         } else {
@@ -877,6 +887,7 @@ mod tests {
         refused: Vec<Refusal>,
         was_running: Vec<(u32, bool, String)>,
         unhardened: Vec<bool>,
+        secrets: Vec<(u32, String)>,
         /// Each pane's OSC 12 cursor colour and OSC 11 background, as told.
         colours: Vec<(u32, Option<u32>, Option<u32>)>,
     }
@@ -909,6 +920,7 @@ mod tests {
                 refused: Vec::new(),
                 was_running: Vec::new(),
                 unhardened: Vec::new(),
+                secrets: Vec::new(),
                 colours: Vec::new(),
             }
         }
@@ -1000,6 +1012,9 @@ mod tests {
                         } => self.was_running.push((pane, runnable, command.to_owned())),
                         Notice::Approval(_) => {}
                         Notice::Unhardened { checked } => self.unhardened.push(checked),
+                        Notice::Secrets { count, names } => {
+                            self.secrets.push((count, names.to_owned()));
+                        }
                     }
                 }
             }
@@ -1097,9 +1112,12 @@ mod tests {
         assert!(reactor.is_window_ready());
         assert_eq!(reactor.take_other_version(), None);
         assert!(reactor.can_ask(ApprovalAction::Owner));
-        let colours = reactor.engine(pane).unwrap().colours();
-        assert_eq!(colours, (Some(0x0001_0203), Some(0x0004_0506)));
-        assert!(peer.colours.is_empty(), "sent what version 13 cannot read");
+        reactor.set_exposed(Some((1, "GITHUB_TOKEN".to_owned())));
+        assert!(reactor.launched_sandboxed().is_some());
+        reactor.write(pane, b"more\n");
+        serve(&mut reactor, &mut peer, |r, _| on_screen(r, pane, "reset"));
+        peer.read();
+        assert!(peer.secrets.is_empty(), "sent what version 14 cannot read");
         assert!(reactor.is_window_ready(), "the link ended");
     }
 
@@ -1174,6 +1192,37 @@ mod tests {
             drop(peer);
             assert!(turn_until(&mut reactor, |r| !r.has_window()));
         }
+    }
+
+    #[test]
+    fn secret_names_are_told_once_a_session_after_a_sandboxed_launch() {
+        let mut reactor = Reactor::new().unwrap();
+        let pane = reactor.open_tab(shell(ALIVE), 24, 80).unwrap();
+        reactor.set_exposed(Some((2, "AWS_PROFILE, GITHUB_TOKEN".to_owned())));
+        let mut peer = Peer::watching(&mut reactor, pane);
+        serve(&mut reactor, &mut peer, |r, p| p.matches(r, pane));
+        assert!(peer.secrets.is_empty(), "told before any sandboxed launch");
+        assert!(reactor.launched_sandboxed().is_some());
+        assert_eq!(
+            reactor.launched_sandboxed(),
+            None,
+            "a second launch logs again"
+        );
+        for told in [1, 1] {
+            reactor.write(pane, b"more\n");
+            serve(&mut reactor, &mut peer, |r, _| {
+                on_screen(r, pane, "got-more")
+            });
+            peer.read();
+            assert_eq!(peer.secrets.len(), told);
+        }
+        assert_eq!(peer.secrets[0], (2, "AWS_PROFILE, GITHUB_TOKEN".to_owned()));
+        drop(peer);
+        assert!(turn_until(&mut reactor, |r| !r.has_window()));
+        let mut peer = Peer::watching(&mut reactor, pane);
+        serve(&mut reactor, &mut peer, |r, p| p.matches(r, pane));
+        peer.read();
+        assert!(peer.secrets.is_empty(), "a new window was told again");
     }
 
     #[test]

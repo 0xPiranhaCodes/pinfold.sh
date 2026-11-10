@@ -222,6 +222,11 @@ pub struct Reactor {
     pub(crate) protect: Protect,
     /// Set when this core lacks the hardened runtime: whether it could tell (ADR-0044).
     pub(crate) unhardened: Option<bool>,
+    /// Secret-looking names a sandboxed agent could read in other panes on macOS, until the
+    /// first sandboxed launch makes them due to the window, once a session (ADR-0047).
+    exposed: Option<(u32, String)>,
+    /// Those names, due to the window.
+    pub(crate) secrets: Option<(u32, String)>,
     /// The one palette every pane draws in: Graphite Grid until a window sends another.
     palette: Arc<Mutex<Palette>>,
     /// The `pinfold` binary that runs the built-in tools.
@@ -259,6 +264,8 @@ impl Reactor {
             approval_answers: Vec::new(),
             protect: Protect::default(),
             unhardened: None,
+            exposed: None,
+            secrets: None,
             palette: Arc::new(Mutex::new(Palette::GRAPHITE_GRID)),
             tools: None,
             markdown: None,
@@ -269,6 +276,20 @@ impl Reactor {
     /// `checked` false that it could not tell (ADR-0044).
     pub fn set_unhardened(&mut self, checked: bool) {
         self.unhardened = Some(checked);
+    }
+
+    /// Keeps what [`sandbox::exposed`](crate::sandbox::exposed) found, for the window to hear
+    /// at the first sandboxed launch.
+    pub fn set_exposed(&mut self, exposed: Option<(u32, String)>) {
+        self.exposed = exposed;
+    }
+
+    /// Notes a sandboxed launch: the first one makes the names found due to the window, and
+    /// returns them, for the log. Later ones return nothing.
+    pub fn launched_sandboxed(&mut self) -> Option<(u32, String)> {
+        let exposed = self.exposed.take()?;
+        self.secrets = Some(exposed.clone());
+        Some(exposed)
     }
 
     /// Starts `command` on a new PTY and returns its pane number. The pane is in no tab, so it

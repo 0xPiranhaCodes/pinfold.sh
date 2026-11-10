@@ -276,6 +276,16 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                 None => family.spawn_command(reactor, own, of, way, Some(&cwd), command)?,
             };
             reactor.read_agent_signals(pane);
+            if agent.sandbox
+                && let Some((count, names)) = reactor.launched_sandboxed()
+            {
+                // Names only, never a value (ADR-0047).
+                let _ = writeln!(
+                    io::stderr(),
+                    "pinfold-core: warn secret_names={count} [{names}]: on macOS sandboxed agents \
+                     can read these variables in other panes; strip_secrets = true removes them"
+                );
+            }
             Ok(json!({"pane": pane}))
         }
         // A tool runs as the caller's child, so a sandboxed caller is refused as for any pane.
@@ -934,6 +944,9 @@ fn daemon(
     if let Some(patterns) = config.api.protect.clone() {
         reactor.set_patterns(patterns);
     }
+    // Panes get the core's own environment, so one check covers both (ADR-0047).
+    let names = std::env::vars_os().map(|(name, _)| name);
+    reactor.set_exposed(sandbox::exposed(config.strip_secrets, names));
     let mut log = audit::open(&config.api);
     let mut window = reactor.has_window();
     // A core with no pane waits for its first window, as `pinfold up` asks for one next.
