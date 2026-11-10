@@ -582,8 +582,7 @@ impl App {
             .with_titlebar_transparent(true)
             .with_title_hidden(true);
         let window = Rc::new(event_loop.create_window(attributes)?);
-        // Before the renderer is made, so a light theme is here by the first frame.
-        self.appear(window.theme());
+        self.begin(pinfold_config::path().as_deref(), window.theme());
         window.set_ime_allowed(true);
         let size = self.font_size() * font_scale(self.size, window.scale_factor());
         let renderer = renderer(&window, size, self.config.font_path.as_deref())?;
@@ -615,6 +614,18 @@ impl App {
             open.apply_theme(&self.theme);
         }
         self.redraw_soon();
+    }
+
+    /// Loads the theme `config` chooses for the system's appearance and queues its palette, at
+    /// once and not through the watch: this runs before the renderer is made and before the
+    /// hello goes, so neither the first frame nor the first palette is the other half's
+    /// (ADR-0049, section 2). The watch is told too, so it follows later changes from here.
+    fn begin(&mut self, config: Option<&Path>, appearance: Option<winit::window::Theme>) {
+        let dark = appearance != Some(winit::window::Theme::Light);
+        self.theme = config.map_or(GRAPHITE, |path| theme_at(path, dark));
+        let palette = proto::Request::Palette(palette_of(&self.theme));
+        self.outbox.send(Request::Core(palette));
+        self.appear(appearance);
     }
 
     /// Tells the watch the system's appearance, dark where it does not say. The watch answers
@@ -1909,10 +1920,11 @@ fn config() -> Config {
     })
 }
 
-/// Reads the theme the config file at `path` chooses, with its `[colors]` on top. A theme that
-/// cannot be used means Graphite Grid, and the log says why (ADR-0049, section 2).
-fn theme_at(path: &Path) -> Theme {
-    let (theme, notes) = theme::load(path)
+/// Reads the theme the config file at `path` chooses, the `dark` or the light half of a table,
+/// with its `[colors]` on top. A theme that cannot be used means Graphite Grid, and the log
+/// says why (ADR-0049, section 2).
+fn theme_at(path: &Path, dark: bool) -> Theme {
+    let (theme, notes) = theme::load_as(path, dark)
         .unwrap_or_else(|error| (GRAPHITE, vec![format!("using Graphite Grid: {error}")]));
     for note in notes {
         let _ = writeln!(io::stderr(), "pinfold: theme: {note}");
@@ -1929,7 +1941,7 @@ fn theme_at(path: &Path) -> Theme {
 ///
 /// Returns an error if the window, font, surface or link cannot be set up.
 pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
-    let mut link = Link::silent(link)?;
+    let link = Link::silent(link)?;
     let waker = link.waker();
     let (outbox, inbox) = outbox::channel();
     let latest = Arc::new(Latest::default());
@@ -1938,7 +1950,8 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
     #[cfg(target_os = "macos")]
     winit::platform::macos::EventLoopBuilderExtMacOS::with_default_menu(&mut builder, false);
     let event_loop = builder.build()?;
-    // Before either file is first read, so a save between the two is not missed.
+    // Before either file is first read, so a save between the two is not missed. The theme is
+    // first read once the window is made and says the system's appearance.
     let proxy = event_loop.create_proxy();
     let appearance = reload::watch(move |saved| {
         let notice = match saved {
@@ -1947,8 +1960,6 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
         };
         proxy.send_event(notice).is_ok()
     })?;
-    let theme = pinfold_config::path().map_or(GRAPHITE, |path| theme_at(&path));
-    link.theme(palette_of(&theme));
     let (proxy, shared) = (event_loop.create_proxy(), latest.clone());
     thread::Builder::new()
         .name("pinfold-io".into())
@@ -1979,7 +1990,7 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
         dock,
         notifier,
     );
-    (app.theme, app.appearance) = (theme, appearance);
+    app.appearance = appearance;
     event_loop.run_app(&mut app)?;
     app.result
 }
@@ -2316,7 +2327,7 @@ mod tests {
         let write = |text: &str| {
             std::fs::write(&path, text).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-            theme_at(&path)
+            theme_at(&path, true)
         };
         let theme = write("[colors]\nbackground = \"#0d1117\"\ncursor = \"#58a6ff\"\n");
         let palette = palette_of(&theme);
@@ -2356,8 +2367,9 @@ mod tests {
         assert_eq!(write("theme = \"../other\""), GRAPHITE);
     }
 
-    /// ADR-0049, section 2: the window tells the watch the system's appearance, dark where it
-    /// does not say, and the half of `theme = { light, dark }` that comes back is a new palette.
+    /// ADR-0049, section 2: the window starts on the half of `theme = { light, dark }` the
+    /// system's appearance chooses, dark where it does not say, and tells the watch each
+    /// appearance, and the half that comes back is a new palette.
     #[test]
     fn a_change_of_appearance_sends_a_new_palette() {
         use std::os::unix::fs::PermissionsExt;
@@ -2369,13 +2381,23 @@ mod tests {
         )
         .unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let mut watch = theme::Watch::new(path.clone());
+        let mut watch = theme::Watch::new(path.clone(), true);
         let (mut app, inbox, _poll) = app();
         let told;
         (app.appearance, told) = mpsc::channel();
-        // What `run` loads at start is the dark half.
-        app.theme = theme_at(&path);
+        // A light system's first palette is the light half's, with no dark one before it.
+        app.begin(Some(&path), Some(Light));
+        assert_eq!(app.theme.background, 0x00ff_ffff);
+        let sent = inbox.take();
+        assert!(matches!(
+            &sent[..],
+            [Request::Core(proto::Request::Palette(sent))] if sent.background == 0x00ff_ffff
+        ));
+        assert_eq!(told.try_iter().collect::<Vec<_>>(), [false]);
+        // A system that does not say starts on the dark half, as the watch does.
+        app.begin(Some(&path), None);
         assert_eq!(app.theme.background, 0x0010_1216);
+        assert_eq!(told.try_iter().collect::<Vec<_>>(), [true]);
         let mut grounds = Vec::new();
         for appearance in [None, Some(Dark), Some(Light), Some(Light), Some(Dark)] {
             app.appear(appearance);
@@ -2388,7 +2410,7 @@ mod tests {
                 _ => 0,
             }));
         }
-        assert_eq!(grounds, [0x00ff_ffff, 0x0010_1216]);
+        assert_eq!(grounds, [0x0010_1216, 0x00ff_ffff, 0x0010_1216]);
         assert_eq!(app.theme.background, 0x0010_1216);
     }
 
