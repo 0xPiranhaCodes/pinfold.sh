@@ -189,7 +189,8 @@ impl Painter {
                 top,
                 left.saturating_add(cell_width),
                 bottom,
-                cell.background,
+                // No alpha here, so glass is opaque.
+                cell.background & 0x00ff_ffff,
             );
         }
         if tabs {
@@ -280,9 +281,14 @@ mod tests {
     #[test]
     fn a_space_draws_only_background() {
         let mut painter = painter();
-        let (mut buffer, width, height) = pixels(&painter, 1, 1);
+        let (mut buffer, width, height) = pixels(&painter, 2, 1);
         let mut canvas = Canvas::new(&mut buffer, width, height).unwrap();
-        painter.draw_row(&mut canvas, 0, &[cell(' ')]);
+        // Glass has no alpha here, and a pixel's top byte stays 0.
+        let glass = Cell {
+            background: PAPER | pinfold_proto::GLASS,
+            ..cell(' ')
+        };
+        painter.draw_row(&mut canvas, 0, &[cell(' '), glass]);
         assert!(buffer.iter().all(|&pixel| pixel == PAPER));
     }
 

@@ -9,10 +9,12 @@ pub const ITALIC: u32 = 1 << 25;
 /// On [`LEFT_CAP`] or [`RIGHT_CAP`], the end of a tab, which stands taller than its cell. Only
 /// the window's own top bar sets this.
 pub const TALL: u32 = 1 << 26;
-/// The colour of a cell no program has coloured, and of the window around the grid.
-///
-/// shortcut: a copy of the core's own default, so after OSC 11 a program's new default counts
-/// as a cell colour and stays opaque, carry the live colour in `Frame` when the core next changes.
+/// In [`Cell::background`], set by the window on a cell whose colour is its pane's OSC 11
+/// default background, which the renderer then draws as it draws the theme's: translucent
+/// under `background_opacity` (ADR-0049, section 4). The core never sends it.
+pub const GLASS: u32 = 1 << 27;
+/// Graphite Grid's background: the colour of a cell no program has coloured, and of the
+/// window around the grid, until a theme says otherwise.
 pub const DEFAULT_BACKGROUND: u32 = 0x0012_1212;
 
 /// The colours a pane's named and indexed colours resolve through, as `0x00RRGGBB` (ADR-0049).
@@ -74,7 +76,7 @@ pub struct Cell {
     /// Text colour, with any of [`BOLD`] and [`ITALIC`] in the top byte, which keeps a cell
     /// at 12 bytes.
     pub foreground: u32,
-    /// Background colour.
+    /// Background colour, with [`GLASS`] or not in the top byte.
     pub background: u32,
 }
 
@@ -96,8 +98,9 @@ impl Cell {
     pub fn invert(&mut self) {
         let style = self.style();
         std::mem::swap(&mut self.foreground, &mut self.background);
-        self.foreground |= style;
-        self.background &= !style;
+        // Text is never glass, so that bit goes.
+        self.foreground = self.foreground & 0x00ff_ffff | style;
+        self.background &= 0x00ff_ffff;
     }
 
     /// Draws the cell in `colours`, a background and a text colour, as a cursor or a selection

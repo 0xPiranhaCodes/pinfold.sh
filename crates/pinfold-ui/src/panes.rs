@@ -7,7 +7,7 @@ use pinfold_config::theme::Theme;
 #[cfg(test)]
 use pinfold_proto::DEFAULT_BACKGROUND;
 use pinfold_proto::link::Rect;
-use pinfold_proto::{Cell, Frame};
+use pinfold_proto::{Cell, Frame, GLASS};
 
 /// Empties `frame` to `rows` by `columns` of the default background.
 #[cfg(test)]
@@ -53,6 +53,23 @@ pub fn blit(target: &mut Frame, pane: &Frame, rect: Rect) {
             cells.get(..shown),
         ) {
             to.copy_from_slice(from);
+        }
+    }
+}
+
+/// Marks as glass the cells of the pane at `rect` that have `ground`, the default background
+/// its program set with OSC 11, so they are drawn as the theme's background is (ADR-0049,
+/// section 4). Done right after [`blit`], so nothing drawn over the pane is marked.
+pub fn glaze(target: &mut Frame, rect: Rect, ground: u32) {
+    let width = usize::from(target.columns);
+    let end = usize::from(rect.x.saturating_add(rect.columns)).min(width);
+    for row in rect.y..rect.y.saturating_add(rect.rows) {
+        let row = usize::from(row) * width;
+        let cells = (target.cells).get_mut(row + usize::from(rect.x).min(end)..row + end);
+        for cell in cells.into_iter().flatten() {
+            if cell.background == ground {
+                cell.background |= GLASS;
+            }
         }
     }
 }
@@ -145,6 +162,30 @@ pub fn dividers(frame: &mut Frame, rects: &[Rect], focused: Option<Rect>, theme:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR-0049, section 4: OSC 11 makes glass of its own pane's default background, and of
+    /// no other pane, no other colour and no border.
+    #[test]
+    fn only_a_panes_own_default_background_is_glazed() {
+        let mut grid = Frame::default();
+        blank(&mut grid, 2, 5);
+        let (ground, other) = (0x0010_2030, 0x00ff_0000);
+        for at in [0, 2, 3, 6] {
+            grid.cells[at].background = ground;
+        }
+        grid.cells[1].background = other;
+        glaze(&mut grid, rect(0, 0, 2, 2), ground);
+        let look: Vec<u32> = grid.cells.iter().map(|cell| cell.background).collect();
+        let rest = DEFAULT_BACKGROUND;
+        let first = [ground | GLASS, other, ground, ground, rest];
+        assert_eq!(
+            look,
+            [first, [rest, ground | GLASS, rest, rest, rest]].concat()
+        );
+        // A rectangle past the grid, as one can be until the frame after a layout, is safe.
+        glaze(&mut grid, rect(4, 1, u16::MAX, u16::MAX), rest);
+        assert_eq!(grid.cells[9].background, rest | GLASS);
+    }
     use pinfold_config::theme::GRAPHITE;
 
     fn rect(x: u16, y: u16, columns: u16, rows: u16) -> Rect {
