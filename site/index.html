@@ -36,7 +36,9 @@
           <li><a href="#memory" data-key="3">memory <kbd>⌘3</kbd></a></li>
           <li><a href="#agents" data-key="4">agents <kbd>⌘4</kbd></a></li>
           <li><a href="#try" data-key="5">try it <kbd>⌘5</kbd></a></li>
-          <li><a href="#install" data-key="6">install <kbd>⌘6</kbd></a></li>
+          <li><a href="#themes" data-key="6">themes <kbd>⌘6</kbd></a></li>
+          <li><a href="#configure" data-key="7">configure <kbd>⌘7</kbd></a></li>
+          <li><a href="#install" data-key="8">install <kbd>⌘8</kbd></a></li>
         </ul>
       </nav>
       <span class="title">~/code/pinfold · zsh · 1 agent</span>
@@ -201,7 +203,7 @@ Docs: https://github.com/0xPiranhaCodes/pinfold.sh#readme
           <label for="cmd">~/pinfold.sh ❯</label>
           <input id="cmd" name="cmd" spellcheck="false" autocapitalize="off" autocorrect="off" placeholder="help">
         </form>
-        <p class="hint" hidden data-js>try: <kbd class="k" tabindex="0" role="button">pinfold --help</kbd> · <kbd class="k" tabindex="0" role="button">keys</kbd> · <kbd class="k" tabindex="0" role="button">states</kbd> · <kbd class="k" tabindex="0" role="button">mem</kbd> · <kbd class="k" tabindex="0" role="button">install</kbd> · <kbd class="k" tabindex="0" role="button">clear</kbd></p>
+        <p class="hint" hidden data-js>try: <kbd class="k" tabindex="0" role="button">pinfold --help</kbd> · <kbd class="k" tabindex="0" role="button">keys</kbd> · <kbd class="k" tabindex="0" role="button">states</kbd> · <kbd class="k" tabindex="0" role="button">mem</kbd> · <kbd class="k" tabindex="0" role="button">themes</kbd> · <kbd class="k" tabindex="0" role="button">config</kbd> · <kbd class="k" tabindex="0" role="button">install</kbd> · <kbd class="k" tabindex="0" role="button">clear</kbd></p>
       </div>
     </div>
   </section>
@@ -215,6 +217,72 @@ Docs: https://github.com/0xPiranhaCodes/pinfold.sh#readme
       <div><span>prefix</span><kbd class="k"><i>Ctrl</i><i>a</i></kbd></div>
       <div><span>prefix → tab · right · down</span><kbd class="k"><i>c</i><i>|</i><i>-</i></kbd></div>
       <div><span>open a project layout</span><kbd class="k"><i>pinfold up</i></kbd></div>
+    </div>
+  </section>
+
+  <section id="themes" class="block" aria-labelledby="th-h">
+    <div class="section-head"><h2 id="th-h">themes</h2><span class="rule" aria-hidden="true"></span><span class="meta">on main · in the next beta</span></div>
+    <div class="box">
+      <ul class="swatches" aria-label="The default theme and the eleven bundled themes">
+        <li><span class="sw" aria-hidden="true" style="background:#121212;color:#e2e5ea">❯ ls<span><i style="background:#12151a"></i><i style="background:#ff8a8a"></i><i style="background:#63d29a"></i><i style="background:#f5b544"></i><i style="background:#7aa7ff"></i><i style="background:#d9a7e0"></i><i style="background:#9cc0ff"></i><i style="background:#c9cdd4"></i></span></span><b>Graphite Grid</b><small>default</small></li>
+        <li><span class="sw" aria-hidden="true" style="background:#101216;color:#8b949e">❯ ls<span><i style="background:#000000"></i><i style="background:#f78166"></i><i style="background:#56d364"></i><i style="background:#e3b341"></i><i style="background:#6ca4f8"></i><i style="background:#db61a2"></i><i style="background:#2b7489"></i><i style="background:#ffffff"></i></span></span><b>GitHub Dark</b><small>dark</small></li>
+        <li><span class="sw" aria-hidden="true" style="background:#ffffff;color:#1f2328">❯ ls<span><i style="background:#24292f"></i><i style="background:#cf222e"></i><i style="background:#116329"></i><i style="background:#4d2d00"></i><i style="background:#0969da"></i><i style="background:#8250df"></i><i style="background:#1b7c83"></i><i style="background:#6e7781"></i></span></span><b>GitHub Light</b><small>light</small></li>
+        <li><span class="sw" aria-hidden="true" style="background:#1e1f29;color:#e6e6e6">❯ ls<span><i style="background:#000000"></i><i style="background:#ff5555"></i><i style="background:#50fa7b"></i><i style="background:#f1fa8c"></i><i style="background:#bd93f9"></i><i style="background:#ff79c6"></i><i style="background:#8be9fd"></i><i style="background:#bbbbbb"></i></span></span><b>Dracula</b><small>dark</small></li>
+        <li><span class="sw" aria-hidden="true" style="background:#002b36;color:#839496">❯ ls<span><i style="background:#073642"></i><i style="background:#dc322f"></i><i style="background:#859900"></i><i style="background:#b58900"></i><i style="background:#268bd2"></i><i style="background:#d33682"></i><i style="background:#2aa198"></i><i style="background:#eee8d5"></i></span></span><b>Solarized Dark</b><small>dark</small></li>
+        <li><span class="sw" aria-hidden="true" style="background:#fdf6e3;color:#657b83">❯ ls<span><i style="background:#073642"></i><i style="background:#dc322f"></i><i style="background:#859900"></i><i style="background:#b58900"></i><i style="background:#268bd2"></i><i style="background:#d33682"></i><i style="background:#2aa198"></i><i style="background:#eee8d5"></i></span></span><b>Solarized Light</b><small>light</small></li>
+        <li><span class="sw" aria-hidden="true" style="background:#21252b;color:#abb2bf">❯ ls<span><i style="background:#21252b"></i><i style="background:#e06c75"></i><i style="background:#98c379"></i><i style="background:#e5c07b"></i><i style="background:#61afef"></i><i style="background:#c678dd"></i><i style="background:#56b6c2"></i><i style="background:#abb2bf"></i></span></span><b>One Dark</b><small>dark</small></li>
+        <li><span class="sw" aria-hidden="true" style="background:#2e3440;color:#d8dee9">❯ ls<span><i style="background:#3b4252"></i><i style="background:#bf616a"></i><i style="background:#a3be8c"></i><i style="background:#ebcb8b"></i><i style="background:#81a1c1"></i><i style="background:#b48ead"></i><i style="background:#88c0d0"></i><i style="background:#e5e9f0"></i></span></span><b>Nord</b><small>dark</small></li>
+        <li><span class="sw" aria-hidden="true" style="background:#282828;color:#ebdbb2">❯ ls<span><i style="background:#282828"></i><i style="background:#cc241d"></i><i style="background:#98971a"></i><i style="background:#d79921"></i><i style="background:#458588"></i><i style="background:#b16286"></i><i style="background:#689d6a"></i><i style="background:#a89984"></i></span></span><b>Gruvbox Dark</b><small>dark</small></li>
+        <li><span class="sw" aria-hidden="true" style="background:#16161e;color:#787c99">❯ ls<span><i style="background:#363b54"></i><i style="background:#f7768e"></i><i style="background:#73daca"></i><i style="background:#e0af68"></i><i style="background:#7aa2f7"></i><i style="background:#bb9af7"></i><i style="background:#7dcfff"></i><i style="background:#787c99"></i></span></span><b>Tokyo Night</b><small>dark</small></li>
+        <li><span class="sw" aria-hidden="true" style="background:#1e1e2e;color:#cdd6f4">❯ ls<span><i style="background:#45475a"></i><i style="background:#f38ba8"></i><i style="background:#a6e3a1"></i><i style="background:#f9e2af"></i><i style="background:#89b4fa"></i><i style="background:#f5c2e7"></i><i style="background:#94e2d5"></i><i style="background:#bac2de"></i></span></span><b>Catppuccin Mocha</b><small>dark</small></li>
+        <li><span class="sw" aria-hidden="true" style="background:#eff1f5;color:#4c4f69">❯ ls<span><i style="background:#bcc0cc"></i><i style="background:#d20f39"></i><i style="background:#40a02b"></i><i style="background:#df8e1d"></i><i style="background:#1e66f5"></i><i style="background:#ea76cb"></i><i style="background:#179299"></i><i style="background:#5c5f77"></i></span></span><b>Catppuccin Latte</b><small>light</small></li>
+      </ul>
+      <div class="caption"><span>Each swatch is that theme's own background, text and eight ANSI colours, from <a href="https://github.com/0xPiranhaCodes/pinfold.sh/tree/main/crates/pinfold-config/themes">crates/pinfold-config/themes</a>. The eleven are converted from their authors' MIT-licensed sources; <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/docs/configuration.md#bundled-themes">docs/configuration.md</a> names each source, commit and copyright.</span><span>not in v0.1.0-beta.3</span></div>
+    </div>
+    <div class="grid3">
+      <article class="box hover">
+        <h3>pick one <span>/ or one each for light and dark</span></h3>
+        <p>Name a theme in <b>pinfold.toml</b>. Give two names and PinFold follows the system's appearance.</p>
+        <pre>theme = "Nord"
+<span class="m"># or</span>
+theme = { light = "GitHub Light", dark = "GitHub Dark" }</pre>
+      </article>
+      <article class="box hover">
+        <h3>override <span>/ single colours</span></h3>
+        <p><b>[colors]</b> sets single colours on top of the theme, or on top of Graphite Grid.</p>
+        <pre>[colors]
+background = "#0d1117"
+
+[colors.states]
+needs_you = "#f5b544"</pre>
+      </article>
+      <article class="box hover">
+        <h3>import <span>/ Ghostty and iTerm2</span></h3>
+        <p>A <b>Ghostty theme file</b> and an iTerm2 <b>.itermcolors</b> preset work as they are: copy one into <b>themes/</b> beside pinfold.toml, then name it.</p>
+        <pre>mkdir -p ~/.config/pinfold/themes
+cp ~/Downloads/Nord.itermcolors ~/.config/pinfold/themes/</pre>
+      </article>
+    </div>
+    <p class="hint">Saving pinfold.toml, or the theme file in use, recolours the window within about a second, history included. A theme sets colours only: the agent states keep their glyph and word, and PinFold steps each state's colour until it contrasts at least 4.5:1 with the theme's background, tabs and overlay. Themes are on <code>main</code> and arrive in the next beta.</p>
+  </section>
+
+  <section id="configure" class="block" aria-labelledby="cf-h">
+    <div class="section-head"><h2 id="cf-h">configure</h2><span class="rule" aria-hidden="true"></span><span class="meta">one TOML file, applied on save</span></div>
+    <div class="box">
+      <p>PinFold reads <b>~/.config/pinfold/pinfold.toml</b>, or <b>$XDG_CONFIG_HOME/pinfold/pinfold.toml</b> when that variable is set, on macOS and Linux alike. On macOS, <b>PinFold &gt; Settings</b> (⌘,) opens it. Every key is optional. If the file has a problem, PinFold still opens, says why in its log and uses the defaults.</p>
+      <pre>font_size = 14            <span class="m"># points, 6 to 72; default 13</span>
+theme = "Nord"            <span class="m"># next beta; without it, Graphite Grid</span>
+background_opacity = 0.85 <span class="m"># macOS only; default 1</span>
+background_blur = true    <span class="m"># macOS only; default false</span>
+
+[keys]
+prefix = "C-b"            <span class="m"># default "C-a"</span>
+
+[agents.claude]           <span class="m"># run it with: pinfold agent claude</span>
+command = ["claude"]
+sandbox = true
+keep_env = ["ANTHROPIC_API_KEY"]</pre>
+      <div class="caption"><span>Every key, default and limit: <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/docs/configuration.md">docs/configuration.md</a>.</span><span>a save applies within about a second</span></div>
     </div>
   </section>
 
