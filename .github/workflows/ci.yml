@@ -70,6 +70,8 @@ jobs:
       # cargo vet does not look at the fork, so this is what catches an unreviewed edit.
       - run: vendor/check.sh
       - run: python3 -B -m unittest discover -s .github/scripts
+      # The manual-checks guide parses docs/beta/manual-checks.md, so an edit that breaks it fails here.
+      - run: bash tests/macos/manual-checks.sh --check
       - name: Require notes on exemptions and trusted entries the PR adds
         if: github.event_name == 'pull_request'
         env:
