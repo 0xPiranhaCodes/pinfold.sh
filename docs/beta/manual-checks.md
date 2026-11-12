@@ -6,6 +6,11 @@ signed, notarized `PinFold.dmg` from the draft release, after the checks in
 and one Intel Mac. Start each Mac with no earlier PinFold: do [Uninstall](#14-uninstall) first if
 one was there. Record each run in the [results](#results) table.
 
+`bash tests/macos/manual-checks.sh` walks through these steps one at a time, read from this
+file, and saves each answer so a run can stop and go on later. It shows the date, macOS version
+and chip, runs a step's read-only command such as `pinfold --version` when asked with `r`, and
+ends with the results row to paste here. `--list` shows the sections it found.
+
 ## 1. Install and first launch
 
 1. Open `PinFold.dmg`. Expected: a window with `PinFold.app` and an `Applications` link.
