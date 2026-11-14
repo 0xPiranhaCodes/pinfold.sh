@@ -20,3 +20,6 @@ have shipped, and beta.4 includes the built-in tools. v0.1 waits on the Linux de
 [#213](https://github.com/0xPiranhaCodes/pinfold.sh/issues/213) are still open. The sandbox gap in
 [#331](https://github.com/0xPiranhaCodes/pinfold.sh/issues/331) is documented for v0.1, not fixed
 ([ADR-0047](adr/0047-macos-sandbox-reads-other-processes-environment.md)).
+
+**Next (proposed).** A "needs you" inbox across every agent pane, a key to the next ◆, and
+optional desktop and status-only webhook alerts ([ADR-0051](adr/0051-needs-you-inbox-and-alerts.md)).
