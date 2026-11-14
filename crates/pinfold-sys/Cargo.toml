@@ -49,7 +49,7 @@ objc2-quartz-core = { version = "0.3.2", optional = true }
 # The versions copypasta already builds, for a clipboard read within a limit (#310).
 [target.'cfg(not(target_os = "macos"))'.dependencies]
 x11-clipboard = { version = "0.9.3", optional = true }
-x11rb = { version = "0.13.2", optional = true }
+x11rb = { version = "0.14.0", optional = true }
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 objc2 = "0.6.5"
