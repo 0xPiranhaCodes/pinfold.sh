@@ -375,9 +375,9 @@ struct Pending {
 
 /// Walks `root` and covers what [`Caps`] allows. Each blob read goes, as `git fast-import`
 /// input (`blob`, `data <n>`), to one of `importers`, one reader thread each, and each covered
-/// path's [`Record`] to `stat` in walk order. A record in `previous`, the last checkpoint's
-/// stat list, whose stat is unchanged gives its blob id without a read. Returns the counts and
-/// the importers, for the caller to finish.
+/// path's record (mode, blob id, size, times, inode, path) to `stat` in walk order. A record
+/// in `previous`, the last checkpoint's stat list, whose stat is unchanged gives its blob id
+/// without a read. Returns the counts and the importers, for the caller to finish.
 ///
 /// # Errors
 ///
