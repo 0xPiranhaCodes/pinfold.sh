@@ -203,7 +203,7 @@ no paths):
 
 | Method | Parameters | Who may call | Result |
 | --- | --- | --- | --- |
-| `checkpoint.take` | `pane` | An agent pane for its own run (`self`), a pane for runs of its `children`, or a terminal outside every pane. Once in 30 s per run. | `{ checkpoint, files, new_bytes, complete }` |
+| `checkpoint.take` | `pane` | An agent pane for its own run (`self`), a pane for runs of its `children`, or a terminal outside every pane. Once in 30 s per run. | `{ checkpoint, files, new_bytes, complete, changed }`, `changed` being how many paths differ from the launch checkpoint, one `diff-tree -r --name-only` in the store, which [ADR-0052](0052-session-replay-a-timeline-per-agent-run.md) records |
 | `checkpoint.list` | `pane` | As `checkpoint.take`, with no rate limit | Each checkpoint's id, reason, time, counts and `complete`, read on demand from the store by `pinfold checkpoint list` (`for-each-ref`), never cached in the core. Metadata only, never a path. |
 | `checkpoint.restore` | `pane`, `checkpoint`, `shown` (the view checkpoint), `paths` (at most 1,000; all if absent) | Only the person's own callers: a tool pane (the diff viewer) and a terminal outside every pane. An agent pane is refused, for its own run and its children's, before any prompt (decision 7). Always waits on the window's `Rewind` prompt; one waiting prompt per caller | `{ restored, deleted, skipped, restore_checkpoint }`, or refused |
 
