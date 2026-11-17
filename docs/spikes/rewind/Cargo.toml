@@ -1,0 +1,18 @@
+[package]
+name = "spike-rewind"
+description = "ADR-0050 spike: an O_NOFOLLOW walk feeding git fast-import into a private bare store."
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+libc = "0.2.191"
+sha1 = "=0.11.0"
+
+[profile.release]
+debug = false
+
+# Throwaway spike code, kept out of the product workspace (ADR-0019).
+[workspace]
