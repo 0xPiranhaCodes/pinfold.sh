@@ -14,6 +14,7 @@ variable is unset. Saving the file applies it to the running window within about
 | `theme`               | string or table | none | A [theme](#themes) by name, or [one each](#light-and-dark) for light and dark. Without it, Graphite Grid |
 | `colors`              | table  | none    | Single [colours](#themes) on top of the theme            |
 | `keys.prefix`         | string | `"C-a"` | Prefix, `C-` and a lowercase letter                      |
+| `keys.inbox`          | string | `"!"`   | Key after the prefix that opens the [inbox](#the-inbox); one printable ASCII character no other prefix key uses |
 | `api.audit_log`       | bool   | `false` | Also write the API audit log to disk                     |
 | `api.protect`         | list   | below   | Command-line text that protects a pane from API sends    |
 | `agents.<name>`       | table  | none    | An [agent profile](#agent-profiles)                      |
@@ -317,6 +318,7 @@ Press the prefix, then one of these. The prefix pressed twice sends it to the pr
 | `f`                | Open the file manager, `pinfold files`, right of the pane     |
 | `g`                | Open the git diff viewer, `pinfold diff`, right of the pane   |
 | `m`                | Pick a `*.md` file, then open it in `pinfold md` right of the pane |
+| `!`                | Open or close the [inbox](#the-inbox), `keys.inbox`           |
 
 `f` and `g` open the tool in the directory the system says the focused pane's shell is in,
 never one a program's output reported, as a new tab or split does. Tmux binds neither key,
@@ -332,6 +334,19 @@ marks a pane with `m`, which PinFold does not have. In a tool's pane the prefix 
 window's own keys still work, and every other key goes to the tool.
 
 A tab closes with its last pane, and the session ends with its last tab.
+
+### The inbox
+
+Prefix `!`, or Agents in the command palette, lists every agent pane of every tab in one box:
+a pane started from an [agent profile](#agent-profiles), or one whose agent has reported a
+state with `pinfold ctl status`. A plain shell is never listed. Rows go ◆ needs you, ✕ error,
+● running, ✓ done, ○ idle, and the longest in its state first within each. Each row is the
+state's glyph and word in its colour, the tab and pane numbers as `2·1`, the tab's label, the
+agent's last message, and how long it has been in that state, which ticks while the box is
+open. A state that came from output's marks rather than the agent says "from output" where the
+message goes. ↑ and ↓ move, Enter goes to the pane, a click on a row does too, and Esc or
+prefix `!` closes. While it is open every key and paste goes to it, never to a pane. It holds
+its rows only while open.
 
 On macOS the menu bar runs the same commands, and its keys are the Command shortcuts. Items
 that cannot apply, such as Copy with nothing selected, are greyed out, and their keys do

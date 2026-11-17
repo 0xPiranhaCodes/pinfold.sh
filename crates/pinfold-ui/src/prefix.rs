@@ -19,6 +19,7 @@
 //! | `f`                 | Open files here         | the design doc             |
 //! | `g`                 | Open the git diff here  | the design doc             |
 //! | `m`                 | Pick markdown to read   | ADR-0045                   |
+//! | `!`                 | Open or close the inbox | ADR-0051, `keys.inbox`     |
 //!
 //! Alt+arrows matter on macOS, where the desktop takes Ctrl+arrows. `h` `j` `k` `l` stay free,
 //! because the design keeps `l` for the audit log, as it keeps `u` and `A`. `f`, `g` and `m` open a
@@ -97,6 +98,8 @@ pub enum Command {
     OpenDiff,
     /// Pick a `*.md` file in the focused pane's shell's directory, and open `pinfold md` on it.
     OpenMarkdown,
+    /// Open the inbox of every agent pane, or close it (ADR-0051).
+    Inbox,
 }
 
 impl Command {
@@ -133,7 +136,8 @@ impl Command {
             | Self::Resize(..)
             | Self::OpenFiles
             | Self::OpenDiff
-            | Self::OpenMarkdown => "",
+            | Self::OpenMarkdown
+            | Self::Inbox => "",
         }
     }
 }
@@ -182,8 +186,9 @@ fn is_modifier(key: &Key) -> bool {
     )
 }
 
-/// The command for a key after the prefix, or nothing if the key is unbound.
-fn command(key: &Key, modifiers: ModifiersState) -> Option<Command> {
+/// The command for a key after the prefix, or nothing if the key is unbound. `inbox` is
+/// `keys.inbox`, which the config keeps off the keys bound here.
+fn command(key: &Key, modifiers: ModifiersState, inbox: char) -> Option<Command> {
     const NONE: ModifiersState = ModifiersState::empty();
     match key {
         Key::Named(named) => {
@@ -212,6 +217,7 @@ fn command(key: &Key, modifiers: ModifiersState) -> Option<Command> {
             b"f" => Some(Command::OpenFiles),
             b"g" => Some(Command::OpenDiff),
             b"m" => Some(Command::OpenMarkdown),
+            _ if text.chars().eq([inbox]) => Some(Command::Inbox),
             _ => None,
         },
         _ => None,
@@ -226,6 +232,7 @@ fn command(key: &Key, modifiers: ModifiersState) -> Option<Command> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Prefix {
     letter: char,
+    inbox: char,
     armed: bool,
     /// Whether the key last taken was the prefix's, so its repeats stay out of the pane.
     consumed: bool,
@@ -237,9 +244,16 @@ impl Prefix {
     pub const fn new(letter: char) -> Self {
         Self {
             letter,
+            inbox: '!',
             armed: false,
             consumed: false,
         }
+    }
+
+    /// Makes `key` after the prefix the inbox's, as `keys.inbox` gives it.
+    #[must_use]
+    pub const fn with_inbox(self, key: char) -> Self {
+        Self { inbox: key, ..self }
     }
 
     fn is_prefix(&self, key: &Key, modifiers: ModifiersState) -> bool {
@@ -286,7 +300,7 @@ impl Prefix {
             return Step::Pass;
         }
         self.consumed = true;
-        command(key, modifiers).map_or(Step::Swallow, Step::Run)
+        command(key, modifiers, self.inbox).map_or(Step::Swallow, Step::Run)
     }
 
     /// Disarms, for when the window loses focus, so the first key back is not a command.
@@ -360,6 +374,27 @@ mod tests {
             ("m", Command::OpenMarkdown),
         ] {
             assert_after_prefix(&text(key), NONE, Step::Run(command));
+        }
+    }
+
+    #[test]
+    fn the_inbox_key_is_bang_or_the_configs_and_never_one_already_bound() {
+        assert_after_prefix(&text("!"), SHIFT, Step::Run(Command::Inbox));
+        let mut prefix = Prefix::new('a').with_inbox('i');
+        prefix.key(&text("a"), CONTROL, false);
+        assert_eq!(
+            prefix.key(&text("i"), NONE, false),
+            Step::Run(Command::Inbox)
+        );
+        prefix.key(&text("a"), CONTROL, false);
+        assert_eq!(prefix.key(&text("!"), SHIFT, false), Step::Swallow);
+        // The config refuses these for `keys.inbox`, as each already runs a command.
+        for key in pinfold_config::PREFIX_KEYS.chars() {
+            let key = text(&key.to_string());
+            assert!(
+                !matches!(command(&key, NONE, '!'), None | Some(Command::Inbox)),
+                "{key:?}"
+            );
         }
     }
 

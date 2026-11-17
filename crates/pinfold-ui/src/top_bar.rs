@@ -58,7 +58,7 @@ pub const STATES: [(char, &str); 5] = [
 ];
 
 /// A state's colour in `theme`, by its number on the link.
-fn state_colour(theme: &Theme, state: u8) -> Option<u32> {
+pub(crate) fn state_colour(theme: &Theme, state: u8) -> Option<u32> {
     let states = theme.states;
     let colours = [
         states.needs_you,
@@ -86,7 +86,7 @@ const MONTHS: [&str; 12] = [
 /// Whether chrome may draw a character from a program or an agent: letters, digits, ASCII
 /// punctuation and spaces, which rules out control, bidi and format characters and every state
 /// glyph (T4, T6).
-fn safe(character: char) -> bool {
+pub(crate) fn safe(character: char) -> bool {
     character.is_alphanumeric() || character.is_ascii_punctuation() || character == ' '
 }
 

@@ -9,6 +9,10 @@ Entries are generated from Conventional Commits with git-cliff
 
 ## [Unreleased]
 
+### Added
+
+- The inbox ([#447](https://github.com/0xPiranhaCodes/pinfold.sh/issues/447), [ADR-0051](docs/adr/0051-needs-you-inbox-and-alerts.md), slice 2): prefix `!` (`keys.inbox`) or Agents in the palette lists every agent pane of every tab, ◆ needs you first, each row with its state's glyph, colour and word, `tab·pane`, the tab's label, the agent's message and its time in the state, ticking once a second while open. Enter or a click goes to the pane; Esc or prefix `!` closes, and closing frees its rows. A window whose core speaks a link older than 17 flashes "the inbox needs the core updated". The design's Agents board now shows each state's word beside its glyph.
+
 ### Changed
 
 - Link version 17 for the inbox ([#447](https://github.com/0xPiranhaCodes/pinfold.sh/issues/447), [ADR-0051](docs/adr/0051-needs-you-inbox-and-alerts.md), slice 2): `Request::Inbox` says when the window's inbox opens and closes, `Notice::Layout` names every pane's tab (5 bytes a pane), and `Notice::Status` says whether the pane is `listed`, so a plain shell that names its tab is not taken for an agent. The window keeps each listed pane's state, source, message and when it came to its state, at most 64. A core of 17 serves a window of 16 as before; a core of 15 now restarts the session ([ADR-0043](docs/adr/0043-window-serves-the-previous-link-version.md)).

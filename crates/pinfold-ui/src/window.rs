@@ -12,7 +12,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use mio::Waker;
 use pinfold_config::theme::{self, GRAPHITE, Theme};
@@ -40,7 +40,8 @@ use crate::context_menu::{self as menu, Choice, Menu};
 use crate::dock_menu;
 use crate::flash::{self, Flash};
 use crate::hyperlink::{self, Target};
-use crate::link::{self, Approval, Link, Screen, Tab};
+use crate::inbox;
+use crate::link::{self, Approval, Link, Listed, Screen, Tab};
 use crate::notify;
 use crate::outbox::{self, Inbox, Outbox, Request};
 use crate::palette::{self, Palette};
@@ -125,6 +126,13 @@ struct Shown {
     total: usize,
     /// Whether what is above, past the screens' contents, changed since the window read it.
     laid: bool,
+    /// Whether the core is new enough for the inbox (ADR-0051).
+    inbox: bool,
+    /// The inbox's panes and every pane's tab, only while the inbox is open.
+    listed: Vec<Listed>,
+    members: Vec<(u32, u8)>,
+    /// Whether `listed` or `members` changed since the window read them.
+    relisted: bool,
 }
 
 /// While `pending`, the window has not taken `shown` yet, so the I/O thread leaves the link's
@@ -165,7 +173,19 @@ fn publish(link: &mut Link, shown: &mut Shown) -> bool {
         shown.alerts = link.alerts();
         shown.focused = link.focused();
         shown.total = link.total();
+        shown.inbox = link.speaks(&proto::Request::Inbox { open: true });
         shown.laid = true;
+    }
+    // Copied only while the inbox is open, and freed once it closes.
+    if link.take_relisted() && link.inbox_open() {
+        shown.listed.clear();
+        shown.listed.extend_from_slice(link.listed());
+        shown.members.clear();
+        shown.members.extend_from_slice(link.members());
+        shown.relisted = true;
+        changed = true;
+    } else if !link.inbox_open() && shown.listed.capacity() + shown.members.capacity() > 0 {
+        (shown.listed, shown.members) = (Vec::new(), Vec::new());
     }
     for screen in link.screens_mut().iter_mut().filter(|screen| screen.dirty) {
         screen.dirty = false;
@@ -444,6 +464,13 @@ struct App {
     palette: Option<Palette>,
     /// The pane whose `*.md` files the open palette lists, if it lists them.
     picking: Option<u32>,
+    /// The inbox, while open (ADR-0051). Every key goes to it, and closing frees its rows.
+    inbox: Option<inbox::Inbox>,
+    /// Whether the core is new enough for the inbox.
+    inbox_spoken: bool,
+    /// In a window `cargo xtask mem-gate` measures, whether to close the inbox it opens once
+    /// that has drawn its rows.
+    measuring: Option<bool>,
     /// The pane and cell the open menu asked the core for a hyperlink at.
     asking: Option<(u32, Position)>,
     prefix: Prefix,
@@ -492,7 +519,7 @@ impl App {
         notifier: notify::Notifier,
     ) -> Self {
         Self {
-            prefix: Prefix::new(config.keys.prefix),
+            prefix: Prefix::new(config.keys.prefix).with_inbox(config.keys.inbox),
             config,
             theme: GRAPHITE,
             unthemed: false,
@@ -538,6 +565,11 @@ impl App {
             menu: None,
             palette: None,
             picking: None,
+            inbox: None,
+            inbox_spoken: false,
+            measuring: size
+                .and(std::env::var_os("PINFOLD_MEASURE_INBOX"))
+                .map(|value| value == "closed"),
             asking: None,
             flash: Flash::default(),
             unhardened: None,
@@ -696,8 +728,9 @@ impl App {
         }
         self.font_step = 0.0;
         let old = std::mem::replace(&mut self.config, config);
-        if self.config.keys.prefix != old.keys.prefix {
-            self.prefix = Prefix::new(self.config.keys.prefix);
+        if self.config.keys != old.keys {
+            let keys = &self.config.keys;
+            self.prefix = Prefix::new(keys.prefix).with_inbox(keys.inbox);
         }
         let Some(open) = &mut self.open else { return };
         #[cfg(target_os = "macos")]
@@ -749,6 +782,10 @@ impl App {
         self.status =
             active.and_then(|tab| Some((tab.status?.0, tab.status?.1, tab.message.clone())));
         self.total = shown.total;
+        self.inbox_spoken = shown.inbox;
+        if self.measuring.is_some() && self.inbox.is_none() && self.inbox_spoken {
+            self.toggle_inbox();
+        }
         // Another pane may have closed under the question.
         if let Some(Prompt::Close { last, .. }) = &mut self.prompt {
             *last = self.total == 1;
@@ -782,6 +819,11 @@ impl App {
     fn take(&mut self, shown: &mut Shown) {
         if std::mem::take(&mut shown.laid) {
             self.lay_out(shown);
+        }
+        if std::mem::take(&mut shown.relisted)
+            && let Some(inbox) = &mut self.inbox
+        {
+            inbox.refresh(&shown.listed, &shown.members, &self.labels);
         }
         for fresh in shown.screens.iter_mut().filter(|screen| screen.dirty) {
             fresh.dirty = false;
@@ -820,6 +862,7 @@ impl App {
             self.flash.refused(proto::Refusal::Input, Instant::now());
         }
         self.flash.tick(Instant::now());
+        let mut drawn = false;
         if let Some(open) = &mut self.open {
             let (rows, columns) = self.area;
             let theme = &self.theme;
@@ -881,6 +924,12 @@ impl App {
             if let Some(palette) = &self.palette {
                 palette.draw(&mut self.composed, theme);
             }
+            if let Some(inbox) = &self.inbox {
+                inbox.draw(&mut self.composed, theme, Instant::now());
+                self.composed.cursor = None;
+                drawn = inbox.is_ready();
+            }
+
             if self.ended {
                 flash::ended(&mut self.composed, theme);
             } else if !self.approvals.is_empty() {
@@ -941,6 +990,10 @@ impl App {
             smaller: size > MIN_FONT_SIZE,
             resized: self.font_step != 0.0,
         });
+        if drawn && self.measuring == Some(true) {
+            self.measuring = None;
+            self.close_inbox();
+        }
         Ok(())
     }
 
@@ -953,6 +1006,10 @@ impl App {
     }
 
     fn paste(&mut self) {
+        // A paste never reaches the inbox, nor the pane under it.
+        if self.inbox.is_some() {
+            return;
+        }
         // The limit bounds the read itself, so a huge clipboard costs the window nothing.
         let text = match self.clipboard().map(|clipboard| clipboard.text(MAX_PASTE)) {
             Some(Ok(text)) => text,
@@ -1039,8 +1096,63 @@ impl App {
             }
             Command::OpenConfig => return open_config(),
             Command::OpenDocs => return launch(DOCS, false),
+            Command::Inbox => return self.toggle_inbox(),
         };
         self.core(request);
+    }
+
+    /// Opens the inbox, or closes it if it is open (ADR-0051). A core too old for it says so.
+    fn toggle_inbox(&mut self) {
+        if self.inbox.is_some() {
+            return self.close_inbox();
+        }
+        if !self.inbox_spoken {
+            self.flash
+                .note("the inbox needs the core updated", Instant::now());
+            return self.redraw_soon();
+        }
+        (self.menu, self.palette, self.picking) = (None, None, None);
+        self.inbox = Some(inbox::Inbox::default());
+        // The rows come when the I/O thread has copied them.
+        self.core(proto::Request::Inbox { open: true });
+        self.redraw_soon();
+    }
+
+    /// Closes the inbox, which frees its rows here and the I/O thread's copy.
+    fn close_inbox(&mut self) {
+        if self.inbox.take().is_some() {
+            self.core(proto::Request::Inbox { open: false });
+            self.redraw_soon();
+        }
+    }
+
+    /// Carries out what a key or a press did in the inbox. A jump is the existing switch to
+    /// the pane's tab, then its focus.
+    fn inbox_step(&mut self, step: inbox::Step) {
+        match step {
+            inbox::Step::Stay => self.redraw_soon(),
+            inbox::Step::Close => self.close_inbox(),
+            inbox::Step::Jump { tab, pane } => {
+                self.close_inbox();
+                self.core(proto::Request::SwitchTab { index: tab.into() });
+                self.core(proto::Request::Focus { pane });
+            }
+        }
+    }
+
+    /// Hands a key to the open inbox. The prefix still works, so its inbox key closes it; any
+    /// other command waits until the inbox is closed, as the inbox holds the keyboard.
+    fn inbox_key(&mut self, key: &Key, repeat: bool) {
+        match self.prefix.key(key, self.modifiers, repeat) {
+            prefix::Step::Run(Command::Inbox) => self.close_inbox(),
+            prefix::Step::Pass => {
+                if let Some(inbox) = &mut self.inbox {
+                    let step = inbox.key(key);
+                    self.inbox_step(step);
+                }
+            }
+            prefix::Step::Run(_) | prefix::Step::Swallow => {}
+        }
     }
 
     fn select_all(&mut self) {
@@ -1494,6 +1606,18 @@ impl App {
             _ => return None,
         };
         let down = state == ElementState::Pressed;
+        if let Some(inbox) = &self.inbox {
+            if down {
+                let (rows, columns) = self.area;
+                let step = if self.on_bar {
+                    inbox::Step::Close
+                } else {
+                    inbox.click(rows, columns, self.pointer)
+                };
+                self.inbox_step(step);
+            }
+            return None;
+        }
         // shortcut: a press anywhere closes the palette, as Esc does; choose by click if missed.
         if self.palette.is_some() {
             if down {
@@ -1642,7 +1766,8 @@ impl App {
             Ime::Commit(text) => {
                 self.preedit.0.clear();
                 // Like a click, text cannot answer a prompt and goes nowhere else while one is up.
-                let prompted = !self.approvals.is_empty() || self.prompt.is_some();
+                let prompted =
+                    !self.approvals.is_empty() || self.prompt.is_some() || self.inbox.is_some();
                 if !prompted && !self.type_in_bar(&text) && self.vi.is_none() {
                     self.request(Request::Input(self.focused, text.into_bytes()));
                 }
@@ -1721,6 +1846,7 @@ impl ApplicationHandler<Notice> for App {
                 self.prefix.cancel();
                 self.menu = None;
                 self.palette = None;
+                self.close_inbox();
                 self.redraw_soon();
             }
             Notice::Exited => event_loop.exit(),
@@ -1748,6 +1874,9 @@ impl ApplicationHandler<Notice> for App {
                 self.prefix.cancel();
                 self.menu = None;
                 self.palette = None;
+                if !matches!(command, Command::Inbox | Command::Paste) {
+                    self.close_inbox();
+                }
                 self.command(event_loop, command);
             }
             Notice::Command(_) => {}
@@ -1789,6 +1918,11 @@ impl ApplicationHandler<Notice> for App {
                     self.menu_step(step, event_loop);
                 }
             }
+            WindowEvent::KeyboardInput { event, .. } if self.inbox.is_some() => {
+                if event.state.is_pressed() {
+                    self.inbox_key(&event.logical_key, event.repeat);
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } if self.palette.is_some() => {
                 if event.state.is_pressed() {
                     let text = event.text.as_ref().map(|text| text.as_str());
@@ -1812,6 +1946,13 @@ impl ApplicationHandler<Notice> for App {
                     .flash
                     .until()
                     .map_or(self.minute, |flash| flash.min(self.minute));
+                // An open inbox ticks its times once a second; a closed one costs no wakes.
+                let tick = Instant::now() + Duration::from_secs(1);
+                let wake = if self.inbox.is_some() {
+                    wake.min(tick)
+                } else {
+                    wake
+                };
                 event_loop.set_control_flow(ControlFlow::WaitUntil(wake));
             }
             _ => {}
@@ -2213,6 +2354,77 @@ mod tests {
         let sent = inbox.take();
         assert!(
             matches!(&sent[..], [Request::Input(1, bytes)] if bytes == "é".as_bytes()),
+            "{}",
+            sent.len()
+        );
+    }
+
+    #[test]
+    fn the_inbox_opens_jumps_closes_and_drops_a_paste() {
+        let (mut app, inbox, _poll) = app();
+        let key = |text: &str| Key::Character(text.into());
+        // A core older than 17 cannot serve it, and the window says so.
+        app.run(Command::Inbox);
+        assert!(app.inbox.is_none() && app.flash.until().is_some());
+        assert!(inbox.take().is_empty());
+
+        app.inbox_spoken = true;
+        app.labels = vec!["api".to_owned(), "docs".to_owned()];
+        app.run(Command::Inbox);
+        let open = |sent: &[Request], open| matches!(sent, [Request::Core(proto::Request::Inbox { open: o })] if *o == open);
+        assert!(open(&inbox.take(), true));
+        let now = Instant::now();
+        let listed = vec![
+            crate::inbox::tests::listed(7, 1, 9, "busy", now),
+            crate::inbox::tests::listed(8, 0, 3, "Allow?", now),
+        ];
+        let members = vec![(1, 0), (7, 0), (8, 1)];
+        let mut shown = Shown {
+            listed: listed.clone(),
+            members: members.clone(),
+            relisted: true,
+            ..Shown::default()
+        };
+        app.take(&mut shown);
+        // Text typed in an input method and a paste go nowhere while it is open.
+        app.ime(winit::event::Ime::Commit("rm -rf ~\n".to_owned()));
+        app.run(Command::Paste);
+        assert!(inbox.take().is_empty());
+        // The prefix's inbox key closes it, and other prefix commands wait.
+        app.modifiers = ModifiersState::CONTROL;
+        app.inbox_key(&key("a"), false);
+        app.modifiers = ModifiersState::empty();
+        app.inbox_key(&key("c"), false);
+        assert!(app.inbox.is_some() && inbox.take().is_empty());
+        app.modifiers = ModifiersState::CONTROL;
+        app.inbox_key(&key("a"), false);
+        app.modifiers = ModifiersState::SHIFT;
+        app.inbox_key(&key("!"), false);
+        assert!(app.inbox.is_none());
+        assert!(open(&inbox.take(), false));
+
+        // Enter on the ◆ row, first, goes to its tab and pane.
+        app.run(Command::Inbox);
+        inbox.take();
+        app.take(&mut Shown {
+            listed,
+            members,
+            relisted: true,
+            ..Shown::default()
+        });
+        app.modifiers = ModifiersState::empty();
+        app.inbox_key(&Key::Named(NamedKey::Enter), false);
+        assert!(app.inbox.is_none());
+        let sent = inbox.take();
+        assert!(
+            matches!(
+                sent[..],
+                [
+                    Request::Core(proto::Request::Inbox { open: false }),
+                    Request::Core(proto::Request::SwitchTab { index: 1 }),
+                    Request::Core(proto::Request::Focus { pane: 8 }),
+                ]
+            ),
             "{}",
             sent.len()
         );
