@@ -29,3 +29,8 @@ have shipped, and beta.4 includes the built-in tools. v0.1 waits on the Linux de
 it and to the next ◆, desktop, webhook and program-notification alerts, and progress on the tab and
 the Dock ([ADR-0051](adr/0051-needs-you-inbox-and-alerts.md), accepted 2026-11-18;
 [#447](https://github.com/0xPiranhaCodes/pinfold.sh/issues/447)).
+
+**Next.** Session replay: a timeline of records per agent run, commands, calls that act,
+approvals, states and files, drawn in cells, with a summary line for the inbox
+([ADR-0052](adr/0052-session-replay-a-timeline-per-agent-run.md), accepted 2026-11-18;
+[#450](https://github.com/0xPiranhaCodes/pinfold.sh/issues/450)).
