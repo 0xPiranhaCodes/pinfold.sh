@@ -230,6 +230,12 @@ we want but do not have links to its issue.
   [threat model](docs/design/threat-model.md#controls-and-their-tests) names the test for
   each control of T1–T10, or says it is untested
   ([#234](https://github.com/0xPiranhaCodes/pinfold.sh/issues/234)).
+- **VT conformance matrix**: `crates/pinfold-core/tests/vt_conformance.rs` feeds each case's
+  bytes to a fresh 4 × 10 engine and compares what it shows with the result a cited reference
+  documents. It writes `docs/design/vt-conformance.md` and fails when that file is stale, a
+  passing case regresses, or a case fails without a known-gap issue. Add a case as one line of
+  the table, then run `PINFOLD_UPDATE_CONFORMANCE=1 cargo test -p pinfold-core --test
+  vt_conformance` and read the diff.
 - **Conformance**: `tests/conformance/esctest.sh` runs esctest2 against the VT engine
   and compares the tests that pass with `tests/conformance/esctest-pass.txt`. A listed
   test that fails exits 1; a newly passing one is printed, and `--update` rewrites the
