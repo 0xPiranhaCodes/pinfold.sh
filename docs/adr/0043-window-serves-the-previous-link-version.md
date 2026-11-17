@@ -85,6 +85,12 @@ From 15, `OLDEST` is 14, so a version 13 core restarts the session.
 
 From 16, `OLDEST` is 15, so a version 14 core restarts the session.
 
+| Change in 17 | Spoken version 16 |
+|---|---|
+| `Request::Inbox`, `Notice::Layout` gains every pane's tab, and `Notice::Status` gains `listed` ([ADR-0051](0051-needs-you-inbox-and-alerts.md)) | The window never sends the request: prefix `!` and the palette's Agents flash `the inbox needs the core updated`. The core lays out a layout and a status as 16 does: no members, and `listed` left out of the flags byte, which a window of 17 reads from 16 as `listed` for a pane that does not name its tab. Every other key works. |
+
+From 17, `OLDEST` is 16, so a version 15 core restarts the session.
+
 **Raising the version.** A PR that changes the link raises `VERSION`, gives each new message or
 value a `since` of the new version, and adds a row to this table saying how the older version
 degrades. A change with no safe degradation, such as a new field every frame needs, says so

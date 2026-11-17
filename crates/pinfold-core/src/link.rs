@@ -86,8 +86,9 @@ struct PaneLink {
     alerted: bool,
     /// Whether this window heard what the pane was running before a restore.
     told_ran: bool,
-    /// The state, source and `naming` the window last heard of, while `naming` or in the inbox.
-    told: Option<(u8, bool, bool)>,
+    /// The state, source, `naming` and `listed` the window last heard of, while `naming` or in
+    /// the inbox.
+    told: Option<(u8, bool, bool, bool)>,
     /// The message the window last heard of, while `naming` or in the inbox.
     message: String,
     /// The OSC 12 cursor colour and OSC 11 background the window last heard of.
@@ -224,6 +225,9 @@ impl Session {
                     uri: uri.as_deref().unwrap_or_default(),
                 })?;
             }
+            // The inbox's extra rows come with ADR-0051's eighth slice; until then the core
+            // keeps nothing for an open inbox.
+            Request::Inbox { .. } => {}
             Request::ListMarkdown { pane } => {
                 let names = reactor.list_markdown(pane as usize);
                 self.notice(&Notice::Markdown {
@@ -350,8 +354,16 @@ impl Session {
             .session
             .active_tab()
             .map_or(0, pinfold_mux::Tab::focused);
-        let total = reactor.pane_count() as u16;
-        encode_layout(&mut self.out, active, focused, total, &tabs, &shown).map_err(|_| Ended)?;
+        let members: Vec<(u32, u8)> = (reactor.session.tabs().iter().enumerate())
+            .flat_map(|(index, tab)| tab.panes().map(move |pane| (pane, index as u8)))
+            .collect();
+        // Counted from the tabs, so the members always match it.
+        let total = members.len() as u16;
+        let (out, version) = (&mut self.out, self.version);
+        encode_layout(
+            out, version, active, focused, total, &tabs, &shown, &members,
+        )
+        .map_err(|_| Ended)?;
         self.activity_changed = true;
         self.flush()
     }
@@ -450,10 +462,11 @@ impl Session {
             self.activity_changed = true;
         }
         // Every inbox pane's, for a window of 16, and the naming pane's for any (ADR-0051).
-        if (state.naming || reactor.listed(pane))
+        let listed = reactor.listed(pane);
+        if (state.naming || listed)
             && let Some((status, reported, message)) = status
         {
-            let told = Some((status as u8, reported, state.naming));
+            let told = Some((status as u8, reported, state.naming, listed));
             if state.told != told || state.message != message {
                 state.told = told;
                 message.clone_into(&mut state.message);
@@ -464,6 +477,7 @@ impl Session {
                     state: status as u8,
                     reported,
                     naming: state.naming,
+                    listed,
                     since,
                     started,
                     message: &state.message,
@@ -900,6 +914,10 @@ mod tests {
         focused: u32,
         tabs: Vec<u32>,
         shown: Vec<(u32, Rect)>,
+        /// Every pane and its tab's index, from a layout of 17 or later.
+        members: Vec<(u32, u8)>,
+        /// Whether the last naming pane's status said it is in the inbox.
+        naming_listed: Option<bool>,
         refused: Vec<Refusal>,
         was_running: Vec<(u32, bool, String)>,
         unhardened: Vec<bool>,
@@ -935,6 +953,8 @@ mod tests {
                 focused: 0,
                 tabs: Vec::new(),
                 shown: Vec::new(),
+                members: Vec::new(),
+                naming_listed: None,
                 refused: Vec::new(),
                 was_running: Vec::new(),
                 unhardened: Vec::new(),
@@ -1027,9 +1047,13 @@ mod tests {
                             state,
                             reported,
                             naming: true,
+                            listed,
                             message,
                             ..
-                        } => self.status = Some((pane, state, reported, message.to_owned())),
+                        } => {
+                            self.status = Some((pane, state, reported, message.to_owned()));
+                            self.naming_listed = Some(listed);
+                        }
                         Notice::Status {
                             pane, state, since, ..
                         } => self.listed.push((pane, state, since)),
@@ -1039,6 +1063,7 @@ mod tests {
                             self.focused = layout.focused;
                             self.tabs = layout.tabs().collect();
                             self.shown = layout.panes().collect();
+                            self.members = layout.members().collect();
                         }
                         Notice::Refused { reason } => self.refused.push(reason),
                         Notice::WasRunning {
@@ -1155,7 +1180,7 @@ mod tests {
     /// ADR-0051: a window of 16 hears the state of every inbox pane, with its times, and one
     /// of 15 the naming panes' only. A plain shell pane that names no tab is in no inbox.
     #[test]
-    fn every_inbox_pane_s_status_reaches_a_window_of_16_and_only_naming_ones_older() {
+    fn every_inbox_pane_s_status_reaches_the_window_and_a_layout_of_17_places_each_pane() {
         for version in [VERSION, OLDEST] {
             let mut reactor = Reactor::new().unwrap();
             reactor.shell = || shell(ALIVE);
@@ -1184,20 +1209,21 @@ mod tests {
             let heard = |p: &Peer, pane: usize, state: u8| {
                 (p.listed.iter()).any(|(at, told, _)| (*at, *told) == (pane as u32, state))
             };
-            if version == VERSION {
-                serve(&mut reactor, &mut peer, |_, p| {
-                    heard(p, agent, 0) && heard(p, reporter as usize, 1)
-                });
-                assert!(peer.listed.iter().all(|(.., since)| *since < 30));
-                assert!(!heard(&peer, plain as usize, 4), "a plain shell is listed");
-            } else {
-                for _ in 0..5 {
-                    reactor.turn(Some(Duration::from_millis(10))).unwrap();
-                    peer.read();
-                }
-                assert!(peer.listed.is_empty(), "sent what version 15 cannot read");
-            }
+            serve(&mut reactor, &mut peer, |_, p| {
+                heard(p, agent, 0) && heard(p, reporter as usize, 1)
+            });
+            assert!(peer.listed.iter().all(|(.., since)| *since < 30));
+            assert!(!heard(&peer, plain as usize, 4), "a plain shell is listed");
             assert_eq!(peer.status.as_ref().map(|told| told.0), Some(plain));
+            // From 17 the window can tell the naming plain shell is not in the inbox, and
+            // which tab each pane is in.
+            let members = [(agent as u32, 0), (reporter, 0), (plain, 0)];
+            if version == VERSION {
+                assert_eq!(peer.naming_listed, Some(false));
+                assert_eq!(peer.members, members);
+            } else {
+                assert!(peer.members.is_empty(), "sent what version 16 cannot read");
+            }
             assert!(reactor.is_window_ready(), "the link ended");
         }
     }

@@ -279,7 +279,17 @@ mod tests {
         let (mut link, mut core) = linked();
         let (outbox, inbox) = channel();
         let mut wire = Vec::new();
-        encode_layout(&mut wire, 0, PANE + 1, 1, &[PANE + 1], &[]).unwrap();
+        encode_layout(
+            &mut wire,
+            VERSION,
+            0,
+            PANE + 1,
+            1,
+            &[PANE + 1],
+            &[],
+            &[(PANE + 1, 0)],
+        )
+        .unwrap();
         std::io::Write::write_all(&mut core, &wire).unwrap();
         let start = Instant::now();
         while link.focused() != PANE + 1 && start.elapsed() < PATIENCE {

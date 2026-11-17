@@ -9,6 +9,10 @@ Entries are generated from Conventional Commits with git-cliff
 
 ## [Unreleased]
 
+### Changed
+
+- Link version 17 for the inbox ([#447](https://github.com/0xPiranhaCodes/pinfold.sh/issues/447), [ADR-0051](docs/adr/0051-needs-you-inbox-and-alerts.md), slice 2): `Request::Inbox` says when the window's inbox opens and closes, `Notice::Layout` names every pane's tab (5 bytes a pane), and `Notice::Status` says whether the pane is `listed`, so a plain shell that names its tab is not taken for an agent. The window keeps each listed pane's state, source, message and when it came to its state, at most 64. A core of 17 serves a window of 16 as before; a core of 15 now restarts the session ([ADR-0043](docs/adr/0043-window-serves-the-previous-link-version.md)).
+
 ### Security
 
 - [ADR-0050](docs/adr/0050-rewind-an-agents-changes.md) is amended (coordinator for the maintainer, 2026-11-18) after its spike failed the gates as first written: the Linux tree's first take took 46.29 s on macOS and 56.43 s on Linux against 10 s. A take now reads with `min(4, available CPUs)` threads, each feeding its own `git fast-import --depth=0`, into a store with `core.compression = 1`, and `prune` repacks only past 32 packs or 512 MiB; a commit names its parent and lists only changed and deleted paths; `max_new_mib` is 2048 and `max_files` 200,000, counting files and links; `.env*` is covered in every directory the walk enters, and ignored directories are not entered; `getattrlistbulk` stays in reserve. The take and its git run at background priority (QoS utility on macOS, nice 10 and I/O class idle on Linux). The sum of a take's concurrent git peaks must stay within 1.25 times the single importer's: `measure.sh --peaks` measured 152 MB against 268 MB on macOS and 325 MB against 280 MB on Linux with four readers, and at background priority the first take stays at 6.20 s and 4.71 s and the unchanged one at 0.98 s and 0.44 s. [#442](https://github.com/0xPiranhaCodes/pinfold.sh/issues/442)'s slices follow. Docs and spike code only; no new crates.
