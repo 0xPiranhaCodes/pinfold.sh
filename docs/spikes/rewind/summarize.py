@@ -25,9 +25,40 @@ def peak(r):
     return r["footprint"] or r["rss"]
 
 
+def peaks(path):
+    # measure.sh --peaks: the Linux tree per reader count and priority, every git process sampled.
+    rows, host = load(path)
+    print(f"## {path.stem}\n\n{host.get('uname', '')}; {host.get('git', '')}; {host.get('cpus', '?')} CPUs\n")
+    print("| Config | Readers | Priority | First s | Unchanged s | Concurrent git peaks MB | Sampled git sum MB | Largest git RSS MB | git at once | Prototype peak MB |")
+    print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
+    runs = list(dict.fromkeys(r["config"] for r in rows))
+    worst = {}
+    for run in runs:
+        cfg, readers, prio = run.split("-")
+        first, unchanged = pick(rows, "linux", run, "first"), pick(rows, "linux", run, "unchanged")
+        takes = first + unchanged
+        worst[run] = max(r["git_peaks"] for r in takes) / MB
+        print(
+            f"| {cfg} | {readers} | {prio} | {med([r['ms'] for r in first]) / 1000:.2f} | {med([r['ms'] for r in unchanged]) / 1000:.2f} "
+            f"| {worst[run]:.0f} | {max(r['git_sum'] for r in takes) / MB:.0f} | {max(r['git_rss'] for r in takes) / MB:.0f} "
+            f"| {max(r['git_procs'] for r in takes)} | {max(peak(r) for r in takes) / MB:.2f} |"
+        )
+    single = max(r["git_peaks"] for r in pick(rows, "linux", "adr-1-normal", "first")) / MB
+    print(f"\nBound: 1.25 × the ADR-as-written single importer's {single:.0f} MB = {1.25 * single:.0f} MB.\n")
+    print("| Config | Concurrent git peaks MB | Within bound |")
+    print("| --- | --- | --- |")
+    for run in runs:
+        if not run.startswith("adr"):
+            print(f"| {run} | {worst[run]:.0f} | {'yes' if worst[run] <= 1.25 * single else '**no**'} |")
+    print()
+
+
 def main():
     here = pathlib.Path(__file__).parent
     for path in sorted((here / "results").glob("*.jsonl")):
+        if path.stem.endswith("-peaks"):
+            peaks(path)
+            continue
         rows, host = load(path)
         corpora = list(dict.fromkeys(r["corpus"] for r in rows))
         uname = host.get("uname", "")
