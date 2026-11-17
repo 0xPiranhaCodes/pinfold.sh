@@ -79,6 +79,12 @@ criteria = "safe-to-deploy"
 version = "0.3.5"
 notes = "AI-assisted review (Claude Code) for the maintainer; not yet spot-checked by a person. Raw bindings to the Objective-C runtime. build.rs reads only TARGET, CARGO_CFG_*, CARGO_FEATURE_* and DOCS_RS, emits link and cfg lines (dylib objc on Apple), and runs cc only for the unstable-exception feature, which Pinfold does not enable. src is extern declarations, type aliases and constants; the only unsafe blocks are in tests. Did not check each extern signature against Apple's headers."
 
+[[audits.sha1]]
+who = "Satheesh Kumar <22219814+0xPiranhaCodes@users.noreply.github.com>"
+criteria = "safe-to-deploy"
+version = "0.11.0"
+notes = "AI-assisted review (Claude Code) for the maintainer; not yet spot-checked by a person. Pinfold names checkpoint blobs with it, as git does (ADR-0050). Read the dispatch in compress.rs and every unsafe block in the aarch64 SHA2 and x86 SHA-NI backends: each runs only after a cpufeatures check or a compile-time target_feature, and every load and store is an unaligned intrinsic on a [u8; 64] block or the [u32; 5] state, in bounds by type. The LoongArch asm backend, which Pinfold does not build, only reads the block and state it is given. No build script, I/O or FFI."
+
 [[audits.sha2]]
 who = "Satheesh Kumar <22219814+0xPiranhaCodes@users.noreply.github.com>"
 criteria = "safe-to-deploy"
