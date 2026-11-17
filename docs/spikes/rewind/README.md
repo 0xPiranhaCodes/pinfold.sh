@@ -4,7 +4,8 @@
 gate on macOS; with three changes to how a take runs it passes all four gates on macOS (APFS)
 and Linux (ext4).** Slice 0 of
 [#442](https://github.com/0xPiranhaCodes/pinfold.sh/issues/442). The ADR should take the
-changes listed under "Recommended changes to ADR-0050" before slice 1.
+changes listed under "Recommended changes to ADR-0050" before slice 1
+([ADR-0050](../../adr/0050-rewind-an-agents-changes.md), implementation plan step 0).
 
 | Gate | Target | macOS APFS, as written | macOS APFS, recommended | Linux ext4, as written | Linux ext4, recommended |
 | --- | --- | --- | --- | --- | --- |
