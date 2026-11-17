@@ -3,15 +3,22 @@
 //! A repository's own configuration can name commands that `git diff` and `git status` run:
 //! `core.fsmonitor`, a filter driver, a diff driver, a pager. [`run`] turns each of them off,
 //! so looking at a hostile repository runs nothing from it.
+//!
+//! A checkpoint store (ADR-0050) is reached only through [`store`] and [`import`], which read
+//! no configuration but the store's own and never see a work tree. On macOS, Apple's
+//! `/usr/bin/git` stub runs only once the Command Line Tools are found, so no install dialog
+//! ever opens.
 
 use std::env;
 use std::ffi::{OsStr, OsString};
+use std::fs;
 use std::io::{self, Read, Write};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::PermissionsExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus, Stdio};
-use std::thread;
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::sync::OnceLock;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 /// Bytes of standard output kept; git is cut short past them.
@@ -20,6 +27,20 @@ pub(crate) const MAX_OUTPUT: usize = 8_000_000;
 const MAX_ERRORS: usize = 64 * 1024;
 /// Time git may run before it is killed.
 pub(crate) const TIMEOUT: Duration = Duration::from_secs(10);
+/// Time `repack` and `prune` may run in a store, at background priority off the launch path:
+/// `repack` took 10.5 to 15.5 s on a Linux-sized one (ADR-0050 amendment).
+const STORE_UPKEEP: Duration = Duration::from_secs(300);
+/// Apple's stub, which offers to install the Command Line Tools in a dialog when they are
+/// missing (ADR-0050 decision 5).
+const APPLE_STUB: Option<&str> = if cfg!(target_os = "macos") {
+    Some("/usr/bin/git")
+} else {
+    None
+};
+/// The store's configuration, written by PinFold: no command, and zlib level 1, as deltas
+/// come later from `repack` (ADR-0050 section 2).
+const STORE_CONFIG: &str =
+    "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = true\n\tcompression = 1\n";
 
 /// Overrides on every call. `-c` beats every configuration file. With every transport refused,
 /// `core.sshCommand`, credential helpers and `core.askPass` cannot be reached; they are emptied
@@ -127,9 +148,7 @@ where
     S: AsRef<OsStr>,
 {
     let deadline = Instant::now() + timeout;
-    let path = env::var_os("PATH").unwrap_or_default();
-    let git =
-        find(&path, "git").ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no git"))?;
+    let git = locate()?;
     let listed = capture(
         command(&git, repo, &[]).args(["config", "--list", "-z"]),
         deadline,
@@ -177,6 +196,246 @@ pub(crate) fn find(path: &OsStr, name: &str) -> Option<PathBuf> {
             git.metadata()
                 .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
         })
+}
+
+/// The git to run: [`find`]'s, unless that is Apple's stub and the Command Line Tools are
+/// missing, when git counts as missing. The check runs once a process.
+fn locate() -> io::Result<PathBuf> {
+    static TOOLS: OnceLock<bool> = OnceLock::new();
+    let path = env::var_os("PATH").unwrap_or_default();
+    let tools = || *TOOLS.get_or_init(|| command_line_tools("/usr/bin/xcode-select".as_ref()));
+    lookup(&path, APPLE_STUB.map(Path::new), tools)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no git"))
+}
+
+/// The first git on `path`, refused if it is `stub` and `tools` says it would not run.
+fn lookup(path: &OsStr, stub: Option<&Path>, tools: impl FnOnce() -> bool) -> Option<PathBuf> {
+    let git = find(path, "git")?;
+    (stub != Some(git.as_path()) || tools()).then_some(git)
+}
+
+/// Whether `xcode-select -p` names a developer directory holding `usr/bin/git`, so Apple's stub
+/// runs git rather than offering to install it. `-p` only prints; it opens nothing.
+fn command_line_tools(xcode_select: &Path) -> bool {
+    let mut command = Command::new(xcode_select);
+    command
+        .arg("-p")
+        .env_clear()
+        .envs(inherited(env::vars_os()))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let deadline = Instant::now() + crate::files::STATUS_TIMEOUT;
+    let Ok(printed) = capture(&mut command, deadline, &[]) else {
+        return false;
+    };
+    let dir = Path::new(OsStr::from_bytes(printed.stdout.trim_ascii_end()));
+    printed.status.is_some_and(|status| status.success())
+        && dir.is_absolute()
+        && dir.join("usr/bin/git").is_file()
+}
+
+/// Makes a new checkpoint store at `store`: a bare repository, mode 0700, whose files PinFold
+/// writes itself, as neither `init` nor `config` runs there. Its configuration names no command.
+/// Refusing a store that is a link, another user's or open to others is the caller's.
+///
+/// # Errors
+///
+/// Returns an error if anything is already at `store` or a file cannot be written.
+///
+/// # Examples
+///
+/// ```no_run
+/// pinfold_tools::git::create_store("/path/to/state/checkpoints/0123456789abcdef".as_ref())?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn create_store(store: &Path) -> io::Result<()> {
+    let mut dirs = fs::DirBuilder::new();
+    dirs.mode(0o700).create(store)?;
+    for dir in [
+        "objects",
+        "objects/info",
+        "objects/pack",
+        "refs",
+        "refs/heads",
+        "refs/tags",
+    ] {
+        dirs.create(store.join(dir))?;
+    }
+    fs::write(store.join("HEAD"), "ref: refs/heads/main\n")?;
+    fs::write(store.join("config"), STORE_CONFIG)
+}
+
+/// Runs `git <args>` in the checkpoint store `store` (ADR-0050 section 2): `GIT_DIR` is the
+/// store, `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1` leave only its own
+/// configuration, which PinFold wrote, and no other variable is passed, so there is no work
+/// tree and nothing the person's environment names. [`run`]'s overrides, absolute-`PATH`
+/// lookup, output cap and 10 s timeout hold; `repack` and `prune` get 300 s.
+///
+/// Only these run: `diff-tree`, `diff` (given `--no-ext-diff --no-textconv --no-color`),
+/// `cat-file --batch`, `for-each-ref`, `update-ref -d`, `repack -a -d -q` and `prune`.
+/// `fast-import` is [`import`].
+///
+/// # Errors
+///
+/// [`io::ErrorKind::InvalidInput`] for any other subcommand, otherwise as [`run`].
+///
+/// # Examples
+///
+/// ```no_run
+/// let store = "/path/to/state/checkpoints/0123456789abcdef".as_ref();
+/// let refs = pinfold_tools::git::store(store, ["for-each-ref", "refs/pinfold/"], b"")?;
+/// assert!(!refs.cut_short);
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn store<I, S>(store: &Path, args: I, input: &[u8]) -> io::Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let args: Vec<OsString> = args.into_iter().map(|a| a.as_ref().to_owned()).collect();
+    let words: Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();
+    let timeout = match words.as_slice() {
+        [b"diff-tree" | b"diff" | b"for-each-ref", ..] | [b"cat-file", b"--batch"] => TIMEOUT,
+        [b"update-ref", b"-d", ..] => TIMEOUT,
+        [b"repack", b"-a", b"-d", b"-q"] | [b"prune", ..] => STORE_UPKEEP,
+        _ => {
+            let refused = "not a subcommand a checkpoint store runs";
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, refused));
+        }
+    };
+    let mut command = store_command(&locate()?, store);
+    command.arg(&args[0]);
+    if words[0] == b"diff" {
+        command.args(["--no-ext-diff", "--no-textconv", "--no-color"]);
+    }
+    if !input.is_empty() {
+        command.stdin(Stdio::piped());
+    }
+    capture(command.args(&args[1..]), Instant::now() + timeout, input)
+}
+
+/// A `git fast-import --quiet --depth=0` writing into a checkpoint store, run as [`store`]
+/// runs git. Its input is written through [`Write`] and buffered; it has no timeout of its own,
+/// as it waits on its writer. Input ends only with [`Import::finish`]: dropped before that, or
+/// killed with the take, the importer stops at the end of input without `done` and leaves no
+/// partial commit.
+#[derive(Debug)]
+pub struct Import {
+    child: Child,
+    input: Option<io::BufWriter<ChildStdin>>,
+    errors: Option<JoinHandle<Vec<u8>>>,
+}
+
+/// Starts a `git fast-import` into `store`, after `feature done`.
+///
+/// # Errors
+///
+/// Returns an error if no git is found or it cannot start.
+///
+/// # Examples
+///
+/// ```no_run
+/// use std::io::Write;
+///
+/// let store = "/path/to/state/checkpoints/0123456789abcdef".as_ref();
+/// let mut import = pinfold_tools::git::import(store)?;
+/// import.write_all(b"blob\ndata 6\nhello\n\n")?;
+/// import.finish()?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn import(store: &Path) -> io::Result<Import> {
+    let mut command = store_command(&locate()?, store);
+    command
+        .args(["fast-import", "--quiet", "--depth=0"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null());
+    let mut child = command.spawn()?;
+    let stderr = child.stderr.take();
+    let errors = Some(thread::spawn(move || read(stderr, MAX_ERRORS)));
+    let input = child
+        .stdin
+        .take()
+        .map(|stdin| io::BufWriter::with_capacity(64 * 1024, stdin));
+    let mut import = Import {
+        child,
+        input,
+        errors,
+    };
+    import.write_all(b"feature done\n")?;
+    Ok(import)
+}
+
+impl Import {
+    /// Ends the input with `done` and waits for git to write its pack and refs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if writing fails or git exits with a failure, with git's first line.
+    pub fn finish(mut self) -> io::Result<()> {
+        let mut input = self
+            .input
+            .take()
+            .ok_or_else(|| io::Error::other("no input"))?;
+        input.write_all(b"done\n")?;
+        input.flush()?;
+        drop(input);
+        let status = self.child.wait()?;
+        let errors = self.errors.take().map(|e| e.join().unwrap_or_default());
+        if status.success() {
+            return Ok(());
+        }
+        let errors = errors.unwrap_or_default();
+        let first = String::from_utf8_lossy(&errors);
+        let first = first.lines().next().unwrap_or("no message");
+        Err(io::Error::other(format!("git fast-import: {first}")))
+    }
+}
+
+impl Write for Import {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        match &mut self.input {
+            Some(input) => input.write(bytes),
+            None => Err(io::ErrorKind::BrokenPipe.into()),
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.input.as_mut().map_or(Ok(()), Write::flush)
+    }
+}
+
+impl Drop for Import {
+    fn drop(&mut self) {
+        if self.input.take().is_some() {
+            // Not finished: input ends without `done`, so git keeps nothing; reap it.
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+/// Git in the checkpoint store `store`, with the fixed environment [`store`] describes.
+fn store_command(git: &Path, store: &Path) -> Command {
+    let mut command = Command::new(git);
+    command
+        .env_clear()
+        .env("GIT_DIR", store)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("LC_ALL", "C")
+        .current_dir(store)
+        .arg("--no-pager");
+    for setting in OVERRIDES {
+        command.arg("-c").arg(setting);
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
 }
 
 /// Git in `repo` with a scrubbed environment, the fixed overrides and `extra` ones.
@@ -331,6 +590,77 @@ mod tests {
         // A relative entry is never searched, even when the current directory holds a git.
         assert_eq!(find(OsStr::new(".:bin:"), "git"), None);
         fs::remove_dir_all(dir).expect("clean");
+    }
+
+    #[test]
+    fn apples_stub_runs_only_once_the_command_line_tools_are_found() {
+        let dir = env::temp_dir().join(format!("pinfold-clt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let bin = dir.join("bin");
+        fs::create_dir_all(dir.join("tools/usr/bin")).expect("dir");
+        fs::create_dir_all(dir.join("empty")).expect("dir");
+        fs::create_dir_all(&bin).expect("dir");
+        let script = |path: PathBuf, text: String| {
+            fs::write(&path, format!("#!/bin/sh\n{text}\n")).expect("write");
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+            path
+        };
+        let ran = dir.join("ran");
+        let stub = script(bin.join("git"), format!("touch {}", ran.display()));
+        script(dir.join("tools/usr/bin/git"), String::new());
+        // As `xcode-select -p` answers with no developer directory chosen.
+        let missing = script(
+            dir.join("missing"),
+            "echo 'xcode-select: error' >&2; exit 2".into(),
+        );
+        let empty = script(
+            dir.join("chosen-empty"),
+            format!("echo {}", dir.join("empty").display()),
+        );
+        let found = script(
+            dir.join("found"),
+            format!("echo {}", dir.join("tools").display()),
+        );
+        let path = bin.as_os_str();
+        assert_eq!(
+            lookup(path, Some(&stub), || command_line_tools(&missing)),
+            None
+        );
+        assert_eq!(
+            lookup(path, Some(&stub), || command_line_tools(&empty)),
+            None
+        );
+        assert_eq!(
+            lookup(path, Some(&stub), || command_line_tools(&found)),
+            Some(stub.clone())
+        );
+        let other = Some(Path::new("/usr/bin/git"));
+        assert_eq!(
+            lookup(path, other, || unreachable!("not asked")),
+            Some(stub)
+        );
+        assert!(!ran.exists(), "the stub never ran");
+        fs::remove_dir_all(dir).expect("clean");
+    }
+
+    #[test]
+    fn a_store_runs_only_its_subcommands() {
+        let store = Path::new("/nonexistent");
+        let refused: [&[&str]; 9] = [
+            &["init"],
+            &["config", "core.hooksPath", "x"],
+            &["fast-import"],
+            &["update-ref", "refs/x", "HEAD"],
+            &["repack", "-A"],
+            &["repack", "-a", "-d", "-q", "--window=1000"],
+            &["cat-file", "-p", "HEAD"],
+            &["log"],
+            &[],
+        ];
+        for args in refused {
+            let error = super::store(store, args, b"").expect_err("refused");
+            assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{args:?}");
+        }
     }
 
     #[test]

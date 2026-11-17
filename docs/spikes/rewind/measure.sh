@@ -6,6 +6,12 @@
 #                                        (Linux tree only: the sum of concurrent git peaks per
 #                                         reader count, at normal and background priority;
 #                                         writes results/<label>-peaks.jsonl)
+#        measure.sh --real <work-dir> <label>
+#                                        (Linux tree only, on this host: the real take,
+#                                         crates/pinfold-tools/examples/checkpoint.rs, beside
+#                                         the spike's recommended take, both at background
+#                                         priority, interleaved so they share the machine's
+#                                         load; writes results/<label>-real.jsonl)
 # LINUX_SRC=<clone of torvalds/linux at v6.12> skips the download.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -31,6 +37,7 @@ fi
 
 PEAKS=
 if [ "${1:-}" = --peaks ]; then PEAKS=-peaks; shift; fi
+if [ "${1:-}" = --real ]; then PEAKS=-real; shift; fi
 W=$1
 LABEL=$2
 OUT="$HERE/results/$LABEL$PEAKS.jsonl"
@@ -40,6 +47,8 @@ avail_kb=$(df -Pk "$W" | awk 'NR==2 {print $4}')
 
 cargo build -q --release --manifest-path "$HERE/Cargo.toml" --target-dir "$W/target"
 B="$W/target/release/spike-rewind"
+R="$W/target/release/examples/checkpoint"
+[ "$PEAKS" = -real ] && cargo build -q --release --manifest-path "$REPO/Cargo.toml" -p pinfold-tools --example checkpoint --target-dir "$W/target"
 emit() { printf '{"fs":"%s","corpus":"%s","config":"%s","step":"%s","r":%s}\n' "$LABEL" "$1" "$2" "$3" "$4" >> "$OUT"; }
 du_kb() { du -sk "$1" | awk '{print $1}'; }
 
@@ -147,7 +156,38 @@ if [ -n "${LINUX_SRC:-}" ]; then
 else
   git clone -q --depth 1 --branch v6.12 -c advice.detachedHead=false https://github.com/torvalds/linux.git "$W/linux"
 fi
-if [ -n "$PEAKS" ]; then peaks linux "$W/linux"; else measure linux "$W/linux"; fi
+# The real take runs at background priority itself (pinfold_sys::background), so the spike's
+# gets the same: QoS utility on macOS, nice 10 and ioprio idle on Linux, and ADR-0050's
+# amended caps, which cover the Linux tree whole. Each step of each round runs one then the other.
+real() { # <corpus> <dir>
+  name=$1 dir=$2
+  find "$dir" -name .git -prune -o -type f -exec cat {} + > /dev/null # warm the cache
+  if [ "$(uname)" = Darwin ]; then BG="taskpolicy -c utility"; else BG="nice -n 10 ionice -c 3"; fi
+  CAPS="REWIND_MAX_FILES=200000 REWIND_MAX_NEW_MIB=2048"
+  both() { # <step> <n>
+    # shellcheck disable=SC2086
+    emit "$name" real "$1" "$("$B" peaks "$R" "$dir" "$W/store-real" "$2")"
+    # shellcheck disable=SC2086
+    emit "$name" spike "$1" "$("$B" peaks $BG env $CAPS "$B" "$dir" "$W/store-spike" "$2")"
+  }
+  for i in 1 2 3; do rm -rf "$W/store-real" "$W/store-spike"; both first 0; done
+  emit "$name" real du_take "{\"kb\":$(du_kb "$W/store-real")}"
+  for n in 1 2 3; do both unchanged $n; done
+  for n in 4 5 6; do
+    # Append a line to every 100th covered regular file, from the real take's list.
+    tr '\0' '\n' < "$W/store-real/stat/spike-$((n - 1))" |
+      awk 'NR % 100 == 0 && $1 != "120000" { sub(/^[^ ]+ [^ ]+ [^ ]+ [^ ]+ [^ ]+ [^ ]+ /, ""); print }' |
+      while IFS= read -r p; do echo "// changed" >> "$dir/$p"; done
+    both changed $n
+  done
+  rm -rf "$W/store-real" "$W/store-spike"
+}
+
+case "$PEAKS" in
+  -peaks) peaks linux "$W/linux" ;;
+  -real) real linux "$W/linux" ;;
+  *) measure linux "$W/linux" ;;
+esac
 rm -rf "$W/linux"
 
 { uname -srvmo 2>/dev/null || uname -srvm; } | awk '{printf "{\"fs\":\"'"$LABEL"'\",\"step\":\"host\",\"uname\":\"%s\"", $0}' >> "$OUT"
