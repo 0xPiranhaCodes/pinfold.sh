@@ -9,7 +9,7 @@ expression: said
       "id": 1,
       "jsonrpc": "2.0",
       "result": {
-        "link": 15,
+        "link": 16,
         "methods": [
           "window.open",
           "pane.list",
@@ -50,7 +50,9 @@ expression: said
             "focused": 1,
             "id": 0,
             "message": null,
+            "since": "[since]",
             "source": "marks",
+            "started": "[started]",
             "status": "idle",
             "title": null
           },
@@ -60,7 +62,9 @@ expression: said
             "focused": 0,
             "id": 1,
             "message": null,
+            "since": "[since]",
             "source": "marks",
+            "started": "[started]",
             "status": "done",
             "title": null
           }

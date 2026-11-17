@@ -3152,8 +3152,8 @@ fn a_sandboxed_agent_starts_nothing_outside_its_sandbox() {
 
 /// Each key whose value changes from run to run or machine to machine. An audit entry's `seq`
 /// counts the polls before it.
-const VOLATILE: [&str; 8] = [
-    "at_ms", "command", "cwd", "hash", "path", "prev", "seq", "title",
+const VOLATILE: [&str; 10] = [
+    "at_ms", "command", "cwd", "hash", "path", "prev", "seq", "since", "started", "title",
 ];
 
 /// `value` with each [`VOLATILE`] field's value replaced by its name in brackets, at any depth.

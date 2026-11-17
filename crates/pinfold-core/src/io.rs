@@ -173,6 +173,10 @@ pub struct Listed<'a> {
     pub reported: bool,
     /// The reported message, without control or bidi characters. Empty if none.
     pub message: &'a str,
+    /// Whole seconds in `status`, saturating.
+    pub since: u32,
+    /// Whole seconds since its program started, saturating.
+    pub started: u32,
     /// The built-in tool it runs, or nothing for any other program.
     pub tool: Option<&'a Run>,
     /// When it last took its tab's focus in the active tab, as an ordering hint: larger is more
@@ -242,6 +246,8 @@ impl Reactor {
     ///
     /// Returns an error if the operating system's poller cannot be created.
     pub fn new() -> io::Result<Self> {
+        // Before any pane, so its times count from when the core started.
+        let _ = status::epoch();
         let poll = Poll::new()?;
         let waker = Arc::new(Waker::new(poll.registry(), WAKE)?);
         Ok(Self {
@@ -333,7 +339,7 @@ impl Reactor {
             search: None,
             found: None,
             sends: (Instant::now(), 0),
-            status: Tracker::default(),
+            status: Tracker::new(Instant::now()),
             message: String::new(),
             alerted: false,
             tool: None,
@@ -398,7 +404,10 @@ impl Reactor {
                 pane.dirty |= fed;
                 pane.output = pane.output.wrapping_add(u64::from(fed));
                 pane.readable = pumped == Pumped::Budget;
-                pane.closed |= pumped == Pumped::Closed;
+                if pumped == Pumped::Closed && !pane.closed {
+                    pane.closed = true;
+                    pane.status.closed(Instant::now());
+                }
                 if fed {
                     // Shell marks never say "needs you", so only an error can alert there, and
                     // nothing draws those yet. An agent profile's CLI can (ADR-0046).
@@ -525,9 +534,10 @@ impl Reactor {
     /// Lets a pane's own output say what its agent CLI is doing, through OSC 7501 states and
     /// OSC 9 notifications, for a pane launched from an agent profile (ADR-0046). A "needs you"
     /// from them alerts as a report does, and is still labelled as from output.
-    pub fn read_agent_signals(&mut self, pane: usize) {
+    /// `profile` is the profile's index in the config's, read when the core started.
+    pub fn read_agent_signals(&mut self, pane: usize, profile: u8) {
         if let Some(pane) = pane_mut(&mut self.panes, pane) {
-            pane.status.read_agent_signals();
+            pane.status.read_agent_signals(profile);
         }
     }
 
@@ -697,8 +707,10 @@ impl Reactor {
 
     /// Describes every pane for `pane.list`, in order of number, with nothing from a screen.
     pub fn list(&self) -> impl Iterator<Item = Listed<'_>> {
-        self.panes.iter().map(|pane| {
+        let now = Instant::now();
+        self.panes.iter().map(move |pane| {
             let (status, reported, message) = pane_status(pane);
+            let (since, started) = pane.status.held(now);
             let cwd = pane.engine.cwd().map(|cwd| cwd.path.as_str());
             let named = cwd.and_then(|cwd| cwd.rsplit('/').next().filter(|name| !name.is_empty()));
             let titled = pane.tool.as_ref().map(|(_, title)| title.as_str());
@@ -710,6 +722,8 @@ impl Reactor {
                 status,
                 reported,
                 message,
+                since,
+                started,
                 tool: pane.tool.as_ref().map(|(run, _)| run),
                 focused: pane.focused,
             }
@@ -812,6 +826,20 @@ impl Reactor {
     #[must_use]
     pub fn status(&self, pane: usize) -> Option<(Status, bool, &str)> {
         self.pane(pane).map(pane_status)
+    }
+
+    /// Whether a pane belongs in the inbox: an agent profile's, or one that reported a status.
+    /// A tool pane never does (ADR-0045, ADR-0051).
+    #[must_use]
+    pub fn listed(&self, pane: usize) -> bool {
+        self.pane(pane)
+            .is_some_and(|pane| pane.tool.is_none() && pane.status.listed())
+    }
+
+    /// Whole seconds at `now` a pane has been in its state and its program has run.
+    #[must_use]
+    pub fn held(&self, pane: usize, now: Instant) -> Option<(u32, u32)> {
+        self.pane(pane).map(|pane| pane.status.held(now))
     }
 
     /// Returns whether a pane raised a "needs you" alert since the last call, and clears that.
@@ -1082,10 +1110,18 @@ mod tests {
             status: Status::Running,
             reported: false,
             message: "",
+            since: 0,
+            started: 0,
             tool: None,
             focused: 0,
         };
-        assert_eq!(reactor.list().collect::<Vec<_>>(), [expected]);
+        let mut listed = reactor.list().collect::<Vec<_>>();
+        // Times are whole seconds, so a slow machine may have reached one.
+        for pane in &mut listed {
+            assert!(pane.since <= pane.started && pane.started < 30, "{pane:?}");
+            (pane.since, pane.started) = (0, 0);
+        }
+        assert_eq!(listed, [expected]);
     }
 
     #[test]
@@ -1177,7 +1213,8 @@ mod tests {
             i=$((i+1)); done; printf end; sleep 30";
         let shell_pane = reactor.spawn(shell(script), 24, 80).unwrap();
         let agent = reactor.spawn(shell(script), 24, 80).unwrap();
-        reactor.read_agent_signals(agent);
+        reactor.read_agent_signals(agent, 0);
+        assert!(reactor.listed(agent) && !reactor.listed(shell_pane));
         let done = |r: &Reactor| on_screen(r, shell_pane, "end") && on_screen(r, agent, "end");
         assert!(turn_until(&mut reactor, done));
 
