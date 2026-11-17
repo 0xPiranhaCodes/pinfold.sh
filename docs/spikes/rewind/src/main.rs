@@ -754,17 +754,116 @@ fn time(cmd: &[OsString]) {
     );
 }
 
+/// Current and lifetime-peak memory of `pid`: `phys_footprint` on macOS, RSS and `VmHWM` on
+/// Linux. `None` once it has exited.
+#[cfg(target_os = "macos")]
+fn mem(pid: libc::pid_t) -> Option<(u64, u64)> {
+    let mut ri: libc::rusage_info_v4 = unsafe { std::mem::zeroed() };
+    let p = (&mut ri as *mut libc::rusage_info_v4).cast();
+    (unsafe { libc::proc_pid_rusage(pid, libc::RUSAGE_INFO_V4, p) } == 0)
+        .then_some((ri.ri_phys_footprint, ri.ri_lifetime_max_phys_footprint))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn mem(pid: libc::pid_t) -> Option<(u64, u64)> {
+    let s = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let kb = |k: &str| -> Option<u64> {
+        let l = s.lines().find(|l| l.starts_with(k))?;
+        l[k.len()..]
+            .trim()
+            .trim_end_matches(" kB")
+            .trim()
+            .parse()
+            .ok()
+    };
+    Some((kb("VmRSS:")? * 1024, kb("VmHWM:")? * 1024))
+}
+
+#[cfg(target_os = "macos")]
+fn group(pgid: libc::pid_t) -> Vec<libc::pid_t> {
+    let mut pids = vec![0 as libc::pid_t; 256];
+    let size = (pids.len() * size_of::<libc::pid_t>()) as libc::c_int;
+    let n = unsafe { libc::proc_listpgrppids(pgid, pids.as_mut_ptr().cast(), size) };
+    pids.truncate(n.max(0) as usize);
+    pids.retain(|&p| p > 0);
+    pids
+}
+
+#[cfg(not(target_os = "macos"))]
+fn group(pgid: libc::pid_t) -> Vec<libc::pid_t> {
+    let mut pids = Vec::new();
+    for e in std::fs::read_dir("/proc").into_iter().flatten().flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse().ok()) else {
+            continue;
+        };
+        // Field 5 of /proc/<pid>/stat, after the parenthesised command name, is the pgrp.
+        let Ok(stat) = std::fs::read_to_string(e.path().join("stat")) else {
+            continue;
+        };
+        let rest = stat.rsplit_once(')').map_or("", |r| r.1);
+        if rest.split_whitespace().nth(2).and_then(|g| g.parse().ok()) == Some(pgid) {
+            pids.push(pid);
+        }
+    }
+    pids
+}
+
+/// `peaks <cmd> [args]`: runs a take (possibly through `taskpolicy` or `nice`) in its own
+/// process group, samples every other process in the group every 5 ms, and prints the take's
+/// JSON line with `git_sum` (the largest sampled sum of their current memory), `git_peaks` (the
+/// largest sum, over the processes alive at one sample, of each one's own lifetime peak so far)
+/// and `git_procs` (most at once).
+fn peaks(cmd: &[OsString]) {
+    use std::os::unix::process::CommandExt;
+    let mut child = Command::new(&cmd[0])
+        .args(&cmd[1..])
+        .process_group(0)
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let take = child.id() as libc::pid_t;
+    let (mut sum, mut peaks, mut procs) = (0, 0, 0);
+    loop {
+        let done = child.try_wait().expect("wait").is_some();
+        let pids: Vec<_> = group(take).into_iter().filter(|&p| p != take).collect();
+        let (mut now, mut now_peaks) = (0, 0);
+        for p in &pids {
+            if let Some((cur, max)) = mem(*p) {
+                now += cur;
+                now_peaks += max;
+            }
+        }
+        sum = sum.max(now);
+        peaks = peaks.max(now_peaks);
+        procs = procs.max(pids.len());
+        if done {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    let mut out = String::new();
+    child
+        .stdout
+        .take()
+        .expect("stdout")
+        .read_to_string(&mut out)
+        .expect("stdout");
+    let out = out.trim().strip_suffix('}').expect("take JSON");
+    println!("{out},\"git_sum\":{sum},\"git_peaks\":{peaks},\"git_procs\":{procs}}}");
+}
+
 fn main() {
     let t0 = Instant::now();
     let a: Vec<OsString> = std::env::args_os().collect();
     match a.get(1).and_then(|s| s.to_str()) {
         Some("gen") if a.len() == 3 => return generate(std::path::Path::new(&a[2])),
         Some("time") if a.len() > 2 => return time(&a[2..]),
+        Some("peaks") if a.len() > 2 => return peaks(&a[2..]),
         _ => {}
     }
     assert!(
         a.len() == 4,
-        "usage: spike-rewind <dir> <store> <n> | gen <dir> | time <cmd> [args]"
+        "usage: spike-rewind <dir> <store> <n> | gen <dir> | time <cmd> [args] | peaks <cmd> [args]"
     );
     let store = std::path::absolute(&a[2]).expect("store");
     let n: u64 = a[3].to_str().and_then(|s| s.parse().ok()).expect("n");

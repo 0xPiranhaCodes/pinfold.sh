@@ -104,14 +104,30 @@ JSON message, and restore. Spike code, kept out of the workspace
   the store (alternates or a copy), and an unsandboxed agent can forge the index; the gates
   pass without it, so decision 3 can stand.
 - **`git fast-import` peaks at 247–326 MB** on the Linux tree's first take, the largest
-  single process, and at about 6 MB for an unchanged take. With four readers, four such
-  processes run at once; their sum was not measured. Not gated (decision 9), but it is the
+  single process, and at about 6 MB for an unchanged take. Not gated (decision 9), but it is the
   memory cost a launch puts on the machine.
+- **Four readers' git processes together stay under the single importer's peak on macOS and
+  within 1.25 times it on Linux** (`measure.sh --peaks`, the `-peaks` tables of
+  [`results.md`](results.md)). The sum, over the git processes alive at once, of each one's own
+  peak, largest over six takes of the Linux tree: on macOS (`phys_footprint`) 152 MB with four
+  readers and 92 MB with two, against 268 MB for the ADR's single importer; on Linux (RSS) 325 MB
+  with four or two, against 280 MB, a bound of 350 MB. Each reader's importer holds a quarter of
+  the blobs; the Linux maximum is the commit's importer, alone after the readers, whose RSS
+  counts the four packs it maps to look up every blob. Two readers miss the time gate on macOS
+  (10.18 s) and lower nothing on Linux, where the commit's importer sets the peak, so four
+  stay.
+- **Background priority keeps the gates.** With QoS utility on macOS (`taskpolicy -c utility`)
+  the four-reader first take is 6.20 s against 5.95 s and the unchanged one 0.98 s against
+  0.91 s, the narrowest pass here; on Linux, nice 10 and I/O class idle gave 4.71 s and 0.44 s,
+  within run-to-run noise, as the VM's `none` I/O scheduler ignores I/O priority. This run's
+  normal-priority first takes, 5.95 s (macOS) and 5.16 s (Linux), agree with the first run's
+  7.25 s and 5.18 s; its ADR-as-written ones were 45.99 s and 45.56 s.
 
 ## Recommended changes to ADR-0050
 
 1. **Section 2: read with four threads, each feeding its own `git fast-import`, then commit
-   with one more.** `pinfold checkpoint take` is a short-lived process, not the core, so
+   with one more.** Taken by the 2026-11-18 amendment as `min(4, available CPUs)` readers, under
+   a bound of 1.25 times the single importer's git peak, which the `--peaks` run meets. `pinfold checkpoint take` is a short-lived process, not the core, so
    threads do not touch ADR-0007. Its memory bound holds: a fixed queue of 512 records and
    64 KiB buffers per reader, 3.47 MB at most here. Mem-gate's take row should run with the
    readers.
@@ -137,11 +153,16 @@ JSON message, and restore. Spike code, kept out of the workspace
 
 Decision 3 (no `.git/index`) and option A both stand on these numbers.
 
+ADR-0050 took all six in its amendment of 2026-11-18, with four readers and background
+priority measured by `measure.sh --peaks`.
+
 ## Reproducing
 
 ```sh
 docs/spikes/rewind/measure.sh <scratch-dir> macos-apfs   # macOS, the file system of <scratch-dir>
 docs/spikes/rewind/measure.sh --linux                    # Docker, ext4 on a loop device
+docs/spikes/rewind/measure.sh --peaks <scratch-dir> macos-apfs  # Linux tree: git peaks, priority
+docs/spikes/rewind/measure.sh --linux --peaks
 python3 -I docs/spikes/rewind/summarize.py               # results.md's tables
 ```
 

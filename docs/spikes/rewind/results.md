@@ -16,10 +16,43 @@ appending a line to every 100th covered file. Whole-tree takes raise `max_files`
 generated tree's twenty 20 MB files are never covered. The "Default caps" table is one take with
 every ADR-0050 default. MB is 10^6 bytes. "Prototype peak" is `phys_footprint` on macOS
 (mem-gate's measure) and peak RSS on Linux (above the PSS mem-gate reads); macOS peak RSS, also
-in the JSON, reached 4.18 MB. "git peak" is the largest single git process; the recommended
-configuration runs four fast-imports at once, whose sum was not measured. Store sizes are
+in the JSON, reached 4.18 MB. "git peak" is the largest single git process, from `getrusage`, so RSS on both. Store sizes are
 `du -sk`. The `cp` baselines copy everything but `.git`; "clone df" is the change in the file
 system's used space, since `du` counts APFS clones at full size.
+
+The `-peaks` sections come from `measure.sh --peaks` (`--linux --peaks` in Docker), a later
+run on the Linux tree only, with the same hosts. Every take runs under `spike-rewind peaks`, in
+its own process group, and every other process in the group, every git, is sampled every 5 ms:
+`phys_footprint` on macOS and RSS on Linux, which counts the pack files fast-import maps.
+"Concurrent git peaks" is the largest sum, over the git processes alive at one sample, of each
+one's own peak so far (`ri_lifetime_max_phys_footprint`, `VmHWM`); "sampled git sum" is the
+largest sum of their current memory. Both are the largest over the three first and three
+unchanged takes; a process that exits between two samples loses at most its last 5 ms of growth.
+The bound is 1.25 times the "ADR as written" single importer's peak on the same host. "bg" runs
+the take at background priority: `taskpolicy -c utility` on macOS, `nice -n 10 ionice -c 3` on
+Linux. The Linux VM's block devices use the `none` I/O scheduler, which ignores I/O priority
+classes (BFQ and mq-deadline honour them), so there the idle class changed nothing.
+
+## linux-ext4-peaks
+
+Linux 7.2.12-orbstack-00394-gbecdd6130068 #1 SMP PREEMPT Thu Oct 22 22:17:17 UTC 2026 aarch64 GNU/Linux; git version 2.39.5; 8 CPUs
+
+| Config | Readers | Priority | First s | Unchanged s | Concurrent git peaks MB | Sampled git sum MB | Largest git RSS MB | git at once | Prototype peak MB |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| adr | 1 | normal | 45.56 | 0.43 | 280 | 280 | 280 | 2 | 2.57 |
+| recommended | 4 | normal | 5.16 | 0.49 | 325 | 325 | 325 | 4 | 2.97 |
+| recommended | 2 | normal | 8.60 | 0.42 | 325 | 325 | 325 | 2 | 2.68 |
+| recommended | 4 | bg | 4.71 | 0.44 | 326 | 326 | 326 | 4 | 2.87 |
+| recommended | 2 | bg | 8.48 | 0.47 | 325 | 325 | 325 | 2 | 2.57 |
+
+Bound: 1.25 × the ADR-as-written single importer's 280 MB = 350 MB.
+
+| Config | Concurrent git peaks MB | Within bound |
+| --- | --- | --- |
+| recommended-4-normal | 325 | yes |
+| recommended-2-normal | 325 | yes |
+| recommended-4-bg | 326 | yes |
+| recommended-2-bg | 325 | yes |
 
 ## linux-ext4
 
@@ -58,6 +91,27 @@ Linux 7.2.12-orbstack-00394-gbecdd6130068 #1 SMP PREEMPT Thu Oct 22 22:17:17 UTC
 | Linux tree, store ≤ half of covered | 0.20, pass | 0.24, pass |
 | Prototype ≤ 4 MB, every corpus | 2.56 MB, pass | 3.11 MB, pass |
 
+## macos-apfs-peaks
+
+Darwin 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:22:49 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6000 arm64; git version 2.54.0 (Apple Git-157); 8 CPUs
+
+| Config | Readers | Priority | First s | Unchanged s | Concurrent git peaks MB | Sampled git sum MB | Largest git RSS MB | git at once | Prototype peak MB |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| adr | 1 | normal | 45.99 | 0.90 | 268 | 268 | 269 | 2 | 3.03 |
+| recommended | 4 | normal | 5.95 | 0.91 | 152 | 152 | 278 | 4 | 3.44 |
+| recommended | 2 | normal | 10.18 | 0.92 | 92 | 91 | 277 | 2 | 3.20 |
+| recommended | 4 | bg | 6.20 | 0.98 | 156 | 156 | 278 | 4 | 3.49 |
+| recommended | 2 | bg | 11.83 | 0.97 | 95 | 95 | 278 | 2 | 3.16 |
+
+Bound: 1.25 × the ADR-as-written single importer's 268 MB = 335 MB.
+
+| Config | Concurrent git peaks MB | Within bound |
+| --- | --- | --- |
+| recommended-4-normal | 152 | yes |
+| recommended-2-normal | 92 | yes |
+| recommended-4-bg | 156 | yes |
+| recommended-2-bg | 95 | yes |
+
 ## macos-apfs
 
 Darwin 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:22:49 PDT 2026; root:xnu-13432.1.9~1/RELEASE_ARM64_T6000 arm64; git version 2.54.0 (Apple Git-157); 8 CPUs
@@ -94,4 +148,3 @@ Darwin 27.0.0 Darwin Kernel Version 27.0.0: Tue Aug 11 21:22:49 PDT 2026; root:x
 | Linux tree, unchanged ≤ 1 s | 1.02 s, **fail** | 0.98 s, pass |
 | Linux tree, store ≤ half of covered | 0.21, pass | 0.25, pass |
 | Prototype ≤ 4 MB, every corpus | 3.02 MB, pass | 3.47 MB, pass |
-
