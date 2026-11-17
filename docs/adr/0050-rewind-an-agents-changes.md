@@ -1,6 +1,6 @@
 # ADR-0050: Rewind an agent's changes from checkpoints in a PinFold-owned git store
 
-- **Status:** Proposed
+- **Status:** Accepted (accepted by the maintainer, 2026-11-18)
 - **Date:** 2026-11-14
 
 ## Context
@@ -53,7 +53,10 @@ A file-system snapshot (APFS, btrfs, ZFS) needs root or one file system, and is 
 ## Decision
 
 Option A. Each part below is what slice 1 onwards builds, once the spike of the implementation
-plan has measured it.
+plan has measured it. The maintainer's answers to the open questions are folded in and listed
+under "Decisions on the open questions", and so is the maintainer's rule for this work: no
+resident memory growth, so the core keeps fixed-size run records and reads everything else from
+the store on demand. Tracked in [#442](https://github.com/0xPiranhaCodes/pinfold.sh/issues/442).
 
 ### 1. What a checkpoint is and where it lives
 
@@ -75,12 +78,14 @@ plan has measured it.
 - Beside it, `stat/<run>-<n>` holds, sorted by path, each covered file's path, size, modification
   time, inode, change time and blob id. The next checkpoint merges its walk with this list in
   order, streaming, and gives git the old blob id (`M 100644 <id> <path>`) for a file whose stat
-  is unchanged, so it reads only changed files. Memory stays flat in the tree's size.
+  is unchanged, so it reads only changed files. Memory stays flat in the tree's size. A first
+  checkpoint reads every covered file: it never takes stat data or blob ids from the repository's
+  own `.git/index`, which an unsandboxed agent can forge (decision 3).
 - One writer at a time per store, by a lock file made with `O_EXCL`.
 
 ### 2. Who takes it, and how git is run
 
-`pinfold checkpoint take|plan|restore|prune`, hidden subcommands of the existing `pinfold` binary
+`pinfold checkpoint take|list|plan|restore|prune`, hidden subcommands of the existing `pinfold` binary
 with their code in `pinfold-tools`, do all the work. The core starts its sibling binary as it does
 for `tool.open`, never through `PATH`, with fixed arguments and its own values after `--`, waits
 on a thread of ADR-0007's bounded pool (at most two of these processes at once, one per store),
@@ -92,6 +97,13 @@ to a directory descriptor with `O_NOFOLLOW` (`openat`, `fstatat` with `AT_SYMLIN
 `readlinkat`), starting from the working directory opened once with `O_DIRECTORY | O_NOFOLLOW`.
 Each file is read through its open descriptor and checked with `fstat` before and after; one that
 changed while read is read once more, then left uncovered.
+
+Git is the first `git` on an absolute `PATH` entry, as for the diff viewer. On macOS, when that is
+`/usr/bin/git`, PinFold first checks that the Command Line Tools are installed (`xcode-select -p`
+names a directory holding `usr/bin/git`) and otherwise treats git as missing, so running it never
+opens Apple's install dialog; the diff viewer's lookup in `git.rs` gets the same check (decision
+5). With git missing, no checkpoint is taken and the pane's strip says `no checkpoint · git not
+found`.
 
 Git is reached through a new entry point beside `git::run`, `git::store(store, args, stdin)`,
 that keeps `run`'s environment scrubbing, absolute-`PATH` lookup, timeout, output cap and
@@ -110,8 +122,8 @@ deletes a path that the checkpoint it restores did not cover.
 | Skipped | Why |
 | --- | --- |
 | Every entry named `.git`, ignoring ASCII case, and on macOS any name that git's `is_hfs_dotgit` would take for it | Git's own data; restoring it is how a repository gets hooks. Commits the agent made are not undone; the docs say so. |
-| A directory holding a `.git` below the working directory, a nested repository or submodule | Its files belong to another repository's history (open question 6). |
-| Paths ignored by the `.gitignore` files in the tree, with `rewind.include_ignored = false` | Build output and dependencies, often most of a tree's size, and secrets such as `.env`. Matched by PinFold's walker from the tree's `.gitignore` files, read as data with the walk's caps; no git runs over the tree for it. |
+| A directory holding a `.git` below the working directory, a nested repository or submodule | Its files belong to another repository's history. Not covered in v1; the diff viewer on a checkpoint lists each skipped one as `nested repository, not covered` (decision 6). |
+| Paths ignored by the `.gitignore` files in the tree, with `rewind.include_ignored = false`, except files whose name matches `.env*`, which are always covered | Build output and dependencies, often most of a tree's size. Matched by PinFold's walker from the tree's `.gitignore` files, read as data with the walk's caps; no git runs over the tree for it. A `.env*` file is covered even when ignored: an agent that overwrites one loses the person's secrets for good, the worst loss a rewind can prevent, and the copy stays in the private store (decision 2). |
 | A regular file over `rewind.max_file_mib` (16 MiB) | Large binaries. |
 | A regular file with more than one hard link | It may be a link to a file outside the directory, such as a hidden credential, whose text a checkpoint would copy and a restore write back. |
 | Fifos, sockets and devices | Not files. |
@@ -122,8 +134,10 @@ deletes a path that the checkpoint it restores did not cover.
 
 - **Launch.** `agent.launch` takes checkpoint 0 after its directory checks and before the agent's
   PTY opens, and defers its reply until then. If it is not done within `rewind.wait_s` (10 s) the
-  process is killed, the agent starts without one, and the window flashes `✕ error · no
-  checkpoint: took over 10 s` (open question 1). `pinfold agent` prints "taking a checkpoint" while
+  process is killed and the agent starts without one; the strip under the pane says
+  `no checkpoint · took over 10 s` in yellow until a later checkpoint of the run succeeds, and
+  `agent.launch` answers with `checkpoint: null`. It is not an agent state, so it gets none of
+  ◆ ● ✓ ✕ ○ (decision 1). `pinfold agent` prints "taking a checkpoint" while
   it waits.
 - **Done and exit.** When the run's status becomes ✓ done, at most once in 60 s, and when its
   program exits. These mark where the agent stopped, for section 6.
@@ -134,7 +148,8 @@ deletes a path that the checkpoint it restores did not cover.
 
 A run keeps at most `rewind.keep_per_run` (20) checkpoints: past it, the oldest after the launch
 checkpoint goes. A checkpoint older than `rewind.keep_days` (14) goes. When all stores together
-exceed `rewind.max_store_mib` (2048), closed runs go oldest first, then a live run's checkpoints
+exceed `rewind.max_store_mib` (2048; 2 GiB and 14 days are defaults, both configurable, decision
+8), closed runs go oldest first, then a live run's checkpoints
 other than its launch one and its newest. A live run's launch checkpoint is never pruned: if the
 cap cannot be met without it, new checkpoints are refused, and the reason is shown. So an agent
 cannot push its own launch checkpoint out by taking checkpoints. `pinfold checkpoint prune` runs
@@ -154,6 +169,8 @@ after each take: it deletes refs and stat files, then `repack -a -d -q` and `pru
   in yellow. It is not an agent state, so it gets none of ◆ ● ✓ ✕ ○.
 - `u` undoes the file at the cursor and `U` undoes every file, except those marked `later`, which
   only `u` undoes one at a time. Each calls `checkpoint.restore`, which waits on the window.
+- Nested repositories and submodules the checkpoint skipped are listed at the end of the file
+  list as `nested repository, not covered`, so the person knows a rewind leaves them as they are.
 - **The confirmation** is a new approval kind, `Rewind`, drawn by the window outside pane text like
   the trust prompt: `◆ needs you` in amber, then "Undo changes in `<dir>` since `<time>`
   (`<reason>`)", the caller, counts ("restore 5 · delete 3 the agent added · bring back 1 it
@@ -187,16 +204,25 @@ no paths):
 | Method | Parameters | Who may call | Result |
 | --- | --- | --- | --- |
 | `checkpoint.take` | `pane` | An agent pane for its own run (`self`), a pane for runs of its `children`, or a terminal outside every pane. Once in 30 s per run. | `{ checkpoint, files, new_bytes, complete }` |
-| `checkpoint.list` | `pane` | As `checkpoint.take`, with no rate limit | Each checkpoint's id, reason, time, counts and `complete`. Metadata only, never a path. |
-| `checkpoint.restore` | `pane`, `checkpoint`, `shown` (the view checkpoint), `paths` (at most 1,000; all if absent) | Any caller that may list the run, including a tool pane. Always waits on the window's `Rewind` prompt; one waiting prompt per caller | `{ restored, deleted, skipped, restore_checkpoint }`, or refused |
+| `checkpoint.list` | `pane` | As `checkpoint.take`, with no rate limit | Each checkpoint's id, reason, time, counts and `complete`, read on demand from the store by `pinfold checkpoint list` (`for-each-ref`), never cached in the core. Metadata only, never a path. |
+| `checkpoint.restore` | `pane`, `checkpoint`, `shown` (the view checkpoint), `paths` (at most 1,000; all if absent) | Only the person's own callers: a tool pane (the diff viewer) and a terminal outside every pane. An agent pane is refused, for its own run and its children's, before any prompt (decision 7). Always waits on the window's `Rewind` prompt; one waiting prompt per caller | `{ restored, deleted, skipped, restore_checkpoint }`, or refused |
 
 `tool.open` gains `checkpoint` for `diff`. A sandboxed agent still cannot call `tool.open`. A
 closed run stays reachable from the pane that launched it, as one of its `children`, for this
-core's life; the core keeps at most 64 runs of at most 20 checkpoints in memory.
+core's life only; runs from before a core restart are not reachable in v1 (decision 4). The core
+keeps per run a fixed-size record and no list: the run id, its pane, the store key, the newest
+`done` or `exit` checkpoint's `n` and a `missing` reason, 48 bytes, for at most 64 runs, 3 KiB.
+Everything else, checkpoint lists, counts and paths, is read from the store when asked.
 
-The window link gains `ApprovalAction::Rewind` (`is_once`, `since` the next link version), whose
-texts are the directory, the summary line and the paths, all escaped by the core. The window's
-existing flash carries the result.
+The window link gains `ApprovalAction::Rewind` (`is_once`, `since` link version 16, the next free
+one), whose texts are the directory, the summary line and the paths, all escaped by the core, and
+`Notice::Checkpoint { pane, missing: u8 }` for the strip's `no checkpoint`. The window's existing
+flash carries the result. ADR-0043 gains the row for 16: the core never sends either to a version
+15 window, so a restore from a terminal outside every pane is refused with "approval needs an open
+PinFold window" and the strip shows nothing. [ADR-0051](0051-needs-you-inbox-and-alerts.md) takes
+17 and [ADR-0052](0052-session-replay-a-timeline-per-agent-run.md) 18, so a release that includes
+all three moves the link from 15 to 18, more than one apart, and restarts the session per
+[ADR-0043](0043-window-serves-the-previous-link-version.md).
 
 Config, read when the core starts, as agent profiles are:
 
@@ -205,12 +231,12 @@ Config, read when the core starts, as agent profiles are:
 enabled = true          # a checkpoint at every agent launch
 on_done = true          # and when the run's status becomes done
 wait_s = 10             # how long a launch waits for its checkpoint
-include_ignored = false # skip what the tree's .gitignore files ignore
+include_ignored = false # skip what the tree's .gitignore files ignore, except .env*
 max_file_mib = 16       # larger files are not covered
 max_files = 100000      # entries walked per checkpoint
 max_new_mib = 256       # new content per checkpoint
-max_store_mib = 2048    # all stores together
-keep_days = 14
+max_store_mib = 2048    # all stores together, 2 GiB
+keep_days = 14          # older checkpoints are pruned
 keep_per_run = 20
 
 [agents.claude]
@@ -224,7 +250,7 @@ rewind = true           # per profile; false takes no checkpoints for it
 | Store | `~/Library/Application Support/PinFold/checkpoints/<key>` | `$XDG_STATE_HOME/pinfold/checkpoints/<key>` |
 | `.git` aliases skipped | ASCII case and HFS+ ignorable code points | ASCII case |
 | Sandboxed agent | Can read `.git`'s control files but not write them (`GIT`); unchanged | `.git` read-only, commits in the shadow (ADR-0039); unchanged, as checkpoints skip `.git` |
-| Git | The first on an absolute `PATH` entry; `/usr/bin/git` without the Command Line Tools would open an install dialog (open question 5) | The first on an absolute `PATH` entry |
+| Git | The first on an absolute `PATH` entry; `/usr/bin/git` only once the Command Line Tools are found, so no install dialog opens | The first on an absolute `PATH` entry |
 
 Sandboxed and unsandboxed runs are treated the same: checkpoints and restores always run outside
 the sandbox, from PinFold's own binary, on paths inside the working directory the core recorded at
@@ -232,7 +258,7 @@ launch.
 
 ## Threat-model changes
 
-The threat model gains, each marked "proposed by ADR-0050":
+The threat model gains, each naming ADR-0050:
 
 - **T5**, control added: checkpoints never run git over the working tree. PinFold walks it without
   following links and feeds `git fast-import` in a store with no global or system configuration.
@@ -244,23 +270,27 @@ The threat model gains, each marked "proposed by ADR-0050":
   walk; or a caller asks for a restore the person did not mean. Controls: the walk and the restore
   never follow a link; hard-linked files are not covered; a restore writes a new file and renames
   it over the name; it deletes only covered paths of a complete checkpoint and skips a file
-  changed since shown; it always takes a checkpoint first; every restore waits on a window prompt
-  whose text comes from the store, not the caller; the store is hidden from sandboxed agents.
+  changed since shown; it always takes a checkpoint first; only the person's own callers (a tool
+  pane, a terminal outside every pane) may ask for a restore, never an agent pane; every restore
+  waits on a window prompt whose text comes from the store, not the caller; the store is hidden
+  from sandboxed agents.
   Not covered: an unsandboxed agent, running as the person, can change or delete its own
   checkpoints, so a rewind is a convenience, not a backup.
 - **T9**, residual noted: a checkpoint keeps copies of covered files, a deleted secret file among
-  them, for up to `keep_days`, in a 0700 store under the state directory. Ignored files, such as
-  `.env` in most repositories, are not copied by default.
-- **Authorization** gains the three `checkpoint.*` rows.
+  them, for up to `keep_days`, in a 0700 store under the state directory. Ignored files are not
+  copied by default, except `.env*` files, which are always copied into that private store so an
+  agent's overwrite of one can be undone.
+- **Authorization** gains the `checkpoint.*` rows; `checkpoint.restore` is denied to agent panes.
 
 ## Memory
 
 | Metric | Target | How `cargo xtask mem-gate` checks it |
 | --- | --- | --- |
-| Core, 8 idle panes, plus 64 run records of 20 checkpoints | ≤ 4 MB, the existing core budget, with a target of 2 KiB a record, 128 KiB at the cap | A new row variant of the core row, filling the records through `checkpoint.take` on a scratch directory |
+| Core, 8 idle panes | Unchanged: no run, no record, and `[rewind]` adds nothing until an agent launches | The existing row must hold unchanged |
+| Core, 8 agent panes plus 64 run records | ≤ 4 MB, the existing core budget; 48 B a record, 3 KiB at the cap, and no checkpoint list kept | A new row, filling the records through `checkpoint.take` on a scratch directory, then `checkpoint.list` on each run, measured after settle |
 | Each agent pane in the core | ≤ 250 KB, unchanged | The existing pane row |
 | A `pinfold checkpoint take` process | ≤ 4 MB at any tree size, as the walk and the stat merge stream with 64 KiB buffers | A new row: a take over a generated tree of 100,000 files, then a second take with 1% changed |
-| `git fast-import` and `repack` | Not PinFold's process; the spike reports their peak, not gated (open question 9) | — |
+| `git fast-import` and `repack` | Not PinFold's process; the spike measures and reports their peak, and mem-gate does not gate it (decision 9) | — |
 | Diff viewer on a checkpoint | ≤ 3 MB + 3 × git output, at most 27 MB, the existing diff row | The existing row, run with `--checkpoint` |
 | Window with a `Rewind` prompt | The existing window budget: at most 10 paths of 256 bytes | The existing window rows |
 | Disk | ≤ `max_store_mib`, 2 GiB by default | A pruning test, not mem-gate |
@@ -273,58 +303,80 @@ The threat model gains, each marked "proposed by ADR-0050":
    (`/usr/bin/time -l` or `-v`) of the prototype and of `git fast-import`; `du -sk` of the store
    after the take and after `repack`; the same for a second take with nothing changed and with 1%
    of files changed; and, as baselines, `cp -c -R` on macOS, `cp -R --reflink=auto` and plain
-   `cp -R`. Corpora: PinFold at a fixed commit, `torvalds/linux` at tag `v6.12`, and a generated tree of 100,000 small files, 20 files of 20 MB and an ignored
+   `cp -R`. It also reports, not gates, `git fast-import`'s peak memory (decision 9), and the time
+   a first take would save by reading the real `.git/index`, which v1 does not do (decision 3).
+   Corpora: PinFold at a fixed commit, `torvalds/linux` at tag `v6.12`, and a generated tree of 100,000 small files, 20 files of 20 MB and an ignored
    directory of 200,000 files. Results go in its README with the script beside them. This
    decision stands if a launch checkpoint of the Linux tree takes ≤ 10 s, an unchanged one
    ≤ 1 s, the store is at most half the covered size, and the prototype stays ≤ 4 MB. Otherwise
-   this ADR is revised before slice 1, with option B on macOS the first alternative.
+   this ADR is revised before slice 1, with option B on macOS the first alternative. mem-gate:
+   none; the spike's own table is its memory evidence.
 1. **`pinfold-sys`: descriptor-relative file access.** `openat`, `fstatat`, `readlinkat`,
    `unlinkat`, `symlinkat`, `renameat` and `mkdirat` wrappers, each with a `// SAFETY:` comment.
    Tests: a component swapped for a link is refused; a rename over a link replaces the link, not
-   its target.
+   its target. mem-gate: the existing core and pane rows hold unchanged (no resident state).
 2. **`pinfold-tools`: the walker and `git::store`.** Skips, caps, hard links, the `.git` aliases,
-   `.gitignore` matching and the stat merge; the fast-import stream. Tests: each skip and cap
-   fails without it; the hostile work tree of T5 leaves no marker; a `.gitignore` fuzz target joins
-   `fuzz-smoke`.
+   nested repositories, `.gitignore` matching with `.env*` always covered, and the stat merge; the
+   fast-import stream; the macOS Command Line Tools check before `/usr/bin/git`, for
+   `git::store` and the diff viewer's `git::run` alike. Tests: each skip and cap fails without
+   it; an ignored `.env.local` is covered; the hostile work tree of T5 leaves no marker; with the
+   Command Line Tools absent (a stubbed `xcode-select`) git counts as missing and `/usr/bin/git`
+   never runs; a `.gitignore` fuzz target joins `fuzz-smoke`. mem-gate: the existing diff row
+   holds.
 3. **`pinfold checkpoint take` and `prune`.** Store creation and its refusals, the lock, commit
    metadata, pruning order. Tests: a live launch checkpoint is never pruned; the cap refuses new
-   checkpoints instead; a symlinked or open store is refused.
+   checkpoints instead; a symlinked or open store is refused. mem-gate: new row, a take over a
+   generated tree of 100,000 files, then one with 1% changed, ≤ 4 MB.
 4. **`pinfold checkpoint plan` and `restore`.** Tests: a planted directory link, file link and hard
    link; a file changed since shown is skipped; an incomplete checkpoint deletes nothing; the
-   restore checkpoint restores the state before the restore.
+   restore checkpoint restores the state before the restore. mem-gate: the take row's
+   `restore` variant, ≤ 4 MB.
 5. **Core: runs and taking.** Run records, the launch checkpoint with its wait, done and exit
    checkpoints, `checkpoint.take` and `checkpoint.list` with schemas, scopes, rate limits, audit
-   and MCP tools, and the `[rewind]` config. Session tests, one with a sandboxed agent that
-   cannot read its store.
-6. **Core, link and window: `checkpoint.restore`.** `ApprovalAction::Rewind`, the plan, the prompt,
-   the result flash. Tests: only the window answers; with no window it is refused; output that
-   prints the prompt's text answers nothing; a snapshot of the prompt at 80 columns.
+   and MCP tools, `pinfold checkpoint list`, and the `[rewind]` config. Session tests: one with
+   a sandboxed agent that cannot read its store; a launch whose checkpoint takes past `wait_s`
+   starts the agent and answers `checkpoint: null`. mem-gate: the new 64-run-record core row,
+   ≤ 3 KiB over the 8-agent-pane row.
+6. **Core, link and window: `checkpoint.restore`.** Link version 16 with `ApprovalAction::Rewind`
+   and `Notice::Checkpoint`, ADR-0043's row; the plan, the prompt, the result flash, the strip's
+   `no checkpoint`. Tests: only the window answers; with no window it is refused; an agent pane
+   asking for its own run's restore is refused before any prompt; output that prints the prompt's
+   text answers nothing; a snapshot of the prompt and of the strip at 80 columns. mem-gate: the
+   window rows gain a `rewind: true` case, within the window budget.
 7. **Diff viewer and CLI.** `tool.open`'s `checkpoint`, `pinfold diff --checkpoint`, the `later`
    mark, `u` and `U`, `pinfold rewind` and the palette entry. Snapshots and an end-to-end session
-   test: launch, agent edits, add and delete, `U`, `y`, tree as before.
-8. **mem-gate rows and docs.** The rows above, `docs/configuration.md`, the threat model's rows
-   moved from proposed to built, and known issues: commits not undone, writes outside the
-   directory, nested repositories.
+   test: launch, agent edits, add and delete, `U`, `y`, tree as before; nested repositories are
+   listed as not covered. mem-gate: the diff row run with `--checkpoint`, ≤ 27 MB.
+8. **Docs and known issues.** `docs/configuration.md`, the threat model's rows pointed at their
+   tests, and known issues: commits not undone, writes outside the directory, nested repositories
+   and submodules, runs from before a core restart. mem-gate: the full table, every row above,
+   pasted in the PR.
 
-## Open questions for the maintainer
+## Decisions on the open questions
 
-1. When the launch checkpoint takes past `wait_s`, should the agent start without one, as proposed,
-   or should the launch be refused?
-2. Is leaving ignored files out by default right, given that an agent's edit to an ignored `.env`
-   then cannot be rewound?
-3. Should a first checkpoint inside a repository read stat data and blob ids from the real
-   `.git/index` to skip unchanged tracked files? Faster on large repositories, but it parses a
-   file an unsandboxed agent can forge. The spike can measure the gain.
-4. Should runs from before a core restart be reachable, which needs the core to list a store's
-   refs through `pinfold checkpoint`, or is this core's life enough for a first version?
-5. On macOS, should PinFold check for the Command Line Tools before running `/usr/bin/git`, so a
-   launch never opens Apple's install dialog? The diff viewer has the same exposure today.
-6. Should nested repositories and submodules be covered as plain files?
-7. May an agent ask, through `checkpoint.restore`, to undo its own run, behind the same prompt, as
-   proposed, or only the person's own callers: tool panes and terminals outside every pane?
-8. Are 2 GiB in all and 14 days the right defaults for disk?
-9. Should mem-gate also gate the peak of `git fast-import`, which is git's process, not
-   PinFold's?
+The maintainer answered each on 2026-11-18.
+
+1. **A launch checkpoint past `wait_s`:** the agent starts without one, and the pane's strip says
+   `no checkpoint`. A slow disk should not stop the person's work, and the strip makes the gap
+   visible.
+2. **Ignored files:** left out by default, but files matching `.env*` are always covered. They
+   are the worst loss case, and the copy stays in the private store.
+3. **Reading the real `.git/index`:** not in v1. An unsandboxed agent can forge it; the spike
+   measures what it would save.
+4. **Runs from before a core restart:** this core's life only in v1. Reaching older runs is a
+   later ADR, with ADR-0052's question 10.
+5. **The Command Line Tools on macOS:** checked before `/usr/bin/git` runs, so no install dialog
+   opens, and the diff viewer's same exposure is fixed in slice 2. A dialog from a background
+   take would be a prompt nobody asked for.
+6. **Nested repositories and submodules:** skipped in v1, and the diff viewer says so. Their files
+   belong to another repository's history.
+7. **Who may restore:** only the person's own callers, tool panes and terminals outside every
+   pane. An agent may not undo runs through `checkpoint.restore`, so a prompt-injected agent
+   cannot ask the person to wipe what it did.
+8. **Disk defaults:** 2 GiB in all and 14 days, both configurable. Disk, not memory, holds the
+   checkpoints, and these bound it.
+9. **`git fast-import`'s peak:** measured in the spike and reported, not gated by mem-gate. It is
+   git's short-lived process, not PinFold's.
 
 ## Consequences
 
