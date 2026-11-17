@@ -109,12 +109,13 @@ in [#447](https://github.com/0xPiranhaCodes/pinfold.sh/issues/447).
   agents outside PinFold are read when the inbox opens and dropped when it closes (sections 7
   and 8).
 
-### 2. Link (version 17)
+### 2. Link (version 16)
 
-[ADR-0050](0050-rewind-an-agents-changes.md) takes 16, this ADR 17 and
-[ADR-0052](0052-session-replay-a-timeline-per-agent-run.md) 18. A release that includes all three
-moves the link from 15 to 18, more than one apart, and restarts the session per
-[ADR-0043](0043-window-serves-the-previous-link-version.md), which gains the row for 17.
+Reserved as 17, after [ADR-0050](0050-rewind-an-agents-changes.md)'s 16, but this ADR's first
+slice reached the link first and took 16, the next version not yet on `main`; the others take the
+next free versions as they land. A release that includes all three moves the link from 15 more
+than one apart and restarts the session per
+[ADR-0043](0043-window-serves-the-previous-link-version.md), which gains the row for 16.
 
 - `Notice::Status` gains `since: u32` and `started: u32`, whole seconds in the state and in the
   run when sent, saturating, and `naming: bool`. The core sends it for every listed pane and for
@@ -133,7 +134,7 @@ moves the link from 15 to 18, more than one apart, and restarts the session per
 - A jump is `SwitchTab` then `Focus`, which exist. Opening a tab in a folder is the existing new
   tab request with a directory.
 
-A version 16 window gets what it gets today, the naming pane's status only, and never sends the
+A version 15 window gets what it gets today, the naming pane's status only, and never sends the
 new requests: prefix `!` and `w` flash `the inbox needs the core updated`.
 
 ### 3. API
@@ -373,9 +374,9 @@ These are type sizes and caps, not measurements; each slice pastes its row.
 
 Each about 400 changed lines, one concern, with its tests and its mem-gate row:
 
-1. **Core state and link 17.** `since`, `started`, `listed`, profile index; `Notice::Status`
+1. **Core state and link 16.** `since`, `started`, `listed`, profile index; `Notice::Status`
    fields for every listed pane; `pane.list` `since` and `started`; ADR-0043 row. Tests: `since`
-   moves only on a change of state; listed rules; link round trip; a version 16 window gets only
+   moves only on a change of state; listed rules; link round trip; a version 15 window gets only
    naming statuses. mem-gate: idle rows unchanged, ≤ 11 B a pane.
 2. **The inbox.** `pinfold-ui/src/inbox.rs`, `Request::Inbox`, prefix `!`, `keys.inbox`, palette
    entry, jump. Tests: ordering; every row has glyph, colour and word; "from output"; hostile

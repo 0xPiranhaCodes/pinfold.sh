@@ -277,13 +277,17 @@ impl State {
                 (self.activity, self.alerts) = (tabs, alerts);
                 self.laid = true;
             }
+            // The inbox's other panes come with ADR-0051's next slice.
             Notice::Status {
                 pane,
                 state,
                 reported,
+                naming,
                 message,
+                ..
             } => {
-                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.pane == pane) {
+                let tab = self.tabs.iter_mut().find(|tab| tab.pane == pane);
+                if naming && let Some(tab) = tab {
                     tab.status = Some((state, reported));
                     message.clone_into(&mut tab.message);
                     self.laid = true;
@@ -1392,19 +1396,35 @@ mod tests {
             pane: PANE,
             state: 0,
             reported: true,
+            naming: true,
+            since: 0,
+            started: 0,
             message: "ok?",
         };
         let other = Notice::Status {
             pane: PANE + 9,
             state: 1,
             reported: false,
+            naming: true,
+            since: 0,
+            started: 0,
+            message: "",
+        };
+        // A pane in the tab that does not name it leaves the tab's state as it is.
+        let unnamed = Notice::Status {
+            pane: PANE,
+            state: 3,
+            reported: false,
+            naming: false,
+            since: 5,
+            started: 9,
             message: "",
         };
         let alerts = Notice::Activity {
             tabs: 0,
             alerts: 0b1,
         };
-        peer.notices(&[other, status, alerts]).unwrap();
+        peer.notices(&[other, status, unnamed, alerts]).unwrap();
         assert!(turn_until(&mut link, |link| link.alerts() == 0b1));
         let tab = &link.tabs()[0];
         assert_eq!((tab.status, tab.message.as_str()), (Some((0, true)), "ok?"));

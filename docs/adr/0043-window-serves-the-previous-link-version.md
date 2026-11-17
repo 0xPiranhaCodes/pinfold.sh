@@ -79,6 +79,12 @@ From 14, `OLDEST` is 13, so a version 12 core restarts the session.
 
 From 15, `OLDEST` is 14, so a version 13 core restarts the session.
 
+| Change in 16 | Spoken version 15 |
+|---|---|
+| `Notice::Status` gains `naming`, `since` and `started`, and is sent for every pane in the inbox ([ADR-0051](0051-needs-you-inbox-and-alerts.md)) | The first change of a message's layout rather than a new message: the core lays a status out as 15 does and sends it for the panes that name tabs only, `Notice::since` being 16 for one with `naming` false. A window of 16 reads a core of 15's status as naming, with no times. Each tab's state shows as before. |
+
+From 16, `OLDEST` is 15, so a version 14 core restarts the session.
+
 **Raising the version.** A PR that changes the link raises `VERSION`, gives each new message or
 value a `since` of the new version, and adds a row to this table saying how the older version
 degrades. A change with no safe degradation, such as a new field every frame needs, says so
