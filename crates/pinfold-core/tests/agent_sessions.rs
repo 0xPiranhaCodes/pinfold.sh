@@ -41,7 +41,7 @@ fn replay(data: &[u8], agent: bool) -> Vec<&'static str> {
     let mut engine = AlacrittyEngine::new(ROWS, COLUMNS);
     let mut tracker = Tracker::default();
     if agent {
-        tracker.read_agent_signals();
+        tracker.read_agent_signals(0);
     }
     let mut now = Instant::now();
     let mut shown = vec![tracker.status().name()];

@@ -275,7 +275,13 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                 }
                 None => family.spawn_command(reactor, own, of, way, Some(&cwd), command)?,
             };
-            reactor.read_agent_signals(pane);
+            // The profile's place in the config's, which the core read when it started; past 255
+            // profiles the index names none, and nothing reads it yet but the webhook will.
+            let profile = agents.keys().position(|name| *name == launch.profile);
+            let profile = profile
+                .and_then(|at| u8::try_from(at).ok())
+                .unwrap_or(u8::MAX);
+            reactor.read_agent_signals(pane, profile);
             if agent.sandbox
                 && let Some((count, names)) = reactor.launched_sandboxed()
             {
@@ -309,7 +315,7 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                 let mut listed = json!({"id": pane.id, "title": pane.title, "cwd": pane.cwd,
                        "command": pane.command, "status": pane.status.name(),
                        "source": source(pane.reported), "message": message,
-                       "focused": pane.focused});
+                       "focused": pane.focused, "since": pane.since, "started": pane.started});
                 if let Some(run) = pane.tool {
                     listed["kind"] = json!("tool");
                     listed["tool"] = run.describe();

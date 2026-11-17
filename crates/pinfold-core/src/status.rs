@@ -8,6 +8,7 @@
 //! notifications outrank its shell's marks, and they alone can say "needs you" from output
 //! (ADR-0046). A plain shell pane never reads them.
 
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crate::marks::{AgentMarks, AgentSignal, ShellMarks, ShellPhase};
@@ -23,6 +24,19 @@ pub const ALERT_INTERVAL: Duration = Duration::from_secs(10);
 
 /// The most characters a `pane.status` message may have.
 pub const MAX_MESSAGE: usize = 200;
+
+/// When the core started, which a tracker counts its times from, so each takes 4 bytes rather
+/// than an `Instant`'s 16. The reactor reads it first, when the core starts.
+pub fn epoch() -> Instant {
+    static EPOCH: OnceLock<Instant> = OnceLock::new();
+    *EPOCH.get_or_init(Instant::now)
+}
+
+/// Whole seconds from [`epoch`] to `now`, saturating.
+fn seconds(now: Instant) -> u32 {
+    let elapsed = now.saturating_duration_since(epoch()).as_secs();
+    u32::try_from(elapsed).unwrap_or(u32::MAX)
+}
 
 /// The semantic colour used to draw a status.
 ///
@@ -242,9 +256,81 @@ pub struct Tracker {
     // Separate limits, so a fake alert printed by output cannot silence a real API one.
     last_api_alert: Option<Instant>,
     last_output_alert: Option<Instant>,
+    /// When the shown status last changed, in [`seconds`].
+    since: u32,
+    /// When the pane's program started, in [`seconds`].
+    started: u32,
+    /// Whether a `pane.status` report came since the pane opened, which puts it in the inbox
+    /// for good (ADR-0051).
+    listed: bool,
+    /// The agent profile it was launched from, as an index into the config's profiles.
+    profile: u8,
 }
 
 impl Tracker {
+    /// A tracker for a program that starts at `now`, idle since then.
+    ///
+    /// ```
+    /// use pinfold_core::status::{Tracker, epoch};
+    /// use std::time::Duration;
+    ///
+    /// let start = epoch();
+    /// let tracker = Tracker::new(start);
+    /// assert_eq!(tracker.held(start + Duration::from_secs(3)), (3, 3));
+    /// ```
+    #[must_use]
+    pub fn new(now: Instant) -> Self {
+        let started = seconds(now);
+        Self {
+            since: started,
+            started,
+            ..Self::default()
+        }
+    }
+
+    /// Whole seconds at `now` in the shown status and since the program started, saturating.
+    #[must_use]
+    pub fn held(&self, now: Instant) -> (u32, u32) {
+        let now = seconds(now);
+        (
+            now.saturating_sub(self.since),
+            now.saturating_sub(self.started),
+        )
+    }
+
+    /// Whether the pane belongs in the inbox: launched from an agent profile, or reported a
+    /// status since it opened. A plain shell pane never is, whatever its marks say (ADR-0051).
+    ///
+    /// ```
+    /// use pinfold_core::status::{Status, Tracker};
+    /// use std::time::Instant;
+    ///
+    /// let mut tracker = Tracker::default();
+    /// assert!(!tracker.listed());
+    /// tracker.report(Status::Running, Instant::now());
+    /// tracker.clear_report(Instant::now());
+    /// assert!(tracker.listed());
+    /// ```
+    #[must_use]
+    pub const fn listed(&self) -> bool {
+        self.listed || self.agent
+    }
+
+    /// The agent profile the pane was launched from, as [`Tracker::read_agent_signals`] got it,
+    /// or nothing for any other pane.
+    #[must_use]
+    pub const fn profile(&self) -> Option<u8> {
+        if self.agent { Some(self.profile) } else { None }
+    }
+
+    /// The pane's program exited, which shows done, whatever was said before.
+    pub fn closed(&mut self, now: Instant) {
+        self.reported = false;
+        self.agent_status = None;
+        self.output_status = Status::Done;
+        let _ = self.transition(Status::Done, now);
+    }
+
     /// Returns the status currently shown for the pane.
     ///
     /// ```
@@ -285,7 +371,7 @@ impl Tracker {
     /// assert_eq!(tracker.status(), Status::Running);
     /// ```
     pub fn report(&mut self, status: Status, now: Instant) -> Option<Alert> {
-        self.reported = true;
+        (self.reported, self.listed) = (true, true);
         self.transition(status, now)
     }
 
@@ -306,10 +392,11 @@ impl Tracker {
         self.transition(self.output(), now)
     }
 
-    /// Makes [`Tracker::observe_agent`] count, for a pane launched from an agent profile
-    /// (ADR-0046). Without it a pane keeps to its shell marks, whatever its output prints.
-    pub fn read_agent_signals(&mut self) {
-        self.agent = true;
+    /// Makes [`Tracker::observe_agent`] count, for a pane launched from the agent profile at
+    /// index `profile` of the config's (ADR-0046). Without it a pane keeps to its shell marks,
+    /// whatever its output prints.
+    pub fn read_agent_signals(&mut self, profile: u8) {
+        (self.agent, self.profile) = (true, profile);
     }
 
     /// Observes what an agent CLI signalled through output. Blocked and a notification say
@@ -327,7 +414,7 @@ impl Tracker {
     /// assert_eq!(shell.status(), Status::Idle);
     ///
     /// let mut agent = Tracker::default();
-    /// agent.read_agent_signals();
+    /// agent.read_agent_signals(0);
     /// assert!(agent.observe_agent(blocked, Instant::now()).is_some());
     /// assert_eq!(agent.status(), Status::NeedsYou);
     /// assert!(agent.from_output());
@@ -356,7 +443,7 @@ impl Tracker {
     /// use std::time::Instant;
     ///
     /// let mut tracker = Tracker::default();
-    /// tracker.read_agent_signals();
+    /// tracker.read_agent_signals(0);
     /// tracker.observe_agent(AgentMarks { latest: Some(AgentSignal::Notified), signals: 1 }, Instant::now());
     /// tracker.typed(Instant::now());
     /// assert_eq!(tracker.status(), Status::Idle);
@@ -427,7 +514,7 @@ impl Tracker {
         if self.status == status {
             return None;
         }
-        self.status = status;
+        (self.status, self.since) = (status, seconds(now));
         if !matches!(status, Status::NeedsYou | Status::Error) {
             return None;
         }
@@ -588,7 +675,7 @@ mod tests {
     fn an_agent_pane_needs_you_until_its_cli_moves_on_or_the_person_types() {
         let now = Instant::now();
         let mut tracker = Tracker::default();
-        tracker.read_agent_signals();
+        tracker.read_agent_signals(0);
         tracker.observe_shell(marks(ShellPhase::Running, 0, None), now);
 
         let first = tracker.observe_agent(signal(AgentSignal::Blocked, 1), now);
@@ -632,7 +719,7 @@ mod tests {
         assert_eq!(shell.status(), Status::Idle);
 
         let mut agent = Tracker::default();
-        agent.read_agent_signals();
+        agent.read_agent_signals(0);
         agent.report(Status::Running, now);
         assert_eq!(
             agent.observe_agent(signal(AgentSignal::Blocked, 1), now),
@@ -647,7 +734,7 @@ mod tests {
     fn a_flapping_agent_cli_raises_one_alert_in_ten_seconds() {
         let now = Instant::now();
         let mut tracker = Tracker::default();
-        tracker.read_agent_signals();
+        tracker.read_agent_signals(0);
         let mut alerts: usize = 0;
         for step in 0_u32..1000 {
             let at = now + Duration::from_millis(u64::from(step) * 5);
@@ -678,6 +765,62 @@ mod tests {
             assert_eq!(Status::from_name(status.name()), Some(status));
         }
         assert_eq!(Status::from_name("needs you"), None);
+    }
+
+    #[test]
+    fn time_in_state_moves_only_when_the_shown_state_changes() {
+        // Whole seconds from the epoch, so an offset from it is exact.
+        let start = epoch();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        let mut tracker = Tracker::new(start);
+        tracker.report(Status::Running, at(5));
+        assert_eq!(tracker.held(at(5)), (0, 5));
+        // A repeat of the state, a new message's report, or output a report outranks.
+        tracker.report(Status::Running, at(9));
+        tracker.observe_shell(marks(ShellPhase::Prompt, 1, Some(1)), at(10));
+        assert_eq!(tracker.held(at(12)), (7, 12));
+        tracker.report(Status::NeedsYou, at(20));
+        assert_eq!(tracker.held(at(21)), (1, 21));
+        // Clearing reveals output's error, a change.
+        tracker.clear_report(at(30));
+        assert_eq!(
+            (tracker.status(), tracker.held(at(30))),
+            (Status::Error, (0, 30))
+        );
+        tracker.closed(at(40));
+        assert_eq!(
+            (tracker.status(), tracker.held(at(41))),
+            (Status::Done, (1, 41))
+        );
+        // Saturating, never wrapping, for a time before the start.
+        assert_eq!(Tracker::new(at(50)).held(start), (0, 0));
+    }
+
+    #[test]
+    fn a_pane_is_listed_once_it_reports_or_runs_an_agent_and_never_from_marks() {
+        let now = Instant::now();
+        let mut shell = Tracker::new(now);
+        shell.observe_shell(marks(ShellPhase::Prompt, 1, Some(1)), now);
+        shell.observe_agent(signal(AgentSignal::Blocked, 1), now);
+        assert_eq!((shell.listed(), shell.profile()), (false, None));
+
+        let mut reported = Tracker::new(now);
+        reported.report(Status::Done, now);
+        reported.clear_report(now);
+        assert_eq!((reported.listed(), reported.profile()), (true, None));
+
+        let mut agent = Tracker::new(now);
+        agent.read_agent_signals(3);
+        assert_eq!((agent.listed(), agent.profile()), (true, Some(3)));
+    }
+
+    /// ADR-0051's budget for this slice: `since`, `started`, `listed` and the profile cost at
+    /// most 11 bytes a pane. Without them a tracker took 48 bytes on 64-bit targets.
+    #[cfg(target_pointer_width = "64")]
+    #[test]
+    fn the_inbox_fields_cost_a_pane_at_most_eleven_bytes() {
+        let size = size_of::<Tracker>();
+        assert!(size <= 48 + 11, "a tracker takes {size} bytes");
     }
 
     #[test]

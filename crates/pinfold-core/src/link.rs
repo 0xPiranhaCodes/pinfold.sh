@@ -86,9 +86,9 @@ struct PaneLink {
     alerted: bool,
     /// Whether this window heard what the pane was running before a restore.
     told_ran: bool,
-    /// The state and source the window last heard of, while `naming`.
-    told: Option<(u8, bool)>,
-    /// The message the window last heard of, while `naming`.
+    /// The state, source and `naming` the window last heard of, while `naming` or in the inbox.
+    told: Option<(u8, bool, bool)>,
+    /// The message the window last heard of, while `naming` or in the inbox.
     message: String,
     /// The OSC 12 cursor colour and OSC 11 background the window last heard of.
     colours: (Option<u32>, Option<u32>),
@@ -449,20 +449,31 @@ impl Session {
             state.alerted = alerted;
             self.activity_changed = true;
         }
-        if state.naming
+        // Every inbox pane's, for a window of 16, and the naming pane's for any (ADR-0051).
+        if (state.naming || reactor.listed(pane))
             && let Some((status, reported, message)) = status
         {
-            let told = Some((status as u8, reported));
+            let told = Some((status as u8, reported, state.naming));
             if state.told != told || state.message != message {
                 state.told = told;
                 message.clone_into(&mut state.message);
+                let now = std::time::Instant::now();
+                let (since, started) = reactor.held(pane, now).unwrap_or_default();
                 let notice = Notice::Status {
                     pane: pane as u32,
                     state: status as u8,
                     reported,
+                    naming: state.naming,
+                    since,
+                    started,
                     message: &state.message,
                 };
-                notice.encode(&mut self.out).map_err(|_| Ended)?;
+                // A window of 15 hears the naming panes only, in its own layout.
+                if self.version >= notice.since() {
+                    notice
+                        .encode_at(self.version, &mut self.out)
+                        .map_err(|_| Ended)?;
+                }
             }
         }
         let colours = reactor.engine(pane).map(|engine| engine.colours());
@@ -867,6 +878,8 @@ mod tests {
     struct Peer {
         socket: UnixStream,
         decoder: Decoder,
+        /// Bytes of the core's hello still to drop, for a peer of an older version.
+        skip: usize,
         hellos: usize,
         frames: HashMap<u32, Frame>,
         tops: HashMap<u32, usize>,
@@ -880,6 +893,8 @@ mod tests {
         alerts: u32,
         /// The last status: pane, state, whether reported, and message.
         status: Option<(u32, u8, bool, String)>,
+        /// Statuses of panes that name no tab: pane, state and seconds in it.
+        listed: Vec<(u32, u8, u32)>,
         layouts: usize,
         active: u16,
         focused: u32,
@@ -901,6 +916,7 @@ mod tests {
             Self {
                 socket,
                 decoder: Decoder::default(),
+                skip: 0,
                 hellos: 0,
                 frames: HashMap::new(),
                 tops: HashMap::new(),
@@ -913,6 +929,7 @@ mod tests {
                 activity: 0,
                 alerts: 0,
                 status: None,
+                listed: Vec::new(),
                 layouts: 0,
                 active: 0,
                 focused: 0,
@@ -924,6 +941,17 @@ mod tests {
                 secrets: Vec::new(),
                 colours: Vec::new(),
             }
+        }
+
+        /// Attaches and says hello as a window of `version`, whose decoder speaks that version.
+        fn older(reactor: &mut Reactor, version: u16) -> Self {
+            let mut peer = Self::attach(reactor);
+            let mut hello = Vec::new();
+            Notice::Hello { version }.encode(&mut hello).unwrap();
+            peer.decoder.next_notice(&mut hello.as_slice()).unwrap();
+            peer.skip = hello.len();
+            peer.send(Request::Hello { version });
+            peer
         }
 
         /// Attaches and says hello.
@@ -967,7 +995,9 @@ mod tests {
                     Err(error) if error.kind() == ErrorKind::ConnectionReset => return,
                     Err(error) => panic!("{error}"),
                 };
-                let mut input = &buffer[..count];
+                let skipped = self.skip.min(count);
+                self.skip -= skipped;
+                let mut input = &buffer[skipped..count];
                 while let Some(notice) = self.decoder.next_notice(&mut input).unwrap() {
                     match notice {
                         Notice::Hello { .. } => self.hellos += 1,
@@ -996,8 +1026,13 @@ mod tests {
                             pane,
                             state,
                             reported,
+                            naming: true,
                             message,
+                            ..
                         } => self.status = Some((pane, state, reported, message.to_owned())),
+                        Notice::Status {
+                            pane, state, since, ..
+                        } => self.listed.push((pane, state, since)),
                         Notice::Layout(layout) => {
                             self.layouts += 1;
                             self.active = layout.active;
@@ -1104,8 +1139,7 @@ mod tests {
     fn an_older_window_is_served_without_what_it_cannot_read() {
         let mut reactor = Reactor::new().unwrap();
         let pane = reactor.open_tab(shell(OSC_COLOURS), 24, 80).unwrap();
-        let mut peer = Peer::attach(&mut reactor);
-        peer.send(Request::Hello { version: OLDEST });
+        let mut peer = Peer::older(&mut reactor, OLDEST);
         peer.fit(&reactor, pane);
         serve(&mut reactor, &mut peer, |r, p| {
             on_screen(r, pane, "set") && p.matches(r, pane)
@@ -1113,13 +1147,59 @@ mod tests {
         assert!(reactor.is_window_ready());
         assert_eq!(reactor.take_other_version(), None);
         assert!(reactor.can_ask(ApprovalAction::Owner));
-        reactor.set_exposed(Some((1, "GITHUB_TOKEN".to_owned())));
-        assert!(reactor.launched_sandboxed().is_some());
         reactor.write(pane, b"more\n");
         serve(&mut reactor, &mut peer, |r, _| on_screen(r, pane, "reset"));
-        peer.read();
-        assert!(peer.secrets.is_empty(), "sent what version 14 cannot read");
         assert!(reactor.is_window_ready(), "the link ended");
+    }
+
+    /// ADR-0051: a window of 16 hears the state of every inbox pane, with its times, and one
+    /// of 15 the naming panes' only. A plain shell pane that names no tab is in no inbox.
+    #[test]
+    fn every_inbox_pane_s_status_reaches_a_window_of_16_and_only_naming_ones_older() {
+        for version in [VERSION, OLDEST] {
+            let mut reactor = Reactor::new().unwrap();
+            reactor.shell = || shell(ALIVE);
+            let agent = reactor.open_tab(shell(ALIVE), 24, 80).unwrap();
+            reactor.read_agent_signals(agent, 0);
+            let mut peer = Peer::older(&mut reactor, version);
+            peer.fit(&reactor, agent);
+            serve(&mut reactor, &mut peer, |_, p| p.status.is_some());
+            let mut split = |pane: u32, shown: usize| {
+                peer.send(Request::Split {
+                    pane,
+                    way: SplitWay::Right,
+                });
+                serve(&mut reactor, &mut peer, |_, p| p.shown.len() == shown);
+                peer.focused
+            };
+            let reporter = split(agent as u32, 2);
+            let plain = split(reporter, 3);
+            let now = std::time::Instant::now();
+            reactor
+                .report_status(reporter as usize, Status::Running, "", now)
+                .unwrap();
+            reactor
+                .report_status(agent, Status::NeedsYou, "", now)
+                .unwrap();
+            let heard = |p: &Peer, pane: usize, state: u8| {
+                (p.listed.iter()).any(|(at, told, _)| (*at, *told) == (pane as u32, state))
+            };
+            if version == VERSION {
+                serve(&mut reactor, &mut peer, |_, p| {
+                    heard(p, agent, 0) && heard(p, reporter as usize, 1)
+                });
+                assert!(peer.listed.iter().all(|(.., since)| *since < 30));
+                assert!(!heard(&peer, plain as usize, 4), "a plain shell is listed");
+            } else {
+                for _ in 0..5 {
+                    reactor.turn(Some(Duration::from_millis(10))).unwrap();
+                    peer.read();
+                }
+                assert!(peer.listed.is_empty(), "sent what version 15 cannot read");
+            }
+            assert_eq!(peer.status.as_ref().map(|told| told.0), Some(plain));
+            assert!(reactor.is_window_ready(), "the link ended");
+        }
     }
 
     /// Sets a cursor colour and a background, and resets both after a line of input.

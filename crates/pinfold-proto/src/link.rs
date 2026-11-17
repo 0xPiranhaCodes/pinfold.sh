@@ -39,10 +39,13 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode, Palette};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 15;
+pub const VERSION: u16 = 16;
 
 /// The oldest version this side still speaks, one before [`VERSION`] (ADR-0043).
 pub const OLDEST: u16 = VERSION - 1;
+
+/// The first version whose [`Notice::Status`] carries `naming` and its times (ADR-0051).
+const TIMED_STATUS: u16 = 16;
 
 /// Most rows or columns a screen can have, which the core clamps its panes to.
 pub const MAX_DIMENSION: u16 = 1024;
@@ -677,7 +680,9 @@ pub enum Notice<'a> {
         /// The redacted command, which is only a hint. At most [`MAX_COMMAND`] bytes.
         command: &'a str,
     },
-    /// The state of a pane that names its tab.
+    /// The state of a pane that names its tab, or, since version 16, of any pane in the inbox
+    /// (ADR-0051). Below 16 the wire has no `naming` or times: a window reads them as `true`
+    /// and 0, and the core sends only naming panes.
     Status {
         /// The pane.
         pane: u32,
@@ -685,6 +690,12 @@ pub enum Notice<'a> {
         state: u8,
         /// Whether the pane's agent reported it, rather than output's marks, which can fake it.
         reported: bool,
+        /// Whether the pane has its tab's focus, so the tab shows this state.
+        naming: bool,
+        /// Whole seconds the pane has been in `state` when sent, saturating.
+        since: u32,
+        /// Whole seconds since the pane's program started when sent, saturating.
+        started: u32,
         /// The reported message, which the core has cleaned of control and bidi characters.
         message: &'a str,
     },
@@ -1194,17 +1205,44 @@ impl Notice<'_> {
             Self::Markdown { .. } => 13,
             Self::Colours { .. } => 14,
             Self::Secrets { .. } => 15,
+            Self::Status { naming: false, .. } => TIMED_STATUS,
             _ => OLDEST,
         }
     }
 
-    /// Appends this message to `out`. On an error `out` is as it was.
+    /// Appends this message to `out`, as [`VERSION`] lays it out. On an error `out` is as it
+    /// was.
     ///
     /// # Errors
     ///
     /// [`Error::TooLarge`] past [`MAX_MESSAGE`], and [`Error::BadColour`] for a pane colour above
     /// `0xFFFFFF`.
     pub fn encode(&self, out: &mut Vec<u8>) -> Result<(), Error> {
+        self.encode_at(VERSION, out)
+    }
+
+    /// Appends this message as a window speaking `version` reads it, which differs only for
+    /// [`Notice::Status`] below 16. It never checks [`Notice::since`]: the sender does.
+    ///
+    /// ```
+    /// use pinfold_proto::link::{Decoder, Notice, OLDEST};
+    ///
+    /// let mut wire = Vec::new();
+    /// Notice::Hello { version: OLDEST }.encode(&mut wire)?;
+    /// let status = Notice::Status {
+    ///     pane: 1, state: 0, reported: false, naming: true, since: 0, started: 0, message: "",
+    /// };
+    /// status.encode_at(OLDEST, &mut wire)?;
+    /// let (mut decoder, mut input) = (Decoder::default(), wire.as_slice());
+    /// decoder.next_notice(&mut input)?;
+    /// assert_eq!(decoder.next_notice(&mut input)?, Some(status));
+    /// # Ok::<(), pinfold_proto::link::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// As [`Notice::encode`].
+    pub fn encode_at(&self, version: u16, out: &mut Vec<u8>) -> Result<(), Error> {
         if let Self::Colours {
             cursor, background, ..
         } = self
@@ -1298,6 +1336,9 @@ impl Notice<'_> {
                 pane,
                 state,
                 reported,
+                naming,
+                since,
+                started,
                 message,
             } => {
                 if *state >= STATES {
@@ -1308,6 +1349,10 @@ impl Notice<'_> {
                     });
                 }
                 out.extend_from_slice(&[*state, u8::from(*reported)]);
+                if version >= TIMED_STATUS {
+                    out.push(u8::from(*naming));
+                    put!(out; since, started);
+                }
                 put_tail(out, start, MAX_MESSAGE, STATUS, *pane, message.as_bytes())?
             }
             Self::Approval(approval) => {
@@ -1336,7 +1381,7 @@ impl Notice<'_> {
         finish(out, start, MAX_MESSAGE, kind)
     }
 
-    fn decode(kind: u8, body: &[u8]) -> Result<Notice<'_>, Error> {
+    fn decode(kind: u8, body: &[u8], version: u16) -> Result<Notice<'_>, Error> {
         let mut body = Reader(body);
         let notice = match kind {
             HELLO => Notice::Hello {
@@ -1386,7 +1431,7 @@ impl Notice<'_> {
                 tabs: body.u32()?,
                 alerts: body.u32()?,
             },
-            // The state and its source go ahead of the pane, as the message runs to the end.
+            // The state, its source and times go ahead of the pane, as the message runs to the end.
             STATUS => {
                 let state = body.u8()?;
                 if state >= STATES {
@@ -1395,9 +1440,22 @@ impl Notice<'_> {
                         tag: state,
                     });
                 }
+                let reported = body.tag("reported", &[false, true])?;
+                let (naming, since, started) = if version >= TIMED_STATUS {
+                    (
+                        body.tag("naming", &[false, true])?,
+                        body.u32()?,
+                        body.u32()?,
+                    )
+                } else {
+                    (true, 0, 0)
+                };
                 Notice::Status {
                     state,
-                    reported: body.tag("reported", &[false, true])?,
+                    reported,
+                    naming,
+                    since,
+                    started,
                     pane: body.u32()?,
                     message: body.text()?,
                 }
@@ -1621,7 +1679,8 @@ impl Decoder {
     /// Any error ends the link, and every later call returns it.
     pub fn next_request(&mut self, input: &mut &[u8]) -> Result<Option<Request<'_>>, Error> {
         // A window answers at the lower version, so never above the core's.
-        self.next(input, MAX_REQUEST, VERSION, Request::decode, Request::since)
+        let decode = |kind, body, _| Request::decode(kind, body);
+        self.next(input, MAX_REQUEST, VERSION, decode, Request::since)
     }
 
     /// Reads the next message the core sent, as [`Decoder::next_request`] does.
@@ -1650,7 +1709,7 @@ impl Decoder {
         input: &mut &[u8],
         limit: usize,
         newest: u16,
-        decode: fn(u8, &'a [u8]) -> Result<M, Error>,
+        decode: fn(u8, &'a [u8], u16) -> Result<M, Error>,
         since: fn(&M) -> u16,
     ) -> Result<Option<M>, Error> {
         let decoded = match self.fill(input, limit, newest) {
@@ -1658,7 +1717,7 @@ impl Decoder {
             Ok(true) => {
                 let (kind, body) = message(&self.buffer);
                 let version = self.version.unwrap_or(OLDEST);
-                decode(kind, body).and_then(|message| match since(&message) {
+                decode(kind, body, version).and_then(|message| match since(&message) {
                     since if since > version => Err(Error::Newer { kind, since }),
                     _ => Ok(message),
                 })
@@ -2071,7 +2130,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 15, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 16, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -2299,17 +2358,71 @@ mod tests {
             count: 1,
             names: "GITHUB_TOKEN",
         };
-        let newer = Error::Newer {
-            kind: SECRETS,
-            since: 15,
+        assert_eq!(at_oldest(secrets), Ok(true));
+        // Nothing is new in 16 but a layout, so a stand-in `since` checks the gate.
+        let mut wire = raw(HELLO, &OLDEST.to_le_bytes());
+        Notice::Raise.encode(&mut wire).unwrap();
+        let (mut decoder, mut input) = (Decoder::default(), wire.as_slice());
+        let newest = |notice: &Notice<'_>| match notice {
+            Notice::Raise => VERSION,
+            _ => OLDEST,
         };
-        assert_eq!(at_oldest(secrets), Err(newer));
+        let mut next = |input: &mut &[u8]| {
+            let next = decoder.next(input, MAX_MESSAGE, VERSION, Notice::decode, newest);
+            next.map(|notice| notice.is_some())
+        };
+        assert_eq!(next(&mut input), Ok(true));
+        let newer = Error::Newer {
+            kind: RAISE,
+            since: VERSION,
+        };
+        assert_eq!(next(&mut input), Err(newer));
         let mut wire = raw(HELLO, &OLDEST.to_le_bytes());
         PALETTE_SEED.encode(&mut wire).unwrap();
         let mut decoder = Decoder::default();
         let mut input = wire.as_slice();
         decoder.next_request(&mut input).unwrap();
         assert_eq!(decoder.next_request(&mut input), Ok(Some(PALETTE_SEED)));
+    }
+
+    /// ADR-0051: a window of 15 reads a status in its own layout, as naming with no times, and
+    /// one of 16 gets the pane's times and whether it names its tab.
+    #[test]
+    fn a_status_is_laid_out_for_the_spoken_version() {
+        let status = Notice::Status {
+            pane: 7,
+            state: 0,
+            reported: false,
+            naming: false,
+            since: 42,
+            started: 600,
+            message: "ok",
+        };
+        let read = |version: u16| {
+            let mut wire = raw(HELLO, &version.to_le_bytes());
+            status.encode_at(version, &mut wire).unwrap();
+            let (mut decoder, mut input) = (Decoder::default(), wire.as_slice());
+            decoder.next_notice(&mut input).unwrap();
+            let notice = decoder
+                .next_notice(&mut input)
+                .unwrap()
+                .map(|n| format!("{n:?}"));
+            (wire.len(), notice)
+        };
+        let (old, older) = read(OLDEST);
+        let untimed = Notice::Status {
+            pane: 7,
+            state: 0,
+            reported: false,
+            naming: true,
+            since: 0,
+            started: 0,
+            message: "ok",
+        };
+        assert_eq!(older, Some(format!("{untimed:?}")));
+        let (new, newer) = read(VERSION);
+        assert_eq!(newer, Some(format!("{status:?}")));
+        assert_eq!(new, old + 9, "naming and two times");
     }
 
     const PALETTE_SEED: Request<'static> = Request::Palette(Palette::GRAPHITE_GRID);
@@ -2938,7 +3051,7 @@ mod tests {
             &[0; 14].into_iter().chain([0xff]).collect::<Vec<_>>(),
         );
         assert_eq!(notice_error(&wire), Err(Error::BadText));
-        let wire = raw(STATUS, &[0, 1, 0, 0, 0, 0, 0xff]);
+        let wire = raw(STATUS, &[0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff]);
         assert_eq!(notice_error(&wire), Err(Error::BadText));
     }
 
@@ -2960,10 +3073,18 @@ mod tests {
             notice_error(&raw(STATUS, &[0, 2, 0, 0, 0, 0])),
             Err(reported)
         );
+        let naming = Error::BadTag {
+            field: "naming",
+            tag: 2,
+        };
+        assert_eq!(notice_error(&raw(STATUS, &[0, 0, 2, 0])), Err(naming));
         let notice = Notice::Status {
             pane: 0,
             state: STATES,
             reported: false,
+            naming: true,
+            since: 0,
+            started: 0,
             message: "",
         };
         let mut out = vec![7];
@@ -3381,10 +3502,13 @@ mod tests {
             pane in any::<u32>(),
             state in 0..STATES,
             reported in any::<bool>(),
+            naming in any::<bool>(),
+            since in any::<u32>(),
+            started in any::<u32>(),
             message in any::<String>(),
             chunk in chunks(),
         ) {
-            let notice = Notice::Status { pane, state, reported, message: &message };
+            let notice = Notice::Status { pane, state, reported, naming, since, started, message: &message };
             prop_assert!(notice_survives(&notice, chunk), "changed on the link");
         }
 

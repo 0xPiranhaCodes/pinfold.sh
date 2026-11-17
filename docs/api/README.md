@@ -121,6 +121,9 @@ marks, which output can fake, so `pane.list` and `pane.status` events carry `sou
 `pane.list` also carries `focused`, an ordering hint rather than a time: larger means the pane
 took focus in the active tab more recently, and 0 means never. `@` in `pinfold files` and `a` in
 `pinfold diff` use it to find the last focused agent pane, as an ordinary caller whose `pane.send` the window approves.
+It carries `since` and `started` too: whole seconds the pane has been in its current state and
+since its program started, counted by the core and saturating
+([ADR-0051](../adr/0051-needs-you-inbox-and-alerts.md)). A pane that closed is `done` since then.
 In a pane `agent.launch` opened, `marks` also covers the CLI's OSC 7501 states and OSC 9
 notifications, which can say `needs-you` ([ADR-0046](../adr/0046-agent-panes-read-needs-you-from-output.md)).
 The window shows the state as glyph, colour and word, and the message only in its own chrome. `pinfold
