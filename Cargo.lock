@@ -1457,6 +1457,7 @@ dependencies = [
  "objc2-quartz-core 0.3.2",
  "raw-window-handle",
  "signal-hook",
+ "thiserror 2.0.21",
  "x11-clipboard",
  "x11rb",
 ]

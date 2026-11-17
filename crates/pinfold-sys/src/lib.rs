@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
+pub mod at;
 #[cfg(feature = "clipboard")]
 pub mod clipboard;
 pub mod foreground;
