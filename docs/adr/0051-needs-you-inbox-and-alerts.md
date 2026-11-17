@@ -133,9 +133,17 @@ than one apart and restarts the session per
   progress: u8 }`.
 - A jump is `SwitchTab` then `Focus`, which exist. Opening a tab in a folder is the existing new
   tab request with a directory.
+- **Version 17,** taken by slice 2 as the next free version on `main`: `Request::Inbox`, and two
+  things the window needs to draw a row it did not have. `Notice::Layout` gains every pane of
+  the session with its tab's index, tab by tab in each tab's pane order (5 bytes a pane, ≤ 320
+  bytes), so a row can say `tab·pane` and a jump can reach a pane in a hidden tab; before it the
+  layout named each tab's focused pane only. `Notice::Status`'s `naming` byte becomes flags with
+  bit 1 `listed`, so a plain shell that names its tab is not drawn as an agent. A version 16
+  window gets neither.
 
-A version 15 window gets what it gets today, the naming pane's status only, and never sends the
-new requests: prefix `!` and `w` flash `the inbox needs the core updated`.
+A version 15 window gets what it gets today, the naming pane's status only. A window whose core
+speaks below 17 never sends the new requests: prefix `!` and `w` flash `the inbox needs the core
+updated`.
 
 ### 3. API
 

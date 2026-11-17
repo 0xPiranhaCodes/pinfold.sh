@@ -29,7 +29,7 @@ use std::ops::Range;
 use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
@@ -123,6 +123,21 @@ pub struct Tab {
     pub message: String,
 }
 
+/// A pane in the inbox (ADR-0051), as its last [`Notice::Status`] said.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Listed {
+    /// The pane.
+    pub pane: u32,
+    /// Its state, below [`pinfold_proto::link::STATES`].
+    pub state: u8,
+    /// Whether its agent reported the state, rather than output's marks.
+    pub reported: bool,
+    /// When it came to that state, on this window's clock.
+    pub since: Instant,
+    /// The message its agent reported, cleaned by the core. Empty if none.
+    pub message: String,
+}
+
 /// An approval copied out of the decoder's borrowed message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Approval {
@@ -191,6 +206,14 @@ struct State {
     /// Restored panes, whether Enter may run what each was running, and that command.
     was_running: Vec<(u32, bool, String)>,
     approvals: Vec<Approval>,
+    /// Each pane of the session and its tab's index, from a core of 17 or later.
+    members: Vec<(u32, u8)>,
+    /// The inbox's panes, at most [`MAX_PANES`].
+    listed: Vec<Listed>,
+    /// Whether `listed` or `members` changed since they were last read.
+    relisted: bool,
+    /// Whether the window last said its inbox is open.
+    inbox: bool,
 }
 
 impl State {
@@ -277,12 +300,13 @@ impl State {
                 (self.activity, self.alerts) = (tabs, alerts);
                 self.laid = true;
             }
-            // The inbox's other panes come with ADR-0051's next slice.
             Notice::Status {
                 pane,
                 state,
                 reported,
                 naming,
+                listed,
+                since,
                 message,
                 ..
             } => {
@@ -292,6 +316,7 @@ impl State {
                     message.clone_into(&mut tab.message);
                     self.laid = true;
                 }
+                self.list(pane, listed.then_some((state, reported, since, message)));
             }
             Notice::Refused { reason } => self.refused = Some(reason),
             // The core restores at most this many panes, once.
@@ -329,6 +354,42 @@ impl State {
         Ok(())
     }
 
+    /// Keeps a pane's inbox row, or drops it for `None`. The core's seconds become an
+    /// `Instant`, so the two sides share no clock.
+    fn list(&mut self, pane: u32, status: Option<(u8, bool, u32, &str)>) {
+        let index = self.listed.iter().position(|listed| listed.pane == pane);
+        let Some((state, reported, since, message)) = status else {
+            if let Some(index) = index {
+                self.listed.swap_remove(index);
+                self.relisted = true;
+            }
+            return;
+        };
+        let now = Instant::now();
+        let since = now
+            .checked_sub(Duration::from_secs(since.into()))
+            .unwrap_or(now);
+        let index = match index {
+            Some(index) => index,
+            // The core never lists more, so a flood of made-up panes stops here.
+            None if self.listed.len() < MAX_PANES => {
+                self.listed.push(Listed {
+                    pane,
+                    state,
+                    reported,
+                    since,
+                    message: String::new(),
+                });
+                self.listed.len() - 1
+            }
+            None => return,
+        };
+        let listed = &mut self.listed[index];
+        (listed.state, listed.reported, listed.since) = (state, reported, since);
+        message.clone_into(&mut listed.message);
+        self.relisted = true;
+    }
+
     fn follow(&mut self, layout: &Layout<'_>) {
         self.active = layout.active.into();
         self.focused = layout.focused;
@@ -336,6 +397,13 @@ impl State {
         self.over = layout.is_empty();
         self.laid = true;
         follow(&mut self.screens, layout.panes());
+        self.members.clear();
+        self.members.extend(layout.members());
+        let members = &self.members;
+        self.listed
+            .retain(|listed| members.iter().any(|(pane, _)| *pane == listed.pane));
+        // A pane may have moved to another tab's number.
+        self.relisted = true;
         // A pane of a tab that was hidden may have set its colours then.
         for screen in &mut self.screens {
             let mut kept = self.colours.iter();
@@ -597,6 +665,10 @@ impl Link {
     /// message, the core is too far behind, the link has ended, or the request is newer than
     /// the version the link speaks (ADR-0043), and then queues none.
     pub fn send(&mut self, request: Request<'_>) -> bool {
+        if let Request::Inbox { open } = request {
+            // Opening reads the rows afresh.
+            (self.state.inbox, self.state.relisted) = (open, open);
+        }
         // Before the core's hello this is the oldest version, so a newer request waits for none.
         let spoken = self.decoder.version().unwrap_or(OLDEST);
         let queued =
@@ -651,6 +723,37 @@ impl Link {
     #[must_use]
     pub fn tabs(&self) -> &[Tab] {
         &self.state.tabs
+    }
+
+    /// Returns each pane of the session and its tab's index, tab by tab. Empty from a core
+    /// older than 17.
+    #[must_use]
+    pub fn members(&self) -> &[(u32, u8)] {
+        &self.state.members
+    }
+
+    /// Returns the inbox's panes, in no order.
+    #[must_use]
+    pub fn listed(&self) -> &[Listed] {
+        &self.state.listed
+    }
+
+    /// Returns whether the inbox's panes or their tabs changed since the last call, and clears
+    /// that.
+    pub fn take_relisted(&mut self) -> bool {
+        std::mem::take(&mut self.state.relisted)
+    }
+
+    /// Returns whether the window's inbox is open, as the last [`Request::Inbox`] said.
+    #[must_use]
+    pub fn inbox_open(&self) -> bool {
+        self.state.inbox
+    }
+
+    /// Returns whether the core speaks a version that carries `request`.
+    #[must_use]
+    pub fn speaks(&self, request: &Request<'_>) -> bool {
+        self.decoder.version() >= Some(request.since())
     }
 
     /// Returns the index of the active tab.
@@ -783,6 +886,27 @@ mod tests {
     const PANE: u32 = 3;
     const PATIENCE: Duration = Duration::from_secs(10);
 
+    /// Each tab's focused pane in its tab, the active tab's panes, and made-up panes in the first
+    /// tab up to `total`.
+    fn members(active: u16, total: u16, tabs: &[u32], panes: &[(u32, Rect)]) -> Vec<(u32, u8)> {
+        let mut members: Vec<(u32, u8)> = Vec::new();
+        let named = tabs
+            .iter()
+            .enumerate()
+            .map(|(index, &pane)| (pane, index as u8));
+        let shown = panes.iter().map(|&(pane, _)| (pane, active as u8));
+        for (pane, tab) in named.chain(shown) {
+            if members.iter().all(|(known, _)| *known != pane) {
+                members.push((pane, tab));
+            }
+        }
+        let mut spare = 9000..;
+        while members.len() < usize::from(total) {
+            members.extend(spare.next().map(|pane| (pane, 0)));
+        }
+        members
+    }
+
     /// The core's end of the link, as a test drives it.
     struct Peer {
         stream: UnixStream,
@@ -806,7 +930,7 @@ mod tests {
 
         fn no_tabs(&mut self) -> io::Result<()> {
             let mut wire = Vec::new();
-            encode_layout(&mut wire, 0, 0, 0, &[], &[]).map_err(io::Error::other)?;
+            encode_layout(&mut wire, VERSION, 0, 0, 0, &[], &[], &[]).map_err(io::Error::other)?;
             self.stream.write_all(&wire)
         }
 
@@ -825,8 +949,11 @@ mod tests {
             panes: &[(u32, Rect)],
         ) -> io::Result<()> {
             let mut wire = Vec::new();
-            encode_layout(&mut wire, active, focused, total, tabs, panes)
-                .map_err(io::Error::other)?;
+            let members = members(active, total, tabs, panes);
+            encode_layout(
+                &mut wire, VERSION, active, focused, total, tabs, panes, &members,
+            )
+            .map_err(io::Error::other)?;
             self.stream.write_all(&wire)
         }
 
@@ -1397,15 +1524,18 @@ mod tests {
             state: 0,
             reported: true,
             naming: true,
+            listed: true,
             since: 0,
             started: 0,
             message: "ok?",
         };
+        // A plain shell's pane names its tab but is not in the inbox.
         let other = Notice::Status {
             pane: PANE + 9,
             state: 1,
             reported: false,
             naming: true,
+            listed: false,
             since: 0,
             started: 0,
             message: "",
@@ -1416,6 +1546,7 @@ mod tests {
             state: 3,
             reported: false,
             naming: false,
+            listed: true,
             since: 5,
             started: 9,
             message: "",
@@ -1424,10 +1555,27 @@ mod tests {
             tabs: 0,
             alerts: 0b1,
         };
+        let start = Instant::now();
         peer.notices(&[other, status, unnamed, alerts]).unwrap();
         assert!(turn_until(&mut link, |link| link.alerts() == 0b1));
         let tab = &link.tabs()[0];
         assert_eq!((tab.status, tab.message.as_str()), (Some((0, true)), "ok?"));
+        // The inbox keeps every listed pane's latest, its seconds on this clock.
+        let listed = link.listed();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            (listed[0].pane, listed[0].state, listed[0].reported),
+            (PANE, 3, false)
+        );
+        let five = Duration::from_secs(5);
+        assert!((start - five..=Instant::now() - five).contains(&listed[0].since));
+        assert!(link.take_relisted() && !link.take_relisted());
+        assert_eq!(link.members(), [(PANE, 0)]);
+        // A layout without the pane drops its row.
+        peer.layout(0, PANE + 1, 1, &[PANE + 1], &[(PANE + 1, whole())])
+            .unwrap();
+        assert!(turn_until(&mut link, |link| link.listed().is_empty()));
+        assert_eq!(link.members(), [(PANE + 1, 0)]);
     }
 
     #[test]
