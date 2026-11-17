@@ -21,6 +21,7 @@ have shipped, and beta.4 includes the built-in tools. v0.1 waits on the Linux de
 [#331](https://github.com/0xPiranhaCodes/pinfold.sh/issues/331) is documented for v0.1, not fixed
 ([ADR-0047](adr/0047-macos-sandbox-reads-other-processes-environment.md)).
 
-**Next (proposed).** Session replay: a timeline of records per agent run, commands, calls,
+**Next.** Session replay: a timeline of records per agent run, commands, calls that act,
 approvals, states and files, drawn in cells, with a summary line for the inbox
-([ADR-0052](adr/0052-session-replay-a-timeline-per-agent-run.md)).
+([ADR-0052](adr/0052-session-replay-a-timeline-per-agent-run.md), accepted 2026-11-18;
+[#450](https://github.com/0xPiranhaCodes/pinfold.sh/issues/450)).
