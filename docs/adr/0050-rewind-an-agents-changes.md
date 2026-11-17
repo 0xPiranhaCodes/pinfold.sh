@@ -2,6 +2,10 @@
 
 - **Status:** Accepted (accepted by the maintainer, 2026-11-18)
 - **Date:** 2026-11-14
+- **Amended 2026-11-18**, decided by the coordinator for the maintainer, after the spike in
+  [`docs/spikes/rewind/`](../spikes/rewind/README.md) failed this ADR's gates as first written.
+  Sections 1, 2, 3, 5 and 7, the memory table and slices 0, 2 and 3 change; see "Amendment
+  2026-11-18" at the end.
 
 ## Context
 
@@ -77,8 +81,12 @@ the store on demand. Tracked in [#442](https://github.com/0xPiranhaCodes/pinfold
   with a flag if there were more.
 - Beside it, `stat/<run>-<n>` holds, sorted by path, each covered file's path, size, modification
   time, inode, change time and blob id. The next checkpoint merges its walk with this list in
-  order, streaming, and gives git the old blob id (`M 100644 <id> <path>`) for a file whose stat
-  is unchanged, so it reads only changed files. Memory stays flat in the tree's size. A first
+  order, streaming, and reuses the old blob id for a file whose stat is unchanged, so it reads
+  only changed files. Its commit names the checkpoint whose list it merged as its parent and
+  lists only what differs from it: `M` for a path added or changed, `D` for one gone. The
+  launch checkpoint of a run has no parent, and lists every covered file, unless the store
+  holds an earlier run's checkpoint, which it then takes as its parent (amendment). Memory stays
+  flat in the tree's size. A first
   checkpoint reads every covered file: it never takes stat data or blob ids from the repository's
   own `.git/index`, which an unsandboxed agent can forge (decision 3).
 - One writer at a time per store, by a lock file made with `O_EXCL`.
@@ -98,6 +106,21 @@ to a directory descriptor with `O_NOFOLLOW` (`openat`, `fstatat` with `AT_SYMLIN
 Each file is read through its open descriptor and checked with `fstat` before and after; one that
 changed while read is read once more, then left uncovered.
 
+The walk is one thread and stays in path order. Files to read go through a bounded queue of 512
+records to `min(4, available CPUs)` reader threads, each with 64 KiB buffers and its own
+`git fast-import --quiet --depth=0`, and the stat list is written in walk order as their answers
+come back, so memory does not grow with the tree. Once every reader's pack is in the store, one
+more `fast-import` writes the commit. `pinfold checkpoint take` is a short-lived process, not the
+core, so these threads do not touch ADR-0007. Their git processes are bounded: the sum of the
+concurrent `git` peaks of a take must stay within 1.25 times the peak of the single importer of
+this ADR as first written, on the same tree (amendment).
+
+The take and its git children run at background priority, so a checkpoint never makes the
+machine feel slow. On macOS the take is started with a QoS clamp of utility, as
+`taskpolicy -c utility` starts a command, and its children inherit the clamp; on Linux the take
+sets nice 10 (`setpriority`) and I/O priority class idle (`ioprio_set`) for itself before it
+starts any git. Each is a `pinfold-sys` wrapper.
+
 Git is the first `git` on an absolute `PATH` entry, as for the diff viewer. On macOS, when that is
 `/usr/bin/git`, PinFold first checks that the Command Line Tools are installed (`xcode-select -p`
 names a directory holding `usr/bin/git`) and otherwise treats git as missing, so running it never
@@ -109,10 +132,10 @@ Git is reached through a new entry point beside `git::run`, `git::store(store, a
 that keeps `run`'s environment scrubbing, absolute-`PATH` lookup, timeout, output cap and
 `OVERRIDES`, and adds `GIT_DIR=<store>`, `GIT_CONFIG_GLOBAL=/dev/null` and
 `GIT_CONFIG_NOSYSTEM=1`, with no work tree. The store's own `config` is written by PinFold at
-creation and names no command. Only these subcommands run there: `fast-import --quiet` (with
-`feature done`), `diff-tree`, `diff` between two commits (with `--no-ext-diff --no-textconv
---no-color`), `cat-file --batch`, `for-each-ref`, `update-ref -d`, `repack -a -d -q` and
-`prune`. None of them reads the working directory.
+creation and names no command: `core.compression = 1`, as deltas come later from `repack`.
+Only these subcommands run there: `fast-import --quiet --depth=0` (with `feature done`),
+`diff-tree`, `diff` between two commits (with `--no-ext-diff --no-textconv --no-color`),
+`cat-file --batch`, `for-each-ref`, `update-ref -d`, `repack -a -d -q` and `prune`. None of them reads the working directory.
 
 ### 3. What a checkpoint skips
 
@@ -123,12 +146,12 @@ deletes a path that the checkpoint it restores did not cover.
 | --- | --- |
 | Every entry named `.git`, ignoring ASCII case, and on macOS any name that git's `is_hfs_dotgit` would take for it | Git's own data; restoring it is how a repository gets hooks. Commits the agent made are not undone; the docs say so. |
 | A directory holding a `.git` below the working directory, a nested repository or submodule | Its files belong to another repository's history. Not covered in v1; the diff viewer on a checkpoint lists each skipped one as `nested repository, not covered` (decision 6). |
-| Paths ignored by the `.gitignore` files in the tree, with `rewind.include_ignored = false`, except files whose name matches `.env*`, which are always covered | Build output and dependencies, often most of a tree's size. Matched by PinFold's walker from the tree's `.gitignore` files, read as data with the walk's caps; no git runs over the tree for it. A `.env*` file is covered even when ignored: an agent that overwrites one loses the person's secrets for good, the worst loss a rewind can prevent, and the copy stays in the private store (decision 2). |
+| Paths ignored by the `.gitignore` files in the tree, with `rewind.include_ignored = false`, except files whose name matches `.env*`, which are covered in every directory the walk enters. An ignored directory is not entered, so a `.env*` inside one is not covered | Build output and dependencies, often most of a tree's size. Matched by PinFold's walker from the tree's `.gitignore` files, read as data with the walk's caps; no git runs over the tree for it. A `.env*` file is covered even when ignored: an agent that overwrites one loses the person's secrets for good, the worst loss a rewind can prevent, and the copy stays in the private store (decision 2). |
 | A regular file over `rewind.max_file_mib` (16 MiB) | Large binaries. |
 | A regular file with more than one hard link | It may be a link to a file outside the directory, such as a hidden credential, whose text a checkpoint would copy and a restore write back. |
 | Fifos, sockets and devices | Not files. |
 | Anything outside the working directory | Not watched. The docs say an unsandboxed agent's writes elsewhere, such as to `~/.bashrc`, cannot be rewound. |
-| Everything past `rewind.max_files` (100,000) entries or `rewind.max_new_mib` (256 MiB) of new content | Bounds time and disk. The checkpoint is marked incomplete; a restore from it deletes nothing. |
+| Everything past `rewind.max_files` (200,000) files and links, directories not counted, or `rewind.max_new_mib` (2048 MiB) of new content | Bounds time and disk. The checkpoint is marked incomplete; a restore from it deletes nothing. At the first values, 100,000 entries and 256 MiB, a launch checkpoint of the Linux tree stopped after 33,969 of 86,663 files; whole, it fits `wait_s` (amendment). |
 
 ### 4. When checkpoints are taken
 
@@ -153,7 +176,10 @@ exceed `rewind.max_store_mib` (2048; 2 GiB and 14 days are defaults, both config
 other than its launch one and its newest. A live run's launch checkpoint is never pruned: if the
 cap cannot be met without it, new checkpoints are refused, and the reason is shown. So an agent
 cannot push its own launch checkpoint out by taking checkpoints. `pinfold checkpoint prune` runs
-after each take: it deletes refs and stat files, then `repack -a -d -q` and `prune` in the store.
+after each take: it deletes refs and stat files, then `prune` in the store. It runs
+`repack -a -d -q`, which costs 10-15 s on a Linux-sized store, only when the store holds more
+than 32 packs or the packs written since its last repack exceed 512 MiB, and at background
+priority like a take (amendment).
 
 ### 6. Seeing and undoing
 
@@ -233,8 +259,8 @@ on_done = true          # and when the run's status becomes done
 wait_s = 10             # how long a launch waits for its checkpoint
 include_ignored = false # skip what the tree's .gitignore files ignore, except .env*
 max_file_mib = 16       # larger files are not covered
-max_files = 100000      # entries walked per checkpoint
-max_new_mib = 256       # new content per checkpoint
+max_files = 200000      # files and links walked per checkpoint
+max_new_mib = 2048      # new content per checkpoint
 max_store_mib = 2048    # all stores together, 2 GiB
 keep_days = 14          # older checkpoints are pruned
 keep_per_run = 20
@@ -290,7 +316,7 @@ The threat model gains, each naming ADR-0050:
 | Core, 8 agent panes plus 64 run records | ≤ 4 MB, the existing core budget; 48 B a record, 3 KiB at the cap, and no checkpoint list kept | A new row, filling the records through `checkpoint.take` on a scratch directory, then `checkpoint.list` on each run, measured after settle |
 | Each agent pane in the core | ≤ 250 KB, unchanged | The existing pane row |
 | A `pinfold checkpoint take` process | ≤ 4 MB at any tree size, as the walk and the stat merge stream with 64 KiB buffers | A new row: a take over a generated tree of 100,000 files, then a second take with 1% changed |
-| `git fast-import` and `repack` | Not PinFold's process; the spike measures and reports their peak, and mem-gate does not gate it (decision 9) | — |
+| `git fast-import` and `repack` | Not PinFold's process, and mem-gate does not gate it (decision 9). The sum of a take's concurrent git peaks stays within 1.25 times the single importer's on the same tree: on the Linux tree 152 MB against 268 MB on macOS and 325 MB against 280 MB on Linux (amendment) | The spike's `measure.sh --peaks` |
 | Diff viewer on a checkpoint | ≤ 3 MB + 3 × git output, at most 27 MB, the existing diff row | The existing row, run with `--checkpoint` |
 | Window with a `Rewind` prompt | The existing window budget: at most 10 paths of 256 bytes | The existing window rows |
 | Disk | ≤ `max_store_mib`, 2 GiB by default | A pruning test, not mem-gate |
@@ -310,23 +336,33 @@ The threat model gains, each naming ADR-0050:
    decision stands if a launch checkpoint of the Linux tree takes ≤ 10 s, an unchanged one
    ≤ 1 s, the store is at most half the covered size, and the prototype stays ≤ 4 MB. Otherwise
    this ADR is revised before slice 1, with option B on macOS the first alternative. mem-gate:
-   none; the spike's own table is its memory evidence.
+   none; the spike's own table is its memory evidence. Done in PR #451: as written the first
+   take failed on both platforms; the amendment below takes the spike's changes, with which every
+   gate passes.
 1. **`pinfold-sys`: descriptor-relative file access.** `openat`, `fstatat`, `readlinkat`,
    `unlinkat`, `symlinkat`, `renameat` and `mkdirat` wrappers, each with a `// SAFETY:` comment.
    Tests: a component swapped for a link is refused; a rename over a link replaces the link, not
    its target. mem-gate: the existing core and pane rows hold unchanged (no resident state).
-2. **`pinfold-tools`: the walker and `git::store`.** Skips, caps, hard links, the `.git` aliases,
-   nested repositories, `.gitignore` matching with `.env*` always covered, and the stat merge; the
-   fast-import stream; the macOS Command Line Tools check before `/usr/bin/git`, for
-   `git::store` and the diff viewer's `git::run` alike. Tests: each skip and cap fails without
-   it; an ignored `.env.local` is covered; the hostile work tree of T5 leaves no marker; with the
-   Command Line Tools absent (a stubbed `xcode-select`) git counts as missing and `/usr/bin/git`
-   never runs; a `.gitignore` fuzz target joins `fuzz-smoke`. mem-gate: the existing diff row
-   holds.
-3. **`pinfold checkpoint take` and `prune`.** Store creation and its refusals, the lock, commit
-   metadata, pruning order. Tests: a live launch checkpoint is never pruned; the cap refuses new
+2. **`pinfold-tools`: the walker and `git::store`.** Skips, caps (`max_files` counting files
+   and links only), hard links, the `.git` aliases, nested repositories, `.gitignore` matching
+   with `.env*` covered in every directory the walk enters and ignored directories not entered,
+   and the stat merge; the fast-import stream, with `min(4, available CPUs)` reader threads each
+   feeding its own `fast-import --depth=0` through the 512-record queue, and a commit on the
+   previous checkpoint listing only `M` and `D`; background priority for the take and its git
+   (QoS utility on macOS, nice 10 and I/O class idle on Linux, through `pinfold-sys`); the macOS
+   Command Line Tools check before `/usr/bin/git`, for `git::store` and the diff viewer's
+   `git::run` alike. `getattrlistbulk` on macOS stays in reserve for the walk, used only if the
+   take row or a regression puts the unchanged Linux-tree take over 1 s. Tests: each skip and cap
+   fails without it; an ignored `.env.local` is covered and a `.env` in an ignored directory is
+   not; a commit built on its parent has the tree of a take from scratch; the hostile work tree of
+   T5 leaves no marker; with the Command Line Tools absent (a stubbed `xcode-select`) git counts
+   as missing and `/usr/bin/git` never runs; a `.gitignore` fuzz target joins `fuzz-smoke`.
+   mem-gate: the existing diff row holds.
+3. **`pinfold checkpoint take` and `prune`.** Store creation with `core.compression = 1` and its
+   refusals, the lock, commit metadata, pruning order, and `repack` only past 32 packs or 512 MiB
+   written since the last one. Tests: a live launch checkpoint is never pruned; the cap refuses new
    checkpoints instead; a symlinked or open store is refused. mem-gate: new row, a take over a
-   generated tree of 100,000 files, then one with 1% changed, ≤ 4 MB.
+   generated tree of 100,000 files, then one with 1% changed, ≤ 4 MB, with the reader threads.
 4. **`pinfold checkpoint plan` and `restore`.** Tests: a planted directory link, file link and hard
    link; a file changed since shown is skipped; an incomplete checkpoint deletes nothing; the
    restore checkpoint restores the state before the restore. mem-gate: the take row's
@@ -389,3 +425,45 @@ not undo the agent's commits or its writes outside the working directory, skips 
 files by default, and cannot protect checkpoints from an unsandboxed agent. Revisit if the spike
 misses its targets, if a pure-Rust store replaces git for the tools, or if agents start running in
 their own copy of the tree, which would make a rewind a discard.
+
+## Amendment 2026-11-18
+
+Decided by the coordinator for the maintainer, under the maintainer's rule for this work (no
+memory growth) and the spike's numbers ([`README.md`](../spikes/rewind/README.md),
+[`results.md`](../spikes/rewind/results.md)). As first written, the Linux tree's first take took
+46.29 s on macOS and 56.43 s on Linux against 10 s, and its unchanged take 1.02 s on macOS against
+1 s. One `git fast-import` at git's default zlib level, trying a delta for every blob, was the
+bottleneck, then reading from one thread on APFS. The spike's six recommendations are taken:
+
+1. **Parallel readers, under a memory bound** (section 2). `min(4, available CPUs)` reader
+   threads, each with its own `fast-import`, fed by the one in-order walk through a 512-record
+   queue, and one more `fast-import` for the commit. The sum of concurrent git peaks must stay
+   within 1.25 times the single importer's peak on the same tree. `measure.sh --peaks`, on the
+   Linux tree, largest over six takes: macOS (`phys_footprint`) 152 MB with four readers against
+   268 MB, a bound of 335 MB; Linux (RSS) 325 MB against 280 MB, a bound of 350 MB, the commit's
+   importer alone after the readers. **Four readers** are chosen: two lower nothing on Linux and
+   take 10.18 s on macOS, over the gate.
+2. **`--depth=0` and `core.compression = 1`** (sections 2 and 5). Deltas come from
+   `repack -a -d -q` in `prune`, run only past 32 packs or 512 MiB written since the last one, as
+   it costs 10.5 s (macOS) and 15.5 s (Linux) on a Linux-sized store. The store is 0.25 of
+   covered bytes against 0.21.
+3. **A commit on its parent, listing only `M` and `D`** (section 1). Git's share of an unchanged
+   take falls to 8-114 ms; the trees match a take from scratch.
+4. **`max_new_mib = 2048` and `max_files = 200000`, counting files and links only** (section 3
+   and the config). At 256 MiB the Linux tree's launch checkpoint was incomplete, so a restore
+   from it could delete nothing; whole, it takes 5-7 s and about 350 MB of store.
+5. **`.env*` is covered in every directory the walk enters; an ignored directory is not
+   entered** (section 3), as the generated tree's ignored `build/` of 200,000 files showed.
+6. **`getattrlistbulk` on macOS stays in reserve** for the walk (slice 2), as the unchanged take
+   is the walk and passes narrowly.
+
+Also decided: **the take and its git run at background priority** (section 2), QoS utility on
+macOS and nice 10 with I/O class idle on Linux, so a checkpoint never makes the machine feel
+slow. Measured with four readers on the Linux tree, it keeps every gate: first take 6.20 s
+against 5.95 s at normal priority on macOS and 4.71 s against 5.16 s on Linux; unchanged 0.98 s
+against 0.91 s on macOS, the narrowest margin, and 0.44 s on Linux. The Linux numbers come from an
+OrbStack VM on the same Mac whose `none` I/O scheduler ignores I/O priority, so the idle class
+is unmeasured there; bare-metal Linux and CI were not used. `wait_s` stays the backstop.
+
+Decision 3 (no `.git/index`), option A and the 4 MB prototype bound stand: the prototype peaked at
+3.49 MB with four readers at background priority.

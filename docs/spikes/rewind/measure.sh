@@ -2,6 +2,10 @@
 # Reproduces results.md for one file system. Needs cargo, git, and ~6 GB free on <work>.
 # Usage: measure.sh <work-dir> <label>   (writes results/<label>.jsonl beside this script)
 #        measure.sh --linux              (Docker: the same run on a loop-mounted ext4 image)
+#        measure.sh [--linux] --peaks [<work-dir> <label>]
+#                                        (Linux tree only: the sum of concurrent git peaks per
+#                                         reader count, at normal and background priority;
+#                                         writes results/<label>-peaks.jsonl)
 # LINUX_SRC=<clone of torvalds/linux at v6.12> skips the download.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -10,6 +14,8 @@ PINFOLD_COMMIT=8f0bd1f4baf33dee3203c16d5213eff4ebc3895d
 mkdir -p "$HERE/results"
 
 if [ "${1:-}" = --linux ]; then
+  PEAKS=
+  [ "${2:-}" = --peaks ] && PEAKS=--peaks
   LINUX_MOUNT=
   [ -n "${LINUX_SRC:-}" ] && LINUX_MOUNT="-v $LINUX_SRC:/linux-src:ro"
   # shellcheck disable=SC2086
@@ -20,12 +26,14 @@ if [ "${1:-}" = --linux ]; then
       cp -R /repo/docs/spikes/rewind /spike && rm -rf /spike/results && ln -s /results /spike/results
       git config --global --add safe.directory "*"
       cd /spike && git init -q && LINUX_SRC=$([ -d /linux-src ] && echo /linux-src || true) \
-        ./measure.sh /w linux-ext4'
+        ./measure.sh '"$PEAKS"' /w linux-ext4'
 fi
 
+PEAKS=
+if [ "${1:-}" = --peaks ]; then PEAKS=-peaks; shift; fi
 W=$1
 LABEL=$2
-OUT="$HERE/results/$LABEL.jsonl"
+OUT="$HERE/results/$LABEL$PEAKS.jsonl"
 : > "$OUT"
 avail_kb=$(df -Pk "$W" | awk 'NR==2 {print $4}')
 [ "$avail_kb" -gt 6000000 ] || { echo "need 6 GB free on $W, have $((avail_kb / 1024)) MB" >&2; exit 1; }
@@ -95,20 +103,51 @@ measure() { # <corpus> <dir>
   fi
 }
 
-rm -rf "$W/pinfold" && git clone -q https://github.com/0xPiranhaCodes/pinfold.sh.git "$W/pinfold" && git -C "$W/pinfold" checkout -q "$PINFOLD_COMMIT"
-measure pinfold "$W/pinfold"
-rm -rf "$W/pinfold"
+# Every take runs under `spike-rewind peaks`, in its own process group, which samples each git
+# process in the group every 5 ms (phys_footprint on macOS, RSS on Linux). "bg" adds the
+# background priority ADR-0050 asks for: QoS utility on macOS, nice 10 and ioprio idle on Linux.
+peaks() { # <corpus> <dir>
+  name=$1 dir=$2 store="$W/store-$1"
+  find "$dir" -name .git -prune -o -type f -exec cat {} + > /dev/null # warm the cache
+  if [ "$(uname)" = Darwin ]; then BG="taskpolicy -c utility"; else BG="nice -n 10 ionice -c 3"; fi
+  for run in adr-1-normal recommended-4-normal recommended-2-normal recommended-4-bg recommended-2-bg; do
+    cfg=${run%%-*} readers=${run#*-} readers=${readers%-*} prio=${run##*-}
+    if [ "$cfg" = adr ]; then
+      CONFIG="REWIND_READERS=1 REWIND_COMPRESSION=-1 REWIND_FAST_IMPORT_ARGS=--quiet"
+    else
+      CONFIG="REWIND_READERS=$readers REWIND_COMPRESSION=1 REWIND_FAST_IMPORT_ARGS=--depth=0"
+    fi
+    PRIO=
+    [ "$prio" = bg ] && PRIO=$BG
+    for i in 1 2 3; do
+      rm -rf "$store"
+      # shellcheck disable=SC2086
+      emit "$name" "$run" first "$("$B" peaks $PRIO env $WHOLE $CONFIG "$B" "$dir" "$store" 0)"
+    done
+    for n in 1 2 3; do
+      # shellcheck disable=SC2086
+      emit "$name" "$run" unchanged "$("$B" peaks $PRIO env $WHOLE $CONFIG "$B" "$dir" "$store" $n)"
+    done
+  done
+  rm -rf "$store"
+}
 
-rm -rf "$W/generated" && "$B" gen "$W/generated"
-measure generated "$W/generated"
-rm -rf "$W/generated"
+if [ -z "$PEAKS" ]; then
+  rm -rf "$W/pinfold" && git clone -q https://github.com/0xPiranhaCodes/pinfold.sh.git "$W/pinfold" && git -C "$W/pinfold" checkout -q "$PINFOLD_COMMIT"
+  measure pinfold "$W/pinfold"
+  rm -rf "$W/pinfold"
+
+  rm -rf "$W/generated" && "$B" gen "$W/generated"
+  measure generated "$W/generated"
+  rm -rf "$W/generated"
+fi
 
 if [ -n "${LINUX_SRC:-}" ]; then
   cp -R "$LINUX_SRC" "$W/linux"
 else
   git clone -q --depth 1 --branch v6.12 -c advice.detachedHead=false https://github.com/torvalds/linux.git "$W/linux"
 fi
-measure linux "$W/linux"
+if [ -n "$PEAKS" ]; then peaks linux "$W/linux"; else measure linux "$W/linux"; fi
 rm -rf "$W/linux"
 
 { uname -srvmo 2>/dev/null || uname -srvm; } | awk '{printf "{\"fs\":\"'"$LABEL"'\",\"step\":\"host\",\"uname\":\"%s\"", $0}' >> "$OUT"
