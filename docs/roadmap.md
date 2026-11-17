@@ -21,6 +21,10 @@ have shipped, and beta.4 includes the built-in tools. v0.1 waits on the Linux de
 [#331](https://github.com/0xPiranhaCodes/pinfold.sh/issues/331) is documented for v0.1, not fixed
 ([ADR-0047](adr/0047-macos-sandbox-reads-other-processes-environment.md)).
 
+**Next.** Rewind an agent's changes from checkpoints of its working directory
+([ADR-0050](adr/0050-rewind-an-agents-changes.md), accepted 2026-11-18;
+[#442](https://github.com/0xPiranhaCodes/pinfold.sh/issues/442)).
+
 **Next.** A "needs you" inbox across every agent pane with Approve and Interrupt, prefix keys to
 it and to the next ◆, desktop, webhook and program-notification alerts, and progress on the tab and
 the Dock ([ADR-0051](adr/0051-needs-you-inbox-and-alerts.md), accepted 2026-11-18;
