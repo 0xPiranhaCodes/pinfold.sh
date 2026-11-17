@@ -39,13 +39,17 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode, Palette};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 16;
+pub const VERSION: u16 = 17;
 
 /// The oldest version this side still speaks, one before [`VERSION`] (ADR-0043).
 pub const OLDEST: u16 = VERSION - 1;
 
 /// The first version whose [`Notice::Status`] carries `naming` and its times (ADR-0051).
 const TIMED_STATUS: u16 = 16;
+
+/// The first version with [`Request::Inbox`] and every pane's tab in a [`Notice::Layout`]
+/// (ADR-0051).
+const INBOX: u16 = 17;
 
 /// Most rows or columns a screen can have, which the core clamps its panes to.
 pub const MAX_DIMENSION: u16 = 1024;
@@ -141,6 +145,7 @@ const OPEN_TOOL: u8 = 22;
 const LIST_MARKDOWN: u8 = 23;
 const OPEN_MARKDOWN: u8 = 24;
 const PALETTE: u8 = 25;
+const INBOX_OPEN: u8 = 26;
 
 const FRAME: u8 = 1;
 const CWD: u8 = 2;
@@ -182,6 +187,8 @@ const BLANK: Cell = Cell {
 const LAYOUT_TAB: usize = 4;
 /// A pane in a layout: its number and the four sides of its rectangle.
 const LAYOUT_PANE: usize = 4 + 4 * 2;
+/// A pane of the session in a layout: its number and its tab's index.
+const LAYOUT_MEMBER: usize = 4 + 1;
 
 /// Why bytes could not be encoded or decoded. This holds sizes and tags, never message contents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -608,6 +615,11 @@ pub enum Request<'a> {
     /// The colours every pane's named and indexed colours resolve through from now on, history
     /// included (ADR-0049). Sent after the hello and after each change. Since version 14.
     Palette(Palette),
+    /// The inbox opened or closed in the window (ADR-0051). Since version 17.
+    Inbox {
+        /// Whether it is open now.
+        open: bool,
+    },
 }
 
 /// A message from the core to a window. Text borrows from the decoder's buffer.
@@ -692,6 +704,9 @@ pub enum Notice<'a> {
         reported: bool,
         /// Whether the pane has its tab's focus, so the tab shows this state.
         naming: bool,
+        /// Whether the pane is in the inbox: an agent profile's, or one that reported since it
+        /// opened. Since version 17; below it, a pane that does not name its tab.
+        listed: bool,
         /// Whole seconds the pane has been in `state` when sent, saturating.
         since: u32,
         /// Whole seconds since the pane's program started when sent, saturating.
@@ -749,6 +764,7 @@ pub struct Layout<'a> {
     pub total: u16,
     tabs: &'a [u8],
     panes: &'a [u8],
+    members: &'a [u8],
 }
 
 impl Layout<'_> {
@@ -770,17 +786,30 @@ impl Layout<'_> {
             .filter_map(|pane| read_pane(pane).ok())
     }
 
+    /// Returns every pane of the session and its tab's index, tab by tab, each tab's in its
+    /// order, since version 17; none below it.
+    pub fn members(&self) -> impl Iterator<Item = (u32, u8)> + '_ {
+        self.members
+            .as_chunks::<LAYOUT_MEMBER>()
+            .0
+            .iter()
+            .filter_map(|member| Some((Reader(member).u32().ok()?, member[4])))
+    }
+
     /// Returns whether no tab is left, which ends the window.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.tabs.is_empty()
     }
 
-    fn write(&self, out: &mut Vec<u8>) {
+    fn write(&self, version: u16, out: &mut Vec<u8>) {
         let (tabs, panes) = (self.tabs.len() / LAYOUT_TAB, self.panes.len() / LAYOUT_PANE);
         put!(out; self.active, self.focused, self.total, tabs as u16, panes as u16);
         out.extend_from_slice(self.tabs);
         out.extend_from_slice(self.panes);
+        if version >= INBOX {
+            out.extend_from_slice(self.members);
+        }
     }
 }
 
@@ -954,6 +983,7 @@ impl Request<'_> {
             Self::OpenTool { .. } => 12,
             Self::ListMarkdown { .. } | Self::OpenMarkdown { .. } => 13,
             Self::Palette(_) => 14,
+            Self::Inbox { .. } => INBOX,
             _ => OLDEST,
         }
     }
@@ -1076,6 +1106,10 @@ impl Request<'_> {
                 }
                 PALETTE
             }
+            Self::Inbox { open } => {
+                out.push(u8::from(open));
+                INBOX_OPEN
+            }
         };
         finish(out, start, MAX_REQUEST, kind)
     }
@@ -1188,6 +1222,9 @@ impl Request<'_> {
                     ansi,
                 })
             }
+            INBOX_OPEN => Request::Inbox {
+                open: body.tag("open", &[false, true])?,
+            },
             kind => return Err(Error::UnknownKind { kind }),
         };
         body.end()?;
@@ -1222,7 +1259,8 @@ impl Notice<'_> {
     }
 
     /// Appends this message as a window speaking `version` reads it, which differs only for
-    /// [`Notice::Status`] below 16. It never checks [`Notice::since`]: the sender does.
+    /// [`Notice::Status`] and [`Notice::Layout`] below 17. It never checks [`Notice::since`]:
+    /// the sender does.
     ///
     /// ```
     /// use pinfold_proto::link::{Decoder, Notice, OLDEST};
@@ -1230,7 +1268,8 @@ impl Notice<'_> {
     /// let mut wire = Vec::new();
     /// Notice::Hello { version: OLDEST }.encode(&mut wire)?;
     /// let status = Notice::Status {
-    ///     pane: 1, state: 0, reported: false, naming: true, since: 0, started: 0, message: "",
+    ///     pane: 1, state: 0, reported: false, naming: true, listed: false, since: 0, started: 0,
+    ///     message: "",
     /// };
     /// status.encode_at(OLDEST, &mut wire)?;
     /// let (mut decoder, mut input) = (Decoder::default(), wire.as_slice());
@@ -1296,7 +1335,7 @@ impl Notice<'_> {
                 put_tail(out, start, MAX_MESSAGE, LINKED, *pane, &head)?
             }
             Self::Layout(layout) => {
-                layout.write(out);
+                layout.write(version, out);
                 LAYOUT
             }
             Self::Raise => RAISE,
@@ -1337,6 +1376,7 @@ impl Notice<'_> {
                 state,
                 reported,
                 naming,
+                listed,
                 since,
                 started,
                 message,
@@ -1350,7 +1390,8 @@ impl Notice<'_> {
                 }
                 out.extend_from_slice(&[*state, u8::from(*reported)]);
                 if version >= TIMED_STATUS {
-                    out.push(u8::from(*naming));
+                    let listed = u8::from(*listed && version >= INBOX) << 1;
+                    out.push(u8::from(*naming) | listed);
                     put!(out; since, started);
                 }
                 put_tail(out, start, MAX_MESSAGE, STATUS, *pane, message.as_bytes())?
@@ -1409,7 +1450,7 @@ impl Notice<'_> {
                 at: body.position()?,
                 uri: body.text()?,
             },
-            LAYOUT => Notice::Layout(read_layout(&mut body)?),
+            LAYOUT => Notice::Layout(read_layout(&mut body, version)?),
             RAISE => Notice::Raise,
             MARKDOWN => Notice::Markdown {
                 pane: body.u32()?,
@@ -1441,19 +1482,26 @@ impl Notice<'_> {
                     });
                 }
                 let reported = body.tag("reported", &[false, true])?;
-                let (naming, since, started) = if version >= TIMED_STATUS {
-                    (
-                        body.tag("naming", &[false, true])?,
-                        body.u32()?,
-                        body.u32()?,
-                    )
+                let (flags, since, started) = if version >= TIMED_STATUS {
+                    let flags: &[u8] = if version >= INBOX {
+                        &[0, 1, 2, 3]
+                    } else {
+                        &[0, 1]
+                    };
+                    (body.tag("flags", flags)?, body.u32()?, body.u32()?)
                 } else {
-                    (true, 0, 0)
+                    (1, 0, 0)
                 };
+                let naming = flags & 1 != 0;
                 Notice::Status {
                     state,
                     reported,
                     naming,
+                    listed: if version >= INBOX {
+                        flags & 2 != 0
+                    } else {
+                        !naming
+                    },
                     since,
                     started,
                     pane: body.u32()?,
@@ -1597,20 +1645,26 @@ pub fn encode_frame(
     finish(out, start, MAX_MESSAGE, FRAME)
 }
 
-/// Appends a [`Notice::Layout`]. `tabs` holds each tab's focused pane, `panes` what the active
-/// tab shows, and `total` how many panes the session holds. On an error `out` is as it was.
+/// Appends a [`Notice::Layout`] as a window speaking `version` reads it. `tabs` holds each
+/// tab's focused pane, `panes` what the active tab shows, `total` how many panes the session
+/// holds, and `members` each of those with its tab's index, which goes only from version 17.
+/// On an error `out` is as it was.
 ///
 /// # Errors
 ///
 /// What a peer would refuse: [`Error::OutOfBounds`] for too many tabs or panes, an `active` tab
-/// that does not exist, a pane listed twice or a rectangle off the largest screen.
+/// that does not exist, a pane listed twice, a rectangle off the largest screen, or members
+/// that are not `total` panes of existing tabs.
+#[expect(clippy::too_many_arguments, reason = "each is one field of the layout")]
 pub fn encode_layout(
     out: &mut Vec<u8>,
+    version: u16,
     active: u16,
     focused: u32,
     total: u16,
     tabs: &[u32],
     panes: &[(u32, Rect)],
+    members: &[(u32, u8)],
 ) -> Result<(), Error> {
     let too_long = |value: usize| Error::OutOfBounds {
         field: "layout",
@@ -1626,8 +1680,14 @@ pub fn encode_layout(
     for (pane, rect) in panes {
         put!(out; pane, rect.x, rect.y, rect.columns, rect.rows);
     }
+    if version >= INBOX {
+        for (pane, tab) in members {
+            put!(out; pane, tab);
+        }
+    }
     let body = out.get(start + PREFIX + KIND..).unwrap_or_default();
-    if let Err(error) = read_layout(&mut Reader(body)) {
+    let mut read = Reader(body);
+    if let Err(error) = read_layout(&mut read, version).and_then(|_| read.end()) {
         out.truncate(start);
         return Err(error);
     }
@@ -1985,7 +2045,7 @@ fn repeats(records: &[u8], size: usize) -> bool {
     false
 }
 
-fn read_layout<'a>(body: &mut Reader<'a>) -> Result<Layout<'a>, Error> {
+fn read_layout<'a>(body: &mut Reader<'a>, version: u16) -> Result<Layout<'a>, Error> {
     let (active, focused, total) = (body.u16()?, body.u32()?, body.u16()?);
     let (tabs, panes) = (usize::from(body.u16()?), usize::from(body.u16()?));
     let bound = |field, value: usize, most: usize| {
@@ -2006,7 +2066,21 @@ fn read_layout<'a>(body: &mut Reader<'a>) -> Result<Layout<'a>, Error> {
     for pane in panes.as_chunks::<LAYOUT_PANE>().0 {
         read_pane(pane)?;
     }
-    if repeats(tabs, LAYOUT_TAB) || repeats(panes, LAYOUT_PANE) {
+    let members = if version >= INBOX {
+        body.take(usize::from(total) * LAYOUT_MEMBER)?
+    } else {
+        &[]
+    };
+    let count = tabs.len() / LAYOUT_TAB;
+    for member in members.as_chunks::<LAYOUT_MEMBER>().0 {
+        if usize::from(member[4]) >= count {
+            return Err(Error::OutOfBounds {
+                field: "member's tab",
+                value: member[4].into(),
+            });
+        }
+    }
+    if repeats(tabs, LAYOUT_TAB) || repeats(panes, LAYOUT_PANE) || repeats(members, LAYOUT_MEMBER) {
         return Err(Error::OutOfBounds {
             field: "repeated pane",
             value: u64::from(focused),
@@ -2018,6 +2092,7 @@ fn read_layout<'a>(body: &mut Reader<'a>) -> Result<Layout<'a>, Error> {
         total,
         tabs,
         panes,
+        members,
     })
 }
 
@@ -2130,7 +2205,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 16, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 17, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -2385,8 +2460,7 @@ mod tests {
         assert_eq!(decoder.next_request(&mut input), Ok(Some(PALETTE_SEED)));
     }
 
-    /// ADR-0051: a window of 15 reads a status in its own layout, as naming with no times, and
-    /// one of 16 gets the pane's times and whether it names its tab.
+    /// ADR-0051: every version spoken gets a pane's times and whether it names its tab.
     #[test]
     fn a_status_is_laid_out_for_the_spoken_version() {
         let status = Notice::Status {
@@ -2394,6 +2468,7 @@ mod tests {
             state: 0,
             reported: false,
             naming: false,
+            listed: true,
             since: 42,
             started: 600,
             message: "ok",
@@ -2409,20 +2484,11 @@ mod tests {
                 .map(|n| format!("{n:?}"));
             (wire.len(), notice)
         };
+        // 15, which reads a status without naming or times, is no longer spoken (ADR-0043).
         let (old, older) = read(OLDEST);
-        let untimed = Notice::Status {
-            pane: 7,
-            state: 0,
-            reported: false,
-            naming: true,
-            since: 0,
-            started: 0,
-            message: "ok",
-        };
-        assert_eq!(older, Some(format!("{untimed:?}")));
         let (new, newer) = read(VERSION);
+        assert_eq!((older, old), (newer.clone(), new));
         assert_eq!(newer, Some(format!("{status:?}")));
-        assert_eq!(new, old + 9, "naming and two times");
     }
 
     const PALETTE_SEED: Request<'static> = Request::Palette(Palette::GRAPHITE_GRID);
@@ -2683,7 +2749,16 @@ mod tests {
                 body.extend_from_slice(&side.to_le_bytes());
             }
         }
+        for (pane, tab) in members() {
+            body.extend_from_slice(&pane.to_le_bytes());
+            body.push(tab);
+        }
         body
+    }
+
+    /// The session's [`MAX_PANES`] panes, all in the first tab.
+    fn members() -> Vec<(u32, u8)> {
+        (0..MAX_PANES as u32).map(|pane| (1000 + pane, 0)).collect()
     }
 
     const CORNER: Rect = Rect {
@@ -2728,7 +2803,8 @@ mod tests {
         for (active, tabs, panes, field) in bad {
             let mut out = vec![9];
             let total = MAX_PANES as u16;
-            let error = encode_layout(&mut out, active, 7, total, tabs, panes).unwrap_err();
+            let error = encode_layout(&mut out, VERSION, active, 7, total, tabs, panes, &members())
+                .unwrap_err();
             assert!(matches!(error, Error::OutOfBounds { field: f, .. } if f == field));
             assert_eq!(out, [9]);
             let wire = raw(LAYOUT, &layout_body(active, tabs, panes));
@@ -2750,11 +2826,47 @@ mod tests {
     #[test]
     fn an_empty_session_is_a_layout() {
         let mut wire = HELLO_WIRE.to_vec();
-        encode_layout(&mut wire, 0, 0, 0, &[], &[]).unwrap();
+        encode_layout(&mut wire, VERSION, 0, 0, 0, &[], &[], &[]).unwrap();
         let (mut decoder, mut input) = (Decoder::default(), wire.as_slice());
         decoder.next_notice(&mut input).unwrap();
         let notice = decoder.next_notice(&mut input).unwrap();
         assert!(matches!(notice, Some(Notice::Layout(layout)) if layout.is_empty()));
+    }
+
+    #[test]
+    fn a_layout_names_each_panes_tab_from_17_and_none_before() {
+        let members = [(4, 0), (5, 1), (6, 1)];
+        let read = |version: u16| {
+            let mut wire = raw(HELLO, &version.to_le_bytes());
+            encode_layout(&mut wire, version, 1, 5, 3, &[4, 5], &[], &members).unwrap();
+            let (mut decoder, mut input) = (Decoder::default(), wire.as_slice());
+            decoder.next_notice(&mut input).unwrap();
+            match decoder.next_notice(&mut input).unwrap() {
+                Some(Notice::Layout(layout)) => layout.members().collect::<Vec<_>>(),
+                other => panic!("{other:?}"),
+            }
+        };
+        assert_eq!(read(VERSION), members);
+        assert_eq!(read(OLDEST), []);
+        let refused = |members: &[(u32, u8)]| {
+            let mut out = Vec::new();
+            encode_layout(&mut out, VERSION, 0, 4, 2, &[4, 5], &[], members).unwrap_err()
+        };
+        assert!(matches!(
+            refused(&[(4, 0), (5, 2)]),
+            Error::OutOfBounds {
+                field: "member's tab",
+                ..
+            }
+        ));
+        assert!(matches!(
+            refused(&[(4, 0), (4, 1)]),
+            Error::OutOfBounds {
+                field: "repeated pane",
+                ..
+            }
+        ));
+        assert_eq!(refused(&[(4, 0)]), Error::Truncated);
     }
 
     #[test]
@@ -3073,16 +3185,17 @@ mod tests {
             notice_error(&raw(STATUS, &[0, 2, 0, 0, 0, 0])),
             Err(reported)
         );
-        let naming = Error::BadTag {
-            field: "naming",
-            tag: 2,
+        let flags = Error::BadTag {
+            field: "flags",
+            tag: 4,
         };
-        assert_eq!(notice_error(&raw(STATUS, &[0, 0, 2, 0])), Err(naming));
+        assert_eq!(notice_error(&raw(STATUS, &[0, 0, 4, 0])), Err(flags));
         let notice = Notice::Status {
             pane: 0,
             state: STATES,
             reported: false,
             naming: true,
+            listed: false,
             since: 0,
             started: 0,
             message: "",
@@ -3336,6 +3449,7 @@ mod tests {
                 Request::OpenTool { pane, tool: if forward { Tool::Files } else { Tool::Diff } },
                 Request::ListMarkdown { pane },
                 Request::WasRunningAnswer { pane, run: forward },
+                Request::Inbox { open: forward },
             ] {
                 prop_assert!(request_survives(command, chunk), "changed on the link");
             }
@@ -3343,7 +3457,7 @@ mod tests {
 
         #[test]
         fn a_layout_round_trips(
-            mut tabs in prop::collection::btree_set(any::<u32>(), 0..=MAX_TABS),
+            mut tabs in prop::collection::btree_set(any::<u32>(), 1..=MAX_TABS),
             panes in prop::collection::btree_map(any::<u32>(), rects(), 0..=MAX_PANES),
             active in any::<u16>(),
             focused in any::<u32>(),
@@ -3353,7 +3467,12 @@ mod tests {
             let tabs: Vec<u32> = std::mem::take(&mut tabs).into_iter().collect();
             let panes: Vec<(u32, Rect)> = panes.into_iter().collect();
             let mut wire = Vec::new();
-            encode_layout(&mut wire, active, focused, MAX_PANES as u16, &tabs, &panes).unwrap();
+            let members: Vec<(u32, u8)> = (members().into_iter().enumerate())
+                .map(|(index, (pane, _))| (pane, (index % tabs.len()) as u8))
+                .collect();
+            let total = MAX_PANES as u16;
+            encode_layout(&mut wire, VERSION, active, focused, total, &tabs, &panes, &members)
+                .unwrap();
             let mut decoder = Decoder::default();
             let hello = [HELLO_WIRE.as_slice(), wire.as_slice()].concat();
             let mut input = hello.as_slice();
@@ -3367,11 +3486,12 @@ mod tests {
                             layout.focused,
                             layout.tabs().collect::<Vec<_>>(),
                             layout.panes().collect::<Vec<_>>(),
+                            layout.members().collect::<Vec<_>>(),
                         ));
                     }
                 }
             }
-            prop_assert_eq!(seen, Some((active, focused, tabs, panes)));
+            prop_assert_eq!(seen, Some((active, focused, tabs, panes, members)));
         }
 
         #[test]
@@ -3503,12 +3623,13 @@ mod tests {
             state in 0..STATES,
             reported in any::<bool>(),
             naming in any::<bool>(),
+            listed in any::<bool>(),
             since in any::<u32>(),
             started in any::<u32>(),
             message in any::<String>(),
             chunk in chunks(),
         ) {
-            let notice = Notice::Status { pane, state, reported, naming, since, started, message: &message };
+            let notice = Notice::Status { pane, state, reported, naming, listed, since, started, message: &message };
             prop_assert!(notice_survives(&notice, chunk), "changed on the link");
         }
 
