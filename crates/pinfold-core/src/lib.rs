@@ -20,4 +20,5 @@ pub mod tap;
 pub mod tool;
 pub mod vt;
 pub mod wait;
+pub mod webhook;
 pub mod workspace;

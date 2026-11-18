@@ -17,6 +17,9 @@ variable is unset. Saving the file applies it to the running window within about
 | `keys.inbox`          | string | `"!"`   | Key after the prefix that opens the [inbox](#the-inbox); one printable ASCII character no other prefix key uses |
 | `keys.next_waiting`   | string | `"w"`   | Key after the prefix that goes to the [next pane that needs you](#the-inbox); the same rules, and not `keys.inbox` |
 | `alerts.desktop`      | list   | `["needs-you", "error"]` | States that raise a [desktop notification](#agent-profiles): `"needs-you"`, `"error"`, or `[]` for none |
+| `alerts.webhook`      | string | `""`    | An `https://` URL, or `http://` to `127.0.0.1` or `[::1]`, to post [webhooks](#webhooks) to; empty for none |
+| `alerts.webhook_states` | list | `["needs-you", "error"]` | States that are posted, as `alerts.desktop` |
+| `alerts.webhook_format` | string | `"json"` | `"json"`, or `"text"` for ntfy-style relays |
 | `api.audit_log`       | bool   | `false` | Also write the API audit log to disk                     |
 | `api.protect`         | list   | below   | Command-line text that protects a pane from API sends    |
 | `agents.<name>`       | table  | none    | An [agent profile](#agent-profiles)                      |
@@ -132,6 +135,25 @@ with nothing else of your environment but the session bus and display variables;
 nothing yet. Without `notify-send` the tab's mark is the only signal, and the log says so once.
 A plain shell pane never reads them, so a program there cannot fake needs you
 ([ADR-0046](adr/0046-agent-panes-read-needs-you-from-output.md)).
+
+### Webhooks
+
+`alerts.webhook` names where the core posts an alert, read when the core starts, so a change
+applies to the next session. The core checks the URL then: at most 2048 bytes, `https://`, or
+`http://` only to `127.0.0.1` or `[::1]` (never `localhost`), no user name or password, a host
+name or IP address with an optional port, and a path and query of printable ASCII without
+spaces, `"`, `\` or `#`. A URL that breaks a rule turns webhooks off, and the log names the rule,
+never the URL, as its path may hold a secret such as an ntfy topic. A post holds only fixed
+fields: the state, whether the agent or its output set it, the profile's name, the hostname, the
+tab and pane numbers and two times, never pane text, a message or the tab's label. As JSON:
+
+```json
+{"pinfold":1,"state":"needs-you","source":"agent","agent":"claude","host":"studio","tab":2,"pane":7,"at":1763112000,"since":1763111958}
+```
+
+With `webhook_format = "text"` it is one line, `◆ needs you · claude · tab 2 pane 7 · studio`. The
+sender, the system `curl`, comes in a later change
+([ADR-0051](adr/0051-needs-you-inbox-and-alerts.md)); until then nothing is posted.
 
 ```toml
 [agents.claude]
