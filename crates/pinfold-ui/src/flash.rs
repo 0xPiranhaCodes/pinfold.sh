@@ -28,6 +28,8 @@ enum Said {
     Unhardened(bool, String),
     /// How many secret-looking variables, and the first few names.
     Secrets(u32, String),
+    /// The host a configured webhook posts to.
+    Webhook(String),
     /// PinFold's own words, such as what an older core cannot do.
     Note(&'static str),
 }
@@ -66,6 +68,13 @@ impl Flash {
     pub fn secrets(&mut self, count: u32, names: String, now: Instant) {
         self.until = Some(now + UNHARDENED_SHOWN);
         self.said = Said::Secrets(count, names);
+    }
+
+    /// Shows that alerts go to a webhook on `host`, so one an agent added to the config is
+    /// seen (ADR-0051). As long as the hardened runtime's notice.
+    pub fn webhook(&mut self, host: String, now: Instant) {
+        self.until = Some(now + UNHARDENED_SHOWN);
+        self.said = Said::Webhook(host);
     }
 
     /// Shows PinFold's `text`.
@@ -125,6 +134,14 @@ impl Flash {
                 ],
                 theme,
             ),
+            Said::Webhook(host) => paste::row(
+                frame,
+                &[
+                    (format!(" {UNHARDENED} webhook  "), VIOLET),
+                    (format!("Alerts for ◆ and ✕ go to {host}"), text),
+                ],
+                theme,
+            ),
             Said::Note(note) => paste::row(frame, &[(format!(" {note}"), text)], theme),
             Said::Blocked => paste::row(
                 frame,
@@ -181,6 +198,24 @@ mod tests {
         flash.banner(&mut frame, &GRAPHITE);
         let text: String = frame.cells.iter().map(|cell| cell.character).collect();
         assert!(text.starts_with(" ✕ error  This session has as many tabs"));
+    }
+
+    #[test]
+    fn a_configured_webhook_names_its_host() {
+        let (mut flash, start) = (Flash::default(), Instant::now());
+        let mut frame = Frame {
+            rows: 1,
+            columns: 80,
+            ..Frame::default()
+        };
+        flash.webhook("ntfy.sh".to_owned(), start);
+        flash.tick(start + SHOWN);
+        flash.banner(&mut frame, &GRAPHITE);
+        let text: String = frame.cells.iter().map(|cell| cell.character).collect();
+        assert!(
+            text.starts_with(" ▲ webhook  Alerts for ◆ and ✕ go to ntfy.sh"),
+            "{text}"
+        );
     }
 
     #[test]

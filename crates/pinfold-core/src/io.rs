@@ -241,6 +241,9 @@ pub struct Reactor {
     posted: u8,
     /// Alerts in those states, by pane, until the core takes them for the webhook.
     posts: Vec<(usize, Status)>,
+    /// A configured webhook's host, whether `curl` was found, and how many alerts were given
+    /// up on, for every window (ADR-0051).
+    pub(crate) webhook: Option<(Box<str>, bool, u32)>,
 }
 
 impl Reactor {
@@ -281,7 +284,21 @@ impl Reactor {
             markdown: None,
             posted: 0,
             posts: Vec::new(),
+            webhook: None,
         })
+    }
+
+    /// Tells every window that a webhook to `host` is configured, and with `sender` whether
+    /// `curl` was found. Only the host: the URL's path can hold a secret.
+    pub fn set_webhook(&mut self, host: &str, sender: bool) {
+        self.webhook = Some((host.into(), sender, 0));
+    }
+
+    /// Tells every window how many alerts the webhook has given up on.
+    pub fn set_webhook_failed(&mut self, failed: u32) {
+        if let Some((_, _, told)) = self.webhook.as_mut() {
+            *told = failed;
+        }
     }
 
     /// Keeps each alert in one of `states` for [`Reactor::take_post`], for the webhook

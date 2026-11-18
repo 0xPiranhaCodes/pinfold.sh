@@ -922,6 +922,7 @@ fn webhook(config: &pinfold_config::Config, reactor: &mut Reactor) -> Option<web
             "pinfold-core: webhooks to {} are off: {place}",
             hook.host()
         );
+        reactor.set_webhook(hook.host(), false);
         return None;
     };
     reactor.post_states(alerts.webhook_states.iter().map(|alert| match alert {
@@ -938,6 +939,7 @@ fn webhook(config: &pinfold_config::Config, reactor: &mut Reactor) -> Option<web
         .keys()
         .map(|name| name.as_str().into())
         .collect();
+    reactor.set_webhook(hook.host(), true);
     let waker = Some(reactor.waker());
     Some(webhook::Sender::new(curl, hook, format, agents, waker))
 }
@@ -1051,6 +1053,7 @@ fn daemon(
         reactor.turn(Some(wait.min().unwrap_or(IDLE)))?;
         if let Some(sender) = webhook.as_mut() {
             post(&mut reactor, sender);
+            reactor.set_webhook_failed(sender.failed());
         }
         output::hand_out(&mut reactor, &mut waits, &subscribers);
         waits.retain(|request| !request.is_gone());
