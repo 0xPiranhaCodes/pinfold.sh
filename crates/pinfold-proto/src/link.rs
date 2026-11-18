@@ -39,7 +39,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode, Palette};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 17;
+pub const VERSION: u16 = 18;
 
 /// The oldest version this side still speaks, one before [`VERSION`] (ADR-0043).
 pub const OLDEST: u16 = VERSION - 1;
@@ -50,6 +50,9 @@ const TIMED_STATUS: u16 = 16;
 /// The first version with [`Request::Inbox`] and every pane's tab in a [`Notice::Layout`]
 /// (ADR-0051).
 const INBOX: u16 = 17;
+
+/// The first version with [`Notice::Webhook`] (ADR-0051).
+const WEBHOOK_SINCE: u16 = 18;
 
 /// Most rows or columns a screen can have, which the core clamps its panes to.
 pub const MAX_DIMENSION: u16 = 1024;
@@ -163,6 +166,7 @@ const UNHARDENED: u8 = 13;
 const MARKDOWN: u8 = 14;
 const COLOURS: u8 = 15;
 const SECRETS: u8 = 16;
+const WEBHOOK: u8 = 17;
 
 /// How many agent states there are. [`Notice::Status`] numbers them in the order of the
 /// contributor rule: needs you, running, done, error, idle.
@@ -748,6 +752,16 @@ pub enum Notice<'a> {
         /// The first few, escaped and joined by `, `, ending in `…` if more.
         names: &'a str,
     },
+    /// A webhook is configured (ADR-0051). Sent after the hello, and again when `failed`
+    /// changes. Since version 18.
+    Webhook {
+        /// The URL's host only, never its path or query, which can hold a secret.
+        host: &'a str,
+        /// Whether `curl` was found, without which nothing is posted.
+        sender: bool,
+        /// How many alerts were given up on.
+        failed: u32,
+    },
 }
 
 /// The session as the window draws it.
@@ -1242,6 +1256,7 @@ impl Notice<'_> {
             Self::Markdown { .. } => 13,
             Self::Colours { .. } => 14,
             Self::Secrets { .. } => 15,
+            Self::Webhook { .. } => WEBHOOK_SINCE,
             Self::Status { naming: false, .. } => TIMED_STATUS,
             _ => OLDEST,
         }
@@ -1348,6 +1363,14 @@ impl Notice<'_> {
             }
             Self::Secrets { count, names } => {
                 put_tail(out, start, MAX_MESSAGE, SECRETS, *count, names.as_bytes())?
+            }
+            Self::Webhook {
+                host,
+                sender,
+                failed,
+            } => {
+                out.push(u8::from(*sender));
+                put_tail(out, start, MAX_MESSAGE, WEBHOOK, *failed, host.as_bytes())?
             }
             Self::Activity { tabs, alerts } => put!(out, ACTIVITY, tabs, alerts),
             Self::Refused { reason } => {
@@ -1464,6 +1487,11 @@ impl Notice<'_> {
             SECRETS => Notice::Secrets {
                 count: body.u32()?,
                 names: body.text()?,
+            },
+            WEBHOOK => Notice::Webhook {
+                sender: body.tag("sender", &[false, true])?,
+                failed: body.u32()?,
+                host: body.text()?,
             },
             UNHARDENED => Notice::Unhardened {
                 checked: body.tag("checked", &[false, true])?,
@@ -2205,7 +2233,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 17, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 18, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -2434,6 +2462,20 @@ mod tests {
             names: "GITHUB_TOKEN",
         };
         assert_eq!(at_oldest(secrets), Ok(true));
+        let webhook = Notice::Webhook {
+            host: "ntfy.sh",
+            sender: true,
+            failed: 0,
+        };
+        let newer = Error::Newer {
+            kind: WEBHOOK,
+            since: WEBHOOK_SINCE,
+        };
+        assert_eq!(
+            at_oldest(webhook),
+            Err(newer),
+            "a window of 17 never gets it"
+        );
         // Nothing is new in 16 but a layout, so a stand-in `since` checks the gate.
         let mut wire = raw(HELLO, &OLDEST.to_le_bytes());
         Notice::Raise.encode(&mut wire).unwrap();
@@ -2847,7 +2889,8 @@ mod tests {
             }
         };
         assert_eq!(read(VERSION), members);
-        assert_eq!(read(OLDEST), []);
+        // 16, which reads no members, is no longer spoken (ADR-0043).
+        assert_eq!(read(OLDEST), members);
         let refused = |members: &[(u32, u8)]| {
             let mut out = Vec::new();
             encode_layout(&mut out, VERSION, 0, 4, 2, &[4, 5], &[], members).unwrap_err()
@@ -3582,6 +3625,12 @@ mod tests {
         #[test]
         fn raise_round_trips(chunk in chunks()) {
             prop_assert!(notice_survives(&Notice::Raise, chunk), "changed on the link");
+        }
+
+        #[test]
+        fn webhook_round_trips(host in any::<String>(), sender in any::<bool>(), failed in any::<u32>(), chunk in chunks()) {
+            let notice = Notice::Webhook { host: &host, sender, failed };
+            prop_assert!(notice_survives(&notice, chunk), "changed on the link");
         }
 
         #[test]
