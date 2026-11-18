@@ -1,5 +1,5 @@
 //! Snapshots of the chrome as cells: pane borders, the bar with its status line, an approval
-//! prompt, the right-click menu, the command palette and the inbox.
+//! prompt, the right-click menu, the command palette, the inbox and its answer prompt.
 
 use pinfold_config::theme::GRAPHITE;
 use std::fmt::Write as _;
@@ -258,6 +258,27 @@ pub(crate) fn inbox() -> Frame {
 #[test]
 fn the_inbox_needs_you_first() {
     insta::assert_snapshot!(cells(&inbox()));
+}
+
+/// PinFold's confirmation of Approve for the inbox's ◆ row, drawn over it as a trust prompt is
+/// (ADR-0051 §6).
+pub(crate) fn answer() -> Frame {
+    use pinfold_proto::link::Choice;
+
+    let mut frame = inbox();
+    let confirm = crate::approval::Confirm::new(
+        (2, 0, 1),
+        Choice::Approve,
+        ("claude", "Enter"),
+        Instant::now(),
+    );
+    confirm.draw(&mut frame, &GRAPHITE);
+    frame
+}
+
+#[test]
+fn the_answer_prompt_names_the_key_the_profile_and_the_pane() {
+    insta::assert_snapshot!(cells(&answer()));
 }
 
 /// ADR-0049: every colour of the chrome is read from the theme. Under a light theme with only

@@ -10,7 +10,7 @@ expression: cells(&inbox())
 |xx│  ● running    2·1  docs-site     Writing guides/limits.md                         6m │xx|
 |xx│  ✓ done       3·1  infra         Turn complete  terraform plan clean             <1m │xx|
 |xx├──────────────────────────────────────────────────────────────────────────────────────┤xx|
-|xx│ 5 agents · 1 needs you                                    ↑↓ move  ⏎ jump  esc close │xx|
+|xx│ 5 agents · 1 needs you                        ⏎ jump · y approve · i interrupt · esc │xx|
 |xx└──────────────────────────────────────────────────────────────────────────────────────┘xx|
 |xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
 |xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
@@ -98,13 +98,14 @@ expression: cells(&inbox())
 8:2..4 fg 343a44 bg 151920
 8:4..15 fg 9aa1ac bg 151920
 8:15..26 fg f5b544 bg 151920
-8:26..62 fg 343a44 bg 151920
-8:62..64 fg e2e5ea bg 151920
-8:64..71 fg 9aa1ac bg 151920
+8:26..50 fg 343a44 bg 151920
+8:50..51 fg e2e5ea bg 151920
+8:51..59 fg 9aa1ac bg 151920
+8:59..60 fg e2e5ea bg 151920
+8:60..71 fg 9aa1ac bg 151920
 8:71..72 fg e2e5ea bg 151920
-8:72..79 fg 9aa1ac bg 151920
-8:79..82 fg e2e5ea bg 151920
-8:82..88 fg 9aa1ac bg 151920
+8:72..85 fg 9aa1ac bg 151920
+8:85..88 fg e2e5ea bg 151920
 8:88..90 fg 343a44 bg 151920
 8:90..92 fg e2e5ea bg 121212
 9:0..2 fg e2e5ea bg 121212

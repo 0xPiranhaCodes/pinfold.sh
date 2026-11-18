@@ -4,7 +4,7 @@ use pinfold_config::theme::Theme;
 use std::fmt::Write as _;
 use std::time::{Duration, Instant};
 
-use pinfold_proto::link::{ApprovalAction, ApprovalAnswer};
+use pinfold_proto::link::{ApprovalAction, ApprovalAnswer, Choice};
 use pinfold_proto::{Cell, Frame};
 use winit::keyboard::{Key, NamedKey};
 
@@ -116,6 +116,91 @@ impl Queue {
     }
 }
 
+/// PinFold's confirmation of an Approve or Interrupt from the inbox (ADR-0051 §6), drawn as a
+/// trust prompt is. It lives only while shown, and `y` sends once: never a lasting grant.
+#[derive(Debug)]
+pub struct Confirm {
+    /// The pane, and its tab and place as its inbox row shows them.
+    pub pane: u32,
+    tab: u8,
+    place: u8,
+    /// What `y` sends.
+    pub choice: Choice,
+    /// The profile name shown, which the core checks against its own.
+    pub profile: String,
+    /// The key name shown, empty for Interrupt; checked as the profile is.
+    pub key: String,
+    opened: Instant,
+}
+
+impl Confirm {
+    /// A confirmation opened at `now` for `pane`, shown as `tab·place`.
+    pub fn new(
+        (pane, tab, place): (u32, u8, u8),
+        choice: Choice,
+        (profile, key): (&str, &str),
+        now: Instant,
+    ) -> Self {
+        Self {
+            pane,
+            tab,
+            place,
+            choice,
+            profile: profile.to_owned(),
+            key: key.to_owned(),
+            opened: now,
+        }
+    }
+
+    /// Takes a key: `Some(true)` sends, `Some(false)` cancels. As for a trust prompt, `y`
+    /// counts only in a `focused` window [`ARMED_AFTER`] the prompt opened, and shown whole in
+    /// `rows` × `columns`; `n` and Esc always cancel.
+    pub fn key(
+        &self,
+        key: &Key,
+        now: Instant,
+        focused: bool,
+        (rows, columns): (u16, u16),
+    ) -> Option<bool> {
+        let armed = focused && now.saturating_duration_since(self.opened) >= ARMED_AFTER;
+        let whole = self.lines(usize::from(columns)).len() <= usize::from(rows);
+        match answer(key, armed, whole)? {
+            ApprovalAnswer::AllowOnce => Some(true),
+            ApprovalAnswer::Deny => Some(false),
+            ApprovalAnswer::AllowForThirtyMinutes => None,
+        }
+    }
+
+    /// Moves the opening back past [`ARMED_AFTER`], as if the prompt had waited.
+    #[cfg(test)]
+    pub(crate) fn rewind(&mut self) {
+        self.opened -= ARMED_AFTER;
+    }
+
+    fn lines(&self, columns: usize) -> Vec<String> {
+        let border = format!("{:─<columns$}", "── PinFold answer ");
+        let mut lines: Vec<String> = vec![border.chars().take(columns.max(1)).collect()];
+        let sent = match self.choice {
+            Choice::Approve => format!("`{}`", self.key),
+            Choice::Interrupt => "Ctrl+C".to_owned(),
+        };
+        let head = format!(
+            " ◆ needs you  Send {sent} to `{}` in tab {} · pane {}?",
+            visible(&self.profile),
+            u16::from(self.tab) + 1,
+            self.place
+        );
+        lines.extend(wrap(&head, columns));
+        lines
+    }
+
+    /// Draws the prompt over the bottom of the pane area, as a trust prompt is drawn.
+    pub fn draw(&self, frame: &mut Frame, theme: &Theme) {
+        let lines = self.lines(usize::from(frame.columns));
+        draw(frame, &lines, ("y send once", "n/Esc cancel"), theme);
+    }
+}
+
 /// The request as rows of at most `columns` characters: a border, who asks what, then every
 /// send text in full, wrapped, after its number and byte length.
 fn lines(prompt: &Approval, queued: usize, columns: usize) -> Vec<String> {
@@ -218,6 +303,20 @@ pub fn fits(prompt: &Approval, queued: usize, rows: u16, columns: u16) -> bool {
 /// row, and the key legend on its own chrome row, which is never cut. The legend says how many
 /// rows above are the prompt's. A request too long to show whole offers only denial.
 fn banner(frame: &mut Frame, prompt: &Approval, queued: usize, theme: &Theme) {
+    let lines = lines(prompt, queued, usize::from(frame.columns));
+    let keys = match prompt.action {
+        ApprovalAction::Trust => ("y trust", "n/Esc don't trust"),
+        ApprovalAction::Owner => ("y allow once", "n/Esc deny"),
+        ApprovalAction::Read | ApprovalAction::Send => {
+            ("y allow once · a allow 30 min", "n/Esc deny")
+        }
+    };
+    draw(frame, &lines, keys, theme);
+}
+
+/// Mutes every pane cell, draws `lines` over the bottom of the pane area, and the `allow` and
+/// `deny` keys on a legend row that is never cut. Lines too many to show whole offer only deny.
+fn draw(frame: &mut Frame, lines: &[String], (allow, deny): (&str, &str), theme: &Theme) {
     let (ground, text) = (theme.chrome.overlay, theme.prompt_text());
     let (amber, red) = (theme.states.needs_you, theme.states.error);
     let columns = usize::from(frame.columns);
@@ -225,7 +324,6 @@ fn banner(frame: &mut Frame, prompt: &Approval, queued: usize, theme: &Theme) {
     for cell in &mut frame.cells {
         cell.foreground = theme.chrome.muted;
     }
-    let lines = lines(prompt, queued, columns);
     let whole = lines.len() <= rows;
     let shown = lines.len().min(rows);
     for (offset, line) in lines.iter().take(shown).enumerate() {
@@ -243,13 +341,6 @@ fn banner(frame: &mut Frame, prompt: &Approval, queued: usize, theme: &Theme) {
             };
         }
     }
-    let (allow, deny) = match prompt.action {
-        ApprovalAction::Trust => ("y trust", "n/Esc don't trust"),
-        ApprovalAction::Owner => ("y allow once", "n/Esc deny"),
-        ApprovalAction::Read | ApprovalAction::Send => {
-            ("y allow once · a allow 30 min", "n/Esc deny")
-        }
-    };
     let legend = if whole {
         (
             format!(" {allow} · {deny} · the {shown} rows above are this prompt"),
@@ -323,6 +414,59 @@ mod tests {
             Some(ApprovalAnswer::Deny)
         );
         assert_eq!(answer(&Key::Named(NamedKey::Enter), true, true), None);
+    }
+
+    /// ADR-0051 §6: `y` sends once only when armed in a focused window; `n` and Esc cancel at
+    /// once; `a`, Enter and anything else do nothing, as the prompt gives no lasting grant.
+    #[test]
+    fn an_answer_prompt_sends_on_y_alone_once_armed() {
+        let now = Instant::now();
+        let mut confirm = Confirm::new((7, 1, 2), Choice::Approve, ("claude", "Enter"), now);
+        let press = |confirm: &Confirm, key: Key, focused| {
+            confirm.key(&key, Instant::now(), focused, (24, 80))
+        };
+        let y = || Key::Character("y".into());
+        assert_eq!(press(&confirm, y(), true), None, "unarmed");
+        assert_eq!(
+            press(&confirm, Key::Named(NamedKey::Escape), true),
+            Some(false)
+        );
+        assert_eq!(
+            press(&confirm, Key::Character("n".into()), true),
+            Some(false)
+        );
+        confirm.rewind();
+        assert_eq!(press(&confirm, y(), false), None, "unfocused");
+        for other in ["a", "i", "x", "Y "] {
+            assert_eq!(
+                press(&confirm, Key::Character(other.into()), true),
+                None,
+                "{other}"
+            );
+        }
+        assert_eq!(press(&confirm, Key::Named(NamedKey::Enter), true), None);
+        assert_eq!(press(&confirm, y(), true), Some(true));
+        // Cut short, it offers only cancelling.
+        assert_eq!(confirm.key(&y(), Instant::now(), true, (1, 20)), None);
+    }
+
+    #[test]
+    fn an_answer_prompt_names_ctrl_c_and_shows_a_hostile_profile_name_as_marks() {
+        let confirm = Confirm::new(
+            (7, 1, 2),
+            Choice::Interrupt,
+            ("cl\u{1b}[2Jaude\u{202e}", ""),
+            Instant::now(),
+        );
+        let mut frame = frame(4, 80);
+        confirm.draw(&mut frame, &GRAPHITE);
+        let shown = text(&frame);
+        assert!(
+            shown.contains("Send Ctrl+C to `cl<U+001B>[2Jaude<U+202E>` in tab 2 · pane 2?"),
+            "{shown}"
+        );
+        assert!(shown.contains("y send once · n/Esc cancel"), "{shown}");
+        assert!(!shown.contains('\u{1b}'));
     }
 
     #[test]

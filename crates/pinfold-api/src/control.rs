@@ -1547,6 +1547,27 @@ mod tests {
         json!({"jsonrpc": "2.0", "id": 2, "method": method, "params": params}).to_string()
     }
 
+    /// ADR-0051 §6: Approve and Interrupt come only from a person's key in the window, so no
+    /// method answers an agent's prompt, under any name a caller might try.
+    #[test]
+    fn no_method_answers_an_agents_prompt() {
+        for method in [
+            "pane.answer",
+            "pane.approve",
+            "pane.interrupt",
+            "inbox.answer",
+            "agent.approve",
+            "agent.answer",
+        ] {
+            let params = json!({"pane": 1, "choice": "approve"});
+            let (reply, _) = replied(
+                pane_request(method, &params).as_bytes(),
+                &mut VERSION.clone(),
+            );
+            assert_eq!(code(&reply), Some(NO_METHOD), "{method}");
+        }
+    }
+
     #[test]
     fn pane_methods_need_version_2_and_well_formed_params() {
         let read = pane_request("pane.read", &json!({"pane": 3}));

@@ -39,7 +39,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode, Palette};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 18;
+pub const VERSION: u16 = 19;
 
 /// The oldest version this side still speaks, one before [`VERSION`] (ADR-0043).
 pub const OLDEST: u16 = VERSION - 1;
@@ -53,6 +53,49 @@ const INBOX: u16 = 17;
 
 /// The first version with [`Notice::Webhook`] (ADR-0051).
 const WEBHOOK_SINCE: u16 = 18;
+
+/// The first version with [`Request::Answer`], its refusals, and a [`Notice::Status`] that names
+/// the pane's agent profile (ADR-0051).
+const ANSWER: u16 = 19;
+
+/// The longest profile or key name a [`Request::Answer`] carries.
+pub const MAX_ANSWER_NAME: usize = 64;
+
+/// What a person answered an agent's prompt with from the inbox (ADR-0051).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Choice {
+    /// The profile's `approve` key.
+    Approve,
+    /// Ctrl+C.
+    Interrupt,
+}
+
+/// The bytes Interrupt types: Ctrl+C.
+pub const INTERRUPT: &[u8] = b"\x03";
+
+/// The bytes a key from the window's key table writes, for a profile's `approve` key: `Enter`,
+/// `Tab`, `Escape`, `Backspace`, `Space`, or one printable ASCII character as itself. Only keys
+/// that write the same bytes in every terminal mode, so the core sends what the window would.
+///
+/// ```
+/// use pinfold_proto::link::key_bytes;
+///
+/// assert_eq!(key_bytes("Enter"), Some(&b"\r"[..]));
+/// assert_eq!(key_bytes("1"), Some(&b"1"[..]));
+/// assert_eq!(key_bytes("enter"), None);
+/// assert_eq!(key_bytes("yes"), None);
+/// ```
+#[must_use]
+pub fn key_bytes(name: &str) -> Option<&[u8]> {
+    match name {
+        "Enter" => Some(b"\r"),
+        "Tab" => Some(b"\t"),
+        "Escape" => Some(b"\x1b"),
+        "Backspace" => Some(b"\x7f"),
+        "Space" => Some(b" "),
+        _ => matches!(name.as_bytes(), [b'!'..=b'~']).then_some(name.as_bytes()),
+    }
+}
 
 /// Most rows or columns a screen can have, which the core clamps its panes to.
 pub const MAX_DIMENSION: u16 = 1024;
@@ -149,6 +192,7 @@ const LIST_MARKDOWN: u8 = 23;
 const OPEN_MARKDOWN: u8 = 24;
 const PALETTE: u8 = 25;
 const INBOX_OPEN: u8 = 26;
+const ANSWER_KIND: u8 = 27;
 
 const FRAME: u8 = 1;
 const CWD: u8 = 2;
@@ -435,6 +479,24 @@ pub enum Refusal {
     /// the window, for a core that has.
     #[error("Input not sent: the program or the core is behind")]
     Input,
+    /// The pane answered from the inbox has gone. Since version 19, as are those below.
+    #[error("Not answered: the pane has gone")]
+    Gone,
+    /// The pane no longer needs you.
+    #[error("Not answered: the pane no longer needs you")]
+    NotWaiting,
+    /// The pane was not launched from an agent profile.
+    #[error("Not answered: not an agent profile's pane")]
+    NotAgent,
+    /// The pane is protected (`api.protect`).
+    #[error("Not answered: the pane is protected")]
+    Protected,
+    /// The profile or key the prompt showed is not the one the core read when it started.
+    #[error(
+        "Not answered: the agent's profile changed since the core started; restart the session \
+         to use it"
+    )]
+    ProfileChanged,
 }
 
 /// A rectangle of cells, from the top left of the space for panes.
@@ -624,6 +686,18 @@ pub enum Request<'a> {
         /// Whether it is open now.
         open: bool,
     },
+    /// A person confirmed Approve or Interrupt on a ◆ pane of the inbox (ADR-0051). Only the
+    /// window's confirmation key sends it; no API method does. Since version 19.
+    Answer {
+        /// The pane.
+        pane: u32,
+        /// What to send.
+        choice: Choice,
+        /// The profile name the prompt showed, at most [`MAX_ANSWER_NAME`] bytes.
+        profile: &'a str,
+        /// The key name the prompt showed, from [`key_bytes`]'s table; empty for Interrupt.
+        key: &'a str,
+    },
 }
 
 /// A message from the core to a window. Text borrows from the decoder's buffer.
@@ -715,6 +789,9 @@ pub enum Notice<'a> {
         since: u32,
         /// Whole seconds since the pane's program started when sent, saturating.
         started: u32,
+        /// The agent profile the pane was launched from, as an index into the config's
+        /// profiles. Since version 19; nothing below it.
+        profile: Option<u8>,
         /// The reported message, which the core has cleaned of control and bidi characters.
         message: &'a str,
     },
@@ -998,6 +1075,7 @@ impl Request<'_> {
             Self::ListMarkdown { .. } | Self::OpenMarkdown { .. } => 13,
             Self::Palette(_) => 14,
             Self::Inbox { .. } => INBOX,
+            Self::Answer { .. } => ANSWER,
             _ => OLDEST,
         }
     }
@@ -1124,6 +1202,24 @@ impl Request<'_> {
                 out.push(u8::from(open));
                 INBOX_OPEN
             }
+            Self::Answer {
+                pane,
+                choice,
+                profile,
+                key,
+            } => {
+                if profile.len() > MAX_ANSWER_NAME || key.len() > MAX_ANSWER_NAME {
+                    out.truncate(start);
+                    return Err(Error::TooLarge {
+                        size: profile.len().max(key.len()) as u64,
+                    });
+                }
+                put!(out; pane);
+                out.extend_from_slice(&[choice as u8, profile.len() as u8]);
+                out.extend_from_slice(profile.as_bytes());
+                out.extend_from_slice(key.as_bytes());
+                ANSWER_KIND
+            }
         };
         finish(out, start, MAX_REQUEST, kind)
     }
@@ -1239,6 +1335,37 @@ impl Request<'_> {
             INBOX_OPEN => Request::Inbox {
                 open: body.tag("open", &[false, true])?,
             },
+            // Bounded and checked against the key table before the core compares them.
+            ANSWER_KIND => {
+                let pane = body.u32()?;
+                let choice = body.tag("choice", &[Choice::Approve, Choice::Interrupt])?;
+                let length = usize::from(body.u8()?);
+                if length > MAX_ANSWER_NAME {
+                    return Err(Error::OutOfBounds {
+                        field: "profile",
+                        value: length as u64,
+                    });
+                }
+                let profile =
+                    std::str::from_utf8(body.take(length)?).map_err(|_| Error::BadText)?;
+                let key = body.text()?;
+                let known = match choice {
+                    Choice::Approve => key_bytes(key).is_some(),
+                    Choice::Interrupt => key.is_empty(),
+                };
+                if !known {
+                    return Err(Error::OutOfBounds {
+                        field: "key",
+                        value: key.len() as u64,
+                    });
+                }
+                Request::Answer {
+                    pane,
+                    choice,
+                    profile,
+                    key,
+                }
+            }
             kind => return Err(Error::UnknownKind { kind }),
         };
         body.end()?;
@@ -1257,6 +1384,14 @@ impl Notice<'_> {
             Self::Colours { .. } => 14,
             Self::Secrets { .. } => 15,
             Self::Webhook { .. } => WEBHOOK_SINCE,
+            Self::Refused {
+                reason:
+                    Refusal::Gone
+                    | Refusal::NotWaiting
+                    | Refusal::NotAgent
+                    | Refusal::Protected
+                    | Refusal::ProfileChanged,
+            } => ANSWER,
             Self::Status { naming: false, .. } => TIMED_STATUS,
             _ => OLDEST,
         }
@@ -1284,7 +1419,7 @@ impl Notice<'_> {
     /// Notice::Hello { version: OLDEST }.encode(&mut wire)?;
     /// let status = Notice::Status {
     ///     pane: 1, state: 0, reported: false, naming: true, listed: false, since: 0, started: 0,
-    ///     message: "",
+    ///     profile: None, message: "",
     /// };
     /// status.encode_at(OLDEST, &mut wire)?;
     /// let (mut decoder, mut input) = (Decoder::default(), wire.as_slice());
@@ -1402,6 +1537,7 @@ impl Notice<'_> {
                 listed,
                 since,
                 started,
+                profile,
                 message,
             } => {
                 if *state >= STATES {
@@ -1416,6 +1552,9 @@ impl Notice<'_> {
                     let listed = u8::from(*listed && version >= INBOX) << 1;
                     out.push(u8::from(*naming) | listed);
                     put!(out; since, started);
+                }
+                if version >= ANSWER {
+                    out.push(profile.unwrap_or(u8::MAX));
                 }
                 put_tail(out, start, MAX_MESSAGE, STATUS, *pane, message.as_bytes())?
             }
@@ -1520,6 +1659,11 @@ impl Notice<'_> {
                 } else {
                     (1, 0, 0)
                 };
+                let profile = if version >= ANSWER {
+                    Some(body.u8()?).filter(|&profile| profile != u8::MAX)
+                } else {
+                    None
+                };
                 let naming = flags & 1 != 0;
                 Notice::Status {
                     state,
@@ -1532,6 +1676,7 @@ impl Notice<'_> {
                     },
                     since,
                     started,
+                    profile,
                     pane: body.u32()?,
                     message: body.text()?,
                 }
@@ -1545,6 +1690,11 @@ impl Notice<'_> {
                         Refusal::Room,
                         Refusal::Spawn,
                         Refusal::Input,
+                        Refusal::Gone,
+                        Refusal::NotWaiting,
+                        Refusal::NotAgent,
+                        Refusal::Protected,
+                        Refusal::ProfileChanged,
                     ],
                 )?,
             },
@@ -2233,7 +2383,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 18, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 19, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -2456,6 +2606,18 @@ mod tests {
             names: "a.md",
         };
         assert_eq!(at_oldest(markdown), Ok(true));
+        let refused = Notice::Refused {
+            reason: Refusal::Protected,
+        };
+        let newer = Error::Newer {
+            kind: REFUSED,
+            since: ANSWER,
+        };
+        assert_eq!(
+            at_oldest(refused),
+            Err(newer),
+            "a window of 18 never gets it"
+        );
         assert_eq!(at_oldest(COLOURS_SEED), Ok(true));
         let secrets = Notice::Secrets {
             count: 1,
@@ -2467,15 +2629,8 @@ mod tests {
             sender: true,
             failed: 0,
         };
-        let newer = Error::Newer {
-            kind: WEBHOOK,
-            since: WEBHOOK_SINCE,
-        };
-        assert_eq!(
-            at_oldest(webhook),
-            Err(newer),
-            "a window of 17 never gets it"
-        );
+        // 18, the oldest spoken, has it.
+        assert_eq!(at_oldest(webhook), Ok(true));
         // Nothing is new in 16 but a layout, so a stand-in `since` checks the gate.
         let mut wire = raw(HELLO, &OLDEST.to_le_bytes());
         Notice::Raise.encode(&mut wire).unwrap();
@@ -2502,10 +2657,11 @@ mod tests {
         assert_eq!(decoder.next_request(&mut input), Ok(Some(PALETTE_SEED)));
     }
 
-    /// ADR-0051: every version spoken gets a pane's times and whether it names its tab.
+    /// ADR-0051: every version spoken gets a pane's times and whether it names its tab; only 19
+    /// gets its profile.
     #[test]
     fn a_status_is_laid_out_for_the_spoken_version() {
-        let status = Notice::Status {
+        let with = |profile| Notice::Status {
             pane: 7,
             state: 0,
             reported: false,
@@ -2513,8 +2669,10 @@ mod tests {
             listed: true,
             since: 42,
             started: 600,
+            profile,
             message: "ok",
         };
+        let status = with(Some(3));
         let read = |version: u16| {
             let mut wire = raw(HELLO, &version.to_le_bytes());
             status.encode_at(version, &mut wire).unwrap();
@@ -2526,11 +2684,73 @@ mod tests {
                 .map(|n| format!("{n:?}"));
             (wire.len(), notice)
         };
-        // 15, which reads a status without naming or times, is no longer spoken (ADR-0043).
         let (old, older) = read(OLDEST);
         let (new, newer) = read(VERSION);
-        assert_eq!((older, old), (newer.clone(), new));
         assert_eq!(newer, Some(format!("{status:?}")));
+        let unprofiled = with(None);
+        assert_eq!((older, old), (Some(format!("{unprofiled:?}")), new - 1));
+        let none = with(None);
+        let mut wire = raw(HELLO, &VERSION.to_le_bytes());
+        none.encode(&mut wire).unwrap();
+        let (mut decoder, mut input) = (Decoder::default(), wire.as_slice());
+        decoder.next_notice(&mut input).unwrap();
+        assert_eq!(decoder.next_notice(&mut input), Ok(Some(none)));
+    }
+
+    /// ADR-0051 §6: an answer's names are bounded, and its key comes from the key table, before
+    /// the core compares anything.
+    #[test]
+    fn an_answer_carries_only_a_bounded_profile_and_a_known_key() {
+        let answer = |choice, profile: &'static str, key: &'static str| Request::Answer {
+            pane: 7,
+            choice,
+            profile,
+            key,
+        };
+        for good in [
+            answer(Choice::Approve, "claude", "Enter"),
+            answer(Choice::Approve, "a", "1"),
+            answer(Choice::Interrupt, "claude", ""),
+        ] {
+            assert!(request_survives(good, 3), "{good:?}");
+            assert_eq!(good.since(), 19);
+        }
+        let long = "a".repeat(MAX_ANSWER_NAME + 1);
+        let too_long = Request::Answer {
+            pane: 7,
+            choice: Choice::Approve,
+            profile: &long,
+            key: "Enter",
+        };
+        assert!(too_long.encode(&mut Vec::new()).is_err());
+        // Hand-made, as the encoder refuses none of these keys.
+        let wire = |choice: u8, profile: &[u8], key: &[u8]| {
+            let mut body = 7u32.to_le_bytes().to_vec();
+            body.extend_from_slice(&[choice, profile.len() as u8]);
+            body.extend_from_slice(profile);
+            body.extend_from_slice(key);
+            raw(ANSWER_KIND, &body)
+        };
+        let decode = |wire: Vec<u8>| {
+            let mut input = &raw(HELLO, &VERSION.to_le_bytes())[..];
+            let mut decoder = Decoder::default();
+            decoder.next_request(&mut input).unwrap();
+            let mut input = wire.as_slice();
+            decoder
+                .next_request(&mut input)
+                .map(|request| format!("{request:?}"))
+        };
+        assert!(decode(wire(0, b"claude", b"Enter")).is_ok());
+        for bad in [
+            wire(0, b"claude", b"yes"),
+            wire(0, b"claude", b""),
+            wire(0, b"claude", b"\x1b[A"),
+            wire(1, b"claude", b"Enter"),
+            wire(2, b"claude", b""),
+            wire(0, &[b'a'; MAX_ANSWER_NAME + 1], b"Enter"),
+        ] {
+            assert!(decode(bad.clone()).is_err(), "{bad:?}");
+        }
     }
 
     const PALETTE_SEED: Request<'static> = Request::Palette(Palette::GRAPHITE_GRID);
@@ -2944,7 +3164,7 @@ mod tests {
             let error = request_error(&raw(kind, body));
             assert!(matches!(error, Err(Error::BadTag { field: f, .. }) if f == field));
         }
-        let error = notice_error(&raw(REFUSED, &[5]));
+        let error = notice_error(&raw(REFUSED, &[10]));
         assert!(matches!(
             error,
             Err(Error::BadTag {
@@ -3206,7 +3426,10 @@ mod tests {
             &[0; 14].into_iter().chain([0xff]).collect::<Vec<_>>(),
         );
         assert_eq!(notice_error(&wire), Err(Error::BadText));
-        let wire = raw(STATUS, &[0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff]);
+        let wire = raw(
+            STATUS,
+            &[0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0, 0, 0, 0, 0xff],
+        );
         assert_eq!(notice_error(&wire), Err(Error::BadText));
     }
 
@@ -3241,6 +3464,7 @@ mod tests {
             listed: false,
             since: 0,
             started: 0,
+            profile: None,
             message: "",
         };
         let mut out = vec![7];
@@ -3546,6 +3770,11 @@ mod tests {
                     Refusal::Room,
                     Refusal::Spawn,
                     Refusal::Input,
+                    Refusal::Gone,
+                    Refusal::NotWaiting,
+                    Refusal::NotAgent,
+                    Refusal::Protected,
+                    Refusal::ProfileChanged,
                 ][..],
             ),
             chunk in chunks(),
@@ -3675,10 +3904,11 @@ mod tests {
             listed in any::<bool>(),
             since in any::<u32>(),
             started in any::<u32>(),
+            profile in prop::option::of(0..u8::MAX),
             message in any::<String>(),
             chunk in chunks(),
         ) {
-            let notice = Notice::Status { pane, state, reported, naming, listed, since, started, message: &message };
+            let notice = Notice::Status { pane, state, reported, naming, listed, since, started, profile, message: &message };
             prop_assert!(notice_survives(&notice, chunk), "changed on the link");
         }
 

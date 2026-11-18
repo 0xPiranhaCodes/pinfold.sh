@@ -1,0 +1,54 @@
+---
+source: crates/pinfold-ui/src/snapshots.rs
+expression: cells(&answer())
+---
+|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
+|xx┌─ AGENTS · needs you first ───────────────────────────────────────────────────── esc ─┐xx|
+|xx│▌ ◆ needs you  1·1  api-refactor  Allow edit to src/config.rs?                    <1m │xx|
+|xx│  ✕ error      1·2  api-refactor  exit 101  1 failed                               1m │xx|
+|xx│  ● running    2·2  docs-site     npm run dev  watching                           22m │xx|
+|xx│  ● running    2·1  docs-site     Writing guides/limits.md                         6m │xx|
+|xx│  ✓ done       3·1  infra         Turn complete  terraform plan clean             <1m │xx|
+|xx├──────────────────────────────────────────────────────────────────────────────────────┤xx|
+|xx│ 5 agents · 1 needs you                        ⏎ jump · y approve · i interrupt · esc │xx|
+|xx└──────────────────────────────────────────────────────────────────────────────────────┘xx|
+|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
+|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
+|── PinFold answer ──────────────────────────────────────────────────────────────────────────|
+| ◆ needs you  Send `Enter` to `claude` in tab 1 · pane 1?                                   |
+| y send once · n/Esc cancel · the 2 rows above are this prompt                              |
+0:0..92 fg 555a63 bg 121212
+1:0..2 fg 555a63 bg 121212
+1:2..90 fg 555a63 bg 151920
+1:90..92 fg 555a63 bg 121212
+2:0..2 fg 555a63 bg 121212
+2:2..3 fg 555a63 bg 151920
+2:3..89 fg 555a63 bg 253c3b
+2:89..90 fg 555a63 bg 151920
+2:90..92 fg 555a63 bg 121212
+3:0..2 fg 555a63 bg 121212
+3:2..90 fg 555a63 bg 151920
+3:90..92 fg 555a63 bg 121212
+4:0..2 fg 555a63 bg 121212
+4:2..90 fg 555a63 bg 151920
+4:90..92 fg 555a63 bg 121212
+5:0..2 fg 555a63 bg 121212
+5:2..90 fg 555a63 bg 151920
+5:90..92 fg 555a63 bg 121212
+6:0..2 fg 555a63 bg 121212
+6:2..90 fg 555a63 bg 151920
+6:90..92 fg 555a63 bg 121212
+7:0..2 fg 555a63 bg 121212
+7:2..90 fg 555a63 bg 151920
+7:90..92 fg 555a63 bg 121212
+8:0..2 fg 555a63 bg 121212
+8:2..90 fg 555a63 bg 151920
+8:90..92 fg 555a63 bg 121212
+9:0..2 fg 555a63 bg 121212
+9:2..90 fg 555a63 bg 151920
+9:90..92 fg 555a63 bg 121212
+10:0..92 fg 555a63 bg 121212
+11:0..92 fg 555a63 bg 121212
+12:0..92 fg f5b544 bg 12151a
+13:0..92 fg f5b544 bg 12151a
+14:0..92 fg e2e5ea bg 12151a
