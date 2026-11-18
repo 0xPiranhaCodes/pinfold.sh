@@ -205,8 +205,16 @@ impl Inbox {
         })
     }
 
-    /// Draws the inbox over the panes' grid in `frame`, times as of `now`.
-    pub fn draw(&self, frame: &mut Frame, theme: &Theme, now: Instant) {
+    /// Draws the inbox over the panes' grid in `frame`, times as of `now`. With `webhook`, whether
+    /// its `curl` was found and how many alerts it gave up on, the footer says when it is not
+    /// posting (ADR-0051).
+    pub fn draw(
+        &self,
+        frame: &mut Frame,
+        theme: &Theme,
+        now: Instant,
+        webhook: Option<(bool, u32)>,
+    ) {
         let Some(area) = self.area(frame.rows, frame.columns).filter(|_| self.ready) else {
             return;
         };
@@ -298,7 +306,7 @@ impl Inbox {
         } else {
             dim
         };
-        write(
+        let mut at = write(
             frame,
             footer,
             at,
@@ -307,13 +315,24 @@ impl Inbox {
             ground,
             end,
         );
+        if let Some((sender, failed)) = webhook {
+            if failed > 0 {
+                let said = format!(" · webhook: {failed} failed");
+                at = write(frame, footer, at, &said, theme.states.error, ground, end);
+            }
+            if !sender {
+                at = write(frame, footer, at, " · webhook: no curl", dim, ground, end);
+            }
+        }
+        let said = at.max(usize::from(left) + 28);
         let keys: [(&str, &str); 3] = [("↑↓", " move  "), ("⏎", " jump  "), ("esc", " close")];
         let width: usize = keys
             .iter()
             .map(|(key, word)| cells(key) + cells(word))
             .sum();
         let mut at = (end - 1).saturating_sub(width);
-        if at > usize::from(left) + 28 {
+        // The keys give way to what the footer says.
+        if at > said {
             for (key, word) in keys {
                 at = write(frame, footer, at, key, text, ground, end);
                 at = write(frame, footer, at, word, dim, ground, end);
@@ -553,10 +572,45 @@ pub(crate) mod tests {
         inbox
     }
 
+    #[test]
+    fn the_footer_says_when_the_webhook_is_not_posting() {
+        let now = Instant::now();
+        let inbox = board(now);
+        let footer = |webhook| {
+            let mut frame = Frame::default();
+            crate::panes::blank(&mut frame, 20, 100);
+            inbox.draw(&mut frame, &GRAPHITE, now, webhook);
+            (0..20)
+                .map(|row| text(&frame, row))
+                .find(|line| line.contains("agents ·"))
+        };
+        let plain = footer(None).unwrap();
+        assert!(
+            !plain.contains("webhook") && plain.contains("esc close"),
+            "{plain}"
+        );
+        assert!(
+            !footer(Some((true, 0))).unwrap().contains("webhook"),
+            "posting"
+        );
+        let failed = footer(Some((true, 3))).unwrap();
+        assert!(failed.contains("needs you · webhook: 3 failed"), "{failed}");
+        let none = footer(Some((false, 0))).unwrap();
+        assert!(none.contains("needs you · webhook: no curl"), "{none}");
+        let mut frame = Frame::default();
+        crate::panes::blank(&mut frame, 20, 100);
+        inbox.draw(&mut frame, &GRAPHITE, now, Some((true, 3)));
+        let red = frame
+            .cells
+            .iter()
+            .find(|cell| cell.character == 'w' && cell.foreground == GRAPHITE.states.error);
+        assert!(red.is_some(), "failed is red");
+    }
+
     pub(crate) fn drawn(inbox: &Inbox, rows: u16, columns: u16, now: Instant) -> Frame {
         let mut frame = Frame::default();
         crate::panes::blank(&mut frame, rows, columns);
-        inbox.draw(&mut frame, &GRAPHITE, now);
+        inbox.draw(&mut frame, &GRAPHITE, now, None);
         frame
     }
 

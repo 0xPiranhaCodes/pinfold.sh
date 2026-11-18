@@ -41,6 +41,9 @@ pub const TOOL_SETTLE: Duration = Duration::from_secs(3);
 pub const CLOSED_SETTLE: Duration = Duration::from_secs(2);
 
 const RUNS: usize = 3;
+/// A webhook's worker ends a minute after its last post, and one alert to a closed port takes
+/// three tries over 35 s (ADR-0051).
+pub const WEBHOOK_SETTLE: Duration = Duration::from_secs(105);
 /// Long enough for a process to finish starting.
 pub const SETTLE: Duration = Duration::from_secs(1);
 /// A window takes seconds to fall from its startup peak, and budgets are for idle windows.
@@ -92,6 +95,9 @@ pub struct Budget<'a> {
     pub menu: bool,
     /// Asks a measured window to open its inbox, and with `closed` to close it again.
     pub inbox: Option<&'a str>,
+    /// Runs the core with this folder as its config home and its `agent.sh` as every pane's
+    /// shell.
+    pub agents: Option<&'a Path>,
 }
 
 /// Bytes, and whether a screen's CJK text went undrawn for want of a font.
@@ -123,6 +129,10 @@ fn measure_once(budget: &Budget, args: &[&str]) -> io::Result<Reading> {
     }
     if budget.menu {
         command.env(MENU_VARIABLE, "1");
+    }
+    if let Some(agents) = budget.agents {
+        command.env("XDG_CONFIG_HOME", agents);
+        command.env("SHELL", agents.join("agent.sh"));
     }
     if let Some(inbox) = budget.inbox {
         command.env(INBOX_VARIABLE, inbox);
@@ -366,6 +376,7 @@ mod tests {
             window: None,
             menu: false,
             inbox: None,
+            agents: None,
         }
     }
 
@@ -412,6 +423,7 @@ mod tests {
             window: None,
             menu: false,
             inbox: None,
+            agents: None,
         };
         assert!(!run(&[budget]));
     }

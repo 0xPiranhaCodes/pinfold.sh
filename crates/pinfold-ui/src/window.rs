@@ -101,6 +101,9 @@ enum Notice {
     /// A sandboxed agent can read this many secret-looking variables, these first, on macOS
     /// (ADR-0047).
     Secrets(u32, String),
+    /// A webhook to this host is configured, whether `curl` was found, and how many alerts were
+    /// given up on (ADR-0051).
+    Webhook(String, bool, u32),
     /// The core is too old to take the theme's palette (ADR-0049).
     Unthemed,
     /// The config file or the theme file in use was saved, and this is the theme now.
@@ -225,6 +228,8 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
         let raised = link.take_raised().then_some(Notice::Raise);
         let unhardened = link.take_unhardened().map(Notice::Unhardened);
         let secrets = (link.take_secrets()).map(|(count, names)| Notice::Secrets(count, names));
+        let webhook = (link.take_webhook())
+            .map(|(host, sender, failed)| Notice::Webhook(host, sender, failed));
         let refused = link.take_refused().map(Notice::Refused);
         let unthemed = link.take_unthemed().then_some(Notice::Unthemed);
         let none_waiting = link.take_none_waiting().then_some(Notice::NoneWaiting);
@@ -248,6 +253,7 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
             raised,
             unhardened,
             secrets,
+            webhook,
             refused,
             unthemed,
             none_waiting,
@@ -451,6 +457,9 @@ struct App {
     /// Set for the session once the core says it lacks the hardened runtime: whether it could
     /// tell. The bar keeps a marker while it is set.
     unhardened: Option<bool>,
+    /// Whether the webhook's `curl` was found and how many alerts it gave up on, if one is
+    /// configured, for the inbox's footer.
+    webhook: Option<(bool, u32)>,
     /// The tab under the pointer.
     over_tab: Option<usize>,
     /// Whether the system says this window has the keyboard.
@@ -601,6 +610,7 @@ impl App {
             asking: None,
             flash: Flash::default(),
             unhardened: None,
+            webhook: None,
             selecting: Selecting::default(),
             bar: None,
             vi: None,
@@ -943,7 +953,7 @@ impl App {
                 palette.draw(&mut self.composed, theme);
             }
             if let Some(inbox) = &self.inbox {
-                inbox.draw(&mut self.composed, theme, Instant::now());
+                inbox.draw(&mut self.composed, theme, Instant::now(), self.webhook);
                 self.composed.cursor = None;
                 drawn = inbox.is_ready();
             }
@@ -1894,6 +1904,13 @@ impl ApplicationHandler<Notice> for App {
             }
             Notice::Secrets(count, names) => {
                 self.flash.secrets(count, names, Instant::now());
+                self.redraw_soon();
+            }
+            Notice::Webhook(host, sender, failed) => {
+                // Once a window, so a webhook an agent wrote into the config is seen.
+                if self.webhook.replace((sender, failed)).is_none() {
+                    self.flash.webhook(host, Instant::now());
+                }
                 self.redraw_soon();
             }
             Notice::Approval(approval) => {

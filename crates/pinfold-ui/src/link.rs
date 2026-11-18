@@ -200,6 +200,9 @@ struct State {
     /// How many secret-looking variables a sandboxed agent can read on macOS, and the first few
     /// names (ADR-0047).
     secrets: Option<(u32, String)>,
+    /// A configured webhook's host, whether `curl` was found and how many alerts were given up
+    /// on, until the window takes it (ADR-0051).
+    webhook: Option<(String, bool, u32)>,
     /// Whether the core is too old to take a palette, so it draws Graphite Grid (ADR-0049).
     unthemed: bool,
     /// The OSC 12 and OSC 11 colours of each pane that has either, shown or not.
@@ -286,6 +289,13 @@ impl State {
             Notice::Raise => self.raised = true,
             Notice::Unhardened { checked } => self.unhardened = Some(checked),
             Notice::Secrets { count, names } => self.secrets = Some((count, names.to_owned())),
+            Notice::Webhook {
+                host,
+                sender,
+                failed,
+            } => {
+                self.webhook = Some((shown_host(host), sender, failed));
+            }
             Notice::Colours {
                 pane,
                 cursor,
@@ -928,6 +938,12 @@ impl Link {
         self.state.secrets.take()
     }
 
+    /// Returns a configured webhook's host, whether `curl` was found and how many alerts were
+    /// given up on, if the core said so since the last call: after the hello and on a change.
+    pub fn take_webhook(&mut self) -> Option<(String, bool, u32)> {
+        self.state.webhook.take()
+    }
+
     /// Returns whether the core turned out too old to take the theme's palette, once. Its
     /// panes are then in Graphite Grid, and the window is to draw the same.
     pub fn take_unthemed(&mut self) -> bool {
@@ -954,6 +970,23 @@ impl Link {
     }
 }
 
+/// Most characters of a webhook's host the window shows, so its notice fits 80 columns.
+const SHOWN_HOST: usize = 40;
+
+/// A webhook's host as the window shows it: only the URL rules' characters, whatever a core
+/// sends, and a long one cut from the start, so the registrable domain at its end stays seen.
+fn shown_host(host: &str) -> String {
+    let host: Vec<char> = (host.chars())
+        .filter(|c| c.is_ascii_alphanumeric() || ".-:[]".contains(*c))
+        .collect();
+    match host.len().checked_sub(SHOWN_HOST) {
+        Some(cut @ 1..) => std::iter::once('…')
+            .chain(host[cut + 1..].iter().copied())
+            .collect(),
+        _ => host.into_iter().collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::thread;
@@ -965,6 +998,21 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn a_webhook_host_keeps_its_end_and_only_url_characters() {
+        assert_eq!(shown_host("ntfy.sh"), "ntfy.sh");
+        assert_eq!(shown_host("[::1]"), "[::1]");
+        assert_eq!(shown_host("a\u{202e}b\x1b[2Jc /d"), "ab[2Jcd");
+        let spoof = format!("ntfy.sh.{}.evil.com", "a".repeat(60));
+        let shown = shown_host(&spoof);
+        assert_eq!(shown.chars().count(), SHOWN_HOST);
+        assert!(
+            shown.starts_with('…') && shown.ends_with(".evil.com"),
+            "{shown}"
+        );
+        assert_eq!(shown_host(&"h".repeat(SHOWN_HOST)), "h".repeat(SHOWN_HOST));
+    }
 
     const PANE: u32 = 3;
     const PATIENCE: Duration = Duration::from_secs(10);

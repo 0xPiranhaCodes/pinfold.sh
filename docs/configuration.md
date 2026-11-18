@@ -151,9 +151,18 @@ tab and pane numbers and two times, never pane text, a message or the tab's labe
 {"pinfold":1,"state":"needs-you","source":"agent","agent":"claude","host":"studio","tab":2,"pane":7,"at":1763112000,"since":1763111958}
 ```
 
-With `webhook_format = "text"` it is one line, `◆ needs you · claude · tab 2 pane 7 · studio`. The
-sender, the system `curl`, comes in a later change
-([ADR-0051](adr/0051-needs-you-inbox-and-alerts.md)); until then nothing is posted.
+With `webhook_format = "text"` it is one line, `◆ needs you · claude · tab 2 pane 7 · studio`.
+
+The core posts through the system `curl`, found once when it starts: `/usr/bin/curl` on macOS, the
+first `curl` on an absolute `PATH` entry on Linux. Without one, webhooks are off and the log says
+so once. `curl` runs as `curl --disable --config -`, so `~/.curlrc` is not read and the URL comes on
+its standard input, never in the process list; it gets no environment but the proxy variables
+`HTTPS_PROXY`, `https_proxy`, `ALL_PROXY`, `all_proxy`, `NO_PROXY` and `no_proxy`, follows no
+redirect, and is killed after 15 s. A 2xx is done; a failure to connect, resolve, set up TLS or in
+time, a 429 or a 5xx is tried again after 5 s and then 30 s; anything else is given up at once, and
+the log names the host, the status and the try. Posts follow each agent pane's alerts, at most one
+a pane a minute and ten in any ten minutes in all, and wait in a queue of 16; past that the oldest
+is dropped and counted as given up ([ADR-0051](adr/0051-needs-you-inbox-and-alerts.md)).
 
 ```toml
 [agents.claude]

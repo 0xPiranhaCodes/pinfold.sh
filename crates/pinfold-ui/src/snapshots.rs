@@ -251,7 +251,7 @@ fn the_command_palette_filtered_to_open() {
 pub(crate) fn inbox() -> Frame {
     let mut frame = pane('x', 14, 92);
     let now = Instant::now();
-    crate::inbox::tests::board(now).draw(&mut frame, &GRAPHITE, now);
+    crate::inbox::tests::board(now).draw(&mut frame, &GRAPHITE, now, None);
     frame
 }
 

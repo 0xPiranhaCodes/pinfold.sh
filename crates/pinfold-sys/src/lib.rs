@@ -114,6 +114,25 @@ pub fn effective_uid() -> u32 {
     unsafe { libc::geteuid() }
 }
 
+/// Returns the machine's hostname, or nothing if the system gives none, one longer than 255
+/// bytes or one that is not UTF-8.
+///
+/// ```
+/// assert!(pinfold_sys::hostname().is_none_or(|name| !name.is_empty() && !name.contains('\0')));
+/// ```
+#[must_use]
+pub fn hostname() -> Option<String> {
+    let mut name = [0_u8; 256];
+    // SAFETY: gethostname writes at most `name.len()` bytes into `name`, which it owns.
+    let result = unsafe { libc::gethostname(name.as_mut_ptr().cast(), name.len()) };
+    // A name that fills the buffer may come without its NUL, cut, so none is taken.
+    let end = name.iter().position(|&byte| byte == 0)?;
+    let name = name
+        .get(..end)
+        .filter(|name| result == 0 && !name.is_empty())?;
+    String::from_utf8(name.to_vec()).ok()
+}
+
 /// Stops a same-user process from debugging this one, which on Linux stops it copying a PTY
 /// master out too (ADR-0020). Call this before opening any PTY. It lasts for the process, holds
 /// when called again and ends at `exec`, so a pane's programs can still be debugged.
