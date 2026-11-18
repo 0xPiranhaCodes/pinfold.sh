@@ -91,10 +91,11 @@ From 16, `OLDEST` is 15, so a version 14 core restarts the session.
 | 18 | `Notice::Webhook`: a configured webhook's host, whether `curl` was found and how many alerts were given up on ([ADR-0051](0051-needs-you-inbox-and-alerts.md)) | The core does not send it. The window shows no "Alerts for ◆ and ✕ go to `<host>`" notice and no webhook words in the inbox footer; the core still posts, and its log names the host and each give-up. Every other key works. |
 
 | 19 | `Request::Answer` (Approve or Interrupt from the inbox, with the profile and key names its prompt showed), its five refusals, and `Notice::Status` gains the pane's agent profile index ([ADR-0051](0051-needs-you-inbox-and-alerts.md)) | The window never sends the request: `y` and `i` in the inbox flash `answering needs the core updated`. The core lays out a status as 18 does, without the profile byte, and never sends the new refusals, which only an answer causes. Every other key works. |
+| 20 | `Notice::InboxExtra`: a listed pane's git branch while the window's inbox is open ([ADR-0051](0051-needs-you-inbox-and-alerts.md) §7) | The core never sends it, and reads no `HEAD` and keeps no 5 s timer for a window of 19 that opens its inbox. The rows show no branch; the run time, from `Notice::Status`, shows as for 20. Every other key works. |
 
 From 17, `OLDEST` is 16, so a version 15 core restarts the session. From 18, `OLDEST` is 17, so a
 version 16 core restarts the session. From 19, `OLDEST` is 18, so a version 17 core restarts the
-session.
+session. From 20, `OLDEST` is 19, so a version 18 core restarts the session.
 
 **Raising the version.** A PR that changes the link raises `VERSION`, gives each new message or
 value a `since` of the new version, and adds a row to this table saying how the older version

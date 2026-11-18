@@ -661,7 +661,8 @@ pub fn open_log(path: &Path) -> io::Result<File> {
 }
 
 /// Opens the file at `path` for reading, refused if it is a symlink. The caller checks that it
-/// got a regular file: O_NONBLOCK, so that a FIFO put here cannot hang the open.
+/// got a regular file: O_NONBLOCK, so that a FIFO put here cannot hang the open, and O_NOCTTY,
+/// so that a terminal put here cannot become this process's controlling one.
 ///
 /// # Errors
 ///
@@ -679,7 +680,7 @@ pub fn open_log(path: &Path) -> io::Result<File> {
 pub fn open_no_follow(path: &Path) -> io::Result<File> {
     OpenOptions::new()
         .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY)
         .open(path)
 }
 
