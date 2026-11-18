@@ -555,6 +555,7 @@ fn mem_gate_task() -> ExitCode {
             screen: None,
             window: None,
             menu: false,
+            rewind: false,
             inbox: None,
             agents: None,
         },
@@ -569,6 +570,7 @@ fn mem_gate_task() -> ExitCode {
             screen: None,
             window: None,
             menu: false,
+            rewind: false,
             inbox: None,
             agents: None,
         },
@@ -583,6 +585,7 @@ fn mem_gate_task() -> ExitCode {
             screen: None,
             window: None,
             menu: false,
+            rewind: false,
             inbox: None,
             agents: None,
         },
@@ -597,6 +600,7 @@ fn mem_gate_task() -> ExitCode {
             screen: None,
             window: None,
             menu: false,
+            rewind: false,
             inbox: None,
             agents: None,
         },
@@ -619,6 +623,7 @@ fn mem_gate_task() -> ExitCode {
         screen: None,
         window: None,
         menu: false,
+        rewind: false,
         inbox: None,
         agents: Some(&idle_hook),
     };
@@ -692,6 +697,7 @@ fn mem_gate_task() -> ExitCode {
         screen: None,
         window: Some(Side::Window),
         menu: false,
+        rewind: false,
         inbox: None,
         agents: None,
     };
@@ -756,6 +762,7 @@ fn mem_gate_task() -> ExitCode {
             screen: None,
             window: Some(Side::Window),
             menu: false,
+            rewind: false,
             inbox: None,
             agents: None,
         });
@@ -770,6 +777,7 @@ fn mem_gate_task() -> ExitCode {
             screen: Some(Path::new(HEAVY_SCREEN)),
             window: Some(Side::Window),
             menu: false,
+            rewind: false,
             inbox: None,
             agents: None,
         });
@@ -784,6 +792,7 @@ fn mem_gate_task() -> ExitCode {
             screen: Some(Path::new(FULL_CACHE)),
             window: Some(Side::Window),
             menu: false,
+            rewind: false,
             inbox: None,
             agents: None,
         });
@@ -798,6 +807,7 @@ fn mem_gate_task() -> ExitCode {
             screen: None,
             window: Some(Side::Window),
             menu: false,
+            rewind: false,
             inbox: None,
             agents: None,
         });
@@ -812,6 +822,23 @@ fn mem_gate_task() -> ExitCode {
             screen: Some(Path::new(HEAVY_SCREEN)),
             window: Some(Side::Window),
             menu: true,
+            rewind: false,
+            inbox: None,
+            agents: None,
+        });
+        // ADR-0050: the prompt at its largest, 10 paths of 256 bytes, within the window budget.
+        budgets.push(mem_gate::Budget {
+            metric: "Window on macOS with a Rewind prompt, 1512x1890",
+            limit: mem_gate::WINDOW_LIMIT_HALF_RETINA,
+            program: &core,
+            args: &["--window", "1", "1512x1890"],
+            per_pane_over: None,
+            settle: mem_gate::WINDOW_SETTLE,
+            wait_for_line: true,
+            screen: None,
+            window: Some(Side::Window),
+            menu: false,
+            rewind: true,
             inbox: None,
             agents: None,
         });
@@ -826,6 +853,7 @@ fn mem_gate_task() -> ExitCode {
             screen: Some(&tool_screen),
             window: Some(Side::Window),
             menu: false,
+            rewind: false,
             inbox: None,
             agents: None,
         });
@@ -840,6 +868,7 @@ fn mem_gate_task() -> ExitCode {
             screen: Some(&agents_screen),
             window: Some(Side::Window),
             menu: false,
+            rewind: false,
             inbox: None,
             agents: None,
         };
@@ -877,6 +906,7 @@ fn mem_gate_task() -> ExitCode {
             screen: None,
             window: Some(Side::Core),
             menu: false,
+            rewind: false,
             inbox: None,
             agents: None,
         };
@@ -935,6 +965,7 @@ fn mem_gate_task() -> ExitCode {
             screen: None,
             window: Some(Side::Window),
             menu: false,
+            rewind: false,
             inbox: None,
             agents: None,
         });
@@ -949,6 +980,7 @@ fn mem_gate_task() -> ExitCode {
             screen: Some(Path::new(HEAVY_SCREEN)),
             window: Some(Side::Window),
             menu: false,
+            rewind: false,
             inbox: None,
             agents: None,
         });
@@ -963,6 +995,7 @@ fn mem_gate_task() -> ExitCode {
             screen: Some(Path::new(FULL_CACHE)),
             window: Some(Side::Window),
             menu: false,
+            rewind: false,
             inbox: None,
             agents: None,
         });
@@ -977,6 +1010,7 @@ fn mem_gate_task() -> ExitCode {
             screen: None,
             window: Some(Side::Window),
             menu: false,
+            rewind: false,
             inbox: None,
             agents: None,
         });
@@ -991,6 +1025,7 @@ fn mem_gate_task() -> ExitCode {
             screen: Some(Path::new(HEAVY_SCREEN)),
             window: Some(Side::Window),
             menu: true,
+            rewind: false,
             inbox: None,
             agents: None,
         });
@@ -1005,6 +1040,7 @@ fn mem_gate_task() -> ExitCode {
             screen: Some(&tool_screen),
             window: Some(Side::Window),
             menu: false,
+            rewind: false,
             inbox: None,
             agents: None,
         });
@@ -1019,6 +1055,7 @@ fn mem_gate_task() -> ExitCode {
             screen: Some(&agents_screen),
             window: Some(Side::Window),
             menu: false,
+            rewind: false,
             inbox: None,
             agents: None,
         };
@@ -1044,6 +1081,7 @@ fn mem_gate_task() -> ExitCode {
             screen: None,
             window: Some(Side::Core),
             menu: false,
+            rewind: false,
             inbox: None,
             agents: None,
         };

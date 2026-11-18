@@ -106,6 +106,10 @@ enum Notice {
     /// A webhook to this host is configured, whether `curl` was found, and how many alerts were
     /// given up on (ADR-0051).
     Webhook(String, bool, u32),
+    /// Why the run in this pane has no checkpoint, 0 once it has one (ADR-0050).
+    Checkpoint(u32, u8),
+    /// A restore the window allowed ended: files undone, skipped, and why it failed if it did.
+    Restored(u32, u32, String),
     /// The core is too old to take the theme's palette (ADR-0049).
     Unthemed,
     /// The config file or the theme file in use was saved, and this is the theme now.
@@ -252,6 +256,14 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
                 return;
             }
         }
+        while let Some((pane, missing)) = link.take_checkpoint() {
+            if proxy.send_event(Notice::Checkpoint(pane, missing)).is_err() {
+                return;
+            }
+        }
+        let restored = link
+            .take_restored()
+            .map(|(undid, skipped, error)| Notice::Restored(undid, skipped, error));
         while let Some(approval) = link.take_approval() {
             if proxy.send_event(Notice::Approval(approval)).is_err() {
                 return;
@@ -268,6 +280,7 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
             unhardened,
             secrets,
             webhook,
+            restored,
             refused,
             unthemed,
             none_waiting,
@@ -500,6 +513,9 @@ struct App {
     /// What restored panes were running, until answered. The focused one's strip takes the next
     /// key.
     was_running: was_running::Strips,
+    /// Each run's pane with no checkpoint and why, for the strip under it, at most
+    /// [`proto::MAX_PANES`] (ADR-0050).
+    no_checkpoint: Vec<(u32, u8)>,
     /// Cross-pane prompts, oldest first. Updates replace a batch in place.
     approvals: approval::Queue,
     /// The right-click menu, while open. Every key and press goes to it.
@@ -617,6 +633,7 @@ impl App {
             clipboard: None,
             prompt: None,
             was_running: was_running::Strips::default(),
+            no_checkpoint: Vec::new(),
             approvals: {
                 // Matches `has_focus` below; `Focused` events keep them in step.
                 let mut queue = approval::Queue::default();
@@ -771,6 +788,11 @@ impl App {
         if self.size.is_some() && std::env::var_os("PINFOLD_MEASURE_MENU").is_some() {
             let middle = (self.area.0 / 2, self.area.1 / 2);
             self.menu = Some(Menu::open(middle, self.area, None));
+        }
+        // And with a `Rewind` prompt at its largest over the strip (ADR-0050).
+        if self.size.is_some() && std::env::var_os("PINFOLD_MEASURE_REWIND").is_some() {
+            let _ = self.approvals.add(approval::largest_rewind());
+            self.no_checkpoint = vec![(self.focused, 1)];
         }
     }
 
@@ -1014,6 +1036,10 @@ impl App {
                 bar.draw(&mut self.composed, theme);
             } else if let Some(vi) = self.vi.filter(|_| self.flash.until().is_none()) {
                 vi.draw(&mut self.composed, theme);
+            } else if let Some(&(_, missing)) = (self.no_checkpoint.iter())
+                .find(|(pane, _)| *pane == self.focused && self.flash.until().is_none())
+            {
+                flash::no_checkpoint(&mut self.composed, missing, theme);
             } else {
                 self.flash.banner(&mut self.composed, theme);
             }
@@ -2039,6 +2065,17 @@ impl ApplicationHandler<Notice> for App {
                 if self.webhook.replace((sender, failed)).is_none() {
                     self.flash.webhook(host, Instant::now());
                 }
+                self.redraw_soon();
+            }
+            Notice::Checkpoint(pane, missing) => {
+                self.no_checkpoint.retain(|(other, _)| *other != pane);
+                if missing != 0 && self.no_checkpoint.len() < proto::MAX_PANES {
+                    self.no_checkpoint.push((pane, missing));
+                }
+                self.redraw_soon();
+            }
+            Notice::Restored(undid, skipped, error) => {
+                self.flash.restored(undid, skipped, error, Instant::now());
                 self.redraw_soon();
             }
             Notice::Approval(approval) => {
