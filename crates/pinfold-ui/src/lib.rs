@@ -25,6 +25,7 @@ mod search_bar;
 mod selection;
 #[cfg(test)]
 mod snapshots;
+mod toast;
 mod top_bar;
 mod vi;
 mod was_running;
