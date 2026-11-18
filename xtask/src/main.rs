@@ -278,7 +278,36 @@ fn write_tool_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
             quote(tools)
         ),
     )?;
-    fs::set_permissions(script, fs::Permissions::from_mode(0o755))
+    fs::set_permissions(script, fs::Permissions::from_mode(0o755))?;
+    write_peek_session(&dir.join("peek"), &repo)
+}
+
+/// Writes, under `home`, a Claude Code session of [`mem_gate::PEEK_SESSION`] bytes for `dir`,
+/// for the peek row: long lines of tool calls and their results, as an agent's file grows.
+fn write_peek_session(home: &Path, dir: &Path) -> io::Result<()> {
+    use std::io::Write;
+    let name: String = (dir.as_os_str().to_string_lossy().encode_utf16())
+        .map(|unit| match u8::try_from(unit) {
+            Ok(byte) if byte.is_ascii_alphanumeric() => char::from(byte),
+            _ => '-',
+        })
+        .collect();
+    let folder = home.join(".claude/projects").join(name);
+    fs::create_dir_all(&folder)?;
+    let mut file = io::BufWriter::new(fs::File::create(folder.join("session.jsonl"))?);
+    let call = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash"}],"usage":{"input_tokens":2,"cache_read_input_tokens":128000}}}"#;
+    let result = format!(
+        r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","content":"{}"}}]}}}}"#,
+        "output line ".repeat(400)
+    );
+    let mut written = 0;
+    while written < mem_gate::PEEK_SESSION {
+        for line in [call, result.as_str()] {
+            writeln!(file, "{line}")?;
+            written += line.len() as u64 + 1;
+        }
+    }
+    file.flush()
 }
 
 /// Writes, for each of ADR-0051's webhook rows, a folder holding the config the measured core
@@ -875,6 +904,7 @@ fn mem_gate_task() -> ExitCode {
     let tools = Path::new(&target).join("release-core/pinfold");
     let tree = inputs.join("tree");
     let passed = mem_gate::run_takes(&tools, &tree, &inputs.join("state")) && passed;
+    let passed = mem_gate::run_peek(&tools, &inputs.join("peek"), &inputs.join("repo")) && passed;
     let _ = fs::remove_dir_all(&inputs);
     if passed {
         ExitCode::SUCCESS

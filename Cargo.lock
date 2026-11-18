@@ -1483,6 +1483,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "similar",
+ "unicode-width",
 ]
 
 [[package]]
