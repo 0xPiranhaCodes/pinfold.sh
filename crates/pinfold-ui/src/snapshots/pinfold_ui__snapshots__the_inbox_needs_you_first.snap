@@ -1,0 +1,116 @@
+---
+source: crates/pinfold-ui/src/snapshots.rs
+expression: cells(&inbox())
+---
+|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
+|xx┌─ AGENTS · needs you first ───────────────────────────────────────────────────── esc ─┐xx|
+|xx│▌ ◆ needs you  1·1  api-refactor  Allow edit to src/config.rs?                    <1m │xx|
+|xx│  ✕ error      1·2  api-refactor  exit 101  1 failed                               1m │xx|
+|xx│  ● running    2·2  docs-site     npm run dev  watching                           22m │xx|
+|xx│  ● running    2·1  docs-site     Writing guides/limits.md                         6m │xx|
+|xx│  ✓ done       3·1  infra         Turn complete  terraform plan clean             <1m │xx|
+|xx├──────────────────────────────────────────────────────────────────────────────────────┤xx|
+|xx│ 5 agents · 1 needs you                                    ↑↓ move  ⏎ jump  esc close │xx|
+|xx└──────────────────────────────────────────────────────────────────────────────────────┘xx|
+|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
+|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
+|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
+|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
+0:0..92 fg e2e5ea bg 121212
+1:0..2 fg e2e5ea bg 121212
+1:2..4 fg 343a44 bg 151920
+1:4..11 fg 5cd6cb bg 151920
+1:11..30 fg 9aa1ac bg 151920
+1:30..83 fg 343a44 bg 151920
+1:83..88 fg 9aa1ac bg 151920
+1:88..90 fg 343a44 bg 151920
+1:90..92 fg e2e5ea bg 121212
+2:0..2 fg e2e5ea bg 121212
+2:2..3 fg 343a44 bg 151920
+2:3..4 fg 5cd6cb bg 253c3b
+2:4..5 fg e2e5ea bg 253c3b
+2:5..6 fg f5b544 bg 253c3b
+2:6..7 fg e2e5ea bg 253c3b
+2:7..16 fg f5b544 bg 253c3b
+2:16..18 fg e2e5ea bg 253c3b
+2:18..21 fg 9aa1ac bg 253c3b
+2:21..85 fg e2e5ea bg 253c3b
+2:85..88 fg f5b544 bg 253c3b
+2:88..89 fg e2e5ea bg 253c3b
+2:89..90 fg 343a44 bg 151920
+2:90..92 fg e2e5ea bg 121212
+3:0..2 fg e2e5ea bg 121212
+3:2..3 fg 343a44 bg 151920
+3:3..5 fg e2e5ea bg 151920
+3:5..6 fg ff8a8a bg 151920
+3:6..7 fg e2e5ea bg 151920
+3:7..12 fg ff8a8a bg 151920
+3:12..18 fg e2e5ea bg 151920
+3:18..21 fg 9aa1ac bg 151920
+3:21..86 fg e2e5ea bg 151920
+3:86..88 fg 9aa1ac bg 151920
+3:88..89 fg e2e5ea bg 151920
+3:89..90 fg 343a44 bg 151920
+3:90..92 fg e2e5ea bg 121212
+4:0..2 fg e2e5ea bg 121212
+4:2..3 fg 343a44 bg 151920
+4:3..5 fg e2e5ea bg 151920
+4:5..6 fg 7aa7ff bg 151920
+4:6..7 fg e2e5ea bg 151920
+4:7..14 fg 7aa7ff bg 151920
+4:14..18 fg e2e5ea bg 151920
+4:18..21 fg 9aa1ac bg 151920
+4:21..85 fg e2e5ea bg 151920
+4:85..88 fg 9aa1ac bg 151920
+4:88..89 fg e2e5ea bg 151920
+4:89..90 fg 343a44 bg 151920
+4:90..92 fg e2e5ea bg 121212
+5:0..2 fg e2e5ea bg 121212
+5:2..3 fg 343a44 bg 151920
+5:3..5 fg e2e5ea bg 151920
+5:5..6 fg 7aa7ff bg 151920
+5:6..7 fg e2e5ea bg 151920
+5:7..14 fg 7aa7ff bg 151920
+5:14..18 fg e2e5ea bg 151920
+5:18..21 fg 9aa1ac bg 151920
+5:21..86 fg e2e5ea bg 151920
+5:86..88 fg 9aa1ac bg 151920
+5:88..89 fg e2e5ea bg 151920
+5:89..90 fg 343a44 bg 151920
+5:90..92 fg e2e5ea bg 121212
+6:0..2 fg e2e5ea bg 121212
+6:2..3 fg 343a44 bg 151920
+6:3..5 fg e2e5ea bg 151920
+6:5..6 fg 63d29a bg 151920
+6:6..7 fg e2e5ea bg 151920
+6:7..11 fg 63d29a bg 151920
+6:11..18 fg e2e5ea bg 151920
+6:18..21 fg 9aa1ac bg 151920
+6:21..85 fg e2e5ea bg 151920
+6:85..88 fg 9aa1ac bg 151920
+6:88..89 fg e2e5ea bg 151920
+6:89..90 fg 343a44 bg 151920
+6:90..92 fg e2e5ea bg 121212
+7:0..2 fg e2e5ea bg 121212
+7:2..90 fg 343a44 bg 151920
+7:90..92 fg e2e5ea bg 121212
+8:0..2 fg e2e5ea bg 121212
+8:2..4 fg 343a44 bg 151920
+8:4..15 fg 9aa1ac bg 151920
+8:15..26 fg f5b544 bg 151920
+8:26..62 fg 343a44 bg 151920
+8:62..64 fg e2e5ea bg 151920
+8:64..71 fg 9aa1ac bg 151920
+8:71..72 fg e2e5ea bg 151920
+8:72..79 fg 9aa1ac bg 151920
+8:79..82 fg e2e5ea bg 151920
+8:82..88 fg 9aa1ac bg 151920
+8:88..90 fg 343a44 bg 151920
+8:90..92 fg e2e5ea bg 121212
+9:0..2 fg e2e5ea bg 121212
+9:2..90 fg 343a44 bg 151920
+9:90..92 fg e2e5ea bg 121212
+10:0..92 fg e2e5ea bg 121212
+11:0..92 fg e2e5ea bg 121212
+12:0..92 fg e2e5ea bg 121212
+13:0..92 fg e2e5ea bg 121212

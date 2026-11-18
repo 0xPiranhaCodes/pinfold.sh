@@ -47,6 +47,8 @@ const CJK_FONTS: [&str; 4] = ["Hiragino", "AppleSDGothicNeo", "NotoSansCJK", "wq
 
 /// Read by `pinfold-ui`'s window, and only in a measured one.
 const MENU_VARIABLE: &str = "PINFOLD_MEASURE_MENU";
+/// Likewise: `open` keeps the inbox open, `closed` closes it once it has drawn its rows.
+const INBOX_VARIABLE: &str = "PINFOLD_MEASURE_INBOX";
 
 /// ADR-0021 budgets with nothing to measure yet, and the issue that makes them measurable.
 const NOT_MEASURED: [(&str, &str); 2] = [
@@ -84,6 +86,8 @@ pub struct Budget<'a> {
     pub window: Option<Side>,
     /// Asks a measured window to open its right-click menu.
     pub menu: bool,
+    /// Asks a measured window to open its inbox, and with `closed` to close it again.
+    pub inbox: Option<&'a str>,
 }
 
 /// Bytes, and whether a screen's CJK text went undrawn for want of a font.
@@ -115,6 +119,9 @@ fn measure_once(budget: &Budget, args: &[&str]) -> io::Result<Reading> {
     }
     if budget.menu {
         command.env(MENU_VARIABLE, "1");
+    }
+    if let Some(inbox) = budget.inbox {
+        command.env(INBOX_VARIABLE, inbox);
     }
     // A core takes its session's socket, which a core the user is running holds.
     let runtime = std::env::temp_dir().join(format!("pinfold-gate-{}", std::process::id()));
@@ -262,6 +269,7 @@ mod tests {
             screen: None,
             window: None,
             menu: false,
+            inbox: None,
         }
     }
 
@@ -307,6 +315,7 @@ mod tests {
             screen: None,
             window: None,
             menu: false,
+            inbox: None,
         };
         assert!(!run(&[budget]));
     }
@@ -413,6 +422,7 @@ mod tests {
     fn the_menu_variable_matches_the_window() {
         let window = include_str!("../../crates/pinfold-ui/src/window.rs");
         assert!(window.contains(&format!("var_os(\"{MENU_VARIABLE}\")")));
+        assert!(window.contains(&format!("var_os(\"{INBOX_VARIABLE}\")")));
     }
 
     #[test]

@@ -114,13 +114,22 @@ pub struct Keys {
     /// The lowercase ASCII letter that, with Ctrl, is the prefix. The file writes it `C-a`.
     #[serde(deserialize_with = "prefix")]
     pub prefix: char,
+    /// The key after the prefix that opens and closes the inbox (ADR-0051).
+    #[serde(deserialize_with = "after_prefix")]
+    pub inbox: char,
 }
 
 impl Default for Keys {
     fn default() -> Self {
-        Self { prefix: 'a' }
+        Self {
+            prefix: 'a',
+            inbox: '!',
+        }
     }
 }
+
+/// The keys the window already binds after the prefix, which `[keys]` cannot take.
+pub const PREFIX_KEYS: &str = "cxnp0123456789|%-\"zdfgm";
 
 impl Default for Config {
     fn default() -> Self {
@@ -183,6 +192,18 @@ fn prefix<'de, D: Deserializer<'de>>(deserializer: D) -> Result<char, D::Error> 
         Some(&[letter @ b'a'..=b'z']) => Ok(char::from(letter)),
         _ => Err(de::Error::custom(format!(
             "prefix must be C- and a lowercase letter, such as \"C-a\", not {text:?}"
+        ))),
+    }
+}
+
+fn after_prefix<'de, D: Deserializer<'de>>(deserializer: D) -> Result<char, D::Error> {
+    let text = String::deserialize(deserializer)?;
+    let mut characters = text.chars();
+    match (characters.next(), characters.next()) {
+        (Some(key), None) if key.is_ascii_graphic() && !PREFIX_KEYS.contains(key) => Ok(key),
+        _ => Err(de::Error::custom(format!(
+            "a key after the prefix must be one printable ASCII character not already bound \
+             ({PREFIX_KEYS}), not {text:?}"
         ))),
     }
 }
@@ -697,6 +718,12 @@ mod tests {
     #[test]
     fn the_prefix_is_read() {
         assert_eq!(parse(b"").unwrap().keys.prefix, 'a');
+        assert_eq!(parse(b"").unwrap().keys.inbox, '!');
+        assert_eq!(parse(b"[keys]\ninbox = \"i\"\n").unwrap().keys.inbox, 'i');
+        for value in ["\"c\"", "\"!!\"", "\"\"", "\" \"", "\"é\"", "\"\\u001b\""] {
+            let text = message(format!("[keys]\ninbox = {value}\n").as_bytes());
+            assert!(text.contains("not already bound"), "{value}: {text}");
+        }
         let config = parse(b"[keys]\nprefix = \"C-b\"\n").unwrap();
         assert_eq!(config.keys.prefix, 'b');
     }
