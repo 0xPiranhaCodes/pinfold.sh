@@ -2,9 +2,9 @@
 //!
 //! Prefix `!` or the palette's "Agents" opens it. Like the palette it is drawn after the panes
 //! and takes every key while open, so program output can neither fake nor answer it. Each row
-//! is the state's glyph and word in its colour, `tab·pane`, the tab's label, the agent's message
-//! and the time in the state, which ticks while the inbox is open. Its rows live only while it
-//! is open: closing drops the whole value.
+//! is the state's glyph and word in its colour, `tab·pane`, the tab's label, the git branch, the
+//! agent's message, the run time and the time in the state, which tick while the inbox is open.
+//! Its rows live only while it is open: closing drops the whole value.
 
 use std::time::{Duration, Instant};
 
@@ -25,6 +25,8 @@ const NARROWEST: u16 = 40;
 const CHROME: u16 = 4;
 /// The widest a label column gets, as `top_bar::label` cuts labels to it.
 const LABEL: usize = 16;
+/// The widest a branch column gets; a longer branch is cut with `…`.
+const BRANCH: usize = 24;
 /// A message narrower than this is dropped rather than cut to nothing.
 const MESSAGE: usize = 8;
 /// Cells of the time column: `99h+` and `59:59` fit.
@@ -74,7 +76,10 @@ struct Row {
     /// The pane's place in its tab, from 1.
     place: u8,
     since: Option<Instant>,
+    started: Option<Instant>,
     label: String,
+    /// Printable ASCII, as the link's decoder refuses anything else.
+    branch: String,
     /// The agent's message, already safe to draw.
     message: String,
     profile: Option<u8>,
@@ -112,6 +117,8 @@ impl Inbox {
             count += 1;
             (row.pane, row.state, row.reported) = (listed.pane, listed.state, listed.reported);
             (row.tab, row.place, row.since) = (tab, place.min(99) as u8, Some(listed.since));
+            row.started = Some(listed.started);
+            row.branch.clone_from(&listed.branch);
             row.profile = listed.profile;
             row.label.clear();
             row.label
@@ -139,8 +146,9 @@ impl Inbox {
     pub fn next_change(&self, now: Instant) -> Option<Instant> {
         self.rows
             .iter()
-            .filter_map(|row| {
-                let since = row.since?;
+            .flat_map(|row| [row.since, row.started])
+            .flatten()
+            .filter_map(|since| {
                 let seconds = now.saturating_duration_since(since).as_secs();
                 (seconds < CAPPED).then(|| since + Duration::from_secs((seconds / 60 + 1) * 60))
             })
@@ -424,6 +432,18 @@ impl Inbox {
             );
             column += columns.label + 2;
         }
+        if columns.branch > 0 {
+            cut(
+                frame,
+                at,
+                column,
+                &row.branch,
+                chrome.dim,
+                ground,
+                columns.branch,
+            );
+            column += columns.branch + 2;
+        }
         if columns.message > 0 {
             let (message, colour) = if row.reported {
                 (row.message.as_str(), theme.foreground)
@@ -432,16 +452,28 @@ impl Inbox {
             };
             cut(frame, at, column, message, colour, ground, columns.message);
         }
-        let held = row
-            .since
-            .map_or(Duration::ZERO, |since| now.saturating_duration_since(since));
-        let time = held_for(held);
+        let held = |since: Option<Instant>| {
+            held_for(since.map_or(Duration::ZERO, |since| now.saturating_duration_since(since)))
+        };
+        let time = held(row.since);
         let colour = if row.state == 0 {
             theme.states.needs_you
         } else {
             chrome.dim
         };
         write(frame, at, end - cells(&time), &time, colour, ground, end);
+        // The run time, right-aligned in its own column left of the time in state.
+        let run = held(row.started);
+        let right = end - TIME - 1;
+        write(
+            frame,
+            at,
+            right - cells(&run),
+            &run,
+            chrome.dim,
+            ground,
+            right,
+        );
     }
 }
 
@@ -460,6 +492,7 @@ struct Area {
 struct Columns {
     place: usize,
     label: usize,
+    branch: usize,
     message: usize,
 }
 
@@ -474,19 +507,22 @@ impl Columns {
             3,
         );
         let label = widest(|row| cells(&row.label), 0).min(LABEL);
-        // The focus bar, a space, the glyph, a space, the word, then the place and the time.
-        let fixed = 3 + 2 + WORD + 2 + place + 2 + TIME + 1;
-        let room = inner.saturating_sub(fixed);
-        let label = if label > 0 && room >= label + 2 {
-            label
-        } else {
-            0
+        let branch = widest(|row| row.branch.len(), 0).min(BRANCH);
+        // The focus bar, a space, the glyph, a space, the word, then the place and two times.
+        let fixed = 3 + 2 + WORD + 2 + place + 2 + TIME + 1 + TIME + 1;
+        let mut room = inner.saturating_sub(fixed);
+        // The label is kept longest, then the branch, then the message.
+        let mut take = |width: usize| {
+            let fits = width > 0 && room >= width + 2;
+            room -= if fits { width + 2 } else { 0 };
+            if fits { width } else { 0 }
         };
-        let room = room.saturating_sub(if label > 0 { label + 2 } else { 0 });
+        let (label, branch) = (take(label), take(branch));
         let message = if room >= MESSAGE + 2 { room - 2 } else { 0 };
         Self {
             place,
             label,
+            branch,
             message,
         }
     }
@@ -591,20 +627,30 @@ pub(crate) mod tests {
             state,
             reported: true,
             since: now - Duration::from_secs(ago),
+            started: now - Duration::from_secs(ago + 600),
             message: message.to_owned(),
             profile: Some(0),
+            branch: String::new(),
         }
     }
 
     /// Five agents over three tabs, as the Agents board draws them.
     pub(crate) fn board(now: Instant) -> Inbox {
-        let listed = [
+        let mut listed = [
             listed(5, 1, 363, "Writing guides/limits.md", now),
             listed(9, 2, 30, "Turn complete · terraform plan clean", now),
             listed(4, 3, 70, "exit 101 · 1 failed", now),
             listed(2, 0, 42, "Allow edit to src/config.rs?", now),
             listed(6, 1, 1335, "npm run dev · watching", now),
         ];
+        for (index, branch) in [
+            (0, "docs/limits"),
+            (2, "fix/flaky-test"),
+            (3, "main"),
+            (4, "55b0e32"),
+        ] {
+            listed[index].branch = branch.to_owned();
+        }
         let members = [(2, 0), (4, 0), (5, 1), (6, 1), (9, 2), (11, 2)];
         let labels = ["api-refactor", "docs-site", "infra"].map(str::to_owned);
         let mut inbox = Inbox::default();
@@ -827,25 +873,29 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_narrow_window_drops_the_message_then_the_label() {
+    fn a_narrow_window_drops_the_message_then_the_branch_then_the_label() {
         let now = Instant::now();
         let inbox = board(now);
-        let wide = lines(&drawn(&inbox, 24, 104, now));
+        let row = |columns| lines(&drawn(&inbox, 24, columns, now)).remove(0);
+        let shows = |columns, label, branch, message| {
+            let row = row(columns);
+            let shown = (
+                row.contains("api-refactor"),
+                row.contains("main"),
+                row.contains("Allow"),
+            );
+            assert_eq!(shown, (label, branch, message), "{columns}: {row:?}");
+        };
+        shows(104, true, true, true);
+        shows(72, true, true, false);
+        shows(60, true, false, false);
+        shows(40, false, false, false);
+        let narrow = row(40);
         assert!(
-            wide[0].contains("api-refactor") && wide[0].contains("Allow edit"),
-            "{wide:?}"
-        );
-        let middle = lines(&drawn(&inbox, 24, 52, now));
-        assert!(
-            middle[0].contains("api-refactor") && !middle[0].contains("Allow"),
-            "{middle:?}"
-        );
-        let narrow = lines(&drawn(&inbox, 24, 40, now));
-        assert!(
-            !narrow[0].contains("api-refactor") && narrow[0].contains("<1m"),
+            narrow.contains("<1m") && narrow.contains("10m"),
             "{narrow:?}"
         );
-        assert!(narrow[0].contains("◆ needs you"), "the word always stays");
+        assert!(narrow.contains("◆ needs you"), "the word always stays");
         let tiny = drawn(&inbox, 4, 20, now);
         assert!(lines(&tiny).is_empty(), "too small to draw");
     }

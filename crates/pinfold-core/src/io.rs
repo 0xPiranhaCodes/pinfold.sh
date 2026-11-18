@@ -467,6 +467,7 @@ impl Reactor {
             .iter()
             .filter_map(|pane| pane.engine.sync_deadline())
             .chain(self.protect.deadline())
+            .chain(self.host.deadline())
             .min()
             .map(|deadline| deadline.saturating_duration_since(now));
         let timeout = if unfinished {

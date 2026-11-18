@@ -39,7 +39,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode, Palette};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 19;
+pub const VERSION: u16 = 20;
 
 /// The oldest version this side still speaks, one before [`VERSION`] (ADR-0043).
 pub const OLDEST: u16 = VERSION - 1;
@@ -57,6 +57,12 @@ const WEBHOOK_SINCE: u16 = 18;
 /// The first version with [`Request::Answer`], its refusals, and a [`Notice::Status`] that names
 /// the pane's agent profile (ADR-0051).
 const ANSWER: u16 = 19;
+
+/// The first version with [`Notice::InboxExtra`] (ADR-0051).
+const INBOX_EXTRA: u16 = 20;
+
+/// The longest branch a [`Notice::InboxExtra`] carries: 40 bytes of printable ASCII (ADR-0051).
+pub const MAX_BRANCH: usize = 40;
 
 /// The longest profile or key name a [`Request::Answer`] carries.
 pub const MAX_ANSWER_NAME: usize = 64;
@@ -211,6 +217,7 @@ const MARKDOWN: u8 = 14;
 const COLOURS: u8 = 15;
 const SECRETS: u8 = 16;
 const WEBHOOK: u8 = 17;
+const INBOX_EXTRA_KIND: u8 = 18;
 
 /// How many agent states there are. [`Notice::Status`] numbers them in the order of the
 /// contributor rule: needs you, running, done, error, idle.
@@ -839,6 +846,15 @@ pub enum Notice<'a> {
         /// How many alerts were given up on.
         failed: u32,
     },
+    /// What an open inbox's row shows beside the pane's status, read when it opens and every
+    /// 5 s while open, and kept by neither side once it closes (ADR-0051 §7). Since version 20.
+    InboxExtra {
+        /// The listed pane.
+        pane: u32,
+        /// The git branch of the pane's directory, at most [`MAX_BRANCH`] bytes of printable
+        /// ASCII, a detached head's first 7 hex digits, or empty for none.
+        branch: &'a str,
+    },
 }
 
 /// The session as the window draws it.
@@ -1384,6 +1400,7 @@ impl Notice<'_> {
             Self::Colours { .. } => 14,
             Self::Secrets { .. } => 15,
             Self::Webhook { .. } => WEBHOOK_SINCE,
+            Self::InboxExtra { .. } => INBOX_EXTRA,
             Self::Refused {
                 reason:
                     Refusal::Gone
@@ -1507,6 +1524,14 @@ impl Notice<'_> {
                 out.push(u8::from(*sender));
                 put_tail(out, start, MAX_MESSAGE, WEBHOOK, *failed, host.as_bytes())?
             }
+            Self::InboxExtra { pane, branch } => put_tail(
+                out,
+                start,
+                MAX_BRANCH,
+                INBOX_EXTRA_KIND,
+                *pane,
+                branch.as_bytes(),
+            )?,
             Self::Activity { tabs, alerts } => put!(out, ACTIVITY, tabs, alerts),
             Self::Refused { reason } => {
                 out.push(*reason as u8);
@@ -1632,6 +1657,20 @@ impl Notice<'_> {
                 failed: body.u32()?,
                 host: body.text()?,
             },
+            INBOX_EXTRA_KIND => {
+                let pane = body.u32()?;
+                let branch = body.text()?;
+                if branch.len() > MAX_BRANCH {
+                    return Err(Error::TooLarge {
+                        size: branch.len() as u64,
+                    });
+                }
+                // The window draws it as is, so only what a core's cleaning lets through.
+                if !branch.bytes().all(|byte| matches!(byte, b' '..=b'~')) {
+                    return Err(Error::BadText);
+                }
+                Notice::InboxExtra { pane, branch }
+            }
             UNHARDENED => Notice::Unhardened {
                 checked: body.tag("checked", &[false, true])?,
             },
@@ -2383,7 +2422,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 19, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 20, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -2609,15 +2648,17 @@ mod tests {
         let refused = Notice::Refused {
             reason: Refusal::Protected,
         };
-        let newer = Error::Newer {
-            kind: REFUSED,
-            since: ANSWER,
+        // 19, the oldest spoken, has it.
+        assert_eq!(at_oldest(refused), Ok(true));
+        let extra = Notice::InboxExtra {
+            pane: 1,
+            branch: "main",
         };
-        assert_eq!(
-            at_oldest(refused),
-            Err(newer),
-            "a window of 18 never gets it"
-        );
+        let newer = Error::Newer {
+            kind: INBOX_EXTRA_KIND,
+            since: INBOX_EXTRA,
+        };
+        assert_eq!(at_oldest(extra), Err(newer), "a window of 19 never gets it");
         assert_eq!(at_oldest(COLOURS_SEED), Ok(true));
         let secrets = Notice::Secrets {
             count: 1,
@@ -2629,7 +2670,6 @@ mod tests {
             sender: true,
             failed: 0,
         };
-        // 18, the oldest spoken, has it.
         assert_eq!(at_oldest(webhook), Ok(true));
         // Nothing is new in 16 but a layout, so a stand-in `since` checks the gate.
         let mut wire = raw(HELLO, &OLDEST.to_le_bytes());
@@ -2657,8 +2697,8 @@ mod tests {
         assert_eq!(decoder.next_request(&mut input), Ok(Some(PALETTE_SEED)));
     }
 
-    /// ADR-0051: every version spoken gets a pane's times and whether it names its tab; only 19
-    /// gets its profile.
+    /// ADR-0051: every version spoken gets a pane's times, whether it names its tab, and its
+    /// profile.
     #[test]
     fn a_status_is_laid_out_for_the_spoken_version() {
         let with = |profile| Notice::Status {
@@ -2687,8 +2727,8 @@ mod tests {
         let (old, older) = read(OLDEST);
         let (new, newer) = read(VERSION);
         assert_eq!(newer, Some(format!("{status:?}")));
-        let unprofiled = with(None);
-        assert_eq!((older, old), (Some(format!("{unprofiled:?}")), new - 1));
+        // 19, the oldest spoken, has the profile too.
+        assert_eq!((older, old), (newer, new));
         let none = with(None);
         let mut wire = raw(HELLO, &VERSION.to_le_bytes());
         none.encode(&mut wire).unwrap();
@@ -3410,6 +3450,25 @@ mod tests {
         }
     }
 
+    /// ADR-0051 §7: a branch past 40 bytes or with anything but printable ASCII is refused.
+    #[test]
+    fn an_inbox_branch_is_short_printable_ascii() {
+        let wire = |branch: &[u8]| {
+            let mut body = 7u32.to_le_bytes().to_vec();
+            body.extend_from_slice(branch);
+            raw(INBOX_EXTRA_KIND, &body)
+        };
+        let read = |branch: &[u8]| notice_error(&wire(branch));
+        assert_eq!(read(&[b'a'; MAX_BRANCH]), Ok(()));
+        let long = Error::TooLarge {
+            size: MAX_BRANCH as u64 + 1,
+        };
+        assert_eq!(read(&[b'a'; MAX_BRANCH + 1]), Err(long));
+        for hostile in [&b"a\x1bb"[..], b"a\nb", "a\u{202e}b".as_bytes(), b"\x7f"] {
+            assert_eq!(read(hostile), Err(Error::BadText), "{hostile:?}");
+        }
+    }
+
     #[test]
     fn text_must_be_utf8() {
         for kind in [PASTE, SEARCH] {
@@ -3859,6 +3918,12 @@ mod tests {
         #[test]
         fn webhook_round_trips(host in any::<String>(), sender in any::<bool>(), failed in any::<u32>(), chunk in chunks()) {
             let notice = Notice::Webhook { host: &host, sender, failed };
+            prop_assert!(notice_survives(&notice, chunk), "changed on the link");
+        }
+
+        #[test]
+        fn inbox_extra_round_trips(pane in any::<u32>(), branch in "[ -~]{0,40}", chunk in chunks()) {
+            let notice = Notice::InboxExtra { pane, branch: &branch };
             prop_assert!(notice_survives(&notice, chunk), "changed on the link");
         }
 

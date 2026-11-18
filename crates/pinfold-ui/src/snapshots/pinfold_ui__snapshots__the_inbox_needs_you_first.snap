@@ -4,11 +4,11 @@ expression: cells(&inbox())
 ---
 |xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
 |xx┌─ AGENTS · needs you first ───────────────────────────────────────────────────── esc ─┐xx|
-|xx│▌ ◆ needs you  1·1  api-refactor  Allow edit to src/config.rs?                    <1m │xx|
-|xx│  ✕ error      1·2  api-refactor  exit 101  1 failed                               1m │xx|
-|xx│  ● running    2·2  docs-site     npm run dev  watching                           22m │xx|
-|xx│  ● running    2·1  docs-site     Writing guides/limits.md                         6m │xx|
-|xx│  ✓ done       3·1  infra         Turn complete  terraform plan clean             <1m │xx|
+|xx│▌ ◆ needs you  1·1  api-refactor  main            Allow edit to src/co…     10m   <1m │xx|
+|xx│  ✕ error      1·2  api-refactor  fix/flaky-test  exit 101  1 failed        11m    1m │xx|
+|xx│  ● running    2·2  docs-site     55b0e32         npm run dev  watching     32m   22m │xx|
+|xx│  ● running    2·1  docs-site     docs/limits     Writing guides/limit…     16m    6m │xx|
+|xx│  ✓ done       3·1  infra                         Turn complete  terra…     10m   <1m │xx|
 |xx├──────────────────────────────────────────────────────────────────────────────────────┤xx|
 |xx│ 5 agents · 1 needs you                        ⏎ jump · y approve · i interrupt · esc │xx|
 |xx└──────────────────────────────────────────────────────────────────────────────────────┘xx|
@@ -34,7 +34,11 @@ expression: cells(&inbox())
 2:7..16 fg f5b544 bg 253c3b
 2:16..18 fg e2e5ea bg 253c3b
 2:18..21 fg 9aa1ac bg 253c3b
-2:21..85 fg e2e5ea bg 253c3b
+2:21..37 fg e2e5ea bg 253c3b
+2:37..41 fg 9aa1ac bg 253c3b
+2:41..79 fg e2e5ea bg 253c3b
+2:79..82 fg 9aa1ac bg 253c3b
+2:82..85 fg e2e5ea bg 253c3b
 2:85..88 fg f5b544 bg 253c3b
 2:88..89 fg e2e5ea bg 253c3b
 2:89..90 fg 343a44 bg 151920
@@ -47,7 +51,11 @@ expression: cells(&inbox())
 3:7..12 fg ff8a8a bg 151920
 3:12..18 fg e2e5ea bg 151920
 3:18..21 fg 9aa1ac bg 151920
-3:21..86 fg e2e5ea bg 151920
+3:21..37 fg e2e5ea bg 151920
+3:37..51 fg 9aa1ac bg 151920
+3:51..79 fg e2e5ea bg 151920
+3:79..82 fg 9aa1ac bg 151920
+3:82..86 fg e2e5ea bg 151920
 3:86..88 fg 9aa1ac bg 151920
 3:88..89 fg e2e5ea bg 151920
 3:89..90 fg 343a44 bg 151920
@@ -60,7 +68,11 @@ expression: cells(&inbox())
 4:7..14 fg 7aa7ff bg 151920
 4:14..18 fg e2e5ea bg 151920
 4:18..21 fg 9aa1ac bg 151920
-4:21..85 fg e2e5ea bg 151920
+4:21..37 fg e2e5ea bg 151920
+4:37..44 fg 9aa1ac bg 151920
+4:44..79 fg e2e5ea bg 151920
+4:79..82 fg 9aa1ac bg 151920
+4:82..85 fg e2e5ea bg 151920
 4:85..88 fg 9aa1ac bg 151920
 4:88..89 fg e2e5ea bg 151920
 4:89..90 fg 343a44 bg 151920
@@ -73,7 +85,11 @@ expression: cells(&inbox())
 5:7..14 fg 7aa7ff bg 151920
 5:14..18 fg e2e5ea bg 151920
 5:18..21 fg 9aa1ac bg 151920
-5:21..86 fg e2e5ea bg 151920
+5:21..37 fg e2e5ea bg 151920
+5:37..48 fg 9aa1ac bg 151920
+5:48..79 fg e2e5ea bg 151920
+5:79..82 fg 9aa1ac bg 151920
+5:82..86 fg e2e5ea bg 151920
 5:86..88 fg 9aa1ac bg 151920
 5:88..89 fg e2e5ea bg 151920
 5:89..90 fg 343a44 bg 151920
@@ -86,7 +102,9 @@ expression: cells(&inbox())
 6:7..11 fg 63d29a bg 151920
 6:11..18 fg e2e5ea bg 151920
 6:18..21 fg 9aa1ac bg 151920
-6:21..85 fg e2e5ea bg 151920
+6:21..79 fg e2e5ea bg 151920
+6:79..82 fg 9aa1ac bg 151920
+6:82..85 fg e2e5ea bg 151920
 6:85..88 fg 9aa1ac bg 151920
 6:88..89 fg e2e5ea bg 151920
 6:89..90 fg 343a44 bg 151920
