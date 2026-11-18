@@ -128,6 +128,8 @@ struct Session {
     refused: Option<Refusal>,
     /// Whether this window was told the core lacks the hardened runtime, if it does.
     told_unhardened: bool,
+    /// The webhook's given-up count as this window last heard it.
+    told_webhook: Option<u32>,
     /// The version in the window's hello, which is never above the core's.
     version: u16,
 }
@@ -624,6 +626,20 @@ impl Window {
                     self.session.notice(&notice)?;
                 }
             }
+            if let Some((host, sender, failed)) = &reactor.webhook
+                && self.session.told_webhook != Some(*failed)
+            {
+                self.session.told_webhook = Some(*failed);
+                let notice = Notice::Webhook {
+                    host,
+                    sender: *sender,
+                    failed: *failed,
+                };
+                // An older window cannot show it; the core's log names the host and each give-up.
+                if self.decoder.version() >= Some(notice.since()) {
+                    self.session.notice(&notice)?;
+                }
+            }
             self.session.report(reactor)?;
             self.session.send_panes(reactor)
         } else {
@@ -831,6 +847,7 @@ impl Reactor {
                 activity_changed: false,
                 refused: None,
                 told_unhardened: false,
+                told_webhook: None,
                 version: 0,
             },
         };
@@ -922,6 +939,7 @@ mod tests {
         was_running: Vec<(u32, bool, String)>,
         unhardened: Vec<bool>,
         secrets: Vec<(u32, String)>,
+        webhooks: Vec<(String, bool, u32)>,
         /// Each pane's OSC 12 cursor colour and OSC 11 background, as told.
         colours: Vec<(u32, Option<u32>, Option<u32>)>,
     }
@@ -959,6 +977,7 @@ mod tests {
                 was_running: Vec::new(),
                 unhardened: Vec::new(),
                 secrets: Vec::new(),
+                webhooks: Vec::new(),
                 colours: Vec::new(),
             }
         }
@@ -1076,6 +1095,11 @@ mod tests {
                         Notice::Secrets { count, names } => {
                             self.secrets.push((count, names.to_owned()));
                         }
+                        Notice::Webhook {
+                            host,
+                            sender,
+                            failed,
+                        } => self.webhooks.push((host.to_owned(), sender, failed)),
                     }
                 }
             }
@@ -1218,12 +1242,9 @@ mod tests {
             // From 17 the window can tell the naming plain shell is not in the inbox, and
             // which tab each pane is in.
             let members = [(agent as u32, 0), (reporter, 0), (plain, 0)];
-            if version == VERSION {
-                assert_eq!(peer.naming_listed, Some(false));
-                assert_eq!(peer.members, members);
-            } else {
-                assert!(peer.members.is_empty(), "sent what version 16 cannot read");
-            }
+            // Both spoken versions are 17 or later (ADR-0043).
+            assert_eq!(peer.naming_listed, Some(false), "{version}");
+            assert_eq!(peer.members, members, "{version}");
             assert!(reactor.is_window_ready(), "the link ended");
         }
     }
@@ -1299,6 +1320,31 @@ mod tests {
             drop(peer);
             assert!(turn_until(&mut reactor, |r| !r.has_window()));
         }
+    }
+
+    #[test]
+    fn a_webhook_is_told_with_its_host_after_the_hello_and_again_when_failed_changes() {
+        let mut reactor = Reactor::new().unwrap();
+        let pane = reactor.open_tab(shell(ALIVE), 24, 80).unwrap();
+        let mut peer = Peer::watching(&mut reactor, pane);
+        serve(&mut reactor, &mut peer, |r, p| p.matches(r, pane));
+        assert!(peer.webhooks.is_empty(), "none configured");
+        drop(peer);
+        assert!(turn_until(&mut reactor, |r| !r.has_window()));
+        reactor.set_webhook("ntfy.sh", false);
+        let mut peer = Peer::watching(&mut reactor, pane);
+        serve(&mut reactor, &mut peer, |_, p| p.webhooks.len() == 1);
+        // The same count is not told again, while output still flows.
+        reactor.set_webhook_failed(0);
+        reactor.write(pane, b"more\n");
+        serve(&mut reactor, &mut peer, |r, _| {
+            on_screen(r, pane, "got-more")
+        });
+        reactor.set_webhook_failed(2);
+        serve(&mut reactor, &mut peer, |_, p| p.webhooks.len() == 2);
+        peer.read();
+        let told = |failed| ("ntfy.sh".to_owned(), false, failed);
+        assert_eq!(peer.webhooks, [told(0), told(2)], "once, then on a change");
     }
 
     #[test]

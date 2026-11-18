@@ -200,6 +200,9 @@ struct State {
     /// How many secret-looking variables a sandboxed agent can read on macOS, and the first few
     /// names (ADR-0047).
     secrets: Option<(u32, String)>,
+    /// A configured webhook's host, whether `curl` was found and how many alerts were given up
+    /// on, until the window takes it (ADR-0051).
+    webhook: Option<(String, bool, u32)>,
     /// Whether the core is too old to take a palette, so it draws Graphite Grid (ADR-0049).
     unthemed: bool,
     /// The OSC 12 and OSC 11 colours of each pane that has either, shown or not.
@@ -286,6 +289,17 @@ impl State {
             Notice::Raise => self.raised = true,
             Notice::Unhardened { checked } => self.unhardened = Some(checked),
             Notice::Secrets { count, names } => self.secrets = Some((count, names.to_owned())),
+            Notice::Webhook {
+                host,
+                sender,
+                failed,
+            } => {
+                // The core's URL rules allow no more; kept to them, whatever a core sends.
+                let host = host
+                    .chars()
+                    .filter(|c| c.is_ascii_alphanumeric() || ".-:[]".contains(*c));
+                self.webhook = Some((host.take(64).collect(), sender, failed));
+            }
             Notice::Colours {
                 pane,
                 cursor,
@@ -926,6 +940,12 @@ impl Link {
     /// said so since the last call: how many, and the first few names. It says so once a session.
     pub fn take_secrets(&mut self) -> Option<(u32, String)> {
         self.state.secrets.take()
+    }
+
+    /// Returns a configured webhook's host, whether `curl` was found and how many alerts were
+    /// given up on, if the core said so since the last call: after the hello and on a change.
+    pub fn take_webhook(&mut self) -> Option<(String, bool, u32)> {
+        self.state.webhook.take()
     }
 
     /// Returns whether the core turned out too old to take the theme's palette, once. Its

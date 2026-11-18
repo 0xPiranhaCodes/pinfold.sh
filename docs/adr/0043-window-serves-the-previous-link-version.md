@@ -88,8 +88,10 @@ From 16, `OLDEST` is 15, so a version 14 core restarts the session.
 | Change in 17 | Spoken version 16 |
 |---|---|
 | `Request::Inbox`, `Notice::Layout` gains every pane's tab, and `Notice::Status` gains `listed` ([ADR-0051](0051-needs-you-inbox-and-alerts.md)) | The window never sends the request: prefix `!` and the palette's Agents flash `the inbox needs the core updated`. The core lays out a layout and a status as 16 does: no members, and `listed` left out of the flags byte, which a window of 17 reads from 16 as `listed` for a pane that does not name its tab. Every other key works. |
+| 18 | `Notice::Webhook`: a configured webhook's host, whether `curl` was found and how many alerts were given up on ([ADR-0051](0051-needs-you-inbox-and-alerts.md)) | The core does not send it. The window shows no "Alerts for ◆ and ✕ go to `<host>`" notice and no webhook words in the inbox footer; the core still posts, and its log names the host and each give-up. Every other key works. |
 
-From 17, `OLDEST` is 16, so a version 15 core restarts the session.
+From 17, `OLDEST` is 16, so a version 15 core restarts the session. From 18, `OLDEST` is 17, so a
+version 16 core restarts the session.
 
 **Raising the version.** A PR that changes the link raises `VERSION`, gives each new message or
 value a `since` of the new version, and adds a row to this table saying how the older version
