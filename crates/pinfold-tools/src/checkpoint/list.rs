@@ -52,8 +52,29 @@ pub fn list(state: &Path, run: &str, key: &str) -> io::Result<Vec<serde_json::Va
 #[cfg(test)]
 mod tests {
     use super::super::Caps;
-    use super::super::take::{Dir, take_next};
+    use super::super::take::{self, Dir};
     use super::*;
+
+    /// Takes, retrying while the store is locked: another test thread that forks for its git
+    /// holds a copy of the lock until it execs, a moment after the last take let go.
+    fn take_next(
+        state: &Path,
+        run: &str,
+        reason: &str,
+        dir: Dir,
+        time: u64,
+        caps: &Caps,
+    ) -> io::Result<take::Taken> {
+        for _ in 0..100 {
+            match take::take_next(state, run, reason, dir, time, caps) {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                other => return other,
+            }
+        }
+        take::take_next(state, run, reason, dir, time, caps)
+    }
 
     #[test]
     fn a_run_lists_newest_first_with_no_paths_and_takes_number_from_the_store() {
