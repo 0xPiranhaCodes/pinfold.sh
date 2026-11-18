@@ -17,11 +17,11 @@ use std::io::{self, ErrorKind, Read, Write};
 use std::mem;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use mio::unix::SourceFd;
+use mio::unix::{SourceFd, pipe};
 use mio::{Interest, Token};
 use pinfold_proto::Frame;
 use pinfold_proto::link::{
@@ -52,6 +52,14 @@ const KEPT_OUTPUT: usize = 32 * 1024;
 const KEPT_CELLS: usize = 80 * 24;
 /// How often an open inbox's branches are read again (ADR-0051 §7).
 const INBOX_REFRESH: Duration = Duration::from_secs(5);
+/// How long `pinfold agents peek` may run before it is killed (ADR-0051 §7).
+const PEEK_KILL: Duration = Duration::from_secs(2);
+/// How often a running peek is looked at.
+const PEEK_POLL: Duration = Duration::from_millis(20);
+/// The longest line of a peek's taken as one.
+const PEEK_LINE: usize = 1024;
+/// The most of a peek's output read: a line of 1 KiB and its newline for each of 64 panes.
+const PEEK_OUTPUT: usize = 64 * (PEEK_LINE + 1);
 /// One read from the socket, which lives on the stack and costs nothing when idle.
 const READ_CHUNK: usize = 16 * 1024;
 
@@ -99,6 +107,118 @@ struct PaneLink {
     colours: (Option<u32>, Option<u32>),
 }
 
+/// A running `pinfold agents peek` and the listed panes it reads for, in the order of its
+/// lines. Its output is the only thing kept, and only until it ends (ADR-0051 §7).
+struct Peek {
+    child: Child,
+    stdout: pipe::Receiver,
+    output: Vec<u8>,
+    panes: Vec<usize>,
+    started: Instant,
+}
+
+impl Peek {
+    /// Starts `tools agents peek -- <dir>...` with no environment but `HOME`, nothing on
+    /// standard input and standard error discarded.
+    fn start(tools: &Path, panes: Vec<usize>, dirs: &[PathBuf]) -> io::Result<Self> {
+        let mut command = Command::new(tools);
+        command
+            .args(["agents", "peek", "--"])
+            .args(dirs)
+            .env_clear()
+            .envs(std::env::var_os("HOME").map(|home| ("HOME", home)))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        pinfold_sys::mark_strays(&mut command);
+        let mut child = command.spawn()?;
+        let stdout = child.stdout.take().map(pipe::Receiver::from);
+        let Some(stdout) = stdout.filter(|stdout| stdout.set_nonblocking(true).is_ok()) else {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(io::Error::other("no output pipe"));
+        };
+        Ok(Self {
+            child,
+            stdout,
+            output: Vec::new(),
+            panes,
+            started: Instant::now(),
+        })
+    }
+
+    /// Reads what is ready, never past [`PEEK_OUTPUT`]. Returns `None` while it runs, else
+    /// whether it ended well; one past [`PEEK_KILL`] is killed and did not.
+    fn poll(&mut self, now: Instant) -> Option<bool> {
+        let mut chunk = [0_u8; 4096];
+        while self.output.len() < PEEK_OUTPUT {
+            match self.stdout.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    let room = PEEK_OUTPUT - self.output.len();
+                    self.output.extend_from_slice(&chunk[..read.min(room)]);
+                }
+            }
+        }
+        match self.child.try_wait() {
+            Ok(Some(status)) => Some(status.success()),
+            Ok(None) if now.duration_since(self.started) < PEEK_KILL => None,
+            _ => Some(false),
+        }
+    }
+
+    /// The context use and steps of the `index`th pane, from its line.
+    fn line(&self, index: usize) -> (Option<u8>, String) {
+        let line = self.output.split(|&byte| byte == b'\n').nth(index);
+        let line = line.filter(|line| line.len() <= PEEK_LINE);
+        let Some(serde_json::Value::Object(line)) =
+            line.and_then(|line| serde_json::from_slice(line).ok())
+        else {
+            return (None, String::new());
+        };
+        let ctx = line.get("ctx").and_then(serde_json::Value::as_u64);
+        let ctx = ctx
+            .filter(|&ctx| ctx <= 100)
+            .and_then(|ctx| u8::try_from(ctx).ok());
+        let mut steps: Vec<String> = (line.get("steps").and_then(serde_json::Value::as_array))
+            .into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str)
+            .map(|step| {
+                step.chars()
+                    .filter(|&c| !c.is_control() && !bidi(c))
+                    .collect()
+            })
+            .filter(|step: &String| !step.is_empty())
+            .collect();
+        let keep = steps.len().saturating_sub(link::STEPS);
+        steps.drain(..keep);
+        // The peek keeps a line within 1 KiB, so this drops nothing it printed.
+        while steps.iter().map(|step| step.len() + 1).sum::<usize>() > link::MAX_STEPS + 1 {
+            steps.remove(0);
+        }
+        (ctx, steps.join("\n"))
+    }
+}
+
+impl Drop for Peek {
+    fn drop(&mut self) {
+        // A peek that ended is reaped; one still running is killed first, which is at once.
+        if matches!(self.child.try_wait(), Ok(None)) {
+            let _ = self.child.kill();
+        }
+        let _ = self.child.wait();
+    }
+}
+
+/// Whether `character` reorders text: the bidi controls and marks.
+fn bidi(character: char) -> bool {
+    matches!(
+        character,
+        '\u{61c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
 /// A copy, which takes a step per pass so a window cannot hold up PTYs with long ones.
 struct CopyJob {
     pane: usize,
@@ -137,6 +257,8 @@ struct Session {
     /// While this window's inbox is open, when its rows' branches are next read; no timer at
     /// all while it is closed (ADR-0051 §7).
     inbox: Option<Instant>,
+    /// The agents peek running for the open inbox, if `[inbox] agent_files` is on.
+    peek: Option<Peek>,
     /// The version in the window's hello, which is never above the core's.
     version: u16,
 }
@@ -159,7 +281,9 @@ impl Session {
         }
         self.out.drain(..self.head);
         self.head = 0;
-        notice.encode(&mut self.out).map_err(|_| Ended)
+        // As the window reads it: `Notice::InboxExtra` is laid out by version.
+        let version = if self.greeted { self.version } else { VERSION };
+        notice.encode_at(version, &mut self.out).map_err(|_| Ended)
     }
 
     /// Writes what the socket will take, and keeps the rest for its next wake-up.
@@ -239,9 +363,15 @@ impl Session {
                 let extra = Notice::InboxExtra {
                     pane: 0,
                     branch: "",
+                    ctx: None,
+                    steps: "",
                 };
                 let reads = open && self.version >= extra.since();
                 self.inbox = reads.then(Instant::now);
+                // Closing ends a peek too, and what it read goes nowhere.
+                if !reads {
+                    self.peek = None;
+                }
             }
             // Only a person's confirmation in the window sends this; no API method does.
             Request::Answer {
@@ -332,28 +462,82 @@ impl Session {
     }
 
     /// Sends each listed pane's branch, read now and kept by neither side, if the open inbox
-    /// is due them, and sets when it is next (ADR-0051 §7).
+    /// is due them, and sets when it is next (ADR-0051 §7). With `[inbox] agent_files` on, a
+    /// window of 21 or later gets them once `pinfold agents peek` has ended, with its context
+    /// use and steps.
     fn send_extras(&mut self, reactor: &Reactor) -> Result<(), Ended> {
         let now = Instant::now();
+        if let Some(peek) = self.peek.as_mut() {
+            let Some(ended) = peek.poll(now) else {
+                return Ok(());
+            };
+            // Only that it ran and how long, never what it read (ADR-0051 §7).
+            let ms = now.duration_since(peek.started).as_millis();
+            let how = if ended { "ran" } else { "failed or was killed" };
+            let _ = writeln!(io::stderr(), "pinfold-core: agents peek {how} in {ms} ms");
+            if let Some(peek) = self.peek.take() {
+                for (index, &pane) in peek.panes.iter().enumerate() {
+                    let (ctx, steps) = if ended {
+                        peek.line(index)
+                    } else {
+                        (None, String::new())
+                    };
+                    self.send_extra(reactor, pane, ctx, &steps)?;
+                }
+            }
+            return Ok(());
+        }
         if self.inbox.is_none_or(|due| due > now) {
             return Ok(());
         }
         self.inbox = Some(now + INBOX_REFRESH);
-        for index in 0..self.panes.len() {
-            let Some(pane) = self.panes.get(index).map(|state| state.number) else {
-                continue;
-            };
-            if !reactor.listed(pane) {
-                continue;
+        let listed = self.panes.iter().map(|state| state.number);
+        let listed: Vec<usize> = listed.filter(|&pane| reactor.listed(pane)).collect();
+        let mut peeked = (Vec::new(), Vec::new());
+        let tools = reactor.tools().filter(|_| reactor.agent_files);
+        if tools.is_some() && self.version >= link::AGENT_FILES {
+            for &pane in &listed {
+                if let Some(dir) = reactor.shell_cwd(pane) {
+                    peeked.0.push(pane);
+                    peeked.1.push(dir);
+                }
             }
-            let dir = reactor.shell_cwd(pane);
-            let branch = dir.map(|dir| branch::branch(&dir)).unwrap_or_default();
-            self.notice(&Notice::InboxExtra {
-                pane: pane as u32,
-                branch: &branch,
-            })?;
+        }
+        if let Some(tools) = tools.filter(|_| !peeked.0.is_empty()) {
+            match Peek::start(tools, peeked.0.clone(), &peeked.1) {
+                Ok(peek) => self.peek = Some(peek),
+                Err(error) => {
+                    let _ = writeln!(
+                        io::stderr(),
+                        "pinfold-core: warn agents peek did not start: {}",
+                        error.kind()
+                    );
+                    peeked.0.clear();
+                }
+            }
+        }
+        for pane in listed.into_iter().filter(|pane| !peeked.0.contains(pane)) {
+            self.send_extra(reactor, pane, None, "")?;
         }
         Ok(())
+    }
+
+    /// Sends `pane`'s branch, read now, with `ctx` and `steps`.
+    fn send_extra(
+        &mut self,
+        reactor: &Reactor,
+        pane: usize,
+        ctx: Option<u8>,
+        steps: &str,
+    ) -> Result<(), Ended> {
+        let dir = reactor.shell_cwd(pane);
+        let branch = dir.map(|dir| branch::branch(&dir)).unwrap_or_default();
+        self.notice(&Notice::InboxExtra {
+            pane: pane as u32,
+            branch: &branch,
+            ctx,
+            steps,
+        })
     }
 
     fn state(&mut self, pane: usize) -> Option<&mut PaneLink> {
@@ -716,9 +900,14 @@ impl Host {
             .is_some_and(|window| window.readable || window.session.copying.is_some())
     }
 
-    /// When an open inbox's branches are next read, and nothing while it is closed.
+    /// When an open inbox's branches are next read, or a running peek next looked at, and
+    /// nothing while it is closed.
     pub(crate) fn deadline(&self) -> Option<Instant> {
-        self.window.as_ref()?.session.inbox
+        let session = &self.window.as_ref()?.session;
+        match session.peek {
+            Some(_) => Some(Instant::now() + PEEK_POLL),
+            None => session.inbox,
+        }
     }
 
     /// Notes that the socket has news.
@@ -905,6 +1094,7 @@ impl Reactor {
                 told_unhardened: false,
                 told_webhook: None,
                 inbox: None,
+                peek: None,
                 version: 0,
             },
         };
@@ -999,6 +1189,8 @@ mod tests {
         webhooks: Vec<(String, bool, u32)>,
         /// Each inbox branch told: pane and branch.
         extras: Vec<(u32, String)>,
+        /// Each extra's context use and steps, beside `extras`.
+        peeked: Vec<(Option<u8>, String)>,
         /// Each pane's OSC 12 cursor colour and OSC 11 background, as told.
         colours: Vec<(u32, Option<u32>, Option<u32>)>,
     }
@@ -1038,6 +1230,7 @@ mod tests {
                 secrets: Vec::new(),
                 webhooks: Vec::new(),
                 extras: Vec::new(),
+                peeked: Vec::new(),
                 colours: Vec::new(),
             }
         }
@@ -1160,8 +1353,14 @@ mod tests {
                             sender,
                             failed,
                         } => self.webhooks.push((host.to_owned(), sender, failed)),
-                        Notice::InboxExtra { pane, branch } => {
+                        Notice::InboxExtra {
+                            pane,
+                            branch,
+                            ctx,
+                            steps,
+                        } => {
                             self.extras.push((pane, branch.to_owned()));
+                            self.peeked.push((ctx, steps.to_owned()));
                         }
                     }
                 }
@@ -1367,17 +1566,132 @@ mod tests {
         peer.read();
         assert_eq!(peer.extras.len(), 2, "read after the inbox closed");
 
-        // A window of 19 opens an inbox it cannot show branches in, so none are read.
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A listed agent pane whose shell is in `dir`, served to a window that has heard of it.
+    fn listed_in(dir: &Path, reactor: &mut Reactor) -> (usize, Peer) {
+        let script = format!("cd '{}' && echo ready; read line", dir.display());
+        let agent = reactor.open_tab(shell(&script), 24, 80).unwrap();
+        let mut peer = Peer::watching(reactor, agent);
+        serve(reactor, &mut peer, |r, _| on_screen(r, agent, "ready"));
+        reactor
+            .report_status(agent, Status::Running, "", Instant::now())
+            .unwrap();
+        serve(reactor, &mut peer, |_, p| p.status.is_some());
+        (agent, peer)
+    }
+
+    /// A stand-in for `pinfold` in `root` that runs `body`, after `$@` and its environment are
+    /// written beside it.
+    fn stub_tools(root: &Path, body: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let stub = root.join("pinfold");
+        let script = format!(
+            "#!/bin/sh\necho \"$@\" > '{0}/args'\nenv > '{0}/env'\necho $$ > '{0}/pid'\n{body}\n",
+            root.display()
+        );
+        fs::write(&stub, script).unwrap();
+        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        stub
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("pinfold-peek-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root.canonicalize().unwrap()
+    }
+
+    /// ADR-0051 §7: with `[inbox] agent_files` off, as it starts, an open inbox starts no peek,
+    /// so no session file is read, and its rows get no second line.
+    #[test]
+    fn with_agent_files_off_no_peek_runs_and_no_file_is_read() {
+        let root = scratch("off");
+        let mut reactor = Reactor::new().unwrap();
+        reactor.set_tools(stub_tools(&root, r#"echo '{"ctx":64,"steps":["Bash"]}'"#));
+        let (agent, mut peer) = listed_in(&root, &mut reactor);
+        peer.send(Request::Inbox { open: true });
+        serve(&mut reactor, &mut peer, |_, p| !p.extras.is_empty());
+        assert_eq!(peer.extras[0].0, agent as u32);
+        assert_eq!(peer.peeked, [(None, String::new())]);
+        assert!(!root.join("args").exists(), "a peek ran");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// ADR-0051 §7: on, the core starts `pinfold agents peek` with fixed arguments, the panes'
+    /// directories after `--` and no environment but `HOME`, and forwards each line cleaned,
+    /// keeping nothing once it is sent.
+    #[test]
+    fn an_open_inbox_forwards_each_peek_line_and_keeps_nothing() {
+        let root = scratch("on");
+        let mut reactor = Reactor::new().unwrap();
+        let line = r#"{"ctx":64,"steps":["Read","a\u001b]0;x\u0007b\u202ec","","Edit","Grep"]}"#;
+        reactor.set_tools(stub_tools(&root, &format!("echo '{line}'")));
+        reactor.set_agent_files(true);
+        let (agent, mut peer) = listed_in(&root, &mut reactor);
+        peer.send(Request::Inbox { open: true });
+        serve(&mut reactor, &mut peer, |_, p| !p.extras.is_empty());
+        assert_eq!(peer.extras[0].0, agent as u32);
+        let steps = "a]0;xbc\nEdit\nGrep".to_owned();
+        assert_eq!(peer.peeked, [(Some(64), steps)]);
+        let args = fs::read_to_string(root.join("args")).unwrap();
+        assert_eq!(
+            args.trim_end(),
+            format!("agents peek -- {}", root.display())
+        );
+        let env = fs::read_to_string(root.join("env")).unwrap();
+        assert!(env.lines().any(|line| line.starts_with("HOME=")), "{env}");
+        assert!(!env.lines().any(|line| line.starts_with("CARGO")), "{env}");
+        assert!(reactor.host.window.as_ref().unwrap().session.peek.is_none());
+
+        // Closing ends a peek that runs, and starts none.
+        reactor.set_tools(stub_tools(&root, "sleep 30"));
+        reactor.host.window.as_mut().unwrap().session.inbox = Some(Instant::now());
+        assert!(turn_until(&mut reactor, |r| r
+            .host
+            .window
+            .as_ref()
+            .unwrap()
+            .session
+            .peek
+            .is_some()));
+        peer.send(Request::Inbox { open: false });
+        assert!(turn_until(&mut reactor, |r| r.host.deadline().is_none()));
+
+        // A window of 20 gets branches only, so no peek runs for it.
+        fs::remove_file(root.join("args")).unwrap();
         let mut older = Peer::older(&mut reactor, VERSION - 1);
         older.fit(&reactor, agent);
         serve(&mut reactor, &mut older, |_, p| p.status.is_some());
         older.send(Request::Inbox { open: true });
-        for _ in 0..10 {
-            reactor.turn(Some(Duration::from_millis(5))).unwrap();
-        }
-        older.read();
-        assert_eq!(reactor.host.deadline(), None);
-        assert!(older.extras.is_empty());
+        serve(&mut reactor, &mut older, |_, p| !p.extras.is_empty());
+        assert_eq!(older.peeked, [(None, String::new())]);
+        assert!(!root.join("args").exists(), "a peek ran for a window of 20");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// ADR-0051 §7: a peek still running after 2 s is killed, and the rows get their branch
+    /// with no second line.
+    #[test]
+    fn a_peek_past_two_seconds_is_killed_and_gives_no_second_line() {
+        let root = scratch("slow");
+        let mut reactor = Reactor::new().unwrap();
+        reactor.set_tools(stub_tools(&root, "exec sleep 30"));
+        reactor.set_agent_files(true);
+        let (_, mut peer) = listed_in(&root, &mut reactor);
+        let start = Instant::now();
+        peer.send(Request::Inbox { open: true });
+        serve(&mut reactor, &mut peer, |_, p| !p.extras.is_empty());
+        let took = start.elapsed();
+        assert!((PEEK_KILL..PEEK_KILL * 3).contains(&took), "{took:?}");
+        assert_eq!(peer.peeked, [(None, String::new())]);
+        let pid = fs::read_to_string(root.join("pid")).unwrap();
+        let alive = Command::new("kill")
+            .args(["-0", pid.trim()])
+            .status()
+            .unwrap();
+        assert!(!alive.success(), "the peek still runs");
         fs::remove_dir_all(root).unwrap();
     }
 
