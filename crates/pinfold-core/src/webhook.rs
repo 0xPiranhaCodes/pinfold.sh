@@ -157,7 +157,8 @@ impl Webhook {
         Ok(Some(Self {
             url: url.into(),
             host,
-            loopback,
+            // Plain `http` is loopback only, and `https://127.0.0.1` is still `https`.
+            loopback: !https,
         }))
     }
 
@@ -572,6 +573,12 @@ mod tests {
             .curl_config("x", Format::Text, &mut config);
         assert!(config.contains("proto = \"=https\"\n"));
         assert!(config.contains("header = \"Content-Type: text/plain\"\n"));
+        // A loopback host over `https` stays `https`, or `curl` refuses the URL (exit 1).
+        config.clear();
+        let local = Webhook::new("https://127.0.0.1:9").unwrap().unwrap();
+        assert!(!local.loopback());
+        local.curl_config("x", Format::Json, &mut config);
+        assert!(config.contains("proto = \"=https\"\n"));
     }
 
     #[test]

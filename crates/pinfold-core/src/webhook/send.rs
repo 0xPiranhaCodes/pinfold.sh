@@ -798,6 +798,29 @@ mod tests {
         assert_eq!((runs(&dir), sender.failed()), (2, 0), "started again");
     }
 
+    /// The real `curl`, where there is one, takes the whole config: a closed port is a connect
+    /// failure, tried again, not a refused option or protocol.
+    #[test]
+    fn the_system_curl_reads_the_config_to_a_closed_port() {
+        let Some(curl) = find_curl() else {
+            return;
+        };
+        for url in [
+            "https://127.0.0.1:9/t",
+            "http://127.0.0.1:9/t",
+            "http://[::1]:9/t",
+        ] {
+            let hook = Webhook::new(url).unwrap().unwrap();
+            let (_dir, mut sender) = stub("");
+            let job = &mut Arc::get_mut(&mut sender.shared).unwrap().job;
+            (job.curl, job.hook) = (curl.clone(), hook);
+            job.vars = |_| None;
+            let mut config = String::new();
+            job.hook.curl_config("{}", Format::Json, &mut config);
+            assert_eq!(run(job, &config), Try::Again(Failed::Exit(7)), "{url}");
+        }
+    }
+
     #[test]
     fn curl_is_found_only_as_an_executable_on_an_absolute_path_entry() {
         let dir = tempfile::tempdir().unwrap();
