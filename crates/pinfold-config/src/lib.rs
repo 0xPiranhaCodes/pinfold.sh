@@ -53,6 +53,8 @@ pub struct Config {
     pub keys: Keys,
     /// The `[api]` table.
     pub api: Api,
+    /// The `[alerts]` table.
+    pub alerts: Alerts,
     /// The `[agents.<name>]` tables: agent profiles, by name.
     pub agents: BTreeMap<String, Agent>,
     /// Whether the launcher starts the core, and the core every program it starts, without the
@@ -117,6 +119,9 @@ pub struct Keys {
     /// The key after the prefix that opens and closes the inbox (ADR-0051).
     #[serde(deserialize_with = "after_prefix")]
     pub inbox: char,
+    /// The key after the prefix that goes to the next pane that needs you (ADR-0051).
+    #[serde(deserialize_with = "after_prefix")]
+    pub next_waiting: char,
 }
 
 impl Default for Keys {
@@ -124,8 +129,44 @@ impl Default for Keys {
         Self {
             prefix: 'a',
             inbox: '!',
+            next_waiting: 'w',
         }
     }
+}
+
+/// The `[alerts]` table (ADR-0051).
+///
+/// ```
+/// use pinfold_config::Alert;
+///
+/// assert_eq!(pinfold_config::parse(b"")?.alerts.desktop, [Alert::NeedsYou, Alert::Error]);
+/// let config = pinfold_config::parse(b"[alerts]\ndesktop = [\"error\"]")?;
+/// assert_eq!(config.alerts.desktop, [Alert::Error]);
+/// # Ok::<(), pinfold_config::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Alerts {
+    /// The states that raise a desktop notification. Read by the window.
+    pub desktop: Vec<Alert>,
+}
+
+impl Default for Alerts {
+    fn default() -> Self {
+        Self {
+            desktop: vec![Alert::NeedsYou, Alert::Error],
+        }
+    }
+}
+
+/// A state that can raise an alert.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Alert {
+    /// ◆ needs you.
+    NeedsYou,
+    /// ✕ error.
+    Error,
 }
 
 /// The keys the window already binds after the prefix, which `[keys]` cannot take.
@@ -144,6 +185,7 @@ impl Default for Config {
             colors: de::IgnoredAny,
             keys: Keys::default(),
             api: Api::default(),
+            alerts: Alerts::default(),
             agents: BTreeMap::new(),
             strip_secrets: false,
         }
@@ -574,7 +616,17 @@ impl Watch {
 /// # Ok::<(), pinfold_config::Error>(())
 /// ```
 pub fn parse(bytes: &[u8]) -> Result<Config, Error> {
-    parse_as(bytes)
+    let config: Config = parse_as(bytes)?;
+    let keys = &config.keys;
+    // Each key is checked against the window's own; this checks them against each other.
+    if keys.inbox == keys.next_waiting {
+        return Err(Error::Invalid(format!(
+            "keys.inbox and keys.next_waiting are both {:?}: each key after the prefix runs one \
+             command",
+            keys.inbox.to_string()
+        )));
+    }
+    Ok(config)
 }
 
 /// Parses a config file or a theme file.
@@ -726,6 +778,50 @@ mod tests {
         }
         let config = parse(b"[keys]\nprefix = \"C-b\"\n").unwrap();
         assert_eq!(config.keys.prefix, 'b');
+    }
+
+    #[test]
+    fn a_key_already_bound_is_refused_for_next_waiting() {
+        assert_eq!(parse(b"").unwrap().keys.next_waiting, 'w');
+        let config = parse(b"[keys]\nnext_waiting = \"N\"\n").unwrap();
+        assert_eq!(config.keys.next_waiting, 'N');
+        for value in ["\"c\"", "\"m\"", "\"0\"", "\"ww\"", "\"\""] {
+            let text = message(format!("[keys]\nnext_waiting = {value}\n").as_bytes());
+            assert!(text.contains("not already bound"), "{value}: {text}");
+        }
+        for text in [
+            "[keys]\nnext_waiting = \"!\"\n",
+            "[keys]\ninbox = \"w\"\n",
+            "[keys]\ninbox = \"q\"\nnext_waiting = \"q\"\n",
+        ] {
+            let error = message(text.as_bytes());
+            assert!(
+                error.contains("keys.inbox and keys.next_waiting"),
+                "{error}"
+            );
+        }
+        // Swapped is fine: each key still runs one command.
+        let config = parse(b"[keys]\ninbox = \"w\"\nnext_waiting = \"!\"\n").unwrap();
+        assert_eq!((config.keys.inbox, config.keys.next_waiting), ('w', '!'));
+    }
+
+    #[test]
+    fn desktop_alerts_are_needs_you_and_error_unless_set() {
+        assert_eq!(
+            parse(b"").unwrap().alerts.desktop,
+            [Alert::NeedsYou, Alert::Error]
+        );
+        let none = parse(b"[alerts]\ndesktop = []\n").unwrap();
+        assert!(none.alerts.desktop.is_empty());
+        let one = parse(b"[alerts]\ndesktop = [\"needs-you\"]\n").unwrap();
+        assert_eq!(one.alerts.desktop, [Alert::NeedsYou]);
+        for text in [
+            "[alerts]\ndesktop = [\"running\"]\n",
+            "[alerts]\ndesktop = \"error\"\n",
+            "[alerts]\nwebhooks = true\n",
+        ] {
+            assert!(message(text.as_bytes()).contains("line 2"), "{text}");
+        }
     }
 
     #[test]

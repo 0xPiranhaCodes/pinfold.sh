@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use mio::Waker;
 use pinfold_config::theme::{self, GRAPHITE, Theme};
-use pinfold_config::{Config, MAX_FONT_SIZE, MIN_FONT_SIZE};
+use pinfold_config::{Alert, Config, Keys, MAX_FONT_SIZE, MIN_FONT_SIZE};
 use pinfold_proto::link::{self as proto, MAX_DIMENSION, MAX_PASTE, Position, Rect, Selection};
 use pinfold_proto::{Frame, MouseMode};
 use pinfold_render::cpu::{CpuRenderer, Renderer};
@@ -111,6 +111,12 @@ enum Notice {
     Command(Command),
     /// A restored pane, whether the core would run what it was running, and that command.
     WasRunning(u32, bool, String),
+    /// A go to the next pane that needs you found none.
+    NoneWaiting,
+    /// A listed pane came to need you or to an error: the pane, the state and its tab's index.
+    Alert(u32, u8, Option<u8>),
+    /// The desktop notification for this pane was clicked.
+    Clicked(u32),
 }
 
 /// What the I/O thread has for the window. A screen marked dirty here is one the window has not
@@ -221,6 +227,12 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
         let secrets = (link.take_secrets()).map(|(count, names)| Notice::Secrets(count, names));
         let refused = link.take_refused().map(Notice::Refused);
         let unthemed = link.take_unthemed().then_some(Notice::Unthemed);
+        let none_waiting = link.take_none_waiting().then_some(Notice::NoneWaiting);
+        while let Some((pane, state, tab)) = link.take_alert() {
+            if proxy.send_event(Notice::Alert(pane, state, tab)).is_err() {
+                return;
+            }
+        }
         while let Some(approval) = link.take_approval() {
             if proxy.send_event(Notice::Approval(approval)).is_err() {
                 return;
@@ -229,7 +241,16 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
         let ran = link.take_was_running().into_iter();
         let ran = ran.map(|(pane, runnable, command)| Notice::WasRunning(pane, runnable, command));
         let notices = [
-            searched, copied, linked, markdown, raised, unhardened, secrets, refused, unthemed,
+            searched,
+            copied,
+            linked,
+            markdown,
+            raised,
+            unhardened,
+            secrets,
+            refused,
+            unthemed,
+            none_waiting,
         ]
         .into_iter()
         .flatten();
@@ -491,6 +512,13 @@ struct App {
     result: Result<(), Error>,
 }
 
+/// The prefix `keys` sets.
+fn prefix(keys: &Keys) -> Prefix {
+    Prefix::new(keys.prefix)
+        .with_inbox(keys.inbox)
+        .with_next_waiting(keys.next_waiting)
+}
+
 /// The scale glyphs are drawn at. The gate's macOS budget names a Retina window, so a measured
 /// one draws at that scale on any display: a 1x runner would hold four times the cells.
 fn font_scale(measured: Option<(u32, u32)>, scale: f64) -> f32 {
@@ -519,7 +547,7 @@ impl App {
         notifier: notify::Notifier,
     ) -> Self {
         Self {
-            prefix: Prefix::new(config.keys.prefix).with_inbox(config.keys.inbox),
+            prefix: prefix(&config.keys),
             config,
             theme: GRAPHITE,
             unthemed: false,
@@ -729,8 +757,7 @@ impl App {
         self.font_step = 0.0;
         let old = std::mem::replace(&mut self.config, config);
         if self.config.keys != old.keys {
-            let keys = &self.config.keys;
-            self.prefix = Prefix::new(keys.prefix).with_inbox(keys.inbox);
+            self.prefix = prefix(&self.config.keys);
         }
         let Some(open) = &mut self.open else { return };
         #[cfg(target_os = "macos")]
@@ -763,18 +790,9 @@ impl App {
         }
         self.active = shown.active;
         let tabs = shown.tabs.iter().enumerate();
-        let old = std::mem::take(&mut self.states);
+        self.states.clear();
         self.states
             .extend(tabs.map(|(index, tab)| top_bar::tab_state(tab.status, shown.alerts, index)));
-        let tabs = notify::Tabs {
-            old: &old,
-            new: &self.states,
-            labels: &self.labels,
-            active: self.active,
-            focused: self.has_focus,
-        };
-        let pane = |index: usize| shown.tabs.get(index).map_or(u32::MAX, |tab| tab.pane);
-        self.notifier.changed(tabs, pane, Instant::now());
         self.activity = shown.activity | top_bar::marked(&self.states);
         #[cfg(target_os = "macos")]
         self.dock.update(&self.labels, &self.states);
@@ -1097,6 +1115,7 @@ impl App {
             Command::OpenConfig => return open_config(),
             Command::OpenDocs => return launch(DOCS, false),
             Command::Inbox => return self.toggle_inbox(),
+            Command::NextWaiting => return self.next_waiting(),
         };
         self.core(request);
     }
@@ -1116,6 +1135,41 @@ impl App {
         // The rows come when the I/O thread has copied them.
         self.core(proto::Request::Inbox { open: true });
         self.redraw_soon();
+    }
+
+    /// Goes to the next pane that needs you (ADR-0051). The I/O thread holds every listed pane's
+    /// state while the inbox is closed, so it picks the pane, and says if none waits.
+    fn next_waiting(&mut self) {
+        if !self.inbox_spoken {
+            self.flash
+                .note("the inbox needs the core updated", Instant::now());
+            return self.redraw_soon();
+        }
+        self.request(Request::NextWaiting);
+    }
+
+    /// Says in the row under the pane that no pane needs you.
+    fn none_waiting(&mut self) {
+        self.flash.note("Nothing needs you", Instant::now());
+        self.redraw_soon();
+    }
+
+    /// Raises a desktop notification for a listed pane that came to `state`, if the config asks
+    /// for that state and the person cannot see the pane: it is in a hidden tab, or the window
+    /// lacks focus (ADR-0051).
+    fn alert(&mut self, pane: u32, state: u8, tab: Option<u8>) {
+        let alert = match state {
+            top_bar::NEEDS_YOU => Alert::NeedsYou,
+            top_bar::ERROR => Alert::Error,
+            _ => return,
+        };
+        let seen = self.has_focus && find(&self.panes, pane).is_some();
+        if seen || !self.config.alerts.desktop.contains(&alert) {
+            return;
+        }
+        let tab = tab.map(usize::from);
+        let label = tab.and_then(|tab| self.labels.get(tab)).map(String::as_str);
+        (self.notifier).alert((pane, state), (tab, label), Instant::now());
     }
 
     /// Closes the inbox, which frees its rows here and the I/O thread's copy.
@@ -1145,6 +1199,10 @@ impl App {
     fn inbox_key(&mut self, key: &Key, repeat: bool) {
         match self.prefix.key(key, self.modifiers, repeat) {
             prefix::Step::Run(Command::Inbox) => self.close_inbox(),
+            prefix::Step::Run(Command::NextWaiting) => {
+                self.close_inbox();
+                self.next_waiting();
+            }
             prefix::Step::Pass => {
                 if let Some(inbox) = &mut self.inbox {
                     let step = inbox.key(key);
@@ -1880,6 +1938,9 @@ impl ApplicationHandler<Notice> for App {
                 self.command(event_loop, command);
             }
             Notice::Command(_) => {}
+            Notice::NoneWaiting => self.none_waiting(),
+            Notice::Alert(pane, state, tab) => self.alert(pane, state, tab),
+            Notice::Clicked(pane) => self.request(Request::GoTo(pane)),
         }
     }
 
@@ -2125,8 +2186,8 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
         })
     };
     let proxy = event_loop.create_proxy();
-    let notifier = notify::Notifier::new(move |tab| {
-        let _ = proxy.send_event(Notice::Command(Command::Tab(tab)));
+    let notifier = notify::Notifier::new(move |pane| {
+        let _ = proxy.send_event(Notice::Clicked(pane));
     });
     let mut app = App::new(
         config(),
@@ -2356,6 +2417,78 @@ mod tests {
             matches!(&sent[..], [Request::Input(1, bytes)] if bytes == "é".as_bytes()),
             "{}",
             sent.len()
+        );
+    }
+
+    #[test]
+    fn prefix_w_asks_the_io_thread_for_the_next_pane_and_none_waiting_flashes() {
+        let (mut app, inbox, _poll) = app();
+        let key = |text: &str| Key::Character(text.into());
+        // A core older than 17 lists no panes, and the window says so.
+        app.run(Command::NextWaiting);
+        assert!(inbox.take().is_empty() && app.flash.until().is_some());
+        app.flash = Flash::default();
+
+        app.inbox_spoken = true;
+        assert_eq!(
+            app.prefix.key(&key("a"), ModifiersState::CONTROL, false),
+            prefix::Step::Swallow
+        );
+        let step = app.prefix.key(&key("w"), ModifiersState::empty(), false);
+        assert_eq!(step, prefix::Step::Run(Command::NextWaiting));
+        app.run(Command::NextWaiting);
+        assert!(matches!(&inbox.take()[..], [Request::NextWaiting]));
+        // From the open inbox too, which closes first.
+        app.run(Command::Inbox);
+        let _ = inbox.take();
+        app.prefix.key(&key("a"), ModifiersState::CONTROL, false);
+        app.inbox_key(&key("w"), false);
+        assert!(app.inbox.is_none());
+        let sent = inbox.take();
+        assert!(
+            matches!(
+                &sent[..],
+                [
+                    Request::Core(proto::Request::Inbox { open: false }),
+                    Request::NextWaiting
+                ]
+            ),
+            "{}",
+            sent.len()
+        );
+        // The I/O thread found none: PinFold's own note, in the row under the pane.
+        app.none_waiting();
+        assert!(app.flash.until().is_some());
+        let mut frame = Frame::default();
+        panes::clear(&mut frame, 24, 80, 0);
+        app.flash.banner(&mut frame, &GRAPHITE);
+        let text: String = frame.cells.iter().map(|cell| cell.character).collect();
+        assert!(text.contains("Nothing needs you"), "{text}");
+    }
+
+    #[test]
+    fn a_desktop_alert_is_raised_only_for_a_wanted_state_of_an_unseen_pane() {
+        let (mut app, _inbox, _poll) = app();
+        app.labels = vec!["api".to_owned(), "docs".to_owned()];
+        // Pane 1 is on screen in a focused window; pane 2 is in the hidden tab.
+        app.alert(1, top_bar::NEEDS_YOU, Some(0));
+        app.alert(2, 1, Some(1));
+        assert_eq!(app.notifier.raised(), 0, "seen, and running never alerts");
+        app.alert(2, top_bar::ERROR, Some(1));
+        assert_eq!(app.notifier.raised(), 1, "✕ is on by default");
+        app.alert(2, top_bar::NEEDS_YOU, Some(1));
+        assert_eq!(app.notifier.raised(), 1, "the pane's minute holds it back");
+
+        let (mut app, _inbox, _poll) = super::tests::app();
+        app.config.alerts.desktop = vec![Alert::NeedsYou];
+        app.alert(2, top_bar::ERROR, None);
+        assert_eq!(app.notifier.raised(), 0, "the config left ✕ out");
+        app.has_focus = false;
+        app.alert(1, top_bar::NEEDS_YOU, Some(0));
+        assert_eq!(
+            app.notifier.raised(),
+            1,
+            "shown, but the window is in the background"
         );
     }
 

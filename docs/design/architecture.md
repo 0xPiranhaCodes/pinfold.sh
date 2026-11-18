@@ -278,10 +278,10 @@ split_right = "prefix |"
 split_down = "prefix -"
 open_files = "prefix f"
 open_diff = "prefix g"
-next_waiting = "C-S-w"
+next_waiting = "w"   # after the prefix (ADR-0051)
 
 [alerts]
-desktop = true
+desktop = ["needs-you", "error"]
 sound = false
 webhook = "https://ntfy.sh/my-topic"
 
