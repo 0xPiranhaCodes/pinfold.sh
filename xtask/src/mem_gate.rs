@@ -280,14 +280,14 @@ pub fn run(budgets: &[Budget]) -> bool {
     passed
 }
 
-/// Runs checkpoint `n` of `tree` into a store under `state` and returns its peak, in each
+/// Runs the next checkpoint of `tree` into a store under `state` and returns its peak, in each
 /// platform's metric of the other rows. On macOS that is the take's own lifetime peak
 /// `phys_footprint`, which it prints as `peak` with `PINFOLD_MEASURE` set. Linux keeps no peak
 /// PSS, and the take's `VmHWM` counts shared libraries whole, so its PSS is sampled every
 /// millisecond until it exits. Git's processes are not PinFold's and are not counted
 /// (ADR-0050 decision 9).
-fn take_peak(program: &Path, tree: &Path, state: &Path, n: u64) -> io::Result<u64> {
-    let take = ["checkpoint", "take", "r1-0", &n.to_string(), "api", "--"];
+fn take_peak(program: &Path, tree: &Path, state: &Path) -> io::Result<u64> {
+    let take = ["checkpoint", "take", "r1-0", "api", "--"];
     let whole = |line: &serde_json::Value| {
         line["files"].as_u64() == Some(TAKE_FILES as u64) && line["complete"] == true
     };
@@ -350,12 +350,12 @@ fn take_peaks(program: &Path, tree: &Path, state: &Path) -> io::Result<[u64; 3]>
     for run in 0..RUNS {
         let _ = std::fs::remove_dir_all(state);
         std::fs::create_dir_all(state)?;
-        first.push(take_peak(program, tree, state, 0)?);
+        first.push(take_peak(program, tree, state)?);
         for file in (0..TAKE_FILES).step_by(100) {
             let path = tree.join(format!("{:03}/{file:06}.txt", file / 1000));
             std::fs::write(path, format!("changed in run {run}\n"))?;
         }
-        changed.push(take_peak(program, tree, state, 1)?);
+        changed.push(take_peak(program, tree, state)?);
         let peak = checkpoint_peak(program, &restore, tree, state, all_back);
         restored.push(peak.map_err(|error| io::Error::other(format!("the restore {error}")))?);
     }

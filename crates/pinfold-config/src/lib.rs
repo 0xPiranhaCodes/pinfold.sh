@@ -59,6 +59,8 @@ pub struct Config {
     pub inbox: Inbox,
     /// The `[agents.<name>]` tables: agent profiles, by name.
     pub agents: BTreeMap<String, Agent>,
+    /// The `[rewind]` table (ADR-0050). Read when the core starts.
+    pub rewind: Rewind,
     /// Whether the launcher starts the core, and the core every program it starts, without the
     /// variables whose names look like secrets' (ADR-0047). Read when the core starts.
     pub strip_secrets: bool,
@@ -105,6 +107,85 @@ pub struct Agent {
     /// ```
     #[serde(default, deserialize_with = "approve")]
     pub approve: Option<String>,
+    /// Whether launches of this profile take checkpoints, when `[rewind] enabled` is on
+    /// (ADR-0050).
+    #[serde(default = "yes")]
+    pub rewind: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// The `[rewind]` table (ADR-0050 section 7): checkpoints of an agent's working directory.
+/// Each number is checked against a range, and one outside it refuses the file.
+///
+/// ```
+/// let config = pinfold_config::parse(b"[rewind]\nwait_s = 20")?;
+/// assert_eq!((config.rewind.wait_s, config.rewind.keep_per_run), (20, 20));
+/// assert!(pinfold_config::parse(b"[rewind]\nwait_s = 0").is_err());
+/// # Ok::<(), pinfold_config::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Rewind {
+    /// A checkpoint at every agent launch, and at done and exit.
+    pub enabled: bool,
+    /// And when the run's status becomes done.
+    pub on_done: bool,
+    /// How long a launch waits for its checkpoint, in seconds, 1 to 60, as a client waits 62 s for
+    /// its answer.
+    #[serde(deserialize_with = "bounded::<_, 1, 60>")]
+    pub wait_s: u64,
+    /// Whether what the tree's `.gitignore` files ignore is covered too; `.env*` always is.
+    pub include_ignored: bool,
+    /// Larger files are not covered, in MiB, 1 to 4096.
+    #[serde(deserialize_with = "bounded::<_, 1, 4096>")]
+    pub max_file_mib: u64,
+    /// Files and links walked per checkpoint, 1 to 10,000,000.
+    #[serde(deserialize_with = "bounded::<_, 1, 10_000_000>")]
+    pub max_files: u64,
+    /// New content per checkpoint, in MiB, 1 to 1,048,576.
+    #[serde(deserialize_with = "bounded::<_, 1, 1_048_576>")]
+    pub max_new_mib: u64,
+    /// All stores together, in MiB, 1 to 16,777,216.
+    #[serde(deserialize_with = "bounded::<_, 1, 16_777_216>")]
+    pub max_store_mib: u64,
+    /// Older checkpoints are pruned, 1 to 3650 days.
+    #[serde(deserialize_with = "bounded::<_, 1, 3650>")]
+    pub keep_days: u64,
+    /// Checkpoints a run keeps, 1 to 1000.
+    #[serde(deserialize_with = "bounded::<_, 1, 1000>")]
+    pub keep_per_run: u64,
+}
+
+impl Default for Rewind {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            on_done: true,
+            wait_s: 10,
+            include_ignored: false,
+            max_file_mib: 16,
+            max_files: 200_000,
+            max_new_mib: 2048,
+            max_store_mib: 2048,
+            keep_days: 14,
+            keep_per_run: 20,
+        }
+    }
+}
+
+fn bounded<'de, D: Deserializer<'de>, const MIN: u64, const MAX: u64>(
+    deserializer: D,
+) -> Result<u64, D::Error> {
+    let number = i64::deserialize(deserializer)?;
+    match u64::try_from(number) {
+        Ok(number) if (MIN..=MAX).contains(&number) => Ok(number),
+        _ => Err(de::Error::custom(format!(
+            "must be from {MIN} to {MAX}, not {number}"
+        ))),
+    }
 }
 
 /// The most variables an agent profile's `keep_env` names.
@@ -239,6 +320,7 @@ impl Default for Config {
             alerts: Alerts::default(),
             inbox: Inbox::default(),
             agents: BTreeMap::new(),
+            rewind: Rewind::default(),
             strip_secrets: false,
         }
     }
@@ -741,6 +823,44 @@ mod tests {
         assert!(config.macos_option_as_alt);
         assert_eq!(config.font_size, 14.5);
         assert_eq!(parse(b"font_size = 14").unwrap().font_size, 14.0);
+    }
+
+    #[test]
+    fn rewind_reads_every_key_and_refuses_values_out_of_range() {
+        let text = b"[rewind]\nenabled = false\non_done = false\nwait_s = 30\ninclude_ignored = true\n\
+                     max_file_mib = 1\nmax_files = 5\nmax_new_mib = 7\nmax_store_mib = 9\n\
+                     keep_days = 2\nkeep_per_run = 3\n[agents.a]\ncommand = [\"a\"]\nrewind = false";
+        let config = parse(text).unwrap();
+        let want = Rewind {
+            enabled: false,
+            on_done: false,
+            wait_s: 30,
+            include_ignored: true,
+            max_file_mib: 1,
+            max_files: 5,
+            max_new_mib: 7,
+            max_store_mib: 9,
+            keep_days: 2,
+            keep_per_run: 3,
+        };
+        assert_eq!(config.rewind, want);
+        assert!(!config.agents["a"].rewind);
+        assert!(parse(b"[agents.a]\ncommand = [\"a\"]").unwrap().agents["a"].rewind);
+        for bad in [
+            "wait_s = 0",
+            "wait_s = 61",
+            "wait_s = -1",
+            "wait_s = 1.5",
+            "max_files = 0",
+            "max_new_mib = 99999999999",
+            "keep_per_run = 0",
+            "keep_days = \"14\"",
+            "unknown = 1",
+        ] {
+            let error = message(format!("[rewind]\n{bad}").as_bytes());
+            assert!(!error.is_empty(), "{bad}");
+        }
+        assert!(message(b"[rewind]\nwait_s = 0").contains("must be from 1 to 60, not 0"));
     }
 
     #[test]
