@@ -257,6 +257,72 @@ fn write_tool_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
     fs::set_permissions(script, fs::Permissions::from_mode(0o755))
 }
 
+/// Writes, for each of ADR-0051's webhook rows, a folder holding the config the measured core
+/// reads, with `url` as its webhook, and `agent.sh`, every pane's shell, which reports `state`
+/// through `tools` and waits. With `one`, only the first pane of each core reports needs you.
+fn write_webhook_inputs(dir: &Path, tools: &Path, rows: &[(&str, &str, &str)]) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let quote = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', r"'\''"));
+    for (row, url, state) in rows {
+        let folder = dir.join(row);
+        fs::create_dir_all(folder.join("pinfold"))?;
+        fs::write(
+            folder.join("pinfold/pinfold.toml"),
+            format!("[alerts]\nwebhook = \"{url}\"\n"),
+        )?;
+        // The core is each pane's parent, so one pane of each run takes the lock.
+        let state = match *state {
+            "one" => format!(
+                "$(mkdir {}/alerted-$PPID 2>/dev/null && echo needs-you || echo running)",
+                quote(&folder)
+            ),
+            state => state.to_owned(),
+        };
+        let script = folder.join("agent.sh");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n{} ctl status {state} 'Allow edit to src/config.rs?'\nexec /bin/sleep 86400\n",
+                quote(tools)
+            ),
+        )?;
+        fs::set_permissions(script, fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
+/// Takes webhook posts on loopback and answers each 204 at once, for the burst row. Returns its
+/// port. Std only: it reads a request's headers and the body they announce, and nothing else.
+fn answer_posts() -> io::Result<u16> {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let port = listener.local_addr()?.port();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(5)));
+            let (mut request, mut buffer) = (Vec::new(), [0_u8; 4096]);
+            while let Ok(read @ 1..) = stream.read(&mut buffer) {
+                request.extend_from_slice(&buffer[..read]);
+                let text = String::from_utf8_lossy(&request);
+                let Some(end) = text.find("\r\n\r\n") else {
+                    continue;
+                };
+                let length = text[..end]
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                if request.len() >= end + 4 + length {
+                    break;
+                }
+            }
+            let _ = stream.write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n");
+        }
+    });
+    Ok(port)
+}
+
 fn mem_gate_task() -> ExitCode {
     let target = std::env::var_os("CARGO_TARGET_DIR").unwrap_or_else(|| "target".into());
     let corpora = Path::new(&target).join("corpora");
@@ -269,7 +335,17 @@ fn mem_gate_task() -> ExitCode {
         .and_then(|()| write_corpora(&corpora))
         .and_then(|()| {
             let tools = fs::canonicalize(Path::new(&target).join("release-core/pinfold"))?;
-            write_tool_inputs(&inputs, &tools)
+            write_tool_inputs(&inputs, &tools)?;
+            let burst = format!("http://127.0.0.1:{}/", answer_posts()?);
+            write_webhook_inputs(
+                &inputs.join("webhook"),
+                &tools,
+                &[
+                    ("idle", "https://127.0.0.1:9", "running"),
+                    ("one", "https://127.0.0.1:9", "one"),
+                    ("burst", &burst, "needs-you"),
+                ],
+            )
         })
     {
         eprintln!("mem-gate: {error}");
@@ -314,6 +390,7 @@ fn mem_gate_task() -> ExitCode {
             window: None,
             menu: false,
             inbox: None,
+            agents: None,
         },
         mem_gate::Budget {
             metric: "10k lines of typical text",
@@ -327,6 +404,7 @@ fn mem_gate_task() -> ExitCode {
             window: None,
             menu: false,
             inbox: None,
+            agents: None,
         },
         mem_gate::Budget {
             metric: "Scrollback at its cap",
@@ -340,6 +418,7 @@ fn mem_gate_task() -> ExitCode {
             window: None,
             menu: false,
             inbox: None,
+            agents: None,
         },
         mem_gate::Budget {
             metric: "Each idle pane",
@@ -353,8 +432,45 @@ fn mem_gate_task() -> ExitCode {
             window: None,
             menu: false,
             inbox: None,
+            agents: None,
         },
     ];
+    // ADR-0051 section 11: 8 listed agent panes and a webhook, measured once the worker thread
+    // has ended. A post to port 9 fails at once, so one alert takes three tries over 35 s.
+    let (idle_hook, one_hook, burst_hook) = (
+        inputs.join("webhook/idle"),
+        inputs.join("webhook/one"),
+        inputs.join("webhook/burst"),
+    );
+    let webhook = mem_gate::Budget {
+        metric: "Core, 8 agent panes listed, a webhook configured, idle",
+        limit: mem_gate::CORE_LIMIT,
+        program: &core,
+        args: &["--idle", "8"],
+        per_pane_over: None,
+        settle: mem_gate::TOOL_SETTLE,
+        wait_for_line: false,
+        screen: None,
+        window: None,
+        menu: false,
+        inbox: None,
+        agents: Some(&idle_hook),
+    };
+    budgets.extend([
+        mem_gate::Budget {
+            metric: "Core, 8 agent panes listed, a webhook after one alert",
+            settle: mem_gate::WEBHOOK_SETTLE,
+            agents: Some(&one_hook),
+            ..webhook
+        },
+        mem_gate::Budget {
+            metric: "Core, 8 agent panes listed, a webhook after a burst of 8 alerts",
+            settle: mem_gate::WEBHOOK_SETTLE,
+            agents: Some(&burst_hook),
+            ..webhook
+        },
+        webhook,
+    ]);
     // ADR-0045 section 5. Each tool runs in a pane of a core, which prints the tool's pid.
     let idle_tool = ["--tool", "1", "files", empty.as_str()];
     let reader = ["--tool", "1", "md", markdown.as_str()];
@@ -376,6 +492,7 @@ fn mem_gate_task() -> ExitCode {
         window: Some(Side::Window),
         menu: false,
         inbox: None,
+        agents: None,
     };
     budgets.extend([
         mem_gate::Budget { ..tool },
@@ -439,6 +556,7 @@ fn mem_gate_task() -> ExitCode {
             window: Some(Side::Window),
             menu: false,
             inbox: None,
+            agents: None,
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on macOS with text, 1512x1890",
@@ -452,6 +570,7 @@ fn mem_gate_task() -> ExitCode {
             window: Some(Side::Window),
             menu: false,
             inbox: None,
+            agents: None,
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on macOS with a full glyph cache, 1512x1890",
@@ -465,6 +584,7 @@ fn mem_gate_task() -> ExitCode {
             window: Some(Side::Window),
             menu: false,
             inbox: None,
+            agents: None,
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on macOS with 8 tabs, 1512x1890",
@@ -478,6 +598,7 @@ fn mem_gate_task() -> ExitCode {
             window: Some(Side::Window),
             menu: false,
             inbox: None,
+            agents: None,
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on macOS with its context menu open, 1512x1890",
@@ -491,6 +612,7 @@ fn mem_gate_task() -> ExitCode {
             window: Some(Side::Window),
             menu: true,
             inbox: None,
+            agents: None,
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on macOS with the markdown reader, 1512x1890",
@@ -504,6 +626,7 @@ fn mem_gate_task() -> ExitCode {
             window: Some(Side::Window),
             menu: false,
             inbox: None,
+            agents: None,
         });
         let agents = mem_gate::Budget {
             metric: "Window on macOS with 8 agents needing you, 1512x1890",
@@ -517,6 +640,7 @@ fn mem_gate_task() -> ExitCode {
             window: Some(Side::Window),
             menu: false,
             inbox: None,
+            agents: None,
         };
         budgets.push(mem_gate::Budget {
             metric: "Window on macOS with the inbox open over 8 agents, 1512x1890",
@@ -541,6 +665,7 @@ fn mem_gate_task() -> ExitCode {
             window: Some(Side::Core),
             menu: false,
             inbox: None,
+            agents: None,
         });
     }
     if cfg!(target_os = "linux") {
@@ -556,6 +681,7 @@ fn mem_gate_task() -> ExitCode {
             window: Some(Side::Window),
             menu: false,
             inbox: None,
+            agents: None,
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on X11 with text, 1920x1080",
@@ -569,6 +695,7 @@ fn mem_gate_task() -> ExitCode {
             window: Some(Side::Window),
             menu: false,
             inbox: None,
+            agents: None,
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on X11 with a full glyph cache, 1920x1080",
@@ -582,6 +709,7 @@ fn mem_gate_task() -> ExitCode {
             window: Some(Side::Window),
             menu: false,
             inbox: None,
+            agents: None,
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on X11 with 8 tabs, 1920x1080",
@@ -595,6 +723,7 @@ fn mem_gate_task() -> ExitCode {
             window: Some(Side::Window),
             menu: false,
             inbox: None,
+            agents: None,
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on X11 with its context menu open, 1920x1080",
@@ -608,6 +737,7 @@ fn mem_gate_task() -> ExitCode {
             window: Some(Side::Window),
             menu: true,
             inbox: None,
+            agents: None,
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on X11 with the markdown reader, 1920x1080",
@@ -621,6 +751,7 @@ fn mem_gate_task() -> ExitCode {
             window: Some(Side::Window),
             menu: false,
             inbox: None,
+            agents: None,
         });
         let agents = mem_gate::Budget {
             metric: "Window on X11 with 8 agents needing you, 1920x1080",
@@ -634,6 +765,7 @@ fn mem_gate_task() -> ExitCode {
             window: Some(Side::Window),
             menu: false,
             inbox: None,
+            agents: None,
         };
         budgets.push(mem_gate::Budget {
             metric: "Window on X11 with the inbox open over 8 agents, 1920x1080",
@@ -658,6 +790,7 @@ fn mem_gate_task() -> ExitCode {
             window: Some(Side::Core),
             menu: false,
             inbox: None,
+            agents: None,
         });
     }
     let passed = mem_gate::run(&budgets);

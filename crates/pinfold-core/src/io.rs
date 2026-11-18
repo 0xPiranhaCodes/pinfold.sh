@@ -17,7 +17,7 @@ use mio::{Events, Interest, Poll, Token};
 use pinfold_api::tool::Run;
 use pinfold_mux::{Session, Size};
 use pinfold_proto::Palette;
-use pinfold_proto::link::ApprovalAnswer;
+use pinfold_proto::link::{ApprovalAnswer, MAX_PANES};
 use pinfold_sys::Terminal;
 use pinfold_sys::pty::Pty;
 
@@ -26,7 +26,7 @@ use crate::marks::ShellMarks;
 use crate::opener::{OPEN_DEADLINE, Opener};
 use crate::protect::Protect;
 use crate::search::{CopyStep, Copying, Direction, Position, Search, SearchStep, Selection};
-use crate::status::{self, Status, Tracker};
+use crate::status::{self, Alert, Status, Tracker};
 use crate::tap::Tap;
 use crate::vt::{AlacrittyEngine, VtEngine};
 use crate::{paste, shell, tool};
@@ -237,6 +237,10 @@ pub struct Reactor {
     tools: Option<PathBuf>,
     /// The directory last listed for a window's markdown picker.
     pub(crate) markdown: Option<crate::tool::Listing>,
+    /// The states a webhook posts, one bit each by `Status as u8`; 0 when webhooks are off.
+    posted: u8,
+    /// Alerts in those states, by pane, until the core takes them for the webhook.
+    posts: Vec<(usize, Status)>,
 }
 
 impl Reactor {
@@ -275,7 +279,25 @@ impl Reactor {
             palette: Arc::new(Mutex::new(Palette::GRAPHITE_GRID)),
             tools: None,
             markdown: None,
+            posted: 0,
+            posts: Vec::new(),
         })
+    }
+
+    /// Keeps each alert in one of `states` for [`Reactor::take_post`], for the webhook
+    /// (ADR-0051). Without a call none is kept.
+    pub fn post_states(&mut self, states: impl IntoIterator<Item = Status>) {
+        self.posted = states
+            .into_iter()
+            .fold(0, |bits, state| bits | 1 << state as u8);
+    }
+
+    /// Returns the oldest alert kept for the webhook: a listed pane's, in a posted state.
+    pub fn take_post(&mut self) -> Option<(usize, Status)> {
+        if self.posts.is_empty() {
+            return None;
+        }
+        Some(self.posts.remove(0))
     }
 
     /// Tells every window from now on that this core lacks the hardened runtime, or with
@@ -412,9 +434,11 @@ impl Reactor {
                     // Shell marks never say "needs you", so only an error can alert there, and
                     // nothing draws those yet. An agent profile's CLI can (ADR-0046).
                     let now = Instant::now();
-                    let _ = pane.status.observe_shell(pane.engine.shell_marks(), now);
+                    let shell = pane.status.observe_shell(pane.engine.shell_marks(), now);
+                    keep_post(&mut self.posts, self.posted, pane, shell);
                     let alert = pane.status.observe_agent(pane.engine.agent_marks(), now);
                     pane.alerted |= alert.is_some_and(|alert| alert.status() == Status::NeedsYou);
+                    keep_post(&mut self.posts, self.posted, pane, alert);
                 }
             }
             if pane
@@ -528,6 +552,7 @@ impl Reactor {
         pane.message = status::sanitize(message);
         let alert = pane.status.report(status, now);
         pane.alerted |= alert.is_some_and(|alert| alert.status() == Status::NeedsYou);
+        keep_post(&mut self.posts, self.posted, pane, alert);
         Ok(())
     }
 
@@ -842,6 +867,31 @@ impl Reactor {
         self.pane(pane).map(|pane| pane.status.held(now))
     }
 
+    /// The webhook's record of a pane's alert in `status` at `now`, which is `unix` Unix
+    /// seconds: fixed fields and no text. Nothing for a pane gone or in no tab.
+    #[must_use]
+    pub fn post_record(
+        &self,
+        pane: usize,
+        status: Status,
+        now: Instant,
+        unix: u64,
+    ) -> Option<crate::webhook::Record> {
+        let held = self.pane(pane)?;
+        let tab = (self.session.tabs().iter())
+            .position(|tab| tab.panes().any(|member| member as usize == pane))?;
+        let at = u32::try_from(unix).unwrap_or(u32::MAX);
+        Some(crate::webhook::Record {
+            pane: u32::try_from(pane).ok()?,
+            tab: u32::try_from(tab + 1).ok()?,
+            at,
+            since: at.saturating_sub(held.status.held(now).0),
+            status,
+            from_output: held.status.from_output(),
+            profile: held.status.profile(),
+        })
+    }
+
     /// Returns whether a pane raised a "needs you" alert since the last call, and clears that.
     /// A window takes it to mark the pane's tab while it is hidden.
     pub fn take_alert(&mut self, pane: usize) -> bool {
@@ -981,6 +1031,18 @@ fn pane_status(pane: &Pane) -> (Status, bool, &str) {
         (pane.status.status(), false, "")
     } else {
         (pane.status.status(), true, &pane.message)
+    }
+}
+
+/// Keeps `alert` for the webhook if its state is one of the `posted` bits and `pane` is listed.
+/// At most [`MAX_PANES`] are kept, one a pane at most, as the tracker limits alerts.
+fn keep_post(posts: &mut Vec<(usize, Status)>, posted: u8, pane: &Pane, alert: Option<Alert>) {
+    let Some(state) = alert.map(Alert::status) else {
+        return;
+    };
+    let listed = pane.tool.is_none() && pane.status.listed();
+    if listed && posted & 1 << state as u8 != 0 && posts.len() < MAX_PANES {
+        posts.push((pane.number, state));
     }
 }
 
@@ -1177,6 +1239,51 @@ mod tests {
             reactor.report_status(pane + 1, Status::Done, "", now),
             Err("no such pane")
         );
+    }
+
+    #[test]
+    fn only_a_listed_panes_alerts_in_the_posted_states_are_kept_for_the_webhook() {
+        let mut reactor = Reactor::new().unwrap();
+        // A plain shell's failed command alerts ✕ from its marks, but is not listed.
+        let failed = r"printf '\033]133;C\007\033]133;D;1\007end'; sleep 30";
+        let plain = reactor.open_tab(shell(failed), 24, 80).unwrap();
+        let agent = reactor.open_tab(shell("sleep 30"), 24, 80).unwrap();
+        let other = reactor.open_tab(shell("sleep 30"), 24, 80).unwrap();
+        reactor.post_states([Status::NeedsYou]);
+        assert!(turn_until(&mut reactor, |r| on_screen(r, plain, "end")));
+        assert_eq!(reactor.status(plain).map(|s| s.0), Some(Status::Error));
+        let now = Instant::now();
+        reactor
+            .report_status(agent, Status::NeedsYou, "secret", now)
+            .unwrap();
+        reactor
+            .report_status(other, Status::Error, "", now)
+            .unwrap();
+        assert_eq!(reactor.take_post(), Some((agent, Status::NeedsYou)));
+        assert_eq!(
+            reactor.take_post(),
+            None,
+            "not listed, or not a posted state"
+        );
+        let record = reactor
+            .post_record(agent, Status::NeedsYou, now, 1_000)
+            .unwrap();
+        let fields = (
+            record.pane,
+            record.tab,
+            record.at,
+            record.since,
+            record.from_output,
+        );
+        assert_eq!(fields, (agent as u32, 2, 1_000, 1_000, false));
+        assert_eq!(record.profile, None);
+        assert_eq!(reactor.post_record(99, Status::NeedsYou, now, 1_000), None);
+        // Off, nothing is kept.
+        reactor.post_states([]);
+        reactor
+            .report_status(other, Status::NeedsYou, "", now)
+            .unwrap();
+        assert_eq!(reactor.take_post(), None);
     }
 
     #[test]

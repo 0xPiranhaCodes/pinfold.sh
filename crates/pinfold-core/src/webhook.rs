@@ -1,5 +1,5 @@
 //! Webhook building blocks (ADR-0051 section 5): the URL rules, the body built from status
-//! fields only, and the config `curl` reads from standard input. Nothing here sends.
+//! fields only, the config `curl` reads from standard input, and the [`Sender`] that runs it.
 //!
 //! The config's `[alerts] webhook` is read when the core starts. A URL these rules refuse turns
 //! webhooks off with a [`Refused`] reason, which never quotes the URL: its path or query can
@@ -8,6 +8,10 @@
 use std::fmt::{self, Write as _};
 
 use crate::status::Status;
+
+mod send;
+
+pub use send::{MOST, PER_PANE, PROXIES, QUEUE, Record, Sender, WINDOW, find_curl};
 
 /// The longest URL taken, in bytes.
 pub const MAX_URL: usize = 2048;
@@ -153,7 +157,8 @@ impl Webhook {
         Ok(Some(Self {
             url: url.into(),
             host,
-            loopback,
+            // Plain `http` is loopback only, and `https://127.0.0.1` is still `https`.
+            loopback: !https,
         }))
     }
 
@@ -568,6 +573,12 @@ mod tests {
             .curl_config("x", Format::Text, &mut config);
         assert!(config.contains("proto = \"=https\"\n"));
         assert!(config.contains("header = \"Content-Type: text/plain\"\n"));
+        // A loopback host over `https` stays `https`, or `curl` refuses the URL (exit 1).
+        config.clear();
+        let local = Webhook::new("https://127.0.0.1:9").unwrap().unwrap();
+        assert!(!local.loopback());
+        local.curl_config("x", Format::Json, &mut config);
+        assert!(config.contains("proto = \"=https\"\n"));
     }
 
     #[test]
