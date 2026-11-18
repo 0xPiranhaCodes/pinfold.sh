@@ -136,10 +136,15 @@ pub struct Listed {
     pub reported: bool,
     /// When it came to that state, on this window's clock.
     pub since: Instant,
+    /// When its program started, on this window's clock.
+    pub started: Instant,
     /// The message its agent reported, cleaned by the core. Empty if none.
     pub message: String,
     /// The agent profile it was launched from, as an index into the config's profiles.
     pub profile: Option<u8>,
+    /// Its git branch from the core's last [`Notice::InboxExtra`], printable ASCII. Empty while
+    /// the inbox is closed, which frees it (ADR-0051 §7).
+    pub branch: String,
 }
 
 /// An approval copied out of the decoder's borrowed message.
@@ -326,9 +331,9 @@ impl State {
                 naming,
                 listed,
                 since,
+                started,
                 profile,
                 message,
-                ..
             } => {
                 let tab = self.tabs.iter_mut().find(|tab| tab.pane == pane);
                 if naming && let Some(tab) = tab {
@@ -336,9 +341,18 @@ impl State {
                     message.clone_into(&mut tab.message);
                     self.laid = true;
                 }
-                self.list(pane, listed.then_some((state, reported, since, message)));
+                let times = (since, started);
+                self.list(pane, listed.then_some((state, reported, times, message)));
                 if let Some(listed) = self.listed.iter_mut().find(|listed| listed.pane == pane) {
                     listed.profile = profile;
+                }
+            }
+            // Kept only while the inbox is open; one that comes after it closed is dropped.
+            Notice::InboxExtra { pane, branch } if self.inbox => {
+                let listed = self.listed.iter_mut().find(|listed| listed.pane == pane);
+                if let Some(listed) = listed.filter(|listed| listed.branch != branch) {
+                    branch.clone_into(&mut listed.branch);
+                    self.relisted = true;
                 }
             }
             Notice::Refused { reason } => self.refused = Some(reason),
@@ -372,16 +386,16 @@ impl State {
                     None => self.approvals.push(owned),
                 }
             }
-            Notice::Copied { .. } | Notice::WasRunning { .. } => {}
+            Notice::Copied { .. } | Notice::WasRunning { .. } | Notice::InboxExtra { .. } => {}
         }
         Ok(())
     }
 
     /// Keeps a pane's inbox row, or drops it for `None`. The core's seconds become an
     /// `Instant`, so the two sides share no clock.
-    fn list(&mut self, pane: u32, status: Option<(u8, bool, u32, &str)>) {
+    fn list(&mut self, pane: u32, status: Option<(u8, bool, (u32, u32), &str)>) {
         let index = self.listed.iter().position(|listed| listed.pane == pane);
-        let Some((state, reported, since, message)) = status else {
+        let Some((state, reported, (since, started), message)) = status else {
             if let Some(index) = index {
                 self.listed.swap_remove(index);
                 self.relisted = true;
@@ -390,9 +404,11 @@ impl State {
         };
         let old = index.map(|index| self.listed[index].state);
         let now = Instant::now();
-        let since = now
-            .checked_sub(Duration::from_secs(since.into()))
-            .unwrap_or(now);
+        let ago = |seconds: u32| {
+            now.checked_sub(Duration::from_secs(seconds.into()))
+                .unwrap_or(now)
+        };
+        let (since, started) = (ago(since), ago(started));
         let index = match index {
             Some(index) => index,
             // The core never lists more, so a flood of made-up panes stops here.
@@ -402,8 +418,10 @@ impl State {
                     state,
                     reported,
                     since,
+                    started,
                     message: String::new(),
                     profile: None,
+                    branch: String::new(),
                 });
                 self.listed.len() - 1
             }
@@ -415,7 +433,8 @@ impl State {
         if came && self.alerting.len() < MAX_PANES {
             self.alerting.push((pane, state));
         }
-        (listed.state, listed.reported, listed.since) = (state, reported, since);
+        (listed.state, listed.reported) = (state, reported);
+        (listed.since, listed.started) = (since, started);
         message.clone_into(&mut listed.message);
         self.relisted = true;
     }
@@ -696,8 +715,13 @@ impl Link {
     /// the version the link speaks (ADR-0043), and then queues none.
     pub fn send(&mut self, request: Request<'_>) -> bool {
         if let Request::Inbox { open } = request {
-            // Opening reads the rows afresh.
+            // Opening reads the rows afresh, and closing frees their branches.
             (self.state.inbox, self.state.relisted) = (open, open);
+            if !open {
+                for listed in &mut self.state.listed {
+                    listed.branch = String::new();
+                }
+            }
         }
         // Before the core's hello this is the oldest version, so a newer request waits for none.
         let spoken = self.decoder.version().unwrap_or(OLDEST);
@@ -1667,7 +1691,7 @@ mod tests {
             (10, 0, 30),
             (99, 0, 99),
         ] {
-            link.state.list(pane, Some((state, true, since, "")));
+            link.state.list(pane, Some((state, true, (since, 0), "")));
         }
         let next = |link: &mut Link, focused| {
             link.state.focused = focused;
@@ -1686,7 +1710,7 @@ mod tests {
         assert!(!link.take_none_waiting());
 
         for pane in [10, 11, 13] {
-            link.state.list(pane, Some((1, true, 0, "")));
+            link.state.list(pane, Some((1, true, (0, 0), "")));
         }
         assert!(link.go_to_next_waiting());
         assert!(link.take_none_waiting() && !link.take_none_waiting());
@@ -1698,6 +1722,36 @@ mod tests {
         );
     }
 
+    /// ADR-0051 §7: a listed pane's branch is kept only while the inbox is open, and closing
+    /// frees it.
+    #[test]
+    fn a_branch_is_kept_only_while_the_inbox_is_open() {
+        let (mut link, _peer) = linked().unwrap();
+        link.state.list(10, Some((1, true, (5, 600), "")));
+        let extra = Notice::InboxExtra {
+            pane: 10,
+            branch: "feat/inbox",
+        };
+        link.state.apply(extra.clone()).unwrap();
+        assert_eq!(link.listed()[0].branch, "", "kept while closed");
+        link.send(Request::Inbox { open: true });
+        link.state.apply(extra).unwrap();
+        // An unknown pane's is dropped.
+        link.state
+            .apply(Notice::InboxExtra {
+                pane: 11,
+                branch: "other",
+            })
+            .unwrap();
+        assert_eq!(link.listed().len(), 1);
+        let listed = &link.listed()[0];
+        assert_eq!(listed.branch, "feat/inbox");
+        let run = listed.started.elapsed().as_secs();
+        assert!((600..610).contains(&run), "{run}");
+        link.send(Request::Inbox { open: false });
+        assert_eq!(link.listed()[0].branch.capacity(), 0, "not freed on close");
+    }
+
     /// ADR-0051: a listed pane alerts when it comes to ◆ or ✕, not again while it stays, and
     /// never for another state or a pane that is not listed.
     #[test]
@@ -1705,21 +1759,21 @@ mod tests {
         let (mut link, _peer) = linked().unwrap();
         link.state.members = vec![(10, 0), (11, 2)];
         let taken = |link: &mut Link| std::iter::from_fn(|| link.take_alert()).collect::<Vec<_>>();
-        link.state.list(10, Some((0, true, 0, "")));
-        link.state.list(10, Some((0, false, 0, "new message")));
-        link.state.list(11, Some((1, true, 0, "")));
-        link.state.list(12, Some((3, true, 0, "")));
+        link.state.list(10, Some((0, true, (0, 0), "")));
+        link.state.list(10, Some((0, false, (0, 0), "new message")));
+        link.state.list(11, Some((1, true, (0, 0), "")));
+        link.state.list(12, Some((3, true, (0, 0), "")));
         assert_eq!(taken(&mut link), [(10, 0, Some(0)), (12, 3, None)]);
-        link.state.list(11, Some((2, true, 0, "")));
-        link.state.list(11, Some((3, true, 0, "")));
-        link.state.list(10, Some((4, true, 0, "")));
+        link.state.list(11, Some((2, true, (0, 0), "")));
+        link.state.list(11, Some((3, true, (0, 0), "")));
+        link.state.list(10, Some((4, true, (0, 0), "")));
         link.state.list(10, None);
         link.state.list(10, None);
         assert_eq!(taken(&mut link), [(11, 3, Some(2))]);
         // A flood of panes coming and going is held to the inbox's own cap.
         for step in 0..1_000 {
             link.state
-                .list(step % 7, Some(((step % 2) as u8 * 3, true, 0, "")));
+                .list(step % 7, Some(((step % 2) as u8 * 3, true, (0, 0), "")));
         }
         assert_eq!(link.state.alerting.len(), MAX_PANES);
         assert_eq!(taken(&mut link).len(), MAX_PANES);

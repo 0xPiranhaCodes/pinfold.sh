@@ -253,12 +253,13 @@ fn write_tool_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
     )?;
     fs::set_permissions(script, fs::Permissions::from_mode(0o755))?;
     // Every pane says its agent needs you, which lists it in the inbox (ADR-0051), then draws
-    // the heavy screen.
+    // the heavy screen from a repository, so an open inbox reads each pane's branch.
     let script = dir.join("agents-screen.sh");
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\n{} ctl status needs-you 'Allow edit to src/config.rs?'\nexec {}\n",
+            "#!/bin/sh\ncd {} || exit 1\n{} ctl status needs-you 'Allow edit to src/config.rs?'\nexec {}\n",
+            quote(&repo),
             quote(tools),
             quote(&fs::canonicalize(HEAVY_SCREEN)?)
         ),
@@ -667,7 +668,7 @@ fn mem_gate_task() -> ExitCode {
             ..agents
         });
         budgets.push(agents);
-        budgets.push(mem_gate::Budget {
+        let beside = mem_gate::Budget {
             metric: "Core beside that window, 8 idle tabs",
             limit: mem_gate::CORE_LIMIT,
             program: &core,
@@ -680,7 +681,21 @@ fn mem_gate_task() -> ExitCode {
             menu: false,
             inbox: None,
             agents: None,
+        };
+        // ADR-0051 §11: branches are read while the inbox is open and kept by nobody.
+        budgets.push(mem_gate::Budget {
+            metric: "Core with the inbox open over 8 agent panes with branches",
+            screen: Some(&agents_screen),
+            inbox: Some("open"),
+            ..beside
         });
+        budgets.push(mem_gate::Budget {
+            metric: "Core after the inbox closed over 8 agent panes with branches",
+            screen: Some(&agents_screen),
+            inbox: Some("closed"),
+            ..beside
+        });
+        budgets.push(beside);
     }
     if cfg!(target_os = "linux") {
         budgets.push(mem_gate::Budget {
@@ -792,7 +807,7 @@ fn mem_gate_task() -> ExitCode {
             ..agents
         });
         budgets.push(agents);
-        budgets.push(mem_gate::Budget {
+        let beside = mem_gate::Budget {
             metric: "Core beside that window, 8 idle tabs",
             limit: mem_gate::CORE_LIMIT,
             program: &core,
@@ -805,7 +820,21 @@ fn mem_gate_task() -> ExitCode {
             menu: false,
             inbox: None,
             agents: None,
+        };
+        // ADR-0051 §11: branches are read while the inbox is open and kept by nobody.
+        budgets.push(mem_gate::Budget {
+            metric: "Core with the inbox open over 8 agent panes with branches",
+            screen: Some(&agents_screen),
+            inbox: Some("open"),
+            ..beside
         });
+        budgets.push(mem_gate::Budget {
+            metric: "Core after the inbox closed over 8 agent panes with branches",
+            screen: Some(&agents_screen),
+            inbox: Some("closed"),
+            ..beside
+        });
+        budgets.push(beside);
     }
     let passed = mem_gate::run(&budgets);
     let tools = Path::new(&target).join("release-core/pinfold");

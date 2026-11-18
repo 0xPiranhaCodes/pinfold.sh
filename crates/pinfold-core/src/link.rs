@@ -19,6 +19,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use mio::unix::SourceFd;
 use mio::{Interest, Token};
@@ -29,6 +30,7 @@ use pinfold_proto::link::{
 };
 use pinfold_sys::socket;
 
+use crate::branch;
 use crate::grants::{MAX_PENDING as MAX_APPROVALS, Prompt};
 use crate::io::{READ_BUDGET, Reactor};
 use crate::search::{CopyStep, Copying};
@@ -48,6 +50,8 @@ const NOTICE_HEAD: usize = 64;
 const KEPT_OUTPUT: usize = 32 * 1024;
 /// Cells the spare frame keeps, a pane of 80x24, so a larger pane costs one frame, not two.
 const KEPT_CELLS: usize = 80 * 24;
+/// How often an open inbox's branches are read again (ADR-0051 §7).
+const INBOX_REFRESH: Duration = Duration::from_secs(5);
 /// One read from the socket, which lives on the stack and costs nothing when idle.
 const READ_CHUNK: usize = 16 * 1024;
 
@@ -130,6 +134,9 @@ struct Session {
     told_unhardened: bool,
     /// The webhook's given-up count as this window last heard it.
     told_webhook: Option<u32>,
+    /// While this window's inbox is open, when its rows' branches are next read; no timer at
+    /// all while it is closed (ADR-0051 §7).
+    inbox: Option<Instant>,
     /// The version in the window's hello, which is never above the core's.
     version: u16,
 }
@@ -227,9 +234,15 @@ impl Session {
                     uri: uri.as_deref().unwrap_or_default(),
                 })?;
             }
-            // The inbox's extra rows come with ADR-0051's eighth slice; until then the core
-            // keeps nothing for an open inbox.
-            Request::Inbox { .. } => {}
+            // Only a window that can read the rows' branches makes the core read any.
+            Request::Inbox { open } => {
+                let extra = Notice::InboxExtra {
+                    pane: 0,
+                    branch: "",
+                };
+                let reads = open && self.version >= extra.since();
+                self.inbox = reads.then(Instant::now);
+            }
             // Only a person's confirmation in the window sends this; no API method does.
             Request::Answer {
                 pane,
@@ -237,7 +250,7 @@ impl Session {
                 profile,
                 key,
             } => {
-                let now = std::time::Instant::now();
+                let now = Instant::now();
                 let answered = reactor.answer(pane as usize, choice, (profile, key), now);
                 self.refused = answered.err().or(self.refused);
             }
@@ -270,7 +283,7 @@ impl Session {
     /// Tells the window of input a pane had no room for. A pane that has closed is no news.
     fn note_input(&mut self, reactor: &mut Reactor, pane: u32, taken: bool) {
         if taken {
-            reactor.typed(pane as usize, std::time::Instant::now());
+            reactor.typed(pane as usize, Instant::now());
         } else if reactor.engine(pane as usize).is_some() {
             self.refused = Some(Refusal::Input);
         }
@@ -313,6 +326,31 @@ impl Session {
             self.notice(&Notice::Copied {
                 pane: job.pane as u32,
                 text: &job.text,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Sends each listed pane's branch, read now and kept by neither side, if the open inbox
+    /// is due them, and sets when it is next (ADR-0051 §7).
+    fn send_extras(&mut self, reactor: &Reactor) -> Result<(), Ended> {
+        let now = Instant::now();
+        if self.inbox.is_none_or(|due| due > now) {
+            return Ok(());
+        }
+        self.inbox = Some(now + INBOX_REFRESH);
+        for index in 0..self.panes.len() {
+            let Some(pane) = self.panes.get(index).map(|state| state.number) else {
+                continue;
+            };
+            if !reactor.listed(pane) {
+                continue;
+            }
+            let dir = reactor.shell_cwd(pane);
+            let branch = dir.map(|dir| branch::branch(&dir)).unwrap_or_default();
+            self.notice(&Notice::InboxExtra {
+                pane: pane as u32,
+                branch: &branch,
             })?;
         }
         Ok(())
@@ -483,7 +521,7 @@ impl Session {
             if state.told != told || state.message != message {
                 state.told = told;
                 message.clone_into(&mut state.message);
-                let now = std::time::Instant::now();
+                let now = Instant::now();
                 let (since, started) = reactor.held(pane, now).unwrap_or_default();
                 let notice = Notice::Status {
                     pane: pane as u32,
@@ -653,6 +691,7 @@ impl Window {
                 }
             }
             self.session.report(reactor)?;
+            self.session.send_extras(reactor)?;
             self.session.send_panes(reactor)
         } else {
             self.session.flush()
@@ -675,6 +714,11 @@ impl Host {
         self.window
             .as_ref()
             .is_some_and(|window| window.readable || window.session.copying.is_some())
+    }
+
+    /// When an open inbox's branches are next read, and nothing while it is closed.
+    pub(crate) fn deadline(&self) -> Option<Instant> {
+        self.window.as_ref()?.session.inbox
     }
 
     /// Notes that the socket has news.
@@ -860,6 +904,7 @@ impl Reactor {
                 refused: None,
                 told_unhardened: false,
                 told_webhook: None,
+                inbox: None,
                 version: 0,
             },
         };
@@ -952,6 +997,8 @@ mod tests {
         unhardened: Vec<bool>,
         secrets: Vec<(u32, String)>,
         webhooks: Vec<(String, bool, u32)>,
+        /// Each inbox branch told: pane and branch.
+        extras: Vec<(u32, String)>,
         /// Each pane's OSC 12 cursor colour and OSC 11 background, as told.
         colours: Vec<(u32, Option<u32>, Option<u32>)>,
     }
@@ -990,6 +1037,7 @@ mod tests {
                 unhardened: Vec::new(),
                 secrets: Vec::new(),
                 webhooks: Vec::new(),
+                extras: Vec::new(),
                 colours: Vec::new(),
             }
         }
@@ -1112,6 +1160,9 @@ mod tests {
                             sender,
                             failed,
                         } => self.webhooks.push((host.to_owned(), sender, failed)),
+                        Notice::InboxExtra { pane, branch } => {
+                            self.extras.push((pane, branch.to_owned()));
+                        }
                     }
                 }
             }
@@ -1235,7 +1286,7 @@ mod tests {
             };
             let reporter = split(agent as u32, 2);
             let plain = split(reporter, 3);
-            let now = std::time::Instant::now();
+            let now = Instant::now();
             reactor
                 .report_status(reporter as usize, Status::Running, "", now)
                 .unwrap();
@@ -1259,6 +1310,75 @@ mod tests {
             assert_eq!(peer.members, members, "{version}");
             assert!(reactor.is_window_ready(), "the link ended");
         }
+    }
+
+    /// ADR-0051 §7: an open inbox gets each listed pane's branch from the directory the system
+    /// says its shell is in, never OSC 7's, again every 5 s, and no timer runs while it is
+    /// closed or for a window that cannot read it.
+    #[test]
+    fn an_open_inbox_reads_branches_every_5_s_and_a_closed_one_sets_no_timer() {
+        let root = std::env::temp_dir().join(format!("pinfold-inbox-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        for (name, branch) in [("real", "real-branch"), ("fake", "fake-branch")] {
+            fs::create_dir_all(root.join(name).join(".git")).unwrap();
+            let head = format!("ref: refs/heads/{branch}\n");
+            fs::write(root.join(name).join(".git/HEAD"), head).unwrap();
+        }
+        let root = root.canonicalize().unwrap();
+        let script = format!(
+            r"cd '{}' && printf '\033]7;file://{}\007'; echo ready; read line",
+            root.join("real").display(),
+            root.join("fake").display(),
+        );
+        let mut reactor = Reactor::new().unwrap();
+        let agent = reactor.open_tab(shell(&script), 24, 80).unwrap();
+        let mut peer = Peer::watching(&mut reactor, agent);
+        let fake = root.join("fake").display().to_string();
+        serve(&mut reactor, &mut peer, |r, _| {
+            on_screen(r, agent, "ready") && r.cwd(agent) == Some(fake.clone())
+        });
+        reactor
+            .report_status(agent, Status::Running, "", Instant::now())
+            .unwrap();
+        serve(&mut reactor, &mut peer, |_, p| p.status.is_some());
+        assert_eq!(
+            reactor.host.deadline(),
+            None,
+            "a timer before the inbox opens"
+        );
+
+        peer.send(Request::Inbox { open: true });
+        serve(&mut reactor, &mut peer, |_, p| !p.extras.is_empty());
+        assert_eq!(peer.extras, [(agent as u32, "real-branch".to_owned())]);
+        let due = reactor.host.deadline().expect("no refresh while open");
+        assert!(due <= Instant::now() + INBOX_REFRESH);
+
+        // Once due, the branch is read again.
+        fs::write(root.join("real/.git/HEAD"), "ref: refs/heads/next\n").unwrap();
+        reactor.host.window.as_mut().unwrap().session.inbox = Some(Instant::now());
+        serve(&mut reactor, &mut peer, |_, p| p.extras.len() == 2);
+        assert_eq!(peer.extras[1], (agent as u32, "next".to_owned()));
+
+        peer.send(Request::Inbox { open: false });
+        assert!(turn_until(&mut reactor, |r| r.host.deadline().is_none()));
+        for _ in 0..10 {
+            reactor.turn(Some(Duration::from_millis(5))).unwrap();
+        }
+        peer.read();
+        assert_eq!(peer.extras.len(), 2, "read after the inbox closed");
+
+        // A window of 19 opens an inbox it cannot show branches in, so none are read.
+        let mut older = Peer::older(&mut reactor, VERSION - 1);
+        older.fit(&reactor, agent);
+        serve(&mut reactor, &mut older, |_, p| p.status.is_some());
+        older.send(Request::Inbox { open: true });
+        for _ in 0..10 {
+            reactor.turn(Some(Duration::from_millis(5))).unwrap();
+        }
+        older.read();
+        assert_eq!(reactor.host.deadline(), None);
+        assert!(older.extras.is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 
     /// Sets a cursor colour and a background, and resets both after a line of input.
