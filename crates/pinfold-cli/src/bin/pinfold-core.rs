@@ -1654,6 +1654,7 @@ fn run(args: &[&str]) -> io::Result<()> {
 }
 
 fn main() -> ExitCode {
+    pinfold_sys::one_arena();
     pinfold_cli::panics_name_no_text();
     let args: Vec<String> = env::args().skip(1).collect();
     let args: Vec<&str> = args.iter().map(String::as_str).collect();

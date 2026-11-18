@@ -49,6 +49,8 @@ pub const SENDS_PER_SECOND: u32 = 20;
 const KEPT_INPUT: usize = 4 * 1024;
 
 const EVENT_CAPACITY: usize = 64;
+/// How long after the first event since the last trim the heap's free pages go back (#490).
+const TRIM_AFTER: Duration = Duration::from_secs(1);
 /// Beyond any pane number, so a wake-up is never mistaken for PTY activity.
 const WAKE: Token = Token(usize::MAX);
 /// SIGTERM or SIGHUP, through the self-pipe of [`Reactor::watch_signals`].
@@ -219,6 +221,8 @@ pub struct Reactor {
     /// The read end of the self-pipe, kept open while it is polled.
     signals: Option<pipe::Receiver>,
     terminated: bool,
+    /// When the first event since the heap was last trimmed came, if one has.
+    untrimmed: Option<Instant>,
     /// Restored panes and the redacted command each was running, until a window answers.
     pub(crate) was_running: Vec<(usize, String)>,
     /// Answers accepted only from the inherited window link.
@@ -278,6 +282,7 @@ impl Reactor {
             host: Host::default(),
             signals: None,
             terminated: false,
+            untrimmed: None,
             was_running: Vec::new(),
             approval_answers: Vec::new(),
             protect: Protect::default(),
@@ -471,6 +476,7 @@ impl Reactor {
             .filter_map(|pane| pane.engine.sync_deadline())
             .chain(self.protect.deadline())
             .chain(self.host.deadline())
+            .chain(self.untrimmed.map(|since| since + TRIM_AFTER))
             .min()
             .map(|deadline| deadline.saturating_duration_since(now));
         let timeout = if unfinished {
@@ -481,6 +487,17 @@ impl Reactor {
         match self.poll.poll(&mut self.events, timeout) {
             Err(error) if error.kind() == ErrorKind::Interrupted => return Ok(()),
             result => result?,
+        }
+        // glibc keeps freed pages resident; once a burst is over they go back, at most once a
+        // second, and an idle core never wakes for it.
+        if !self.events.is_empty() {
+            self.untrimmed.get_or_insert_with(Instant::now);
+        } else if self
+            .untrimmed
+            .is_some_and(|since| since + TRIM_AFTER <= Instant::now())
+        {
+            pinfold_sys::trim();
+            self.untrimmed = None;
         }
         for event in &self.events {
             // Never read, as the core exits once it has saved.
@@ -1197,6 +1214,28 @@ mod tests {
             assert!(start.elapsed() < Duration::from_secs(10), "no caller came");
             reactor.turn(Some(Duration::from_millis(20))).unwrap();
         }
+    }
+
+    /// #490: a pane's output marks the heap untrimmed, and the turn a second later trims it,
+    /// with nothing else to wake it.
+    #[test]
+    fn the_heap_is_trimmed_a_second_after_output() {
+        let mut reactor = Reactor::new().unwrap();
+        let pane = reactor
+            .open_tab(shell("echo said; sleep 30"), 24, 80)
+            .unwrap();
+        assert!(turn_until(&mut reactor, |r| on_screen(r, pane, "said")));
+        assert!(reactor.untrimmed.is_some());
+        // Each turn may wait 5 s, so only the trim's own deadline ends them sooner.
+        let start = Instant::now();
+        while reactor.untrimmed.is_some() && start.elapsed() < Duration::from_secs(5) {
+            reactor.turn(Some(Duration::from_secs(5))).unwrap();
+        }
+        assert!(reactor.untrimmed.is_none());
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "the trim woke the turn"
+        );
     }
 
     /// Not a test of its own: the caller that the identity test starts in a pane. It connects,

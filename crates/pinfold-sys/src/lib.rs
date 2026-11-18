@@ -51,6 +51,35 @@ pub fn footprint(pid: u32) -> io::Result<u64> {
     platform::footprint(pid)
 }
 
+/// Keeps every thread's allocations in one heap: on Linux, glibc gives each thread that
+/// allocates its own arena, whose free pages stay resident ([#490]). Call it first in `main`,
+/// before any thread starts. Elsewhere it does nothing.
+///
+/// [#490]: https://github.com/0xPiranhaCodes/pinfold.sh/issues/490
+///
+/// # Examples
+///
+/// ```
+/// pinfold_sys::one_arena();
+/// ```
+pub fn one_arena() {
+    platform::one_arena();
+}
+
+/// Hands the heap's free pages back to the system, after work that allocated and freed a
+/// lot, such as a refresh of the inbox. On Linux glibc keeps them resident otherwise; macOS
+/// returns them itself, so there it does nothing.
+///
+/// # Examples
+///
+/// ```
+/// drop(vec![0u8; 1 << 20]);
+/// pinfold_sys::trim();
+/// ```
+pub fn trim() {
+    platform::trim();
+}
+
 /// Returns the largest memory footprint this process has had, in bytes: lifetime peak
 /// `phys_footprint` on macOS, and peak RSS (`VmHWM`) on Linux, which is at least the PSS
 /// [`footprint`] reads.
@@ -795,6 +824,18 @@ mod platform {
 
     use crate::Terminal;
 
+    pub fn one_arena() {
+        // SAFETY: mallopt reads only its two integers and sets a glibc tunable; it allocates
+        // and frees nothing.
+        unsafe { libc::mallopt(libc::M_ARENA_MAX, 1) };
+    }
+
+    pub fn trim() {
+        // SAFETY: malloc_trim takes the allocator's own lock and releases only free pages,
+        // never memory a caller holds.
+        unsafe { libc::malloc_trim(0) };
+    }
+
     pub fn harden() -> io::Result<()> {
         // SAFETY: PR_SET_DUMPABLE reads only its integer argument and touches no memory.
         match unsafe { libc::prctl(libc::PR_SET_DUMPABLE, 0) } {
@@ -998,6 +1039,10 @@ mod platform {
     use std::ptr;
 
     use crate::Terminal;
+
+    pub fn one_arena() {}
+
+    pub fn trim() {}
 
     pub fn harden() -> io::Result<()> {
         // SAFETY: PT_DENY_ATTACH takes no address or data and touches no memory.
