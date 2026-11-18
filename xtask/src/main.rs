@@ -288,6 +288,33 @@ fn write_tool_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
         "[inbox]\nagent_files = true\n",
     )?;
     fs::copy(&script, files.join("agent.sh"))?;
+    // ADR-0051 §8's row: the window's agents with `[inbox] agent_files` on, whose home holds 16
+    // Claude Code sessions running elsewhere, which each pane touches as it starts so that
+    // they changed in the last 10 minutes.
+    let outside = dir.join("outside");
+    fs::create_dir_all(outside.join("pinfold"))?;
+    fs::write(
+        outside.join("pinfold/pinfold.toml"),
+        "[inbox]\nagent_files = true\n",
+    )?;
+    for index in 0..16 {
+        let folder = outside.join(format!(".claude/projects/-elsewhere-agent-{index}"));
+        fs::create_dir_all(&folder)?;
+        let line = format!(r#"{{"type":"user","cwd":"/elsewhere/agent-{index}"}}"#);
+        fs::write(folder.join("session.jsonl"), line + "\n")?;
+    }
+    let script = outside.join("agent.sh");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ntouch {}/.claude/projects/*/session.jsonl\ncd {} || exit 1\n{} ctl status needs-you 'Allow edit to src/config.rs?'\nexec {}\n",
+            quote(&outside),
+            quote(&repo),
+            quote(tools),
+            quote(&fs::canonicalize(HEAVY_SCREEN)?)
+        ),
+    )?;
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
     write_peek_session(&files, &fs::canonicalize(&repo)?)
 }
 
@@ -511,6 +538,7 @@ fn mem_gate_task() -> ExitCode {
     let agents_screen = inputs.join("agents-screen.sh");
     let listed_agents = inputs.join("agents");
     let agent_files = inputs.join("agent-files");
+    let outside = inputs.join("outside");
     let replay_typical = ["--replay", typical.as_str()];
     let replay_hostile = ["--replay", hostile.as_str()];
     let replay_baseline: &[&str] = &["--replay", "/dev/null"];
@@ -828,6 +856,13 @@ fn mem_gate_task() -> ExitCode {
         budgets.push(mem_gate::Budget {
             metric: "Window on macOS with an answer prompt over the inbox, 8 agents, 1512x1890",
             inbox: Some("answer"),
+            ..agents
+        });
+        // ADR-0051 §8: the same inbox with 16 agents outside PinFold after its own rows.
+        budgets.push(mem_gate::Budget {
+            metric: "Window on macOS with the inbox open over 8 agents and 16 outside, 1512x1890",
+            inbox: Some("open"),
+            agents: Some(&outside),
             ..agents
         });
         budgets.push(agents);

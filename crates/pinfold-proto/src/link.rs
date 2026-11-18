@@ -39,7 +39,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode, Palette};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 21;
+pub const VERSION: u16 = 22;
 
 /// The oldest version this side still speaks, one before [`VERSION`] (ADR-0043).
 pub const OLDEST: u16 = VERSION - 1;
@@ -78,6 +78,16 @@ pub const MISSING: [&str; 6] = [
 
 /// The longest error a restore's result carries, written by the core and naming no path.
 pub const MAX_RESTORE_ERROR: usize = 200;
+
+/// The first version with [`Notice::Outside`], [`Request::OpenTabIn`] and
+/// [`Refusal::Folder`] (ADR-0051, slice 10).
+pub const OUTSIDE: u16 = 22;
+
+/// The most agents outside PinFold an open inbox lists (ADR-0051 §8).
+pub const MAX_OUTSIDE: u8 = 16;
+
+/// The longest directory a [`Notice::Outside`] or [`Request::OpenTabIn`] carries.
+pub const MAX_DIR: usize = 1024;
 
 /// The most bytes of steps a [`Notice::InboxExtra`] carries: three of 80 cells and two
 /// newlines fit, as `pinfold agents peek` prints at most 1 KiB a pane.
@@ -224,6 +234,7 @@ const OPEN_MARKDOWN: u8 = 24;
 const PALETTE: u8 = 25;
 const INBOX_OPEN: u8 = 26;
 const ANSWER_KIND: u8 = 27;
+const OPEN_TAB_IN: u8 = 28;
 
 const FRAME: u8 = 1;
 const CWD: u8 = 2;
@@ -243,6 +254,7 @@ const COLOURS: u8 = 15;
 const SECRETS: u8 = 16;
 const WEBHOOK: u8 = 17;
 const INBOX_EXTRA_KIND: u8 = 18;
+const OUTSIDE_KIND: u8 = 19;
 /// [`Notice::InboxExtra`]'s `ctx` byte when it has none.
 const NO_CTX: u8 = 255;
 
@@ -531,6 +543,10 @@ pub enum Refusal {
          to use it"
     )]
     ProfileChanged,
+    /// The folder an outside agent's row named is not one a tab may open in: missing, relative,
+    /// a link, or writable by someone else (ADR-0051 §8). Since version 22.
+    #[error("Not opened: the folder is missing, relative or not private")]
+    Folder,
 }
 
 /// A rectangle of cells, from the top left of the space for panes.
@@ -696,6 +712,14 @@ pub enum Request<'a> {
         pane: u32,
         /// The name as the notice gave it, escaped.
         name: &'a str,
+    },
+    /// Opens a new tab whose shell starts in `dir`, the folder of an agent outside PinFold that
+    /// an open inbox's row named, once the person confirmed PinFold's own prompt. The core
+    /// checks `dir` again and refuses with [`Refusal::Folder`] unless it is a private existing
+    /// absolute directory (ADR-0051 §8). Since version 22.
+    OpenTabIn {
+        /// The folder, at most [`MAX_DIR`] bytes.
+        dir: &'a str,
     },
     /// Answers [`Notice::WasRunning`] for a pane: with `run`, the core types the command and a
     /// newline into the pane's shell, if it offered that. Either way it forgets the command.
@@ -872,6 +896,21 @@ pub enum Notice<'a> {
         sender: bool,
         /// How many alerts were given up on.
         failed: u32,
+    },
+    /// One of the agents outside PinFold an open inbox lists after its own rows, from Claude
+    /// Code's session files with `[inbox] agent_files` on, sent at each refresh and kept by
+    /// neither side once it closes (ADR-0051 §8). A refresh sends rows `0..count` in order, and
+    /// one with `count` 0 and an empty `dir` when there are none. Since version 22.
+    Outside {
+        /// This row's place, below `count`.
+        index: u8,
+        /// How many rows this refresh has, at most [`MAX_OUTSIDE`].
+        count: u8,
+        /// Seconds since its session file changed.
+        secs: u32,
+        /// Its folder as the session file names it, a hint only: absolute, at most [`MAX_DIR`]
+        /// bytes, with no control or bidi character.
+        dir: &'a str,
     },
     /// What an open inbox's row shows beside the pane's status, read when it opens and every
     /// 5 s while open, and kept by neither side once it closes (ADR-0051 §7). Since version 20.
@@ -1126,6 +1165,7 @@ impl Request<'_> {
             Self::Palette(_) => 14,
             Self::Inbox { .. } => INBOX,
             Self::Answer { .. } => ANSWER,
+            Self::OpenTabIn { .. } => OUTSIDE,
             _ => OLDEST,
         }
     }
@@ -1251,6 +1291,16 @@ impl Request<'_> {
             Self::Inbox { open } => {
                 out.push(u8::from(open));
                 INBOX_OPEN
+            }
+            Self::OpenTabIn { dir } => {
+                if dir.len() > MAX_DIR {
+                    out.truncate(start);
+                    return Err(Error::TooLarge {
+                        size: dir.len() as u64,
+                    });
+                }
+                out.extend_from_slice(dir.as_bytes());
+                OPEN_TAB_IN
             }
             Self::Answer {
                 pane,
@@ -1385,6 +1435,15 @@ impl Request<'_> {
             INBOX_OPEN => Request::Inbox {
                 open: body.tag("open", &[false, true])?,
             },
+            OPEN_TAB_IN => {
+                let dir = body.text()?;
+                if dir.len() > MAX_DIR {
+                    return Err(Error::TooLarge {
+                        size: dir.len() as u64,
+                    });
+                }
+                Request::OpenTabIn { dir }
+            }
             // Bounded and checked against the key table before the core compares them.
             ANSWER_KIND => {
                 let pane = body.u32()?;
@@ -1435,6 +1494,10 @@ impl Notice<'_> {
             Self::Secrets { .. } => 15,
             Self::Webhook { .. } => WEBHOOK_SINCE,
             Self::InboxExtra { .. } => INBOX_EXTRA,
+            Self::Outside { .. }
+            | Self::Refused {
+                reason: Refusal::Folder,
+            } => OUTSIDE,
             Self::Refused {
                 reason:
                     Refusal::Gone
@@ -1583,6 +1646,20 @@ impl Notice<'_> {
                 *pane,
                 branch.as_bytes(),
             )?,
+            Self::Outside {
+                index,
+                count,
+                secs,
+                dir,
+            } => {
+                if !outside_row(*index, *count, dir) {
+                    out.truncate(start);
+                    return Err(Error::BadText);
+                }
+                put!(out; *index, *count, *secs);
+                out.extend_from_slice(dir.as_bytes());
+                OUTSIDE_KIND
+            }
             Self::Activity { tabs, alerts } => put!(out, ACTIVITY, tabs, alerts),
             Self::Refused { reason } => {
                 out.push(*reason as u8);
@@ -1708,6 +1785,20 @@ impl Notice<'_> {
                 failed: body.u32()?,
                 host: body.text()?,
             },
+            OUTSIDE_KIND => {
+                let (index, count, secs) = (body.u8()?, body.u8()?, body.u32()?);
+                let dir = body.text()?;
+                // The window draws it escaped and offers it for a tab, so only a plain path.
+                if !outside_row(index, count, dir) {
+                    return Err(Error::BadText);
+                }
+                Notice::Outside {
+                    index,
+                    count,
+                    secs,
+                    dir,
+                }
+            }
             INBOX_EXTRA_KIND if version >= AGENT_FILES => {
                 let pane = body.u32()?;
                 let ctx = match body.u8()? {
@@ -1822,6 +1913,7 @@ impl Notice<'_> {
                         Refusal::NotAgent,
                         Refusal::Protected,
                         Refusal::ProfileChanged,
+                        Refusal::Folder,
                     ],
                 )?,
             },
@@ -2401,7 +2493,17 @@ fn read_layout<'a>(body: &mut Reader<'a>, version: u16) -> Result<Layout<'a>, Er
     })
 }
 
-/// Reads fields from the front of a body, and never past its end.
+/// Whether a [`Notice::Outside`] is well formed: a row below `count` of at most
+/// [`MAX_OUTSIDE`] whose `dir` is absolute, at most [`MAX_DIR`] bytes and free of control and
+/// bidi characters, or the empty refresh, `count` 0 with no `dir`.
+fn outside_row(index: u8, count: u8, dir: &str) -> bool {
+    if count == 0 {
+        return index == 0 && dir.is_empty();
+    }
+    let plain = dir.chars().all(|c| !c.is_control() && !bidi(c));
+    index < count && count <= MAX_OUTSIDE && dir.starts_with('/') && dir.len() <= MAX_DIR && plain
+}
+
 /// Whether `character` reorders text: the bidi controls and marks.
 fn bidi(character: char) -> bool {
     matches!(
@@ -2410,6 +2512,7 @@ fn bidi(character: char) -> bool {
     )
 }
 
+/// Reads fields from the front of a body, and never past its end.
 struct Reader<'a>(&'a [u8]);
 
 impl<'a> Reader<'a> {
@@ -2518,7 +2621,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 21, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 22, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -2752,18 +2855,31 @@ mod tests {
             ctx: Some(64),
             steps: "Bash",
         };
-        // 20, the oldest spoken, has it, laid out as 20 reads it: the branch only.
-        let mut wire = raw(HELLO, &OLDEST.to_le_bytes());
-        extra.encode_at(OLDEST, &mut wire).unwrap();
-        let (mut decoder, mut input) = (Decoder::default(), wire.as_slice());
-        decoder.next_notice(&mut input).unwrap();
-        let branch_only = Notice::InboxExtra {
-            pane: 1,
-            branch: "main",
-            ctx: None,
-            steps: "",
+        // 21, the oldest spoken, has its context use and steps.
+        assert_eq!(at_oldest(extra), Ok(true));
+        let outside = Notice::Outside {
+            index: 0,
+            count: 1,
+            secs: 3,
+            dir: "/work",
         };
-        assert_eq!(decoder.next_notice(&mut input), Ok(Some(branch_only)));
+        let newer = Error::Newer {
+            kind: OUTSIDE_KIND,
+            since: OUTSIDE,
+        };
+        assert_eq!(
+            at_oldest(outside),
+            Err(newer),
+            "a window of 21 never gets it"
+        );
+        let folder = Notice::Refused {
+            reason: Refusal::Folder,
+        };
+        let newer = Error::Newer {
+            kind: REFUSED,
+            since: OUTSIDE,
+        };
+        assert_eq!(at_oldest(folder), Err(newer));
         assert_eq!(at_oldest(COLOURS_SEED), Ok(true));
         let secrets = Notice::Secrets {
             count: 1,
@@ -3309,7 +3425,7 @@ mod tests {
             let error = request_error(&raw(kind, body));
             assert!(matches!(error, Err(Error::BadTag { field: f, .. }) if f == field));
         }
-        let error = notice_error(&raw(REFUSED, &[10]));
+        let error = notice_error(&raw(REFUSED, &[11]));
         assert!(matches!(
             error,
             Err(Error::BadTag {
@@ -3610,6 +3726,42 @@ mod tests {
         for steps in hostile {
             assert_eq!(read(1, steps), Err(Error::BadText), "{steps:?}");
         }
+    }
+
+    /// ADR-0051 §8: the window draws an outside row's folder and offers it for a tab, so the
+    /// decoder takes only a plain absolute path in a row of at most 16.
+    #[test]
+    fn an_outside_row_is_a_plain_absolute_path_in_at_most_sixteen() {
+        let wire = |index: u8, count: u8, dir: &[u8]| {
+            let mut body = vec![index, count];
+            body.extend(7u32.to_le_bytes());
+            body.extend_from_slice(dir);
+            raw(OUTSIDE_KIND, &body)
+        };
+        assert_eq!(
+            notice_error(&wire(15, 16, "/Users/me/日本".as_bytes())),
+            Ok(())
+        );
+        assert_eq!(notice_error(&wire(0, 0, b"")), Ok(()));
+        assert_eq!(notice_error(&wire(0, 1, &[b'/'; MAX_DIR])), Ok(()));
+        let hostile: [(u8, u8, &[u8]); 9] = [
+            (0, 17, b"/w"),
+            (1, 1, b"/w"),
+            (0, 0, b"/w"),
+            (0, 1, b""),
+            (0, 1, b"work"),
+            (0, 1, b"/w\n/x"),
+            (0, 1, b"/w\x1b]0;x\x07"),
+            (0, 1, "/w\u{202e}x".as_bytes()),
+            (0, 1, &[b'/'; MAX_DIR + 1]),
+        ];
+        for (index, count, dir) in hostile {
+            let error = notice_error(&wire(index, count, dir));
+            assert_eq!(error, Err(Error::BadText), "{index} {count} {dir:?}");
+        }
+        let long = "/".repeat(MAX_DIR + 1);
+        let error = Request::OpenTabIn { dir: &long }.encode(&mut Vec::new());
+        assert!(matches!(error, Err(Error::TooLarge { .. })));
     }
 
     #[test]
@@ -4062,6 +4214,20 @@ mod tests {
         fn webhook_round_trips(host in any::<String>(), sender in any::<bool>(), failed in any::<u32>(), chunk in chunks()) {
             let notice = Notice::Webhook { host: &host, sender, failed };
             prop_assert!(notice_survives(&notice, chunk), "changed on the link");
+        }
+
+        #[test]
+        fn outside_rows_round_trip(
+            count in 1..=MAX_OUTSIDE,
+            secs in any::<u32>(),
+            dir in "/[^\\p{C}]{0,200}",
+            chunk in chunks(),
+        ) {
+            prop_assume!(!dir.chars().any(bidi));
+            let notice = Notice::Outside { index: count - 1, count, secs, dir: &dir };
+            prop_assert!(notice_survives(&notice, chunk), "changed on the link");
+            let request = Request::OpenTabIn { dir: &dir };
+            prop_assert!(request_survives(request, chunk), "changed on the link");
         }
 
         #[test]
