@@ -258,6 +258,15 @@ fn a_rewind_prompt_shows_the_counts_and_the_paths_with_later_ones_in_red() {
     insta::assert_snapshot!(cells(&rewind()));
 }
 
+/// The strip under an agent's pane whose launch checkpoint took over `wait_s`, in the muted
+/// chrome colour (ADR-0050, slice 6 amendment).
+#[test]
+fn the_strip_says_a_run_has_no_checkpoint_and_why() {
+    let mut frame = pane('x', 2, 80);
+    crate::flash::no_checkpoint(&mut frame, 1, &GRAPHITE);
+    insta::assert_snapshot!(cells(&frame));
+}
+
 #[test]
 fn the_right_click_menu_with_a_link() {
     let mut frame = pane('x', 14, 20);

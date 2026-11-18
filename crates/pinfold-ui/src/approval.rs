@@ -320,7 +320,6 @@ fn rewind_lines(prompt: &Approval, queued: usize, columns: usize) -> (Vec<String
 
 /// A `Rewind` prompt at its largest: the core's texts with 10 paths of 256 bytes, changed later
 /// every other one, for `cargo xtask mem-gate` and the snapshot (ADR-0050).
-#[cfg(test)]
 pub fn largest_rewind() -> Approval {
     let mut texts = vec![
         "/Users/me/work/pinfold".to_owned(),

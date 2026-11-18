@@ -69,6 +69,9 @@ const MENU_VARIABLE: &str = "PINFOLD_MEASURE_MENU";
 /// Likewise: `open` keeps the inbox open, `closed` closes it once it has drawn its rows, and
 /// `answer` shows PinFold's confirmation of an Interrupt over it (ADR-0051 §6).
 const INBOX_VARIABLE: &str = "PINFOLD_MEASURE_INBOX";
+/// Likewise: shows a `Rewind` prompt at its largest, 10 paths of 256 bytes, over the strip's
+/// `no checkpoint` (ADR-0050).
+const REWIND_VARIABLE: &str = "PINFOLD_MEASURE_REWIND";
 
 /// ADR-0021 budgets with nothing to measure yet, and the issue that makes them measurable.
 const NOT_MEASURED: [(&str, &str); 2] = [
@@ -106,6 +109,8 @@ pub struct Budget<'a> {
     pub window: Option<Side>,
     /// Asks a measured window to open its right-click menu.
     pub menu: bool,
+    /// Asks a measured window to show a `Rewind` prompt at its largest.
+    pub rewind: bool,
     /// Asks a measured window to open its inbox, with `closed` to close it again, and with
     /// `answer` to show an answer prompt over it.
     pub inbox: Option<&'a str>,
@@ -143,6 +148,9 @@ fn measure_once(budget: &Budget, args: &[&str]) -> io::Result<Reading> {
     }
     if budget.menu {
         command.env(MENU_VARIABLE, "1");
+    }
+    if budget.rewind {
+        command.env(REWIND_VARIABLE, "1");
     }
     if let Some(agents) = budget.agents {
         command.env("XDG_CONFIG_HOME", agents);
@@ -466,6 +474,7 @@ mod tests {
             screen: None,
             window: None,
             menu: false,
+            rewind: false,
             inbox: None,
             agents: None,
         }
@@ -513,6 +522,7 @@ mod tests {
             screen: None,
             window: None,
             menu: false,
+            rewind: false,
             inbox: None,
             agents: None,
         };
@@ -622,6 +632,7 @@ mod tests {
         let window = include_str!("../../crates/pinfold-ui/src/window.rs");
         assert!(window.contains(&format!("var_os(\"{MENU_VARIABLE}\")")));
         assert!(window.contains(&format!("var_os(\"{INBOX_VARIABLE}\")")));
+        assert!(window.contains(&format!("var_os(\"{REWIND_VARIABLE}\")")));
     }
 
     #[test]
