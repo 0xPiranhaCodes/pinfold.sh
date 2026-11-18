@@ -178,12 +178,12 @@ pub fn fuzz_markdown(markdown: &[u8], width: u16) -> Vec<String> {
 }
 
 /// Whether `path` is ignored by a `.gitignore` holding `text` in its directory, as the
-/// checkpoint walk reads it, for a directory and for a file; patterns over their step budget
-/// match nothing. For the `gitignore` fuzz target.
+/// checkpoint walk reads it, for a directory and for a file; `None` where that call ran out of
+/// its own step budget. For the `gitignore` fuzz target.
 #[doc(hidden)]
-pub fn fuzz_gitignore(text: &[u8], path: &[u8]) -> [Option<bool>; 2] {
+pub fn fuzz_gitignore(text: &[u8], path: &[u8]) -> [Option<Option<bool>>; 2] {
     let patterns = gitignore::parse(text);
-    [true, false].map(|is_dir| gitignore::matches(&patterns, path, is_dir).unwrap_or(None))
+    [true, false].map(|is_dir| gitignore::matches(&patterns, path, is_dir).ok())
 }
 
 /// Parses `diff` as `pinfold diff` does, and returns its notes and each file's label, header and
