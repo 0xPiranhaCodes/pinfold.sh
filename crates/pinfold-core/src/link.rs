@@ -407,6 +407,7 @@ impl Session {
                 // Closing ends a peek too, and what it read goes nowhere.
                 if !reads {
                     self.peek = None;
+                    pinfold_sys::trim();
                 }
             }
             // Only a person's confirmation in the window sends this; no API method does.
@@ -533,6 +534,8 @@ impl Session {
                     self.send_outside(&rows)?;
                 }
             }
+            // The peek's output and every row built from it are freed by now (#490).
+            pinfold_sys::trim();
             return Ok(());
         }
         if self.inbox.is_none_or(|due| due > now) {
@@ -569,6 +572,8 @@ impl Session {
         for pane in listed.into_iter().filter(|pane| !peeked.0.contains(pane)) {
             self.send_extra(reactor, pane, None, "")?;
         }
+        // Each branch read is freed by now (#490).
+        pinfold_sys::trim();
         Ok(())
     }
 
