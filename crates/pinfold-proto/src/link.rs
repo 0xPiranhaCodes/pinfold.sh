@@ -65,6 +65,20 @@ const INBOX_EXTRA: u16 = 20;
 /// (ADR-0051, slice 9).
 pub const AGENT_FILES: u16 = 21;
 
+/// Why a run has no checkpoint: the words the strip shows after `no checkpoint ·`, none for 0
+/// (ADR-0050 section 4).
+pub const MISSING: [&str; 6] = [
+    "",
+    "took over wait_s",
+    "git not found",
+    "the take failed",
+    "too many runs",
+    "busy",
+];
+
+/// The longest error a restore's result carries, written by the core and naming no path.
+pub const MAX_RESTORE_ERROR: usize = 200;
+
 /// The most bytes of steps a [`Notice::InboxExtra`] carries: three of 80 cells and two
 /// newlines fit, as `pinfold agents peek` prints at most 1 KiB a pane.
 pub const MAX_STEPS: usize = 1024;
