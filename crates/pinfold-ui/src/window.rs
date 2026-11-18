@@ -12,7 +12,7 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use mio::Waker;
 use pinfold_config::theme::{self, GRAPHITE, Theme};
@@ -1946,13 +1946,13 @@ impl ApplicationHandler<Notice> for App {
                     .flash
                     .until()
                     .map_or(self.minute, |flash| flash.min(self.minute));
-                // An open inbox ticks its times once a second; a closed one costs no wakes.
-                let tick = Instant::now() + Duration::from_secs(1);
-                let wake = if self.inbox.is_some() {
-                    wake.min(tick)
-                } else {
-                    wake
-                };
+                // An open inbox wakes only when a shown time changes, at most once a minute, as
+                // each present keeps megabytes of Metal memory dirty for seconds (ADR-0051 §4).
+                let next = self
+                    .inbox
+                    .as_ref()
+                    .and_then(|inbox| inbox.next_change(Instant::now()));
+                let wake = next.map_or(wake, |next| wake.min(next));
                 event_loop.set_control_flow(ControlFlow::WaitUntil(wake));
             }
             _ => {}

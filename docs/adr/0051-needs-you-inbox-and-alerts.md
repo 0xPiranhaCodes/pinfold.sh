@@ -2,6 +2,8 @@
 
 - **Status:** Accepted (accepted by the maintainer, 2026-11-18)
 - **Date:** 2026-11-14
+- **Amended 2026-11-18**, decided by the coordinator for the maintainer: section 4's time format
+  and tick change; see "Amendment 2026-11-18" at the end.
 
 ## Context
 
@@ -170,8 +172,9 @@ updated`.
   updated in the slice that draws it.
 - **Second line,** only with `[inbox] agent_files = true` (section 7): context use as `ctx 64%`
   and the last three steps, each cut to fit, in `chrome.dim`.
-- **Time:** `m:ss` under an hour, then `3h07`, then `99h+`. The view ticks once a second only
-  while open, on the clock's existing tick.
+- **Time:** `<1m` under a minute, then `6m`, then `3h07`, then `99h+`. While open, the view
+  redraws for the clock only when a shown time's text changes, so at most once a minute; a state
+  change redraws at once, as an event (amended 2026-11-18).
 - **Header and footer:** "AGENTS · needs you first", and "N agents · M needs you" (plus
   "webhook: K failed" in red when `failed` > 0, and "webhook: no curl" when `sender` is false).
   No rows: "No agent panes". Footer keys: `⏎ jump · y approve · i interrupt · esc`.
@@ -470,3 +473,20 @@ core's first network-facing behaviour, though through a separate process. Webhoo
 and a change needs a new session. Revisit the sender if `curl` is missing for enough Linux users,
 the session-file reader if Claude Code or OpenCode publish a stable status interface, and the
 listing rule if agents often start in plain shell panes without hooks.
+
+## Amendment 2026-11-18
+
+Decided by the coordinator for the maintainer, under the maintainer's rule for this work (no
+memory growth). As first written, section 4 showed `m:ss` and redrew the open inbox once a
+second. `cargo xtask mem-gate` on macOS, median of 3, MB, with 8 agent tabs needing you
+(`xtask/src/main.rs`): the window with the inbox open measured **55.72** against **50.14** with
+it never opened, 0.14 MB under the 55.86 budget. The inbox's rows were not the cost. Each Metal
+present keeps several megabytes of driver memory (`IOAccelerator (graphics)`, as `footprint`
+reports it) dirty for a few seconds before macOS marks it reclaimable, so a window that presents
+every second never gives it back. An autorelease pool around the draw does not change it,
+PinFold holds no buffer to release, and the renderer has no partial redraw.
+
+So times show no seconds: `<1m` under a minute, then `6m`, then `3h07`, then `99h+`, and the
+open inbox wakes the window only when a shown time's text changes (`Inbox::next_change`), at
+most once a minute, never at `99h+`. A state change still redraws at once. With this, the same
+row measures **50.35** against **50.66**, and 50.30 after it closes.

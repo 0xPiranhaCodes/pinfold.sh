@@ -117,6 +117,19 @@ impl Inbox {
         self.selected = kept.unwrap_or(self.selected.min(count.saturating_sub(1)));
     }
 
+    /// Returns when a shown time next changes: at most once a minute, as times show no
+    /// seconds, so the window redraws for the clock that rarely (ADR-0051 §4).
+    pub fn next_change(&self, now: Instant) -> Option<Instant> {
+        self.rows
+            .iter()
+            .filter_map(|row| {
+                let since = row.since?;
+                let seconds = now.saturating_duration_since(since).as_secs();
+                (seconds < CAPPED).then(|| since + Duration::from_secs((seconds / 60 + 1) * 60))
+            })
+            .min()
+    }
+
     /// Returns whether rows have come since it opened.
     pub fn is_ready(&self) -> bool {
         self.ready
@@ -421,12 +434,16 @@ impl Columns {
     }
 }
 
-/// Time in a state: `m:ss` under an hour, then `3h07`, then `99h+`.
+/// Seconds from which a time reads `99h+` and stops changing.
+const CAPPED: u64 = 100 * 3600;
+
+/// Time in a state: `<1m` under a minute, then `6m`, then `3h07`, then `99h+`.
 fn held_for(held: Duration) -> String {
     let seconds = held.as_secs();
     let (hours, minutes) = (seconds / 3600, seconds / 60 % 60);
     match hours {
-        0 => format!("{minutes}:{:02}", seconds % 60),
+        0 if minutes == 0 => "<1m".to_owned(),
+        0 => format!("{minutes}m"),
         1..=99 => format!("{hours}h{minutes:02}"),
         _ => "99h+".to_owned(),
     }
@@ -710,7 +727,7 @@ pub(crate) mod tests {
         );
         let narrow = lines(&drawn(&inbox, 24, 40, now));
         assert!(
-            !narrow[0].contains("api-refactor") && narrow[0].contains("0:42"),
+            !narrow[0].contains("api-refactor") && narrow[0].contains("<1m"),
             "{narrow:?}"
         );
         assert!(narrow[0].contains("◆ needs you"), "the word always stays");
@@ -766,8 +783,8 @@ pub(crate) mod tests {
     fn times_read_minutes_then_hours_then_cap() {
         let held = |seconds| held_for(Duration::from_secs(seconds));
         assert_eq!(
-            [held(0), held(42), held(363), held(3599)],
-            ["0:00", "0:42", "6:03", "59:59"]
+            [held(0), held(59), held(60), held(363), held(3599)],
+            ["<1m", "<1m", "1m", "6m", "59m"]
         );
         assert_eq!(
             [held(3600), held(11_220), held(359_999)],
@@ -781,8 +798,23 @@ pub(crate) mod tests {
         let now = Instant::now();
         let inbox = board(now);
         let later = now + Duration::from_secs(20);
-        assert!(lines(&drawn(&inbox, 24, 100, now))[0].ends_with("0:42"));
-        assert!(lines(&drawn(&inbox, 24, 100, later))[0].ends_with("1:02"));
+        assert!(lines(&drawn(&inbox, 24, 100, now))[0].ends_with("<1m"));
+        assert!(lines(&drawn(&inbox, 24, 100, later))[0].ends_with("1m"));
+    }
+
+    #[test]
+    fn the_clock_wakes_the_inbox_only_when_a_shown_time_changes() {
+        let now = Instant::now();
+        // Held 363, 30, 70, 42 and 1335 s: the 42 s row turns 1m first.
+        let mut inbox = board(now);
+        let next = inbox
+            .next_change(now)
+            .map(|at| at.duration_since(now).as_secs());
+        assert_eq!(next, Some(18));
+        inbox.refresh(&[listed(2, 0, 400_000, "", now)], &[(2, 0)], &[]);
+        assert_eq!(inbox.next_change(now), None, "99h+ never changes");
+        inbox.refresh(&[], &[], &[]);
+        assert_eq!(inbox.next_change(now), None);
     }
 
     /// CLAUDE.md asks for glyph, colour and word, and the board is the design's view of this.

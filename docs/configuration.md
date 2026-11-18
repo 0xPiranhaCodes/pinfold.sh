@@ -342,8 +342,9 @@ a pane started from an [agent profile](#agent-profiles), or one whose agent has 
 state with `pinfold ctl status`. A plain shell is never listed. Rows go ◆ needs you, ✕ error,
 ● running, ✓ done, ○ idle, and the longest in its state first within each. Each row is the
 state's glyph and word in its colour, the tab and pane numbers as `2·1`, the tab's label, the
-agent's last message, and how long it has been in that state, which ticks while the box is
-open. A state that came from output's marks rather than the agent says "from output" where the
+agent's last message, and how long it has been in that state: `<1m`, then minutes such as
+`6m`, then `3h07`, then `99h+`. The box redraws for the time only when it changes, at most once a
+minute. A state that came from output's marks rather than the agent says "from output" where the
 message goes. ↑ and ↓ move, Enter goes to the pane, a click on a row does too, and Esc or
 prefix `!` closes. While it is open every key and paste goes to it, never to a pane. It holds
 its rows only while open.

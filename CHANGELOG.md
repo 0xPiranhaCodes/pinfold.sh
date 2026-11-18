@@ -11,7 +11,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Added
 
-- The inbox ([#447](https://github.com/0xPiranhaCodes/pinfold.sh/issues/447), [ADR-0051](docs/adr/0051-needs-you-inbox-and-alerts.md), slice 2): prefix `!` (`keys.inbox`) or Agents in the palette lists every agent pane of every tab, ◆ needs you first, each row with its state's glyph, colour and word, `tab·pane`, the tab's label, the agent's message and its time in the state, ticking once a second while open. Enter or a click goes to the pane; Esc or prefix `!` closes, and closing frees its rows. A window whose core speaks a link older than 17 flashes "the inbox needs the core updated". The design's Agents board now shows each state's word beside its glyph.
+- The inbox ([#447](https://github.com/0xPiranhaCodes/pinfold.sh/issues/447), [ADR-0051](docs/adr/0051-needs-you-inbox-and-alerts.md), slice 2): prefix `!` (`keys.inbox`) or Agents in the palette lists every agent pane of every tab, ◆ needs you first, each row with its state's glyph, colour and word, `tab·pane`, the tab's label, the agent's message and its time in the state (`<1m`, `6m`, `3h07`, `99h+`), redrawn only when a shown time changes, at most once a minute, so an open inbox keeps no extra Metal memory dirty. Enter or a click goes to the pane; Esc or prefix `!` closes, and closing frees its rows. A window whose core speaks a link older than 17 flashes "the inbox needs the core updated". The design's Agents board now shows each state's word beside its glyph.
 
 ### Changed
 
