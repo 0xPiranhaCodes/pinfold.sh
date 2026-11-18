@@ -25,6 +25,7 @@ use sha1::{Digest, Sha1};
 
 use crate::gitignore::{self, Pattern};
 
+pub mod list;
 pub mod plan;
 pub mod prune;
 pub mod restore;
@@ -922,7 +923,9 @@ fn blob(
 /// measures it: the line then adds `ms`, the take's wall time, and `peak`, its own peak
 /// footprint in bytes.
 const MEASURE: &str = "PINFOLD_MEASURE";
-const USAGE: &str = "usage: pinfold checkpoint take <run> <n> <reason> -- <dir> | prune \
+const USAGE: &str = "usage: pinfold checkpoint take <run> <reason> [--max-files N] \
+                     [--max-file-mib N] [--max-new-mib N] [--include-ignored] \
+                     (-- <dir> | --key <key>) | list <run> --key <key> | prune \
                      [--live <run>]... [--max-store-mib N] [--keep-days N] [--keep-per-run N] \
                      | plan|restore <run> <c> <shown> -- <dir> [<path>]...";
 
@@ -949,8 +952,12 @@ fn paths(args: &[OsString]) -> Option<Vec<Vec<u8>>> {
 /// and prints one JSON line on standard output: on success the command's result, otherwise
 /// `{"error":"<reason>"}`. Returns whether it succeeded.
 ///
-/// Take and prune run at background priority. `take <run> <n> <reason> -- <dir>` prints
-/// [`take::Taken`]'s line; `prune [--live <run>]... [--max-store-mib N] [--keep-days N]
+/// Take and prune run at background priority. `take <run> <reason> [--max-files N]
+/// [--max-file-mib N] [--max-new-mib N] [--include-ignored] (-- <dir> | --key <key>)`, the
+/// caps `[rewind]`'s and the default [`Caps`] without them, takes the run's next checkpoint
+/// ([`take::take_next`]) and prints [`take::Taken`]'s line; `list <run> --key <key>` prints
+/// `{"checkpoints":[...],"more":M}`, newest first, as [`list::list`] reads them, cut to fit
+/// 4 KiB with `more` counting the oldest left out; `prune [--live <run>]... [--max-store-mib N] [--keep-days N]
 /// [--keep-per-run N]`, defaults 2048, 14 and 20, prints [`prune::Pruned`]'s. `plan <run> <c>
 /// <shown> -- <dir> [<path>]...`, limited to the paths if any are given and all otherwise,
 /// prints [`plan::Planned`]'s, and `restore` with the same arguments [`restore::Restored`]'s,
@@ -959,7 +966,7 @@ fn paths(args: &[OsString]) -> Option<Vec<Vec<u8>>> {
 /// # Examples
 ///
 /// ```no_run
-/// let args = ["take", "r1700000000-0", "0", "launch", "--", "/path/to/work"].map(Into::into);
+/// let args = ["take", "r1700000000-0", "launch", "--", "/path/to/work"].map(Into::into);
 /// let ok = pinfold_tools::checkpoint::command(Some("/path/to/state".as_ref()), &args);
 /// ```
 pub fn command(state: Option<&Path>, args: &[OsString]) -> bool {
@@ -967,35 +974,37 @@ pub fn command(state: Option<&Path>, args: &[OsString]) -> bool {
     let words: Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();
     let result = match (state, words.as_slice()) {
         (None, _) => Err(io::Error::other("no state directory: HOME is not set")),
-        (Some(state), [b"take", run, n, reason, b"--", _]) => {
+        (Some(state), [b"take", run, reason, rest @ ..]) => {
             // First, as on macOS it starts the program again in place.
             let _ = pinfold_sys::background();
             let text = |word: &[u8]| std::str::from_utf8(word).unwrap_or_default().to_owned();
-            let n = text(n)
-                .parse::<u64>()
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "n is not a number"));
-            let time = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |since| since.as_secs());
-            n.and_then(|n| {
-                take::take(
-                    state,
-                    &text(run),
-                    n,
-                    &text(reason),
-                    Path::new(&args[5]),
-                    time,
-                )
-            })
-            .map(|t| {
-                serde_json::json!({
-                    "checkpoint": t.checkpoint,
-                    "store": t.store,
-                    "files": t.files,
-                    "new_bytes": t.new_bytes,
-                    "complete": t.complete,
-                    "changed": t.changed,
+            let usage = || io::Error::new(io::ErrorKind::InvalidInput, USAGE);
+            take::parse(rest)
+                .ok_or_else(usage)
+                .and_then(|(caps, at)| {
+                    let dir = match at {
+                        take::At::Dir(at) => take::Dir::Path(Path::new(&args[3 + at])),
+                        take::At::Key(key) => take::Dir::Key(key),
+                    };
+                    take::take_next(state, &text(run), &text(reason), dir, now(), &caps)
                 })
+                .map(|t| {
+                    serde_json::json!({
+                        "checkpoint": t.checkpoint,
+                        "store": t.store,
+                        "files": t.files,
+                        "new_bytes": t.new_bytes,
+                        "complete": t.complete,
+                        "changed": t.changed,
+                    })
+                })
+        }
+        (Some(state), [b"list", run, b"--key", key]) => {
+            let text = |word: &[u8]| std::str::from_utf8(word).unwrap_or_default().to_owned();
+            list::list(state, &text(run), &text(key)).map(|listed| {
+                let mut line = serde_json::json!({"checkpoints": listed, "more": 0});
+                plan::fit(&mut line, "checkpoints", "more");
+                line
             })
         }
         (Some(state), [b"plan", run, c, shown, b"--", _, ..]) => {

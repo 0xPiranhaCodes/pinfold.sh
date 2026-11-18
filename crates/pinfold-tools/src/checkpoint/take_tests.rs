@@ -210,3 +210,35 @@ fn a_full_store_refuses_every_take_with_the_reason() {
     assert!(full.to_string().starts_with("over max_store_mib"), "{full}");
     fs::remove_dir_all(dir).expect("clean");
 }
+
+#[test]
+fn take_reads_its_caps_and_where_the_directory_is() {
+    let words = |text: &'static str| text.split(' ').map(str::as_bytes).collect::<Vec<_>>();
+    let (caps, at) = parse(&words(
+        "--max-files 9 --include-ignored --max-file-mib 1 -- /w",
+    ))
+    .expect("dir");
+    assert_eq!(at, At::Dir(6));
+    let want = Caps {
+        max_files: 9,
+        max_file_bytes: 1 << 20,
+        include_ignored: true,
+        ..Caps::default()
+    };
+    assert_eq!(caps, want);
+    let (caps, at) = parse(&words("--max-new-mib 2 --key 0123456789abcdef")).expect("key");
+    assert_eq!(
+        (caps.max_new_bytes, at),
+        (2 << 20, At::Key("0123456789abcdef"))
+    );
+    for bad in [
+        "--max-files x -- /w",
+        "--max-new-mib 99999999999999 -- /w",
+        "-- /w /x",
+        "--key",
+        "--other 1 -- /w",
+        "",
+    ] {
+        assert_eq!(parse(&words(bad)), None, "{bad}");
+    }
+}
