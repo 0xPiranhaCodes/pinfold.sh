@@ -176,6 +176,17 @@ pub enum Method {
         /// The pane's number.
         pane: usize,
     },
+    /// `checkpoint.take`: a checkpoint of the working directory of the run in `pane`
+    /// (ADR-0050).
+    CheckpointTake {
+        /// The run's agent pane.
+        pane: usize,
+    },
+    /// `checkpoint.list`: the checkpoints of the run in `pane`, metadata only (ADR-0050).
+    CheckpointList {
+        /// The run's agent pane.
+        pane: usize,
+    },
     /// `session.save`: write the session's snapshot now.
     SessionSave,
     /// `workspace.open`, its shape checked.
@@ -532,6 +543,11 @@ impl Control {
                         | Method::SessionSave
                         | Method::GrantsRevoke { .. }
                         | Method::WorkspaceOpen(_) => APPROVAL_WAIT + OPEN_WAIT,
+                        // A launch waits for its checkpoint, at most `[rewind] wait_s` (60 s), and
+                        // a checkpoint call for a take or a list (ADR-0050).
+                        Method::AgentLaunch(_)
+                        | Method::CheckpointTake { .. }
+                        | Method::CheckpointList { .. } => APPROVAL_WAIT + OPEN_WAIT,
                         _ => OPEN_WAIT,
                     };
                     ask(Request {
@@ -1185,7 +1201,9 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
             | "workspace.ask_trust"
             | "session.save"
             | "agent.launch"
-            | "tool.open"),
+            | "tool.open"
+            | "checkpoint.take"
+            | "checkpoint.list"),
         ) if *greeted < VERSION => refuse(
             Some(id),
             NO_METHOD,
@@ -1243,8 +1261,8 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
             ),
         },
         Some(
-            method
-            @ ("pane.read" | "pane.last_output" | "pane.send" | "pane.close" | "pane.status"),
+            method @ ("pane.read" | "pane.last_output" | "pane.send" | "pane.close" | "pane.status"
+            | "checkpoint.take" | "checkpoint.list"),
         ) => match pane_method(method, request.get("params")) {
             Ok(method) => Step::Ask(id.clone(), method),
             Err(reason) => refuse(Some(id), BAD_PARAMS, reason),
@@ -1386,6 +1404,8 @@ fn pane_method(method: &str, params: Option<&Value>) -> Result<Method, &'static 
             })
         }
         "pane.close" => Ok(Method::PaneClose { pane }),
+        "checkpoint.take" => Ok(Method::CheckpointTake { pane }),
+        "checkpoint.list" => Ok(Method::CheckpointList { pane }),
         _ => Ok(Method::PaneLastOutput { pane }),
     }
 }
@@ -1597,6 +1617,20 @@ mod tests {
             asked("pane.close", json!({"pane": 4})),
             Step::Ask(json!(2), Method::PaneClose { pane: 4 })
         );
+        assert_eq!(
+            asked("checkpoint.take", json!({"pane": 4})),
+            Step::Ask(json!(2), Method::CheckpointTake { pane: 4 })
+        );
+        assert_eq!(
+            asked("checkpoint.list", json!({"pane": 4})),
+            Step::Ask(json!(2), Method::CheckpointList { pane: 4 })
+        );
+        let take = pane_request("checkpoint.take", &json!({"pane": "self"}));
+        let (reply, _) = replied(take.as_bytes(), &mut VERSION.clone());
+        assert_eq!(code(&reply), Some(BAD_PARAMS));
+        let list = pane_request("checkpoint.list", &json!({"pane": 1}));
+        let (reply, _) = replied(list.as_bytes(), &mut OLDEST.clone());
+        assert_eq!(code(&reply), Some(NO_METHOD));
         let spawn = pane_request("pane.spawn", &json!({"where": "tab", "command": "sh"}));
         let (reply, _) = replied(spawn.as_bytes(), &mut VERSION.clone());
         assert_eq!(code(&reply), Some(BAD_PARAMS));

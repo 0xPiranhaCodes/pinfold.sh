@@ -380,6 +380,79 @@ fn write_webhook_inputs(dir: &Path, tools: &Path, rows: &[(&str, &str, &str)]) -
     Ok(())
 }
 
+/// Writes `on`, `off` and `burst` under `dir` for the run-record rows (ADR-0050): each a config
+/// with `[rewind]` on or off and a profile per pane, `quick<n>`, whose agent exits at once, a
+/// `state` folder the core keeps its checkpoints in, a scratch `work` folder, and `agent.sh`,
+/// every pane's shell. It reports running and launches 8 agents in tabs, in `on` and `off` each
+/// once the last one's pane is gone, so both rows have the same churn whether a launch waits
+/// for its checkpoint or not, and in `burst` back to back (#476). Then it takes and lists a
+/// checkpoint of each run through `pinfold mcp`, the other panes' runs refused, and waits. 8
+/// panes make 64 closed runs.
+fn write_rewind_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let quote = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', r"'\''"));
+    for (row, enabled, paced) in [
+        ("on", true, true),
+        ("off", false, true),
+        ("burst", false, false),
+    ] {
+        let folder = dir.join(row);
+        for sub in ["pinfold", "state", "work"] {
+            fs::create_dir_all(folder.join(sub))?;
+        }
+        fs::write(folder.join("work/a.txt"), "a\n")?;
+        let mut config = format!("[rewind]\nenabled = {enabled}\n");
+        for pane in 0..8 {
+            // Its own program, so the shell can tell its agent's pane by its command.
+            let quick = folder.join(format!("quick{pane}.sh"));
+            fs::write(&quick, "#!/bin/sh\nexit 0\n")?;
+            fs::set_permissions(&quick, fs::Permissions::from_mode(0o755))?;
+            config += &format!(
+                "[agents.quick{pane}]\ncommand = [{:?}]\n",
+                quick.display().to_string()
+            );
+        }
+        fs::write(folder.join("pinfold/pinfold.toml"), config)?;
+        let call = |name: &str| {
+            format!(
+                "printf '{{\"jsonrpc\":\"2.0\",\"id\":%s,\"method\":\"tools/call\",\
+                 \"params\":{{\"name\":\"{name}\",\"arguments\":{{\"pane\":%s}}}}}}\\n' $p $p"
+            )
+        };
+        let tools = quote(tools);
+        // A launched agent is not in its launcher's reach for pane.wait, so this polls the list
+        // until the agent's pane is gone.
+        let pace = if paced {
+            format!(
+                "  id=$({tools} ctl list --json | tr '}}' '\\n' | grep -F \"/quick$me.sh\\\"\" | \
+                 sed 's/.*\"id\":\\([0-9]*\\).*/\\1/')\n\
+                 \x20 while [ -n \"$id\" ] && {tools} ctl list --json | grep -q \"\\\"id\\\":$id,\"; do sleep 0.1; done\n"
+            )
+        } else {
+            String::new()
+        };
+        let script = folder.join("agent.sh");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ncd {work} || exit 1\n{tools} ctl status running 'checkpoints'\n\
+                 me=$({tools} ctl list | grep -o '^[0-9]*\\*' | tr -d '*')\n\
+                 i=0; while [ $i -lt 8 ]; do\n\
+                 \x20 {tools} agent quick$me --tab 2>/dev/null\n{pace}\
+                 \x20 i=$((i + 1))\ndone\n\
+                 {{ echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{}}}}'\n\
+                 p=8; while [ $p -lt 72 ]; do {take}; {list}; p=$((p + 1)); done; }} | {tools} mcp > /dev/null\n\
+                 exec /bin/sleep 86400\n",
+                work = quote(&folder.join("work")),
+                take = call("checkpoint_take_v1"),
+                list = call("checkpoint_list_v1"),
+            ),
+        )?;
+        fs::set_permissions(script, fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
 /// Takes webhook posts on loopback and answers each 204 at once, for the burst row. Returns its
 /// port. Std only: it reads a request's headers and the body they announce, and nothing else.
 fn answer_posts() -> io::Result<u16> {
@@ -434,7 +507,8 @@ fn mem_gate_task() -> ExitCode {
                     ("one", "https://127.0.0.1:9", "one"),
                     ("burst", &burst, "needs-you"),
                 ],
-            )
+            )?;
+            write_rewind_inputs(&inputs.join("rewind"), &tools)
         })
     {
         eprintln!("mem-gate: {error}");
@@ -548,6 +622,26 @@ fn mem_gate_task() -> ExitCode {
         inbox: None,
         agents: Some(&idle_hook),
     };
+    // ADR-0050 section 7 and slice 5: 64 run records over 8 agent panes, and no checkpoint list
+    // kept, under #476's ceiling. The same launches with `[rewind]` off, paced and back to back,
+    // are shown, not gated: off minus on was -0.85 and -0.90 MB in CI, too noisy to bound 3 KiB.
+    let (records_on, records_off) = (
+        "Core, 8 agent panes plus 64 run records",
+        "Core, 8 agent panes, 64 paced launches, [rewind] off",
+    );
+    let rewind_inputs = inputs.join("rewind");
+    let (rewind_on, rewind_off, rewind_burst) = (
+        rewind_inputs.join("on"),
+        rewind_inputs.join("off"),
+        rewind_inputs.join("burst"),
+    );
+    let records = mem_gate::Budget {
+        metric: records_on,
+        limit: mem_gate::LAUNCH_LIMIT,
+        settle: mem_gate::REWIND_SETTLE,
+        agents: Some(&rewind_on),
+        ..webhook
+    };
     budgets.extend([
         mem_gate::Budget {
             metric: "Core, 8 agent panes listed, a webhook after one alert",
@@ -562,6 +656,21 @@ fn mem_gate_task() -> ExitCode {
             ..webhook
         },
         webhook,
+    ]);
+    budgets.extend([
+        mem_gate::Budget {
+            metric: records_off,
+            limit: mem_gate::INFORMATION,
+            agents: Some(&rewind_off),
+            ..records
+        },
+        mem_gate::Budget {
+            metric: "Core, 8 agent panes, 64 launches back to back, [rewind] off (#476)",
+            limit: mem_gate::INFORMATION,
+            agents: Some(&rewind_burst),
+            ..records
+        },
+        records,
     ]);
     // ADR-0045 section 5. Each tool runs in a pane of a core, which prints the tool's pid.
     let idle_tool = ["--tool", "1", "files", empty.as_str()];
@@ -1121,6 +1230,23 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_run_record_rows_write_shells_sh_reads_and_pace_only_on_and_off() {
+        let dir = std::env::temp_dir().join(format!("xtask-rewind-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        write_rewind_inputs(&dir, Path::new("/opt/it's/pinfold")).expect("inputs");
+        for (row, paced) in [("on", true), ("off", true), ("burst", false)] {
+            let script = dir.join(row).join("agent.sh");
+            let checked = Command::new("sh").arg("-n").arg(&script).status();
+            assert!(checked.expect("sh").success(), "{row}");
+            let text = fs::read_to_string(&script).expect("script");
+            assert_eq!(text.contains("sleep 0.1"), paced, "{text}");
+            let config = fs::read_to_string(dir.join(row).join("pinfold/pinfold.toml"));
+            assert!(config.expect("config").contains("[agents.quick7]"));
+        }
+        let _ = fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn no_argument_shows_help() {

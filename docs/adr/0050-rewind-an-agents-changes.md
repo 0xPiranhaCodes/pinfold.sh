@@ -554,3 +554,40 @@ Decided by the coordinator for the maintainer while building `pinfold checkpoint
 6. **`plan` takes no lock**, as it only reads. A prune that removed either checkpoint before or
    while it read makes it fail with "checkpoint `<run>/<n>` no longer exists", never a partial
    count. `restore` reads the diff again under the lock and never trusts a plan's counts.
+
+## Amendment 2026-11-18, slice 5
+
+Decided by the coordinator for the maintainer while building the core's runs and taking, as
+section 7's 48-byte record holds a store key but no path, and later takes need the directory:
+
+1. **The store records its directory** (sections 1 and 7). A take given `-- <dir>`, as at
+   launch, writes the resolved path once to `<store>/dir` (mode 0600, `O_EXCL`, never through a
+   link). Every later take is `take <run> <reason> --key <key>`: it reads `dir` without following
+   a link and refuses it, never falling back to the path as given, unless the path resolves to
+   itself and its SHA-256 still gives the key, so a directory swapped for a link after launch is
+   refused. The core computes the key itself at launch, so a launch take killed at `wait_s`
+   leaves later takes working once the store exists.
+2. **Takes number themselves** (section 1). `take` has no `<n>`: under the lock it takes the
+   run's newest in the store plus one, or 0, as `restore` does. `[rewind]`'s caps reach it as
+   `--max-files`, `--max-file-mib`, `--max-new-mib` and `--include-ignored`, and `prune` gets
+   `[rewind]`'s values instead of its defaults.
+3. **`list <run> --key <key>`** prints `{checkpoints, more}`, each
+   `{checkpoint, reason, time, files, new_bytes, complete}`, newest first, cut to 4 KiB with
+   `more` counting the oldest left out. No path.
+4. **Bounds.** A launch take is killed at `wait_s` (1 to 60 s, as a client waits 62 s for an answer), done and exit takes at 120 s, an API take at 60 s, as its caller waits 62 s, the
+   prune after a take at 900 s (its `repack` and `prune` have 300 s each inside), a list at
+   10 s.
+5. **The record** is the core's start, the store key as 8 bytes, the run's `n`, its pane, the
+   pane that launched it, the newest `done` or `exit` checkpoint's `n`, the second of the last
+   done and API take (`u32` each), `missing` and flags: 48 bytes, asserted. The launching pane
+   is how a closed run stays reachable from it (decision 4). At 64 records the oldest closed
+   run's is reused; with 64 live runs a launch starts with `checkpoint: null`, missing
+   `too many runs`.
+6. **Two workers at most**, ADR-0007's pool, each waiting on one child. Launches and API calls
+   wait in a queue of 16, a launch still starting its agent at `wait_s` from its request; past
+   the queue an API call is refused as busy and a launch starts its agent at once with
+   `checkpoint: null`, missing `busy`, never blocking. Done and exit takes wait as flags in
+   their run's record.
+7. **Scopes** (section 7). A caller in a pane reaches a run if it is the run's pane, reaches
+   that pane as `children` while it is open, or launched it; a terminal outside every pane
+   reaches any run of this core.

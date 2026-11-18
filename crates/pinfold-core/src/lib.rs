@@ -10,6 +10,7 @@ mod opener;
 pub mod paste;
 pub mod protect;
 mod reflow;
+pub mod rewind;
 pub mod sandbox;
 pub mod scrollback;
 pub mod search;

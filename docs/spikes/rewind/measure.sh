@@ -167,7 +167,7 @@ real() { # <corpus> <dir>
   one() { # <take> <step> <n>
     if [ "$1" = real ]; then
       # Its store goes under a state directory of its own, and PINFOLD_MEASURE adds ms and peak.
-      emit "$name" real "$2" "$("$B" peaks env HOME="$W/state" XDG_STATE_HOME="$W/state" PINFOLD_MEASURE=1 "$R" checkpoint take r1-0 "$3" api -- "$dir")"
+      emit "$name" real "$2" "$("$B" peaks env HOME="$W/state" XDG_STATE_HOME="$W/state" PINFOLD_MEASURE=1 "$R" checkpoint take r1-0 api -- "$dir")"
     else
       # shellcheck disable=SC2086
       emit "$name" spike "$2" "$("$B" peaks $BG env $CAPS "$B" "$dir" "$W/store-spike" "$3")"

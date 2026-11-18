@@ -147,6 +147,34 @@ nothing yet. Without `notify-send` the tab's mark is the only signal, and the lo
 A plain shell pane never reads them, so a program there cannot fake needs you
 ([ADR-0046](adr/0046-agent-panes-read-needs-you-from-output.md)).
 
+### Checkpoints
+
+Each `agent.launch` of a profile takes a checkpoint of the agent's working directory before the
+agent starts, and another when the run's status becomes done (at most once a minute) and when
+its program exits, so its changes can be undone later
+([ADR-0050](adr/0050-rewind-an-agents-changes.md)). They are git commits in a private store
+under the state directory, never in your repository. `pinfold agent` says "taking a checkpoint"
+while it waits; past `wait_s` the agent starts without one. The core reads `[rewind]` once, at
+start, and refuses the file if a number is out of its range.
+
+```toml
+[rewind]
+enabled = true          # a checkpoint at every agent launch
+on_done = true          # and when the run's status becomes done
+wait_s = 10             # how long a launch waits for its checkpoint, 1 to 60
+include_ignored = false # skip what the tree's .gitignore files ignore, except .env*
+max_file_mib = 16       # larger files are not covered, 1 to 4096
+max_files = 200000      # files and links walked per checkpoint, 1 to 10,000,000
+max_new_mib = 2048      # new content per checkpoint, 1 to 1,048,576
+max_store_mib = 2048    # all stores together, 1 to 16,777,216
+keep_days = 14          # older checkpoints are pruned, 1 to 3650
+keep_per_run = 20       # 1 to 1000
+
+[agents.claude]
+command = ["claude"]
+rewind = false          # this profile takes no checkpoints
+```
+
 ### Webhooks
 
 `alerts.webhook` names where the core posts an alert, read when the core starts, so a change
