@@ -12,8 +12,10 @@ fuzz_target!(|data: &[u8]| {
     let text = parts.next().unwrap_or_default();
     let path = parts.next().unwrap_or_default();
     let [as_dir, as_file] = fuzz_gitignore(text, path);
-    // A pattern that only matches directories can only add to what a directory matches.
-    if as_file == Some(true) {
+    // A pattern that only matches directories can only add to what a directory matches. Each
+    // call has its own step budget, and the directory's, with more patterns to try, can run out
+    // where the file's did not: only a directory call that finished must have an answer.
+    if let (Some(Some(true)), Some(as_dir)) = (as_file, as_dir) {
         assert!(as_dir.is_some());
     }
 });
