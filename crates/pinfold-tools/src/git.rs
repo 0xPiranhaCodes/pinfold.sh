@@ -294,6 +294,42 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
+    store_with(store, args, input, None)
+}
+
+/// [`store`], with git's standard output written to `out` rather than kept, so a diff of any
+/// size costs no memory; the returned `stdout` is empty and `cut_short` means only the timeout.
+///
+/// # Errors
+///
+/// As [`store`].
+///
+/// # Examples
+///
+/// ```no_run
+/// let store = "/path/to/state/checkpoints/0123456789abcdef".as_ref();
+/// let out = std::fs::File::create("/path/to/diff")?;
+/// pinfold_tools::git::store_to(store, ["diff-tree", "-r", "-z", "refs/pinfold/r1-0/0", "refs/pinfold/r1-0/1"], out)?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn store_to<I, S>(store: &Path, args: I, out: fs::File) -> io::Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    store_with(store, args, b"", Some(out))
+}
+
+fn store_with<I, S>(
+    store: &Path,
+    args: I,
+    input: &[u8],
+    out: Option<fs::File>,
+) -> io::Result<Output>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
     let args: Vec<OsString> = args.into_iter().map(|a| a.as_ref().to_owned()).collect();
     let words: Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();
     let timeout = match words.as_slice() {
@@ -313,6 +349,9 @@ where
     }
     if !input.is_empty() {
         command.stdin(Stdio::piped());
+    }
+    if let Some(out) = out {
+        command.stdout(out);
     }
     capture(command.args(&args[1..]), Instant::now() + timeout, input)
 }
