@@ -15,6 +15,8 @@ variable is unset. Saving the file applies it to the running window within about
 | `colors`              | table  | none    | Single [colours](#themes) on top of the theme            |
 | `keys.prefix`         | string | `"C-a"` | Prefix, `C-` and a lowercase letter                      |
 | `keys.inbox`          | string | `"!"`   | Key after the prefix that opens the [inbox](#the-inbox); one printable ASCII character no other prefix key uses |
+| `keys.next_waiting`   | string | `"w"`   | Key after the prefix that goes to the [next pane that needs you](#the-inbox); the same rules, and not `keys.inbox` |
+| `alerts.desktop`      | list   | `["needs-you", "error"]` | States that raise a [desktop notification](#agent-profiles): `"needs-you"`, `"error"`, or `[]` for none |
 | `api.audit_log`       | bool   | `false` | Also write the API audit log to disk                     |
 | `api.protect`         | list   | below   | Command-line text that protects a pane from API sends    |
 | `agents.<name>`       | table  | none    | An [agent profile](#agent-profiles)                      |
@@ -118,12 +120,14 @@ refused. A sandboxed profile's directory must also pass the checks below. The co
 A profile's pane reads its CLI's own state from output: OSC 7501 `state=blocked` (codex-cli
 sends it at its approval prompt) or an OSC 9 notification shows ◆ needs you, labelled from
 output, and `working`, `done`, `idle` and `clear` move it on. Typing into the pane clears a
-needs you. When a tab comes to need you while it is hidden or the window is in the background,
-macOS bounces PinFold's Dock icon once. Once you allow PinFold's notifications in System
-Settings, a banner says "<tab> needs you", never the program's own text, and clicking it goes
-to the tab; macOS asks the first time and shows nothing until you allow it, and a build outside
-an app bundle, such as `cargo run`, has no banners. At most one comes per tab a minute and one
-every 10 seconds in all. Linux marks the tab only. A plain shell pane never reads them, so a program there cannot fake needs you
+needs you. When an agent pane comes to need you or to an error while its tab is hidden or the window is
+in the background, macOS bounces PinFold's Dock icon once. Once you allow PinFold's
+notifications in System Settings, a banner says "<tab> needs you" or "<tab> error", never the
+program's own text, and clicking it goes to the pane; macOS asks the first time and shows
+nothing until you allow it, and a build outside an app bundle, such as `cargo run`, has no
+banners. At most one comes per pane a minute and one every 10 seconds in all.
+`alerts.desktop` picks the states, both by default, and a save applies it at once. Linux marks
+the tab only. A plain shell pane never reads them, so a program there cannot fake needs you
 ([ADR-0046](adr/0046-agent-panes-read-needs-you-from-output.md)).
 
 ```toml
@@ -319,6 +323,7 @@ Press the prefix, then one of these. The prefix pressed twice sends it to the pr
 | `g`                | Open the git diff viewer, `pinfold diff`, right of the pane   |
 | `m`                | Pick a `*.md` file, then open it in `pinfold md` right of the pane |
 | `!`                | Open or close the [inbox](#the-inbox), `keys.inbox`           |
+| `w`                | Go to the next pane that needs you, `keys.next_waiting`       |
 
 `f` and `g` open the tool in the directory the system says the focused pane's shell is in,
 never one a program's output reported, as a new tab or split does. Tmux binds neither key,
@@ -348,6 +353,12 @@ minute. A state that came from output's marks rather than the agent says "from o
 message goes. ↑ and ↓ move, Enter goes to the pane, a click on a row does too, and Esc or
 prefix `!` closes. While it is open every key and paste goes to it, never to a pane. It holds
 its rows only while open.
+
+Prefix `w`, or Next Needs You in the palette, goes from anywhere in the window to the ◆ pane
+that has needed you longest; pressed again on a ◆ pane, it goes to the next in the inbox's order,
+and after the last back to the first. With none, the row under the pane says "Nothing needs
+you". A `[keys]` entry that another prefix key already runs, or that `inbox` and
+`next_waiting` share, is refused when the file is read, with a message naming it.
 
 On macOS the menu bar runs the same commands, and its keys are the Command shortcuts. Items
 that cannot apply, such as Copy with nothing selected, are greyed out, and their keys do

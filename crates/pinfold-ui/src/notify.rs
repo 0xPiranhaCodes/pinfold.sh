@@ -1,52 +1,39 @@
-//! Notifications that a tab needs you (ADR-0046). The text is PinFold's, "`<tab>` needs you",
-//! never what a program printed, and they are rate-limited per tab and across all of them.
+//! Desktop notifications that an agent pane needs you or hit an error (ADR-0046, ADR-0051). The
+//! text is PinFold's, "`<tab>` needs you" or "`<tab>` error", never what a program printed, and
+//! they are rate-limited per pane and across all of them.
 
 use std::time::{Duration, Instant};
 
-use crate::top_bar::NEEDS_YOU;
+use crate::top_bar::STATES;
 
-/// The least time between two notifications for one tab.
-pub const PER_TAB: Duration = Duration::from_secs(60);
+/// The least time between two notifications for one pane.
+pub const PER_PANE: Duration = Duration::from_secs(60);
 /// The least time between any two notifications.
 pub const ANY: Duration = Duration::from_secs(10);
 
-/// When notifications were last raised, in all and for each tab's pane.
+/// When notifications were last raised, in all and for each pane within the last minute.
 #[derive(Default)]
 struct Limit {
     last: Option<Instant>,
-    tabs: Vec<(u32, Instant)>,
+    panes: Vec<(u32, Instant)>,
 }
 
 impl Limit {
-    /// Whether the tab whose pane is `pane` may notify at `now`, and records it if so.
+    /// Whether `pane` may notify at `now`, and records it if so. One a pane a minute and one
+    /// in 10 s keep at most 6 entries.
     fn allow(&mut self, pane: u32, now: Instant) -> bool {
         let soon = |last: Instant, gap| now.saturating_duration_since(last) < gap;
-        let tab = self.tabs.iter().position(|(at, _)| *at == pane);
+        let held = self.panes.iter().position(|(at, _)| *at == pane);
         if self.last.is_some_and(|last| soon(last, ANY))
-            || tab.is_some_and(|tab| soon(self.tabs[tab].1, PER_TAB))
+            || held.is_some_and(|held| soon(self.panes[held].1, PER_PANE))
         {
             return false;
         }
         self.last = Some(now);
-        self.tabs.retain(|(_, last)| soon(*last, PER_TAB));
-        self.tabs.push((pane, now));
+        self.panes.retain(|(_, last)| soon(*last, PER_PANE));
+        self.panes.push((pane, now));
         true
     }
-}
-
-/// The tabs whose state has just become needs you, and that the person cannot see: every one
-/// while the window lacks focus, or else the hidden ones.
-fn due<'a>(
-    old: &'a [u8],
-    new: &'a [u8],
-    active: usize,
-    focused: bool,
-) -> impl Iterator<Item = usize> + 'a {
-    (0..new.len()).filter(move |&index| {
-        new[index] == NEEDS_YOU
-            && old.get(index) != Some(&NEEDS_YOU)
-            && (!focused || index != active)
-    })
 }
 
 /// Raises the notifications, through the platform where it has a way.
@@ -57,13 +44,19 @@ pub struct Notifier {
 }
 
 impl Notifier {
-    /// Sets up the platform's notifications. `clicked` gets the index of the tab whose
-    /// notification was clicked.
-    // shortcut: Linux has no notifications yet, only the tab's mark; a freedesktop one needs a
-    // D-Bus client crate, so add one when Linux users ask (ADR-0046).
-    pub fn new(clicked: impl Fn(usize) + 'static) -> Self {
+    /// Sets up the platform's notifications. `clicked` gets the pane whose notification was
+    /// clicked.
+    // shortcut: Linux has no notifications yet, only the tab's mark; `notify-send` comes with
+    // ADR-0051's fourth slice.
+    pub fn new(clicked: impl Fn(u32) + 'static) -> Self {
         #[cfg(not(target_os = "macos"))]
         drop(clicked);
+        #[cfg(target_os = "macos")]
+        let clicked = move |pane: usize| {
+            if let Ok(pane) = u32::try_from(pane) {
+                clicked(pane);
+            }
+        };
         Self {
             limit: Limit::default(),
             #[cfg(target_os = "macos")]
@@ -71,83 +64,82 @@ impl Notifier {
         }
     }
 
-    /// Notifies for each tab that has just come to need you unseen. `labels` are already safe
-    /// to draw (`top_bar::label`), and `pane` gives a tab's pane, which keys the limit.
-    // shortcut: a click goes to the tab's index when it was raised, so a tab closed in between
-    // shifts it. Key it by pane if that bites.
-    pub fn changed(&mut self, tabs: Tabs<'_>, pane: impl Fn(usize) -> u32, now: Instant) {
-        for index in due(tabs.old, tabs.new, tabs.active, tabs.focused) {
-            if !self.limit.allow(pane(index), now) {
-                continue;
-            }
-            self.show(&text(tabs.labels.get(index), index), index);
+    /// Notifies that `pane`, in the tab at index `tab` labelled `label`, came to `state`, unless
+    /// the limits hold it back. The caller has checked that the config asks for this state and
+    /// that the person cannot see the pane. `label` is already safe to draw (`top_bar::label`).
+    pub fn alert(
+        &mut self,
+        (pane, state): (u32, u8),
+        (tab, label): (Option<usize>, Option<&str>),
+        now: Instant,
+    ) {
+        if self.limit.allow(pane, now) {
+            self.show(&text(state, tab, label), pane);
         }
     }
 
+    /// Returns how many panes notified within the last minute.
+    #[cfg(test)]
+    pub(crate) fn raised(&self) -> usize {
+        self.limit.panes.len()
+    }
+
     #[cfg(target_os = "macos")]
-    fn show(&self, text: &str, index: usize) {
+    fn show(&self, text: &str, pane: u32) {
         if let Some(system) = &self.system {
-            system.notify(text, index);
+            system.notify(text, pane as usize);
         }
     }
 
     #[cfg(not(target_os = "macos"))]
     #[expect(clippy::unused_self, reason = "the same interface as on macOS")]
-    fn show(&self, _text: &str, _index: usize) {}
+    fn show(&self, _text: &str, _pane: u32) {}
 }
 
-/// A notification's text, from the tab's label alone, or its number without one.
-fn text(label: Option<&String>, index: usize) -> String {
-    match label.filter(|label| !label.is_empty()) {
-        Some(label) => format!("{label} needs you"),
-        None => format!("Tab {} needs you", index + 1),
+/// A notification's text: the tab's label, or its number without one, and the state's word.
+/// Nothing a program printed.
+fn text(state: u8, tab: Option<usize>, label: Option<&str>) -> String {
+    let word = STATES
+        .get(usize::from(state))
+        .map_or("needs you", |(_, word)| word);
+    match (label.filter(|label| !label.is_empty()), tab) {
+        (Some(label), _) => format!("{label} {word}"),
+        (None, Some(tab)) => format!("Tab {} {word}", tab + 1),
+        (None, None) => format!("An agent {word}"),
     }
-}
-
-/// The tabs before and after a layout, for [`Notifier::changed`].
-pub struct Tabs<'a> {
-    /// Each tab's state before, as its pill showed it.
-    pub old: &'a [u8],
-    /// Each tab's state now.
-    pub new: &'a [u8],
-    /// The tabs' labels, made safe to draw.
-    pub labels: &'a [String],
-    /// The active tab.
-    pub active: usize,
-    /// Whether the window has the keyboard.
-    pub focused: bool,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::top_bar::{ERROR, NEEDS_YOU};
 
     #[test]
-    fn only_a_tab_that_just_needs_you_unseen_is_due() {
-        let (old, new) = ([1, NEEDS_YOU, 1, 1], [NEEDS_YOU, NEEDS_YOU, NEEDS_YOU, 1]);
-        assert_eq!(due(&old, &new, 0, true).collect::<Vec<_>>(), [2]);
-        assert_eq!(due(&old, &new, 0, false).collect::<Vec<_>>(), [0, 2]);
-        assert_eq!(due(&[], &[NEEDS_YOU], 0, false).count(), 1, "a new tab");
+    fn the_text_is_pinfolds_own_word_and_label() {
+        assert_eq!(text(NEEDS_YOU, Some(0), Some("api")), "api needs you");
+        assert_eq!(text(ERROR, Some(0), Some("api")), "api error");
+        assert_eq!(text(ERROR, Some(2), Some("")), "Tab 3 error");
+        assert_eq!(text(NEEDS_YOU, Some(0), None), "Tab 1 needs you");
+        assert_eq!(text(ERROR, None, None), "An agent error");
+        assert_eq!(
+            text(200, None, Some("api")),
+            "api needs you",
+            "a state out of range"
+        );
     }
 
     #[test]
-    fn the_text_is_pinfolds_own() {
-        assert_eq!(text(Some(&"api".to_owned()), 0), "api needs you");
-        assert_eq!(text(Some(&String::new()), 2), "Tab 3 needs you");
-        assert_eq!(text(None, 0), "Tab 1 needs you");
-    }
-
-    #[test]
-    fn a_flood_of_needs_you_notifies_once_a_tab_a_minute_and_once_in_ten_seconds() {
+    fn a_flood_of_alerts_notifies_once_a_pane_a_minute_and_once_in_ten_seconds() {
         let now = Instant::now();
         let mut limit = Limit::default();
         let mut raised = Vec::new();
-        // Ten panes flap needs you every millisecond for two minutes.
+        // Ten panes flap needs you and error every millisecond for two minutes.
         for step in 0_u32..120_000 {
             let at = now + Duration::from_millis(u64::from(step));
             if limit.allow(step % 10, at) {
                 raised.push(step);
             }
+            assert!(limit.panes.len() <= 6);
         }
         // One every 10 s over 120 s, and each pane at most twice.
         assert_eq!(raised.len(), 12);
@@ -156,7 +148,8 @@ mod tests {
         }
         let mut alone = Limit::default();
         assert!(alone.allow(7, now));
-        assert!(!alone.allow(7, now + ANY), "inside a tab's minute");
-        assert!(alone.allow(7, now + PER_TAB));
+        assert!(!alone.allow(7, now + ANY), "inside the pane's minute");
+        assert!(alone.allow(8, now + ANY), "another pane, keyed apart");
+        assert!(alone.allow(7, now + PER_PANE));
     }
 }
