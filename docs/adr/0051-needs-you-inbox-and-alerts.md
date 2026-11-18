@@ -539,7 +539,7 @@ Decided by the coordinator for the maintainer while building slice 9.
   OpenCode 2.1.4 checked on 2026-11-18), and the last 64 KiB of a database or its WAL is not a
   session. Reading it needs a C library or a new crate, which needs the maintainer under
   CLAUDE.md. So `pinfold agents peek` reads no OpenCode file, and an OpenCode pane's row shows
-  no second line. A follow-up issue, "inbox: OpenCode context and steps", weighs running
+  no second line. [#479](https://github.com/0xPiranhaCodes/pinfold.sh/issues/479) weighs running
   OpenCode's own export as a bounded short-lived child against a SQLite reader.
 - **Which file.** The newest regular `*.jsonl` (by modification time, links skipped, at most
   10,000 entries looked at) in `~/.claude/projects/<name>/`, where `<name>` is the pane's
