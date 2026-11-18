@@ -126,8 +126,11 @@ notifications in System Settings, a banner says "<tab> needs you" or "<tab> erro
 program's own text, and clicking it goes to the pane; macOS asks the first time and shows
 nothing until you allow it, and a build outside an app bundle, such as `cargo run`, has no
 banners. At most one comes per pane a minute and one every 10 seconds in all.
-`alerts.desktop` picks the states, both by default, and a save applies it at once. Linux marks
-the tab only. A plain shell pane never reads them, so a program there cannot fake needs you
+`alerts.desktop` picks the states, both by default, and a save applies it at once. On Linux the
+same text goes through `notify-send`, the first on `PATH` when the window starts, one at a time
+with nothing else of your environment but the session bus and display variables; clicking it does
+nothing yet. Without `notify-send` the tab's mark is the only signal, and the log says so once.
+A plain shell pane never reads them, so a program there cannot fake needs you
 ([ADR-0046](adr/0046-agent-panes-read-needs-you-from-output.md)).
 
 ```toml
