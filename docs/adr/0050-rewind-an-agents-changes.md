@@ -467,3 +467,25 @@ is unmeasured there; bare-metal Linux and CI were not used. `wait_s` stays the b
 
 Decision 3 (no `.git/index`), option A and the 4 MB prototype bound stand: the prototype peaked at
 3.49 MB with four readers at background priority.
+
+Also decided during slice 2, by the coordinator for the maintainer:
+
+- **Timeouts in `git::store`.** `diff-tree`, `diff`, `cat-file`, `for-each-ref` and `update-ref`
+  keep `git::run`'s 10 s. `repack -a -d -q` and `prune` get 300 s, as the amendment measured
+  `repack` at 10.5 s and 15.5 s on a Linux-sized store; they run at background priority after a
+  take, off the launch path. `fast-import` is streamed and has no cap of its own: it is killed with
+  the take, and with `feature done` a killed take leaves no partial commit.
+- **Two more bounds on the walk** (section 3), each skipped and listed as not covered: a directory
+  more than 64 levels below the working directory, as the walk holds a descriptor for each level
+  and macOS starts a process with 256, and a directory of more than 65,536 entries, as the walk
+  holds a directory's names while it is inside it. A `.gitignore` over 64 KiB, or past 256 KiB of
+  patterns held for the directories the walk is in, is not used, and one whose patterns run past a
+  step budget on a path is dropped for the rest of the walk: git's own matcher is exponential on
+  lines such as `**/**/**/x`, and dropping covers more, never less.
+- **The store is written, not `git init`ed.** PinFold creates it with mode 0700 and writes `HEAD`,
+  `config` (`core.bare`, `core.compression = 1`), `objects/` and `refs/` itself, as `init` and
+  `config` are not on the store's list of subcommands. The refusals and the lock stay in slice 3.
+- **QoS utility on macOS** is applied by `pinfold_sys::background()`, which re-executes the take in
+  place, same pid and descriptors, with `posix_spawnattr_set_qos_clamp_np` and
+  `POSIX_SPAWN_SETEXEC`, as `taskpolicy -c utility` does: a thread's QoS is not inherited by the
+  git it starts. On Linux it sets nice 10 and I/O class idle before any thread starts.

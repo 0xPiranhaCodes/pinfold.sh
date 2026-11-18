@@ -54,5 +54,11 @@ panic or a hang, or if a file's label or a shown line holds a control or bidi ch
 `escape` would change. Its seeds in `seeds/unified_diff/` are a change, a rename, a binary
 file, a mode change, a missing final newline and a hostile quoted path.
 
+`gitignore` matches any path against any `.gitignore` text, as the checkpoint walk does
+(ADR-0050), the text and the path split at the first NUL. It fails on a panic or a hang, which
+the matcher's step budget prevents even where git's own matcher is exponential, or if a file
+matches a pattern a directory of the same name does not. Its seeds in `seeds/gitignore/` are a
+mix of git's pattern forms and a run of `**/` that takes git seconds.
+
 `vt.dict` holds the escape sequences a mutator rarely writes by chance. It uses libFuzzer's
 format, which only knows the escapes `\\`, `\"` and `\xNN`.

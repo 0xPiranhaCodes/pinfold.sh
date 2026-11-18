@@ -6,10 +6,12 @@
 //! through [`git::run`], and the only other process a tool starts is the user's editor.
 
 mod at;
+pub mod checkpoint;
 mod diff;
 mod editor;
 mod files;
 pub mod git;
+mod gitignore;
 pub mod keys;
 mod md;
 mod ops;
@@ -173,6 +175,15 @@ impl Command {
 #[doc(hidden)]
 pub fn fuzz_markdown(markdown: &[u8], width: u16) -> Vec<String> {
     md::lines(markdown, width)
+}
+
+/// Whether `path` is ignored by a `.gitignore` holding `text` in its directory, as the
+/// checkpoint walk reads it, for a directory and for a file; patterns over their step budget
+/// match nothing. For the `gitignore` fuzz target.
+#[doc(hidden)]
+pub fn fuzz_gitignore(text: &[u8], path: &[u8]) -> [Option<bool>; 2] {
+    let patterns = gitignore::parse(text);
+    [true, false].map(|is_dir| gitignore::matches(&patterns, path, is_dir).unwrap_or(None))
 }
 
 /// Parses `diff` as `pinfold diff` does, and returns its notes and each file's label, header and

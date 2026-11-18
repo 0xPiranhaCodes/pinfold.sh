@@ -14,6 +14,8 @@ pinfold-api = { path = "../pinfold-api", version = "0.1.0-beta.4" }
 pinfold-sys = { path = "../pinfold-sys", version = "0.1.0-beta.4" }
 pulldown-cmark = { version = "0.13.6", default-features = false }
 serde_json = "1.0.154"
+# Git's blob ids, so a checkpoint's readers name blobs without asking git (ADR-0050).
+sha1 = { version = "0.11.0", default-features = false }
 similar = { version = "2.7.0", default-features = false }
 
 [lints]
