@@ -1047,6 +1047,14 @@ fn main() -> ExitCode {
             false => ExitCode::FAILURE,
         };
     }
+    // Hidden, for the core while the inbox is open (ADR-0051 section 7).
+    if raw.first().is_some_and(|word| word == "agents") {
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        return match pinfold_tools::agents::command(home.as_deref(), &raw[1..]) {
+            true => ExitCode::SUCCESS,
+            false => ExitCode::FAILURE,
+        };
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     // Only where no command takes an argument, so `ctl send 3 --help` still types `--help`.

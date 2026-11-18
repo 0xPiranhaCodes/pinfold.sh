@@ -145,6 +145,12 @@ pub struct Listed {
     /// Its git branch from the core's last [`Notice::InboxExtra`], printable ASCII. Empty while
     /// the inbox is closed, which frees it (ADR-0051 §7).
     pub branch: String,
+    /// Its agent's context use, a whole percent, from the core's last [`Notice::InboxExtra`]
+    /// with `[inbox] agent_files` on. None while the inbox is closed.
+    pub ctx: Option<u8>,
+    /// Its agent's last steps, oldest first, joined by newlines, each already clean. Empty
+    /// while the inbox is closed, which frees them (ADR-0051 §7).
+    pub steps: String,
 }
 
 /// An approval copied out of the decoder's borrowed message.
@@ -348,10 +354,21 @@ impl State {
                 }
             }
             // Kept only while the inbox is open; one that comes after it closed is dropped.
-            Notice::InboxExtra { pane, branch } if self.inbox => {
+            Notice::InboxExtra {
+                pane,
+                branch,
+                ctx,
+                steps,
+            } if self.inbox => {
                 let listed = self.listed.iter_mut().find(|listed| listed.pane == pane);
-                if let Some(listed) = listed.filter(|listed| listed.branch != branch) {
+                let changed = |listed: &&mut Listed| {
+                    (listed.branch.as_str(), listed.ctx, listed.steps.as_str())
+                        != (branch, ctx, steps)
+                };
+                if let Some(listed) = listed.filter(changed) {
                     branch.clone_into(&mut listed.branch);
+                    steps.clone_into(&mut listed.steps);
+                    listed.ctx = ctx;
                     self.relisted = true;
                 }
             }
@@ -422,6 +439,8 @@ impl State {
                     message: String::new(),
                     profile: None,
                     branch: String::new(),
+                    ctx: None,
+                    steps: String::new(),
                 });
                 self.listed.len() - 1
             }
@@ -715,11 +734,12 @@ impl Link {
     /// the version the link speaks (ADR-0043), and then queues none.
     pub fn send(&mut self, request: Request<'_>) -> bool {
         if let Request::Inbox { open } = request {
-            // Opening reads the rows afresh, and closing frees their branches.
+            // Opening reads the rows afresh, and closing frees their branches and steps.
             (self.state.inbox, self.state.relisted) = (open, open);
             if !open {
                 for listed in &mut self.state.listed {
-                    listed.branch = String::new();
+                    (listed.branch, listed.ctx, listed.steps) =
+                        (String::new(), None, String::new());
                 }
             }
         }
@@ -1731,9 +1751,12 @@ mod tests {
         let extra = Notice::InboxExtra {
             pane: 10,
             branch: "feat/inbox",
+            ctx: Some(64),
+            steps: "Read\nEdit",
         };
         link.state.apply(extra.clone()).unwrap();
         assert_eq!(link.listed()[0].branch, "", "kept while closed");
+        assert_eq!(link.listed()[0].steps, "", "kept while closed");
         link.send(Request::Inbox { open: true });
         link.state.apply(extra).unwrap();
         // An unknown pane's is dropped.
@@ -1741,15 +1764,27 @@ mod tests {
             .apply(Notice::InboxExtra {
                 pane: 11,
                 branch: "other",
+                ctx: None,
+                steps: "",
             })
             .unwrap();
         assert_eq!(link.listed().len(), 1);
         let listed = &link.listed()[0];
         assert_eq!(listed.branch, "feat/inbox");
+        assert_eq!(
+            (listed.ctx, listed.steps.as_str()),
+            (Some(64), "Read\nEdit")
+        );
         let run = listed.started.elapsed().as_secs();
         assert!((600..610).contains(&run), "{run}");
         link.send(Request::Inbox { open: false });
-        assert_eq!(link.listed()[0].branch.capacity(), 0, "not freed on close");
+        let listed = &link.listed()[0];
+        assert_eq!(listed.branch.capacity(), 0, "not freed on close");
+        assert_eq!(
+            (listed.ctx, listed.steps.capacity()),
+            (None, 0),
+            "not freed on close"
+        );
     }
 
     /// ADR-0051: a listed pane alerts when it comes to ◆ or ✕, not again while it stays, and

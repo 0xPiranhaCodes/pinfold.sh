@@ -33,6 +33,10 @@ pub const FILES_LIMIT: u64 = TOOL_LIMIT + 512 * ENTRY_CAP;
 pub const DIFF_LIMIT: u64 = TOOL_LIMIT + 3 * GIT_OUTPUT_CAP;
 /// ADR-0050: a `pinfold checkpoint take` process, its reader threads included, at any tree size.
 pub const TAKE_LIMIT: u64 = 4_000_000;
+/// ADR-0051 §11: a `pinfold agents peek` process, whatever the size of the session it reads.
+pub const PEEK_LIMIT: u64 = 4_000_000;
+/// The session file the peek row reads.
+pub const PEEK_SESSION: u64 = 64 * 1024 * 1024;
 /// Files in the generated tree the take rows checkpoint.
 pub const TAKE_FILES: usize = 100_000;
 /// Long enough for a tool to read and lay out what it opened at its cap.
@@ -135,6 +139,10 @@ fn measure_once(budget: &Budget, args: &[&str]) -> io::Result<Reading> {
     if let Some(agents) = budget.agents {
         command.env("XDG_CONFIG_HOME", agents);
         command.env("SHELL", agents.join("agent.sh"));
+        // A folder holding agents' session files is their home too (ADR-0051 §7).
+        if agents.join(".claude").is_dir() {
+            command.env("HOME", agents);
+        }
     }
     if let Some(inbox) = budget.inbox {
         command.env(INBOX_VARIABLE, inbox);
@@ -313,8 +321,10 @@ fn checkpoint_peak(
     if let Some(mut stdout) = child.stdout.take() {
         io::Read::read_to_end(&mut stdout, &mut out)?;
     }
-    let line: serde_json::Value =
-        serde_json::from_slice(&out).map_err(|_| io::Error::other("printed no JSON line"))?;
+    // A peek prints a line per directory, then the measured one.
+    let last = out.trim_ascii_end().rsplit(|&byte| byte == b'\n').next();
+    let line: serde_json::Value = serde_json::from_slice(last.unwrap_or_default())
+        .map_err(|_| io::Error::other("printed no JSON line"))?;
     if let Some(error) = line["error"].as_str() {
         return Err(io::Error::other(format!("failed: {error}")));
     }
@@ -387,6 +397,37 @@ pub fn run_takes(program: &Path, tree: &Path, state: &Path) -> bool {
             false
         }
     }
+}
+
+/// ADR-0051 §11: `pinfold agents peek` over a 64 MiB Claude Code session, the median of
+/// [`RUNS`] peaks, against [`PEEK_LIMIT`]. `home` holds the session for `dir`. Prints its row
+/// under [`run`]'s table and returns false if it is over or cannot be measured.
+pub fn run_peek(program: &Path, home: &Path, dir: &Path) -> bool {
+    let metric = "`pinfold agents peek`, a 64 MiB session file";
+    let limit = megabytes(PEEK_LIMIT);
+    let mut peaks = Vec::new();
+    for _ in 0..RUNS {
+        let peak = checkpoint_peak(program, &["agents", "peek", "--"], dir, home, |_| true);
+        match peak {
+            Ok(peak) => peaks.push(peak),
+            Err(error) => {
+                println!("| {metric} | error: the peek {error} | {limit:.2} | **FAIL** |");
+                return false;
+            }
+        }
+    }
+    peaks.sort_unstable();
+    let bytes = peaks[RUNS / 2];
+    let result = if bytes <= PEEK_LIMIT {
+        "pass"
+    } else {
+        "**FAIL**"
+    };
+    println!(
+        "| {metric} | {:.2} | {limit:.2} | {result} |",
+        megabytes(bytes)
+    );
+    bytes <= PEEK_LIMIT
 }
 
 #[cfg(test)]

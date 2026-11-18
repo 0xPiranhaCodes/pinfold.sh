@@ -976,6 +976,7 @@ fn daemon(
     let mut webhook = webhook(&config, &mut reactor);
     // The built-in tools (ADR-0045), resolved before a restore runs them again.
     reactor.set_tools(sibling("pinfold")?);
+    reactor.set_agent_files(config.inbox.agent_files);
     if let Some(checked) = unhardened {
         reactor.set_unhardened(checked);
     }

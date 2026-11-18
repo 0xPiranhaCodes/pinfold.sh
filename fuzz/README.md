@@ -60,5 +60,11 @@ the matcher's step budget prevents even where git's own matcher is exponential, 
 matches a pattern a directory of the same name does not. Its seeds in `seeds/gitignore/` are a
 mix of git's pattern forms and a run of `**/` that takes git seconds.
 
+`agent_session_tail` parses any bytes as the last 64 KiB of a Claude Code session file, as
+`pinfold agents peek` does (ADR-0051 §7), its first byte saying whether they start at the
+file's start. It fails on a panic or a hang, or if the printed line is over 1 KiB or holds a
+control or bidi character. Its seeds in `seeds/agent_session_tail/` are a recorded session,
+the same cut mid-line, and hostile steps with deep nesting and a token count past `u64`.
+
 `vt.dict` holds the escape sequences a mutator rarely writes by chance. It uses libFuzzer's
 format, which only knows the escapes `\\`, `\"` and `\xNN`.

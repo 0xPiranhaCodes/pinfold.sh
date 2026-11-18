@@ -5,6 +5,7 @@
 //! every string, and reads [`Key`]s. [`run`] owns the terminal around it. Every git call goes
 //! through [`git::run`], and the only other process a tool starts is the user's editor.
 
+pub mod agents;
 mod at;
 pub mod checkpoint;
 mod diff;
@@ -184,6 +185,13 @@ pub fn fuzz_markdown(markdown: &[u8], width: u16) -> Vec<String> {
 pub fn fuzz_gitignore(text: &[u8], path: &[u8]) -> [Option<Option<bool>>; 2] {
     let patterns = gitignore::parse(text);
     [true, false].map(|is_dir| gitignore::matches(&patterns, path, is_dir).ok())
+}
+
+/// The line `pinfold agents peek` prints for a session file whose last bytes are `tail`. For
+/// the `agent_session_tail` fuzz target.
+#[doc(hidden)]
+pub fn fuzz_agent_session_tail(tail: &[u8], whole: bool) -> String {
+    agents::parse(tail, whole).line()
 }
 
 /// Parses `diff` as `pinfold diff` does, and returns its notes and each file's label, header and
