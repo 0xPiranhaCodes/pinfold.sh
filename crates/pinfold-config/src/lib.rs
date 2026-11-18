@@ -149,14 +149,35 @@ impl Default for Keys {
 pub struct Alerts {
     /// The states that raise a desktop notification. Read by the window.
     pub desktop: Vec<Alert>,
+    /// Where the core posts alerts, or empty for nowhere. Read when the core starts, which
+    /// checks it: a URL its rules refuse turns webhooks off, and never the config.
+    pub webhook: String,
+    /// The states that are posted. Read when the core starts.
+    pub webhook_states: Vec<Alert>,
+    /// How a post's body is written. Read when the core starts.
+    pub webhook_format: WebhookFormat,
 }
 
 impl Default for Alerts {
     fn default() -> Self {
         Self {
             desktop: vec![Alert::NeedsYou, Alert::Error],
+            webhook: String::new(),
+            webhook_states: vec![Alert::NeedsYou, Alert::Error],
+            webhook_format: WebhookFormat::Json,
         }
     }
+}
+
+/// `[alerts] webhook_format`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum WebhookFormat {
+    /// One JSON object.
+    #[default]
+    Json,
+    /// One line of text, for ntfy-style relays.
+    Text,
 }
 
 /// A state that can raise an alert.
@@ -819,6 +840,28 @@ mod tests {
             "[alerts]\ndesktop = [\"running\"]\n",
             "[alerts]\ndesktop = \"error\"\n",
             "[alerts]\nwebhooks = true\n",
+        ] {
+            assert!(message(text.as_bytes()).contains("line 2"), "{text}");
+        }
+    }
+
+    #[test]
+    fn webhooks_are_off_unless_set_and_take_their_states_and_format() {
+        let alerts = parse(b"").unwrap().alerts;
+        assert_eq!(alerts.webhook, "");
+        assert_eq!(alerts.webhook_states, [Alert::NeedsYou, Alert::Error]);
+        assert_eq!(alerts.webhook_format, WebhookFormat::Json);
+        let text = b"[alerts]\nwebhook = \"https://ntfy.sh/t\"\nwebhook_states = [\"error\"]\nwebhook_format = \"text\"\n";
+        let alerts = parse(text).unwrap().alerts;
+        assert_eq!(alerts.webhook, "https://ntfy.sh/t");
+        assert_eq!(alerts.webhook_states, [Alert::Error]);
+        assert_eq!(alerts.webhook_format, WebhookFormat::Text);
+        // The URL's rules are the core's, so a bad URL keeps the rest of the config.
+        assert!(parse(b"[alerts]\nwebhook = \"http://localhost/\"\n").is_ok());
+        for text in [
+            "[alerts]\nwebhook_states = [\"done\"]\n",
+            "[alerts]\nwebhook_format = \"xml\"\n",
+            "[alerts]\nwebhook = 1\n",
         ] {
             assert!(message(text.as_bytes()).contains("line 2"), "{text}");
         }
