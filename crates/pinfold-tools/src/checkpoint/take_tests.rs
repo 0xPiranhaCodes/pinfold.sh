@@ -206,7 +206,7 @@ fn a_full_store_refuses_every_take_with_the_reason() {
         "over max_store_mib: 9 MiB of 8 MiB",
     )
     .expect("full");
-    let full = take(&state, "r1-0", 1, "api", &work, 2).expect_err("full");
+    let full = settled(|| take(&state, "r1-0", 1, "api", &work, 2)).expect_err("full");
     assert!(full.to_string().starts_with("over max_store_mib"), "{full}");
     fs::remove_dir_all(dir).expect("clean");
 }
