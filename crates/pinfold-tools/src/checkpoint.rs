@@ -153,11 +153,30 @@ impl Record {
         out.write_all(b"\0")
     }
 
-    /// The next record, or `None` at the end or at a line that does not parse, so a list cut
-    /// short by a crash only reuses less.
+    /// The next record, or `None` at the end or at a line that does not parse, so a previous
+    /// list cut short by a crash only reuses less.
     pub(crate) fn read(input: &mut dyn BufRead, line: &mut Vec<u8>) -> Option<Self> {
         line.clear();
         input.read_until(0, line).ok()?;
+        Self::parse(line)
+    }
+
+    /// The next record, or `None` at the end.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if reading fails or a line does not parse, so a commit is never built
+    /// from part of a list.
+    fn read_whole(input: &mut dyn BufRead, line: &mut Vec<u8>) -> io::Result<Option<Self>> {
+        line.clear();
+        if input.read_until(0, line)? == 0 {
+            return Ok(None);
+        }
+        let broken = || io::Error::new(io::ErrorKind::InvalidData, "a broken stat list");
+        Self::parse(line).map(Some).ok_or_else(broken)
+    }
+
+    fn parse(line: &[u8]) -> Option<Self> {
         let mut fields = line.strip_suffix(b"\0")?.splitn(7, |&c| c == b' ');
         let mut text = || std::str::from_utf8(fields.next()?).ok();
         let mode = u32::from_str_radix(text()?, 8).ok()?;
@@ -187,6 +206,115 @@ pub(crate) fn hex(id: &[u8; 20]) -> [u8; 40] {
         out[2 * i + 1] = DIGITS[usize::from(byte & 15)];
     }
     out
+}
+
+/// Writes the commit of a checkpoint to `import`, a `git fast-import` started once every
+/// reader's importer has finished, as the commit names their blobs. Its tree is the records of
+/// `stat`, the list [`walk`] wrote. Given `parent`, the ref of the checkpoint whose list the walk
+/// merged and that list, it names the parent and lists only what changed (`M`) or went (`D`);
+/// otherwise every record. `message` is the commit message and `time` its Unix time.
+///
+/// # Errors
+///
+/// [`io::ErrorKind::InvalidInput`] if a ref is not under `refs/pinfold/` or holds anything but
+/// `A-Z a-z 0-9 / . _ -`, [`io::ErrorKind::InvalidData`] for a broken list, otherwise a failed
+/// read or write.
+///
+/// # Examples
+///
+/// ```
+/// use pinfold_tools::checkpoint::commit;
+///
+/// let mut import = Vec::new();
+/// commit(&mut import, "refs/pinfold/r1-0/0", "{}", 0, &mut &b""[..], None)?;
+/// assert!(import.starts_with(b"commit refs/pinfold/r1-0/0\n"));
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn commit(
+    import: &mut dyn Write,
+    refname: &str,
+    message: &str,
+    time: u64,
+    stat: &mut dyn BufRead,
+    parent: Option<(&str, &mut dyn BufRead)>,
+) -> io::Result<()> {
+    let plain = |name: &str| {
+        name.starts_with("refs/pinfold/")
+            && name
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || b"/._-".contains(&c))
+    };
+    if !plain(refname) || parent.as_ref().is_some_and(|(from, _)| !plain(from)) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "not a checkpoint ref",
+        ));
+    }
+    let committer = format!("PinFold <pinfold@localhost> {time} +0000");
+    let length = message.len();
+    write!(
+        import,
+        "commit {refname}\ncommitter {committer}\ndata {length}\n{message}\n"
+    )?;
+    let mut olds = None;
+    if let Some((from, list)) = parent {
+        writeln!(import, "from {from}")?;
+        olds = Some(list);
+    }
+    let (mut line, mut old_line) = (Vec::new(), Vec::new());
+    let mut next_old = |line: &mut Vec<u8>| match olds.as_mut() {
+        Some(list) => Record::read_whole(&mut **list, line),
+        None => Ok(None),
+    };
+    let mut old = next_old(&mut old_line)?;
+    while let Some(new) = Record::read_whole(stat, &mut line)? {
+        while let Some(gone) = old.take_if(|o| tree_cmp(&o.path, &new.path) == Ordering::Less) {
+            change(import, &gone, false)?;
+            old = next_old(&mut old_line)?;
+        }
+        let same = old
+            .as_ref()
+            .filter(|o| o.path == new.path)
+            .map(|o| (o.mode, o.id) == (new.mode, new.id));
+        if same.is_some() {
+            old = next_old(&mut old_line)?;
+        }
+        if same != Some(true) {
+            change(import, &new, true)?;
+        }
+    }
+    while let Some(gone) = old {
+        change(import, &gone, false)?;
+        old = next_old(&mut old_line)?;
+    }
+    import.write_all(b"\n")
+}
+
+/// `M <mode> <id> <path>` or `D <path>`, the path C-quoted when it holds a newline, a quote or
+/// a backslash, as fast-import reads it.
+fn change(out: &mut dyn Write, record: &Record, modified: bool) -> io::Result<()> {
+    if modified {
+        write!(out, "M {:o} ", record.mode)?;
+        out.write_all(&hex(&record.id))?;
+        out.write_all(b" ")?;
+    } else {
+        out.write_all(b"D ")?;
+    }
+    let path = &record.path;
+    if !path.iter().any(|&c| matches!(c, b'\n' | b'"' | b'\\')) {
+        out.write_all(path)?;
+        return out.write_all(b"\n");
+    }
+    let mut quoted = vec![b'"'];
+    for &c in path {
+        match c {
+            b'\n' => quoted.extend_from_slice(b"\\n"),
+            b'"' | b'\\' => quoted.extend_from_slice(&[b'\\', c]),
+            _ => quoted.push(c),
+        }
+    }
+    quoted.extend_from_slice(b"\"\n");
+    out.write_all(&quoted)
 }
 
 /// The walk's order, depth first with siblings sorted by bytes: paths compared by component.

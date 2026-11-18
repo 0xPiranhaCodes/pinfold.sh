@@ -51,6 +51,50 @@ pub fn footprint(pid: u32) -> io::Result<u64> {
     platform::footprint(pid)
 }
 
+/// Returns the largest memory footprint this process has had, in bytes: lifetime peak
+/// `phys_footprint` on macOS, and peak RSS (`VmHWM`) on Linux, which is at least the PSS
+/// [`footprint`] reads.
+///
+/// # Errors
+///
+/// Returns an error if the process's memory cannot be read.
+///
+/// # Examples
+///
+/// ```
+/// assert!(pinfold_sys::peak_footprint()? >= pinfold_sys::footprint(std::process::id())?);
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn peak_footprint() -> io::Result<u64> {
+    platform::peak_footprint()
+}
+
+/// Runs this process, and every process it starts from then on, at background priority, so a
+/// checkpoint never makes the machine feel slow (ADR-0050 section 2).
+///
+/// On Linux it sets nice 10 and I/O priority class idle for the calling thread, which threads
+/// and processes started after it inherit, so call it before starting any. On macOS it
+/// re-executes the program in place, with the same pid, arguments, environment and open
+/// descriptors, under a QoS clamp of utility, as `taskpolicy -c utility` starts a command: a
+/// thread's QoS would not reach the processes it starts. It returns only in the re-executed
+/// program, which has `PINFOLD_BACKGROUND` set, so call it first in `main`.
+///
+/// # Errors
+///
+/// Returns the system's error if the priority cannot be set or, on macOS, the program cannot be
+/// re-executed; the process then goes on at its own priority.
+///
+/// # Examples
+///
+/// ```no_run
+/// pinfold_sys::background()?;
+/// // Every thread and process from here on runs at background priority.
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn background() -> io::Result<()> {
+    platform::background()
+}
+
 /// Writes a byte to `pipe` on each SIGTERM and SIGHUP, the self-pipe the core polls to save its
 /// session before it exits. Neither signal ends the process after this, so the reader must.
 ///
@@ -843,6 +887,33 @@ mod platform {
         }
     }
 
+    pub fn peak_footprint() -> io::Result<u64> {
+        let text = std::fs::read_to_string("/proc/self/status")?;
+        text.lines()
+            .find_map(|line| line.strip_prefix("VmHWM:"))
+            .and_then(|rest| rest.split_whitespace().next())
+            .and_then(|kilobytes| kilobytes.parse::<u64>().ok())
+            .map(|kilobytes| kilobytes * 1024)
+            .ok_or_else(|| io::Error::other("no VmHWM line in /proc/self/status"))
+    }
+
+    pub fn background() -> io::Result<()> {
+        // From linux/ioprio.h, which libc does not carry.
+        const IOPRIO_WHO_PROCESS: libc::c_long = 1;
+        const IOPRIO_CLASS_IDLE: libc::c_long = 3;
+        const IOPRIO_CLASS_SHIFT: libc::c_long = 13;
+        // SAFETY: setpriority reads only its integer arguments and touches no memory.
+        if unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, 10) } != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let idle = IOPRIO_CLASS_IDLE << IOPRIO_CLASS_SHIFT;
+        // SAFETY: ioprio_set takes three integers and touches no memory.
+        match unsafe { libc::syscall(libc::SYS_ioprio_set, IOPRIO_WHO_PROCESS, 0, idle) } {
+            0 => Ok(()),
+            _ => Err(io::Error::last_os_error()),
+        }
+    }
+
     pub fn footprint(pid: u32) -> io::Result<u64> {
         let text = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup"))?;
         text.lines()
@@ -1060,6 +1131,94 @@ mod platform {
         Ok((!none).then_some(Terminal { device, session }))
     }
 
+    pub fn peak_footprint() -> io::Result<u64> {
+        let mut info = MaybeUninit::<libc::rusage_info_v4>::zeroed();
+        let buffer = info.as_mut_ptr().cast();
+        // SAFETY: getpid touches no memory, and `buffer` is a writable rusage_info_v4, the
+        // struct RUSAGE_INFO_V4 selects.
+        let result = unsafe { libc::proc_pid_rusage(libc::getpid(), libc::RUSAGE_INFO_V4, buffer) };
+        if result != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        // SAFETY: the call succeeded, and all-zero bytes are valid for this integer struct.
+        Ok(unsafe { info.assume_init() }.ri_lifetime_max_phys_footprint)
+    }
+
+    /// Set in the program [`background`] re-executes, so it runs once.
+    const BACKGROUND: &str = "PINFOLD_BACKGROUND";
+    /// `POSIX_SPAWN_PROC_CLAMP_UTILITY` from `spawn_private.h`, what `taskpolicy -c utility`
+    /// passes.
+    const CLAMP_UTILITY: u64 = 1;
+
+    unsafe extern "C" {
+        /// From `spawn.h`; libc does not carry it.
+        fn posix_spawnattr_set_qos_clamp_np(
+            attr: *mut libc::posix_spawnattr_t,
+            clamp: u64,
+        ) -> libc::c_int;
+    }
+
+    pub fn background() -> io::Result<()> {
+        use std::ffi::{CString, OsString};
+        use std::os::unix::ffi::OsStrExt;
+
+        if std::env::var_os(BACKGROUND).is_some() {
+            return Ok(());
+        }
+        let c = |bytes: &[u8]| CString::new(bytes).map_err(io::Error::other);
+        let path = c(std::env::current_exe()?.as_os_str().as_bytes())?;
+        let args = std::env::args_os()
+            .map(|arg| c(arg.as_bytes()))
+            .collect::<io::Result<Vec<_>>>()?;
+        let mark = (OsString::from(BACKGROUND), OsString::from("1"));
+        let vars = std::env::vars_os().chain(std::iter::once(mark));
+        let env = vars
+            .map(|(key, value)| c(&[key.as_bytes(), b"=", value.as_bytes()].concat()))
+            .collect::<io::Result<Vec<_>>>()?;
+        let pointers = |strings: &[CString]| {
+            let list = strings.iter().map(|s| s.as_ptr().cast_mut());
+            list.chain(std::iter::once(ptr::null_mut()))
+                .collect::<Vec<_>>()
+        };
+        let (argv, envp) = (pointers(&args), pointers(&env));
+        let mut attr = MaybeUninit::<libc::posix_spawnattr_t>::uninit();
+        // SAFETY: init fills in the attribute object `attr` points to.
+        let mut result = unsafe { libc::posix_spawnattr_init(attr.as_mut_ptr()) };
+        if result != 0 {
+            return Err(io::Error::from_raw_os_error(result));
+        }
+        let attr = attr.as_mut_ptr();
+        #[allow(clippy::cast_possible_truncation, reason = "the flag fits a c_short")]
+        let exec = libc::POSIX_SPAWN_SETEXEC as libc::c_short;
+        // SAFETY: `attr` was initialized above and is destroyed once below.
+        result = unsafe { libc::posix_spawnattr_setflags(attr, exec) };
+        if result == 0 {
+            // SAFETY: as above; the call reads its integer and writes only into `attr`.
+            result = unsafe { posix_spawnattr_set_qos_clamp_np(attr, CLAMP_UTILITY) };
+        }
+        if result == 0 {
+            // SAFETY: `path`, `argv` and `envp` are NUL-terminated strings and NULL-ended lists
+            // of them, alive for the call. With POSIX_SPAWN_SETEXEC it replaces this program and
+            // returns only on failure.
+            result = unsafe {
+                libc::posix_spawn(
+                    ptr::null_mut(),
+                    path.as_ptr(),
+                    ptr::null(),
+                    attr,
+                    argv.as_ptr(),
+                    envp.as_ptr(),
+                )
+            };
+        }
+        // SAFETY: `attr` was initialized and is not used after this.
+        unsafe { libc::posix_spawnattr_destroy(attr) };
+        Err(match result {
+            0 => io::Error::other("posix_spawn returned without replacing the program"),
+            error => io::Error::from_raw_os_error(error),
+        })
+    }
+
     pub fn footprint(pid: u32) -> io::Result<u64> {
         let pid = libc::c_int::try_from(pid).map_err(io::Error::other)?;
         let mut info = MaybeUninit::<libc::rusage_info_v4>::zeroed();
@@ -1086,6 +1245,48 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn background_priority_reaches_what_starts_after_it() {
+        const NAME: &str = "tests::background_priority_reaches_what_starts_after_it";
+        if std::env::var_os("PINFOLD_TEST_BACKGROUND").is_none() {
+            // Runs this test alone in a child, as background() may replace the program.
+            let exe = std::env::current_exe().unwrap();
+            let out = Command::new(exe)
+                .args(["--exact", NAME, "--test-threads=1"])
+                .env("PINFOLD_TEST_BACKGROUND", "1")
+                .output()
+                .unwrap();
+            let text = String::from_utf8_lossy(&out.stdout);
+            assert!(out.status.success() && text.contains("1 passed"), "{text}");
+            return;
+        }
+        background().unwrap();
+        // A process started after it, as git is from a take.
+        let probe = if cfg!(target_os = "macos") {
+            // A utility clamp shows as base priority 20, against 31 by default.
+            "ps -o pri= -p $$"
+        } else {
+            "cut -d' ' -f19 /proc/$$/stat"
+        };
+        let out = Command::new("sh").args(["-c", probe]).output().unwrap();
+        let shown = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+        if cfg!(target_os = "macos") {
+            assert!(
+                std::env::var_os("PINFOLD_BACKGROUND").is_some(),
+                "re-executed"
+            );
+            assert_eq!(shown, "20");
+        } else {
+            assert_eq!(shown, "10", "nice");
+            #[cfg(target_os = "linux")]
+            {
+                // SAFETY: ioprio_get takes two integers and touches no memory.
+                let class = unsafe { libc::syscall(libc::SYS_ioprio_get, 1, 0) } >> 13;
+                assert_eq!(class, 3, "I/O class idle");
+            }
+        }
+    }
 
     #[test]
     fn a_rename_never_replaces_a_target_made_after_any_check() {

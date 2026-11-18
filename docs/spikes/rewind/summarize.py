@@ -53,11 +53,33 @@ def peaks(path):
     print()
 
 
+def real(path):
+    # measure.sh --real: the real take beside the spike's, both at background priority.
+    rows, host = load(path)
+    print(f"## {path.stem}\n\n{host.get('uname', '')}; {host.get('git', '')}; {host.get('cpus', '?')} CPUs\n")
+    print("| Take | Step | Median s | Median walk s | Own peak MB, largest | Concurrent git peaks MB, largest |")
+    print("| --- | --- | --- | --- | --- | --- |")
+    for step in ("first", "unchanged", "changed"):
+        for take in ("real", "spike"):
+            rs = pick(rows, "linux", take, step)
+            if rs:
+                print(
+                    f"| {take} | {step} | {med([r['ms'] for r in rs]) / 1000:.2f} | {med([r['walk_ms'] for r in rs]) / 1000:.2f} "
+                    f"| {max(peak(r) for r in rs) / MB:.2f} | {max(r['git_peaks'] for r in rs) / MB:.0f} |"
+                )
+    store = pick(rows, "linux", "real", "du_take")
+    if store:
+        print(f"\nReal store after a first take: {store[-1]['kb'] * 1024 / MB:.0f} MB.\n")
+
+
 def main():
     here = pathlib.Path(__file__).parent
     for path in sorted((here / "results").glob("*.jsonl")):
         if path.stem.endswith("-peaks"):
             peaks(path)
+            continue
+        if path.stem.endswith("-real"):
+            real(path)
             continue
         rows, host = load(path)
         corpora = list(dict.fromkeys(r["corpus"] for r in rows))

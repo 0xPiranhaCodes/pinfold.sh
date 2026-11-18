@@ -1,4 +1,5 @@
 use super::*;
+use crate::git;
 use std::fs;
 use std::io::Cursor;
 use std::os::unix::fs::{PermissionsExt, symlink};
@@ -575,5 +576,207 @@ fn a_gitignore_that_runs_out_of_steps_is_dropped_for_the_rest_of_the_walk() {
     assert!(start.elapsed().as_secs() < 5, "{:?}", start.elapsed());
     let paths = paths(&stat);
     assert!(paths.contains(&"z.log".to_owned()), "{paths:?}");
+    fs::remove_dir_all(dir).expect("clean");
+}
+
+/// A take into `store` at `refs/pinfold/t/<n>`, on `parent`'s list and commit if given, with
+/// two readers each feeding its own `git fast-import`, then one more for the commit.
+fn take_into(store: &Path, root: &Path, n: &str, parent: Option<&str>) -> Walked {
+    let stat_path = store.join(format!("stat/t-{n}"));
+    let list = |n: &str| fs::read(store.join(format!("stat/t-{n}"))).expect("list");
+    let previous = parent.map(list);
+    let mut stat = Vec::new();
+    let mut old = previous.as_deref();
+    let old = old.as_mut().map(|p| p as &mut dyn BufRead);
+    let importers = vec![
+        git::import(store).expect("git"),
+        git::import(store).expect("git"),
+    ];
+    let (walked, importers) =
+        walk(root, &Caps::default(), old, &mut stat, importers).expect("walk");
+    for import in importers {
+        import.finish().expect("blobs");
+    }
+    fs::write(&stat_path, &stat).expect("stat");
+    let mut import = git::import(store).expect("git");
+    let from = parent.map(|p| format!("refs/pinfold/t/{p}"));
+    let mut parent_list = previous.as_deref();
+    let parent = from
+        .as_deref()
+        .zip(parent_list.as_mut().map(|p| p as &mut dyn BufRead));
+    let refname = format!("refs/pinfold/t/{n}");
+    commit(&mut import, &refname, "{}", 1, &mut &stat[..], parent).expect("commit");
+    import.finish().expect("commit");
+    walked
+}
+
+fn store_git(store: &Path, args: &[&str]) -> String {
+    let out = git::store(store, args, b"").expect("git");
+    assert!(
+        out.status.is_some_and(|s| s.success()),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+#[test]
+fn a_commit_on_its_parent_lists_only_changes_and_has_the_tree_of_one_from_scratch() {
+    let dir = scratch("commit");
+    let (root, store) = (dir.join("root"), dir.join("store"));
+    git::create_store(&store).expect("store");
+    fs::create_dir(store.join("stat")).expect("stat");
+    for i in 0..30 {
+        write(
+            root.join(format!("d{}/f{i:02}", i % 3)),
+            &format!("file {i}\n"),
+        );
+    }
+    write(root.join("odd \"name\"\nwith a newline"), "x");
+    symlink("d0/f00", root.join("link")).expect("link");
+    take_into(&store, &root, "0", None);
+    write(root.join("d0/f00"), "changed\n");
+    write(root.join("d9/new"), "new\n");
+    fs::remove_file(root.join("d1/f01")).expect("rm");
+    let walked = take_into(&store, &root, "1", Some("0"));
+    assert_eq!((walked.read, walked.reused), (2, 30));
+    take_into(&store, &root, "scratch", None);
+    let tree = |n: &str| {
+        store_git(
+            &store,
+            &[
+                "for-each-ref",
+                "--format=%(tree)",
+                &format!("refs/pinfold/t/{n}"),
+            ],
+        )
+    };
+    assert_eq!(tree("1"), tree("scratch"));
+    let diff = store_git(
+        &store,
+        &[
+            "diff-tree",
+            "-r",
+            "--name-status",
+            "refs/pinfold/t/0",
+            "refs/pinfold/t/1",
+        ],
+    );
+    assert_eq!(diff, "M\td0/f00\nD\td1/f01\nA\td9/new\n");
+    let parent = store_git(
+        &store,
+        &["for-each-ref", "--format=%(parent)", "refs/pinfold/t/1"],
+    );
+    assert_eq!(
+        parent.trim(),
+        store_git(
+            &store,
+            &["for-each-ref", "--format=%(objectname)", "refs/pinfold/t/0"]
+        )
+        .trim()
+    );
+    let listed = store_git(
+        &store,
+        &[
+            "diff-tree",
+            "-r",
+            "--root",
+            "--name-only",
+            "-z",
+            "refs/pinfold/t/scratch",
+        ],
+    );
+    assert!(
+        listed.contains("odd \"name\"\nwith a newline"),
+        "{listed:?}"
+    );
+    let config = fs::read_to_string(store.join("config")).expect("config");
+    assert!(config.contains("compression = 1") && config.contains("bare = true"));
+    let mode = fs::metadata(&store).expect("store").permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700);
+    assert!(
+        git::create_store(&store).is_err(),
+        "never made over an existing one"
+    );
+    fs::remove_dir_all(dir).expect("clean");
+}
+
+#[test]
+fn an_import_dropped_before_its_end_leaves_no_commit() {
+    let dir = scratch("dropped");
+    let store = dir.join("store");
+    git::create_store(&store).expect("store");
+    let mut import = git::import(&store).expect("git");
+    commit(
+        &mut import,
+        "refs/pinfold/t/0",
+        "{}",
+        1,
+        &mut &b""[..],
+        None,
+    )
+    .expect("commit");
+    import.flush().expect("flush");
+    drop(import);
+    assert_eq!(store_git(&store, &["for-each-ref"]), "");
+    let mut import = Vec::new();
+    let bad = commit(
+        &mut import,
+        "refs/pinfold/t/0\nreset refs/heads/x",
+        "{}",
+        1,
+        &mut &b""[..],
+        None,
+    );
+    assert_eq!(bad.map_err(|e| e.kind()), Err(io::ErrorKind::InvalidInput));
+    let broken = commit(
+        &mut import,
+        "refs/pinfold/t/0",
+        "{}",
+        1,
+        &mut &b"100644 x\0"[..],
+        None,
+    );
+    assert_eq!(
+        broken.map_err(|e| e.kind()),
+        Err(io::ErrorKind::InvalidData)
+    );
+    fs::remove_dir_all(dir).expect("clean");
+}
+
+#[test]
+fn nothing_a_hostile_work_tree_configures_runs_in_a_take_or_a_diff() {
+    let dir = scratch("hostile");
+    let (root, store) = (dir.join("root"), dir.join("store"));
+    git::create_store(&store).expect("store");
+    fs::create_dir(store.join("stat")).expect("stat");
+    let marker = dir.join("marker");
+    let touch = format!("touch {}", marker.display());
+    let config = format!(
+        "[core]\n\tfsmonitor = {touch}\n\thooksPath = hooks\n\tpager = {touch}\n\
+         [filter \"evil\"]\n\tclean = {touch}\n\tsmudge = {touch}\n\
+         [diff \"evil\"]\n\ttextconv = {touch}\n\tcommand = {touch}\n"
+    );
+    write(root.join(".git/config"), &config);
+    write(
+        root.join(".git/hooks/post-commit"),
+        &format!("#!/bin/sh\n{touch}\n"),
+    );
+    write(root.join(".gitattributes"), "* filter=evil diff=evil\n");
+    write(root.join("nested/.git/config"), &config);
+    write(root.join("nested/code.rs"), "x");
+    write(root.join("a.txt"), "one\n");
+    take_into(&store, &root, "0", None);
+    write(root.join("a.txt"), "two\n");
+    take_into(&store, &root, "1", Some("0"));
+    let diff = store_git(&store, &["diff", "refs/pinfold/t/0", "refs/pinfold/t/1"]);
+    assert!(diff.contains("-one\n+two\n"), "{diff}");
+    let blob = store_git(
+        &store,
+        &["for-each-ref", "--format=%(objectname)", "refs/pinfold/t/1"],
+    );
+    let batch = git::store(&store, ["cat-file", "--batch"], blob.as_bytes()).expect("git");
+    assert!(batch.status.is_some_and(|s| s.success()));
+    assert!(!marker.exists(), "a command the work tree named ran");
     fs::remove_dir_all(dir).expect("clean");
 }
