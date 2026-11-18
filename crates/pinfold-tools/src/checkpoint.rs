@@ -25,6 +25,9 @@ use sha1::{Digest, Sha1};
 
 use crate::gitignore::{self, Pattern};
 
+pub mod prune;
+pub mod take;
+
 const BUF: usize = 64 * 1024;
 /// Records waiting for a reader before the walk blocks.
 const PENDING: usize = 512;
@@ -210,15 +213,17 @@ pub(crate) fn hex(id: &[u8; 20]) -> [u8; 40] {
 
 /// Writes the commit of a checkpoint to `import`, a `git fast-import` started once every
 /// reader's importer has finished, as the commit names their blobs. Its tree is the records of
-/// `stat`, the list [`walk`] wrote. Given `parent`, the ref of the checkpoint whose list the walk
-/// merged and that list, it names the parent and lists only what changed (`M`) or went (`D`);
-/// otherwise every record. `message` is the commit message and `time` its Unix time.
+/// `stat`, the list [`walk`] wrote. Given `base`, the tree id of the checkpoint whose list the
+/// walk merged and that list, it starts from that tree and lists only what changed (`M`) or went
+/// (`D`); otherwise every record. It never names a parent, so a pruned checkpoint stays
+/// unreachable from the ones after it (ADR-0050, amendment of slice 3). `message` is the commit
+/// message and `time` its Unix time.
 ///
 /// # Errors
 ///
-/// [`io::ErrorKind::InvalidInput`] if a ref is not under `refs/pinfold/` or holds anything but
-/// `A-Z a-z 0-9 / . _ -`, [`io::ErrorKind::InvalidData`] for a broken list, otherwise a failed
-/// read or write.
+/// [`io::ErrorKind::InvalidInput`] if `refname` is not under `refs/pinfold/` or holds anything
+/// but `A-Z a-z 0-9 / . _ -`, or `base` is not 40 hex digits, [`io::ErrorKind::InvalidData`]
+/// for a broken list, otherwise a failed read or write.
 ///
 /// # Examples
 ///
@@ -236,7 +241,7 @@ pub fn commit(
     message: &str,
     time: u64,
     stat: &mut dyn BufRead,
-    parent: Option<(&str, &mut dyn BufRead)>,
+    base: Option<(&str, &mut dyn BufRead)>,
 ) -> io::Result<()> {
     let plain = |name: &str| {
         name.starts_with("refs/pinfold/")
@@ -244,7 +249,8 @@ pub fn commit(
                 .bytes()
                 .all(|c| c.is_ascii_alphanumeric() || b"/._-".contains(&c))
     };
-    if !plain(refname) || parent.as_ref().is_some_and(|(from, _)| !plain(from)) {
+    let tree = |id: &str| id.len() == 40 && id.bytes().all(|c| c.is_ascii_hexdigit());
+    if !plain(refname) || base.as_ref().is_some_and(|(id, _)| !tree(id)) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "not a checkpoint ref",
@@ -257,8 +263,8 @@ pub fn commit(
         "commit {refname}\ncommitter {committer}\ndata {length}\n{message}\n"
     )?;
     let mut olds = None;
-    if let Some((from, list)) = parent {
-        writeln!(import, "from {from}")?;
+    if let Some((id, list)) = base {
+        writeln!(import, "M 040000 {id} \"\"")?;
         olds = Some(list);
     }
     let (mut line, mut old_line) = (Vec::new(), Vec::new());
@@ -908,6 +914,107 @@ fn blob(
     }
     out.write_all(b"\n")?;
     Ok((hash.finalize().into(), whole))
+}
+
+/// Read by `pinfold checkpoint take`, and only when `cargo xtask mem-gate` or `measure.sh`
+/// measures it: the line then adds `ms`, the take's wall time, and `peak`, its own peak
+/// footprint in bytes.
+const MEASURE: &str = "PINFOLD_MEASURE";
+const USAGE: &str = "usage: pinfold checkpoint take <run> <n> <reason> -- <dir> | prune \
+                     [--live <run>]... [--max-store-mib N] [--keep-days N] [--keep-per-run N]";
+
+/// Runs `pinfold checkpoint <args>`, the hidden commands the core starts (ADR-0050 section 2),
+/// and prints one JSON line on standard output: on success the command's result, otherwise
+/// `{"error":"<reason>"}`. Returns whether it succeeded.
+///
+/// Both run at background priority. `take <run> <n> <reason> -- <dir>` prints
+/// [`take::Taken`]'s line; `prune [--live <run>]... [--max-store-mib N] [--keep-days N]
+/// [--keep-per-run N]`, defaults 2048, 14 and 20, prints [`prune::Pruned`]'s.
+///
+/// # Examples
+///
+/// ```no_run
+/// let args = ["take", "r1700000000-0", "0", "launch", "--", "/path/to/work"].map(Into::into);
+/// let ok = pinfold_tools::checkpoint::command(Some("/path/to/state".as_ref()), &args);
+/// ```
+pub fn command(state: Option<&Path>, args: &[OsString]) -> bool {
+    let start = std::time::Instant::now();
+    let words: Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();
+    let result = match (state, words.as_slice()) {
+        (None, _) => Err(io::Error::other("no state directory: HOME is not set")),
+        (Some(state), [b"take", run, n, reason, b"--", _]) => {
+            // First, as on macOS it starts the program again in place.
+            let _ = pinfold_sys::background();
+            let text = |word: &[u8]| std::str::from_utf8(word).unwrap_or_default().to_owned();
+            let n = text(n)
+                .parse::<u64>()
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "n is not a number"));
+            let time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs());
+            n.and_then(|n| {
+                take::take(
+                    state,
+                    &text(run),
+                    n,
+                    &text(reason),
+                    Path::new(&args[5]),
+                    time,
+                )
+            })
+            .map(|t| {
+                serde_json::json!({
+                    "checkpoint": t.checkpoint,
+                    "store": t.store,
+                    "files": t.files,
+                    "new_bytes": t.new_bytes,
+                    "complete": t.complete,
+                    "changed": t.changed,
+                })
+            })
+        }
+        (Some(state), [b"prune", rest @ ..]) => {
+            let _ = pinfold_sys::background();
+            let rest: Option<Vec<&str>> =
+                rest.iter().map(|w| std::str::from_utf8(w).ok()).collect();
+            let time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs());
+            match rest.as_deref().and_then(prune::parse) {
+                Some((live, limits)) => prune::prune(state, &live, &limits, time).map(|p| {
+                    serde_json::json!({
+                        "deleted": p.deleted,
+                        "repacked": p.repacked,
+                        "bytes": p.bytes,
+                        "full": p.full,
+                        "busy": p.busy,
+                    })
+                }),
+                None => Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE)),
+            }
+        }
+        _ => Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE)),
+    };
+    let (ok, mut line) = match result {
+        Ok(line) => (true, line),
+        Err(error) => (false, serde_json::json!({ "error": error.to_string() })),
+    };
+    if std::env::var_os(MEASURE).is_some()
+        && let Some(fields) = line.as_object_mut()
+    {
+        fields.insert(
+            "ms".into(),
+            u64::try_from(start.elapsed().as_millis())
+                .unwrap_or(u64::MAX)
+                .into(),
+        );
+        fields.insert(
+            "peak".into(),
+            pinfold_sys::peak_footprint().unwrap_or(0).into(),
+        );
+    }
+    let printed = writeln!(io::stdout(), "{line}");
+    ok && printed.is_ok()
 }
 
 #[cfg(test)]

@@ -1038,6 +1038,15 @@ fn printable(text: &str) -> String {
 }
 
 fn main() -> ExitCode {
+    // Hidden, for the core: a working directory need not be UTF-8 (ADR-0050 section 2).
+    let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    if raw.first().is_some_and(|word| word == "checkpoint") {
+        let state = pinfold_config::state_dir();
+        return match pinfold_tools::checkpoint::command(state.as_deref(), &raw[1..]) {
+            true => ExitCode::SUCCESS,
+            false => ExitCode::FAILURE,
+        };
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     // Only where no command takes an argument, so `ctl send 3 --help` still types `--help`.
