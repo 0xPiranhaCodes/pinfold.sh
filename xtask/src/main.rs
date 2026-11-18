@@ -178,7 +178,8 @@ fn git(repo: &Path, args: &[&str]) -> io::Result<()> {
 /// Fills the tools' caps in `dir`, outside any repository so the file manager runs no git:
 /// `reader.md`, `prose.md` and `defs.md` of exactly 5 MB, an `empty` directory, `entries` of
 /// 10,000 files, `tree` of 100,000 for the checkpoint take, a `repo` whose work tree's diff is
-/// over 8 MB, and `tool-screen.sh`, a window's
+/// over 8 MB, `checkpoint`, a store holding that diff between two checkpoints, and
+/// `tool-screen.sh`, a window's
 /// shell that runs the reader.
 fn write_tool_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -241,6 +242,29 @@ fn write_tool_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
     git(&repo, &["add", "a.txt"])?;
     git(&repo, &["commit", "-q", "-m", "base"])?;
     fs::write(repo.join("a.txt"), lines("new"))?;
+    // ADR-0050 slice 7's row: a run's store whose launch and view checkpoints differ by the same
+    // diff, and `key`, the store's name, for `pinfold diff --checkpoint`.
+    let rewind = dir.join("checkpoint");
+    fs::create_dir_all(rewind.join("state"))?;
+    fs::create_dir_all(rewind.join("work"))?;
+    let work = rewind.join("work");
+    let mut key = String::new();
+    for (side, reason) in [("old", "launch"), ("new", "view")] {
+        fs::write(work.join("a.txt"), lines(side))?;
+        let taken = Command::new(tools)
+            .args(["checkpoint", "take", "r1-0", reason, "--"])
+            .arg(&work)
+            .env("HOME", rewind.join("state"))
+            .env("XDG_STATE_HOME", rewind.join("state"))
+            .output()?;
+        let line: serde_json::Value = serde_json::from_slice(&taken.stdout)
+            .map_err(|_| io::Error::other("checkpoint take printed no JSON line"))?;
+        key = line["store"]
+            .as_str()
+            .ok_or_else(|| io::Error::other(format!("checkpoint take failed: {line}")))?
+            .to_owned();
+    }
+    fs::write(rewind.join("key"), key)?;
     let quote = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', r"'\''"));
     let script = dir.join("tool-screen.sh");
     fs::write(
@@ -684,6 +708,20 @@ fn mem_gate_task() -> ExitCode {
     let defs_reader = ["--tool", "1", "md", defs.as_str()];
     let file_manager = ["--tool", "1", "files", entries.as_str()];
     let diff_viewer = ["--tool", "1", "diff", repo.as_str()];
+    let rewind_folder = inputs.join("checkpoint");
+    let (rewind_work, rewind_key) = (
+        input("checkpoint/work"),
+        fs::read_to_string(rewind_folder.join("key")).unwrap_or_default(),
+    );
+    let rewind_viewer = [
+        "--tool",
+        "1",
+        "rewind",
+        rewind_work.as_str(),
+        rewind_key.as_str(),
+        "r1-0/0",
+        "r1-0/1",
+    ];
     let readers = ["--tool", "8", "md", markdown.as_str()];
     let closed = ["--tool-closed", "md", markdown.as_str()];
     let tool = mem_gate::Budget {
@@ -731,6 +769,14 @@ fn mem_gate_task() -> ExitCode {
             metric: "Diff viewer, git output cut at 8 MB",
             limit: mem_gate::DIFF_LIMIT,
             args: &diff_viewer,
+            ..tool
+        },
+        // ADR-0050's memory row: the same diff read from a run's store with `--checkpoint`.
+        mem_gate::Budget {
+            metric: "Diff viewer on a checkpoint, git output cut at 8 MB",
+            limit: mem_gate::DIFF_LIMIT,
+            args: &rewind_viewer,
+            agents: Some(&rewind_folder),
             ..tool
         },
         mem_gate::Budget {

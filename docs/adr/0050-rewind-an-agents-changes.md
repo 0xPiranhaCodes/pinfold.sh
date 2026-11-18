@@ -623,3 +623,38 @@ and the strip:
    window keeps a pane's entry only while it is not 0, at most one per pane.
 7. **Link version 23.** `ApprovalAction::Rewind`, `Notice::Checkpoint { pane, missing }` and
    `Notice::Restored` have `since` 23, as 22 is the inbox's slice 10. ADR-0043 has the row.
+
+## Amendment 2026-11-19, slice 7 as built
+
+Decided by the coordinator for the maintainer while building the diff viewer on a checkpoint
+and `pinfold rewind`:
+
+1. **The viewer's arguments** (section 6). The core starts `pinfold diff --checkpoint -- <key>
+   <C> <N> <pane>`: the store by key, as slice 6's `plan` and `restore` take it, `C` and `N` as
+   `<run>/<n>`, and the agent's pane, which `checkpoint.restore` names. `tool.open`'s
+   `checkpoint` is `C`; the caller must reach the run as `checkpoint.take` does (slice 5,
+   decision 7), and a run whose agent never started is refused, both before the view take. The
+   view take shares `checkpoint.take`'s once in 30 s per run, so no caller takes checkpoints
+   faster this way; only the window's own entry, the person's, is not limited. The
+   server waits 62 s for it, as for a take. A session restore never brings a checkpoint viewer
+   back, as its view checkpoint lived with it.
+2. **The diff** is `git diff --no-renames` of the two commits through `git::store`, so each
+   file is one path a restore can name; the parser, caps and escaping are the existing ones.
+3. **`later`** marks each file `diff-tree -r --name-only -z` lists between the run's newest
+   `done` or `exit` checkpoint before `N` and `N`, streamed from an unlinked file in the store,
+   as `plan` reads it.
+4. **Nested repositories** come from the `skipped` lists of `C`'s and `N`'s commit messages,
+   reason `nested`, and follow the files. Selecting one says a rewind leaves it; `u` on one is
+   refused in the viewer.
+5. **`U`** sends no `paths`, meaning all, only when no file is `later` and the diff shows every
+   file; otherwise the shown files not `later`, at most 1,000, by name. The viewer refuses it
+   past that, when every file is `later`, or when the store's `later` list could not be read,
+   so it fails closed and never sends an empty list.
+6. **The view checkpoint goes when the viewer quits** with `q`, or fails to load, unless `u` or
+   `U` asked for a restore: its ref and stat list are deleted under the store's lock, waited for
+   up to 2 s, as the prune after every take holds it. A viewer killed by closing its pane leaves
+   it to `keep_per_run`.
+7. **`pinfold rewind [pane] [--checkpoint <n>] [--right | --down | --tab]`**: the run in the
+   caller's own pane, else in the agent pane focused last, as the viewer's `a` picks one; since
+   the run's oldest listed checkpoint, its launch one, unless `--checkpoint` names another. The
+   tool's `path` is the caller's working directory, which the viewer never reads.

@@ -3513,6 +3513,66 @@ fn an_agent_run_takes_and_lists_checkpoints_only_for_callers_in_reach() {
 }
 
 #[test]
+fn pinfold_rewind_opens_the_viewer_on_a_view_checkpoint_of_a_run_in_reach() {
+    let session = Session::new("rv", None).unwrap();
+    fs::create_dir_all(session.directory.join("config/pinfold")).unwrap();
+    let toml = "[agents.sleepy]\ncommand = [\"sleep\", \"30\"]\n";
+    fs::write(session.directory.join("config/pinfold/pinfold.toml"), toml).unwrap();
+    let mcp = format!("'{}' mcp", session.directory.join("pinfold").display());
+    let calls = mcp_lines(&[("checkpoint_list_v1", serde_json::json!({"pane": 1}))]);
+    let pinfold = format!("'{}'", session.directory.join("pinfold").display());
+    let client = "\"$PINFOLD_TEST_CLIENT\"";
+    let shell = format!(
+        "mkdir -p -m 700 \"$HOME/work/inner/.git\"; cd \"$HOME/work\"; echo a > a.txt; \
+         {pinfold} agent sleepy 2> {client}/e; echo agent > a.txt; echo new > new.txt; \
+         {pinfold} rewind 2> {client}/own; {pinfold} rewind 1 --down 2>> {client}/e; \
+         {pinfold} rewind 1 --checkpoint 7 2> {client}/again; \
+         {pinfold} ctl list --json > {client}/listed; \
+         {{ {calls} }} | {mcp} > {client}/o; mv {client}/o {client}/out; exec sleep 30"
+    );
+    let mut core = session.start_core(&["--idle", "1"], &shell).unwrap();
+    let ended = session.wait_beside("out", Some(&mut core));
+    assert!(ended, "{} {}", session.read("e"), session.read_log());
+    core.kill().unwrap();
+    core.wait().unwrap();
+
+    // The shell pane has no run and no agent reported from a pane, so there is none to rewind.
+    assert!(
+        session.read("own").contains("no agent run"),
+        "{}",
+        session.read("own")
+    );
+    // A second view of the run within 30 s is refused before any checkpoint is taken.
+    assert!(
+        session.read("again").contains("once in 30 s"),
+        "{}",
+        session.read("again")
+    );
+    let listed: serde_json::Value = serde_json::from_str(&session.read("listed")).unwrap();
+    let tools: Vec<_> = listed["panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|pane| pane["kind"] == "tool")
+        .collect();
+    assert_eq!(tools.len(), 1, "{listed}");
+    let viewer = tools[0];
+    let launch = viewer["tool"]["checkpoint"].as_str().unwrap();
+    assert!(launch.ends_with("-0/0"), "{listed}");
+    assert_eq!(viewer["title"], "rewind work", "{listed}");
+    // The viewer's view checkpoint is the run's newest, taken for it before it started.
+    let out = mcp_results(&session.read("out"));
+    let checkpoints: serde_json::Value = serde_json::from_str(&out[0].1).unwrap();
+    let reasons: Vec<_> = checkpoints["checkpoints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|checkpoint| checkpoint["reason"].as_str().unwrap())
+        .collect();
+    assert_eq!(reasons, ["view", "launch"], "{checkpoints}");
+}
+
+#[test]
 fn a_launch_checkpoint_past_wait_s_starts_the_agent_without_one() {
     let session = Session::new("cw", None).unwrap();
     fs::create_dir_all(session.directory.join("config/pinfold")).unwrap();

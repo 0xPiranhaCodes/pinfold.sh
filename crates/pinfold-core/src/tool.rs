@@ -92,13 +92,16 @@ pub const NO_SEND: &str = "a tool pane takes keys from the window alone, never p
 /// use std::path::Path;
 /// use pinfold_api::tool::{Run, Tool};
 ///
-/// let run = Run { tool: Tool::Files, path: "/".into(), staged: false, range: None };
+/// let run = Run { tool: Tool::Files, path: "/".into(), staged: false, range: None, checkpoint: None };
 /// let command = pinfold_core::tool::command(Path::new("/opt/pinfold"), &run).unwrap();
 /// assert_eq!(command.get_current_dir(), Some(Path::new("/")));
 /// let run = Run { tool: Tool::Md, ..run };
 /// assert!(pinfold_core::tool::command(Path::new("/opt/pinfold"), &run).is_err());
 /// ```
 pub fn command(binary: &Path, run: &Run) -> Result<Command, &'static str> {
+    if run.checkpoint.is_some() {
+        return Err("a checkpoint opens once its view checkpoint is taken");
+    }
     let path = Path::new(&run.path);
     let cwd = match run.tool {
         Tool::Md if path.is_file() => path.parent().unwrap_or(path),
@@ -111,17 +114,60 @@ pub fn command(binary: &Path, run: &Run) -> Result<Command, &'static str> {
     Ok(command)
 }
 
+/// Returns the diff viewer of `run`'s checkpoint as a command of `binary`, started in its
+/// directory: `pinfold diff --checkpoint -- <key> <checkpoint> <shown> <pane>`, where `key` names
+/// the run's store, `shown` is the view checkpoint the core just took and `pane` the agent's,
+/// which the viewer's `u` and `U` name to `checkpoint.restore` (ADR-0050 section 6).
+///
+/// # Errors
+///
+/// Returns why not, naming no path.
+///
+/// # Examples
+///
+/// ```
+/// use std::path::Path;
+/// use pinfold_api::tool::{Run, Tool};
+///
+/// let run = Run { tool: Tool::Diff, path: "/".into(), staged: false, range: None,
+///                 checkpoint: Some("r1-0/0".into()) };
+/// let command = pinfold_core::tool::rewind(Path::new("/opt/pinfold"), &run, "0123456789abcdef", "r1-0/2", 4).unwrap();
+/// let args: Vec<_> = command.get_args().collect();
+/// assert_eq!(args, ["diff", "--checkpoint", "--", "0123456789abcdef", "r1-0/0", "r1-0/2", "4"]);
+/// ```
+pub fn rewind(
+    binary: &Path,
+    run: &Run,
+    key: &str,
+    shown: &str,
+    pane: usize,
+) -> Result<Command, &'static str> {
+    let (Tool::Diff, Some(checkpoint)) = (run.tool, &run.checkpoint) else {
+        return Err("only diff opens a checkpoint");
+    };
+    if !Path::new(&run.path).is_dir() {
+        return Err("files and diff open an existing directory");
+    }
+    let mut command = Command::new(binary);
+    command.current_dir(&run.path);
+    command.args(["diff", "--checkpoint", "--", key, checkpoint, shown]);
+    command.arg(pane.to_string());
+    Ok(command)
+}
+
 /// Returns a tool pane's title: the tool and its argument, the last name of `path` or the
-/// range, escaped. A C0 control shows as `^X`, DEL as `^?`, and a C1 or bidi control as
+/// range, escaped, and `rewind` for the viewer of a checkpoint. A C0 control shows as `^X`, DEL as `^?`, and a C1 or bidi control as
 /// `<U+202E>`, as the tools escape them (ADR-0045 section 4).
 ///
 /// ```
 /// use pinfold_api::tool::{Run, Tool};
 ///
-/// let run = Run { tool: Tool::Md, path: "/r/evil\u{202e}dm.md".into(), staged: false, range: None };
+/// let run = Run { tool: Tool::Md, path: "/r/evil\u{202e}dm.md".into(), staged: false, range: None, checkpoint: None };
 /// assert_eq!(pinfold_core::tool::title(&run), "md evil<U+202E>dm.md");
-/// let run = Run { tool: Tool::Diff, path: "/r".into(), staged: true, range: Some("main..".into()) };
+/// let run = Run { tool: Tool::Diff, path: "/r".into(), staged: true, range: Some("main..".into()), checkpoint: None };
 /// assert_eq!(pinfold_core::tool::title(&run), "diff --staged main..");
+/// let run = Run { staged: false, range: None, checkpoint: Some("r1-0/0".into()), ..run };
+/// assert_eq!(pinfold_core::tool::title(&run), "rewind r");
 /// ```
 #[must_use]
 pub fn title(run: &Run) -> String {
@@ -130,7 +176,10 @@ pub fn title(run: &Run) -> String {
         Tool::Diff => run.range.as_deref().or(name),
         Tool::Md | Tool::Files => name,
     };
-    let mut title = run.tool.name().to_owned();
+    let mut title = match run.checkpoint {
+        Some(_) => "rewind".to_owned(),
+        None => run.tool.name().to_owned(),
+    };
     if run.staged {
         title.push_str(" --staged");
     }
@@ -158,6 +207,7 @@ mod tests {
             path,
             staged: false,
             range: None,
+            checkpoint: None,
         }
     }
 

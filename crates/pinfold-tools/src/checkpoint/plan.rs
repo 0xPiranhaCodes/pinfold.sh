@@ -230,7 +230,7 @@ pub(crate) fn pair(input: &mut dyn BufRead, a: &mut Vec<u8>, b: &mut Vec<u8>) ->
 }
 
 /// The run's newest `done` or `exit` checkpoint before `shown`.
-fn stopped(store: &Path, run: &str, shown: u64) -> io::Result<Option<u64>> {
+pub(crate) fn stopped(store: &Path, run: &str, shown: u64) -> io::Result<Option<u64>> {
     let mut numbers = numbers(store, run)?;
     numbers.sort_unstable_by(|a, b| b.cmp(a));
     for n in numbers.into_iter().filter(|&n| n < shown) {
