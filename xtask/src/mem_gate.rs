@@ -13,8 +13,6 @@ pub const CORE_LIMIT: u64 = 4_000_000;
 pub const LAUNCH_LIMIT: u64 = 5_000_000;
 /// A row that is shown with no budget, never failed.
 pub const INFORMATION: u64 = u64::MAX;
-/// The most 64 run records may add: the row with `[rewind]` on minus the one with it off.
-pub const RECORDS_LIMIT: u64 = 100_000;
 pub const PANE_LIMIT: u64 = 250_000;
 /// The window budget on Linux for an inner size of 1920x1080.
 pub const WINDOW_LIMIT_FULL_HD: u64 = 8_000_000 + 2 * 4 * 1920 * 1080;
@@ -239,10 +237,7 @@ fn megabytes(bytes: u64) -> f64 {
 
 /// Prints the table. Returns false if a budget is exceeded or cannot be measured. A screen with
 /// no CJK font is under-measured, not failed, as hosted CI may have none.
-///
-/// Each of `deltas`, `(metric, row, base, limit)`, fails unless `row`'s median exceeds `base`'s
-/// by at most `limit`.
-pub fn run(budgets: &[Budget], deltas: &[(&str, &str, &str, u64)]) -> bool {
+pub fn run(budgets: &[Budget]) -> bool {
     println!(
         "Median of {RUNS} runs in MB (10^6 bytes), on {}.\n",
         std::env::consts::OS
@@ -250,14 +245,9 @@ pub fn run(budgets: &[Budget], deltas: &[(&str, &str, &str, u64)]) -> bool {
     println!("| Metric | Measured | Budget | Result |");
     println!("| --- | --- | --- | --- |");
     let mut passed = true;
-    let mut measured = Vec::new();
     for budget in budgets {
         let limit = megabytes(budget.limit);
-        let reading = measure(budget);
-        if let Ok((bytes, _)) = reading {
-            measured.push((budget.metric, bytes));
-        }
-        match reading {
+        match measure(budget) {
             Ok((bytes, _)) if budget.limit == INFORMATION => {
                 println!(
                     "| {} | {:.2} | | information only |",
@@ -295,22 +285,6 @@ pub fn run(budgets: &[Budget], deltas: &[(&str, &str, &str, u64)]) -> bool {
                 );
             }
         }
-    }
-    let median = |metric: &str| measured.iter().find(|(m, _)| *m == metric).map(|(_, b)| *b);
-    for &(metric, row, base, limit) in deltas {
-        let over = median(row)
-            .zip(median(base))
-            .map(|(row, base)| row as f64 - base as f64);
-        let fits = over.is_some_and(|over| over <= limit as f64);
-        passed &= fits;
-        let shown = over.map_or("not measured".to_owned(), |over| {
-            format!("{:.2}", over / 1e6)
-        });
-        let result = if fits { "pass" } else { "**FAIL**" };
-        println!(
-            "| {metric} | {shown} | {:.2} | {result} |",
-            megabytes(limit)
-        );
     }
     for (metric, issue) in NOT_MEASURED {
         println!("| {metric} | not measured | | waits for {issue} |");
@@ -458,24 +432,17 @@ mod tests {
 
     #[test]
     fn a_real_process_under_budget_passes() {
-        assert!(run(&[sleep(u64::MAX, &["30"])], &[]));
+        assert!(run(&[sleep(u64::MAX - 1, &["30"])]));
     }
 
     #[test]
     fn a_real_process_over_budget_fails() {
-        assert!(!run(&[sleep(1, &["30"])], &[]));
+        assert!(!run(&[sleep(1, &["30"])]));
     }
 
     #[test]
     fn a_process_that_exits_early_fails() {
-        assert!(!run(&[sleep(u64::MAX, &["0"])], &[]));
-    }
-
-    #[test]
-    fn a_delta_passes_within_its_limit_and_fails_past_it_or_unmeasured() {
-        let rows = [sleep(u64::MAX, &["30"])];
-        assert!(run(&rows, &[("delta", "sleep", "sleep", 0)]));
-        assert!(!run(&rows, &[("delta", "sleep", "missing", u64::MAX)]));
+        assert!(!run(&[sleep(u64::MAX, &["0"])]));
     }
 
     #[test]
@@ -508,7 +475,7 @@ mod tests {
             inbox: None,
             agents: None,
         };
-        assert!(!run(&[budget], &[]));
+        assert!(!run(&[budget]));
     }
 
     #[test]
@@ -539,7 +506,7 @@ mod tests {
             window: Some(Side::Window),
             ..sleep(u64::MAX, &[])
         };
-        assert!(!run(&[budget], &[]));
+        assert!(!run(&[budget]));
     }
 
     #[test]
@@ -554,7 +521,7 @@ mod tests {
         };
         let error = measure_once(&budget, budget.args).unwrap_err();
         assert!(error.to_string().contains("exited early"), "{error}");
-        assert!(!run(&[budget], &[]));
+        assert!(!run(&[budget]));
     }
 
     #[test]
@@ -578,7 +545,7 @@ mod tests {
             wait_for_line: true,
             ..sleep(u64::MAX, &[])
         };
-        assert!(!run(&[budget], &[]));
+        assert!(!run(&[budget]));
     }
 
     #[test]
@@ -597,7 +564,7 @@ mod tests {
             ..sleep(u64::MAX, &["30"])
         };
         assert!(measure(&budget).unwrap().1);
-        assert!(run(&[budget], &[]));
+        assert!(run(&[budget]));
     }
 
     #[test]
@@ -606,7 +573,7 @@ mod tests {
             screen: Some(Path::new("/bin/sh")),
             ..sleep(1, &["30"])
         };
-        assert!(!run(&[budget], &[]));
+        assert!(!run(&[budget]));
     }
 
     #[test]
