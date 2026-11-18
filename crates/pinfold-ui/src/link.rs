@@ -237,6 +237,11 @@ struct State {
     alerting: Vec<(u32, u8)>,
     /// Whether a go to the next pane that needs you found none.
     none_waiting: bool,
+    /// Each run's pane whose strip changed and why it has no checkpoint, until the window takes
+    /// it, at most [`MAX_PANES`] (ADR-0050).
+    checkpoints: Vec<(u32, u8)>,
+    /// How the last restore the window allowed ended, until the window takes it.
+    restored: Option<(u32, u32, String)>,
 }
 
 impl State {
@@ -373,6 +378,17 @@ impl State {
                 }
             }
             Notice::Refused { reason } => self.refused = Some(reason),
+            Notice::Checkpoint { pane, missing } => {
+                self.checkpoints.retain(|(other, _)| *other != pane);
+                if self.checkpoints.len() < MAX_PANES {
+                    self.checkpoints.push((pane, missing));
+                }
+            }
+            Notice::Restored {
+                undid,
+                skipped,
+                error,
+            } => self.restored = Some((undid, skipped, error.to_owned())),
             // The core restores at most this many panes, once.
             Notice::WasRunning {
                 pane,
@@ -993,6 +1009,18 @@ impl Link {
     /// given up on, if the core said so since the last call: after the hello and on a change.
     pub fn take_webhook(&mut self) -> Option<(String, bool, u32)> {
         self.state.webhook.take()
+    }
+
+    /// Takes the oldest change to a run's strip: its pane and why it has no checkpoint, an index
+    /// into [`pinfold_proto::link::MISSING`], 0 once it has one (ADR-0050).
+    pub fn take_checkpoint(&mut self) -> Option<(u32, u8)> {
+        (!self.state.checkpoints.is_empty()).then(|| self.state.checkpoints.remove(0))
+    }
+
+    /// Takes how the last restore the window allowed ended: files undone, skipped, and the
+    /// core's words for a failure, empty for none (ADR-0050).
+    pub fn take_restored(&mut self) -> Option<(u32, u32, String)> {
+        self.state.restored.take()
     }
 
     /// Returns whether the core turned out too old to take the theme's palette, once. Its

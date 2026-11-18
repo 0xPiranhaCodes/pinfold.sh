@@ -1064,6 +1064,39 @@ impl Reactor {
         window.session.notice(&notice).is_ok() && window.session.flush().is_ok()
     }
 
+    /// Tells the window why the run in `pane` has no checkpoint, an index into
+    /// [`pinfold_proto::link::MISSING`], 0 for none, for the strip under it (ADR-0050).
+    /// Returns false with no ready window, so it is told again once one is ready; a window too
+    /// old to show it counts as told.
+    pub fn tell_checkpoint(&mut self, pane: usize, missing: u8) -> bool {
+        let Ok(pane) = u32::try_from(pane) else {
+            return true;
+        };
+        self.tell(&Notice::Checkpoint { pane, missing })
+    }
+
+    /// Tells the window how a restore it allowed ended, for its flash: files undone and
+    /// skipped, or the core's own words for why it failed (ADR-0050). Nothing is kept for a
+    /// window that is not there.
+    pub fn tell_restored(&mut self, undid: u32, skipped: u32, error: &str) {
+        let _ = self.tell(&Notice::Restored {
+            undid,
+            skipped,
+            error,
+        });
+    }
+
+    fn tell(&mut self, notice: &Notice<'_>) -> bool {
+        let Some(window) = (self.host.window.as_mut()).filter(|window| window.session.greeted)
+        else {
+            return false;
+        };
+        if window.decoder.version() < Some(notice.since()) {
+            return true;
+        }
+        window.session.notice(notice).is_ok() && window.session.flush().is_ok()
+    }
+
     /// Takes one answer that arrived over the inherited window link.
     pub fn take_approval_answer(&mut self) -> Option<(u64, ApprovalAnswer)> {
         self.approval_answers.pop()
@@ -1193,6 +1226,10 @@ mod tests {
         peeked: Vec<(Option<u8>, String)>,
         /// Each pane's OSC 12 cursor colour and OSC 11 background, as told.
         colours: Vec<(u32, Option<u32>, Option<u32>)>,
+        /// Each strip told: the run's pane and why it has no checkpoint.
+        checkpoints: Vec<(u32, u8)>,
+        /// Each restore's flash: undone, skipped and the error.
+        restored: Vec<(u32, u32, String)>,
     }
 
     impl Peer {
@@ -1229,6 +1266,8 @@ mod tests {
                 unhardened: Vec::new(),
                 secrets: Vec::new(),
                 webhooks: Vec::new(),
+                checkpoints: Vec::new(),
+                restored: Vec::new(),
                 extras: Vec::new(),
                 peeked: Vec::new(),
                 colours: Vec::new(),
@@ -1344,6 +1383,14 @@ mod tests {
                             command,
                         } => self.was_running.push((pane, runnable, command.to_owned())),
                         Notice::Approval(_) => {}
+                        Notice::Checkpoint { pane, missing } => {
+                            self.checkpoints.push((pane, missing));
+                        }
+                        Notice::Restored {
+                            undid,
+                            skipped,
+                            error,
+                        } => self.restored.push((undid, skipped, error.to_owned())),
                         Notice::Unhardened { checked } => self.unhardened.push(checked),
                         Notice::Secrets { count, names } => {
                             self.secrets.push((count, names.to_owned()));
@@ -1659,15 +1706,6 @@ mod tests {
         peer.send(Request::Inbox { open: false });
         assert!(turn_until(&mut reactor, |r| r.host.deadline().is_none()));
 
-        // A window of 20 gets branches only, so no peek runs for it.
-        fs::remove_file(root.join("args")).unwrap();
-        let mut older = Peer::older(&mut reactor, VERSION - 1);
-        older.fit(&reactor, agent);
-        serve(&mut reactor, &mut older, |_, p| p.status.is_some());
-        older.send(Request::Inbox { open: true });
-        serve(&mut reactor, &mut older, |_, p| !p.extras.is_empty());
-        assert_eq!(older.peeked, [(None, String::new())]);
-        assert!(!root.join("args").exists(), "a peek ran for a window of 20");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -1791,6 +1829,37 @@ mod tests {
         peer.read();
         let told = |failed| ("ntfy.sh".to_owned(), false, failed);
         assert_eq!(peer.webhooks, [told(0), told(2)], "once, then on a change");
+    }
+
+    #[test]
+    fn a_strip_and_a_restore_flash_reach_only_a_window_that_can_show_them() {
+        let mut reactor = Reactor::new().unwrap();
+        let pane = reactor.open_tab(shell(ALIVE), 24, 80).unwrap();
+        assert!(
+            !reactor.tell_checkpoint(pane, 1),
+            "no window: told again later"
+        );
+        let mut peer = Peer::watching(&mut reactor, pane);
+        serve(&mut reactor, &mut peer, |r, p| p.matches(r, pane));
+        assert!(reactor.tell_checkpoint(pane, 1));
+        reactor.tell_restored(8, 1, "");
+        serve(&mut reactor, &mut peer, |_, p| !p.restored.is_empty());
+        assert_eq!(peer.checkpoints, [(u32::try_from(pane).unwrap(), 1)]);
+        assert_eq!(peer.restored, [(8, 1, String::new())]);
+        drop(peer);
+        assert!(turn_until(&mut reactor, |r| !r.has_window()));
+        // A window a version older shows neither, so it counts as told and gets nothing.
+        let mut old = Peer::older(&mut reactor, link::REWIND - 1);
+        serve(&mut reactor, &mut old, |r, _| r.is_window_ready());
+        assert!(reactor.tell_checkpoint(pane, 1));
+        reactor.tell_restored(0, 0, "the restore was refused or failed");
+        assert!(!reactor.can_ask(ApprovalAction::Rewind));
+        reactor.write(pane, b"more\n");
+        serve(&mut reactor, &mut old, |r, _| {
+            on_screen(r, pane, "got-more")
+        });
+        old.read();
+        assert!(old.checkpoints.is_empty() && old.restored.is_empty());
     }
 
     #[test]

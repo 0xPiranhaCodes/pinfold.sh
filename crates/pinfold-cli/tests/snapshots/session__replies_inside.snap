@@ -9,7 +9,7 @@ expression: said
       "id": 1,
       "jsonrpc": "2.0",
       "result": {
-        "link": 21,
+        "link": 23,
         "methods": [
           "window.open",
           "pane.list",
@@ -24,7 +24,8 @@ expression: said
           "pane.status",
           "tool.open",
           "checkpoint.take",
-          "checkpoint.list"
+          "checkpoint.list",
+          "checkpoint.restore"
         ],
         "pane": 0,
         "version": 2

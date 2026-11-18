@@ -225,6 +225,39 @@ fn an_approval_prompt_names_both_panes_and_the_exact_send() {
     insta::assert_snapshot!(cells(&approval()));
 }
 
+/// PinFold's rewind prompt as the core words it: the directory, since when and why, who asks,
+/// the counts, a note, and each path, the one changed later in red (ADR-0050 section 6).
+pub(crate) fn rewind() -> Frame {
+    let mut queue = Queue::default();
+    let texts = [
+        "/Users/me/work/pinfold",
+        "since 12 min ago (launch)",
+        "asked by the tool in pane 3",
+        "restore 1 · delete 1 the agent added · bring back 1 it deleted · 1 changed later",
+        "the agent is still running, and may change these files again",
+        "! restore src/main.rs",
+        "  delete notes^[[2J.txt",
+        "  bring back README.md",
+        "and 2 more",
+    ];
+    let rewind = Approval {
+        id: 9,
+        caller: 0,
+        target: 3,
+        action: ApprovalAction::Rewind,
+        texts: texts.map(str::to_owned).to_vec(),
+    };
+    assert_eq!(queue.add(rewind), None);
+    let mut frame = pane('x', 12, 80);
+    queue.draw(&mut frame, Instant::now(), &GRAPHITE);
+    frame
+}
+
+#[test]
+fn a_rewind_prompt_shows_the_counts_and_the_paths_with_later_ones_in_red() {
+    insta::assert_snapshot!(cells(&rewind()));
+}
+
 #[test]
 fn the_right_click_menu_with_a_link() {
     let mut frame = pane('x', 14, 20);

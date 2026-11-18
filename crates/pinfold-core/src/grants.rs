@@ -211,6 +211,26 @@ impl<T, C: Clock> Grants<T, C> {
         self.ask_alone(ticket, 0, ApprovalAction::Owner, texts, window_ready)
     }
 
+    /// Parks a `Rewind` prompt of its own for the run in `pane`: `texts` are what the core
+    /// planned and escaped. Like trust, only allowing once answers it (ADR-0050).
+    pub fn ask_rewind(
+        &mut self,
+        ticket: T,
+        pane: usize,
+        texts: Vec<String>,
+        window_ready: bool,
+    ) -> Decision<T> {
+        self.ask_alone(ticket, pane, ApprovalAction::Rewind, texts, window_ready)
+    }
+
+    /// Whether a parked ticket is `parked`.
+    pub fn any(&self, parked: impl FnMut(&T) -> bool) -> bool {
+        self.pending
+            .iter()
+            .flat_map(|pending| &pending.tickets)
+            .any(parked)
+    }
+
     fn ask_alone(
         &mut self,
         ticket: T,
@@ -279,6 +299,7 @@ impl<T, C: Clock> Grants<T, C> {
         let reason = match action {
             ApprovalAction::Trust => "the workspace was not trusted",
             ApprovalAction::Owner => "the owner action was denied in the window",
+            ApprovalAction::Rewind => "the restore was refused in the window",
             ApprovalAction::Read | ApprovalAction::Send => "cross-pane action denied",
         };
         release(pending.tickets, allowed, reason)
