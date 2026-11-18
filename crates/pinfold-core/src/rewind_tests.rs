@@ -140,6 +140,10 @@ fn a_launch_queued_past_wait_s_gives_up_without_a_worker() {
         rewind.started(run, Some(run));
         rewind.take(run, 0, now).unwrap();
     }
+    // Both started, as a launch queued beside them would start first.
+    until(&mut rewind, &dir, |_, log| {
+        log.iter().filter(|line| line.contains(" api ")).count() == 2
+    });
     let queued = rewind.open(1, &dir.path().join("c")).unwrap();
     rewind.launch(queued, dir.path().join("c"), 9, now).unwrap();
     let ended = until(&mut rewind, &dir, |ended, _| {
