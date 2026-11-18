@@ -264,6 +264,20 @@ fn write_tool_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
             quote(&fs::canonicalize(HEAVY_SCREEN)?)
         ),
     )?;
+    fs::set_permissions(script, fs::Permissions::from_mode(0o755))?;
+    // ADR-0051 §11's inbox rows: agents that say they need you from a repository and wait, with
+    // the default config, so the core's own cost of reading their branches shows.
+    let agents = dir.join("agents");
+    fs::create_dir_all(&agents)?;
+    let script = agents.join("agent.sh");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncd {} || exit 1\n{} ctl status needs-you 'Allow edit to src/config.rs?'\nexec /bin/sleep 86400\n",
+            quote(&repo),
+            quote(tools)
+        ),
+    )?;
     fs::set_permissions(script, fs::Permissions::from_mode(0o755))
 }
 
@@ -383,6 +397,7 @@ fn mem_gate_task() -> ExitCode {
     );
     let tool_screen = inputs.join("tool-screen.sh");
     let agents_screen = inputs.join("agents-screen.sh");
+    let listed_agents = inputs.join("agents");
     let replay_typical = ["--replay", typical.as_str()];
     let replay_hostile = ["--replay", hostile.as_str()];
     let replay_baseline: &[&str] = &["--replay", "/dev/null"];
@@ -682,19 +697,29 @@ fn mem_gate_task() -> ExitCode {
             inbox: None,
             agents: None,
         };
-        // ADR-0051 §11: branches are read while the inbox is open and kept by nobody.
-        budgets.push(mem_gate::Budget {
-            metric: "Core with the inbox open over 8 agent panes with branches",
-            screen: Some(&agents_screen),
-            inbox: Some("open"),
-            ..beside
-        });
-        budgets.push(mem_gate::Budget {
-            metric: "Core after the inbox closed over 8 agent panes with branches",
-            screen: Some(&agents_screen),
-            inbox: Some("closed"),
-            ..beside
-        });
+        // ADR-0051 §11: branches are read while the inbox is open and kept by nobody, so the
+        // three rows match.
+        for (metric, inbox) in [
+            (
+                "Core beside that window, 8 agent panes listed with branches",
+                None,
+            ),
+            (
+                "Core with the inbox open over 8 agent panes with branches",
+                Some("open"),
+            ),
+            (
+                "Core after the inbox closed over 8 agent panes with branches",
+                Some("closed"),
+            ),
+        ] {
+            budgets.push(mem_gate::Budget {
+                metric,
+                inbox,
+                agents: Some(&listed_agents),
+                ..beside
+            });
+        }
         budgets.push(beside);
     }
     if cfg!(target_os = "linux") {
@@ -821,19 +846,29 @@ fn mem_gate_task() -> ExitCode {
             inbox: None,
             agents: None,
         };
-        // ADR-0051 §11: branches are read while the inbox is open and kept by nobody.
-        budgets.push(mem_gate::Budget {
-            metric: "Core with the inbox open over 8 agent panes with branches",
-            screen: Some(&agents_screen),
-            inbox: Some("open"),
-            ..beside
-        });
-        budgets.push(mem_gate::Budget {
-            metric: "Core after the inbox closed over 8 agent panes with branches",
-            screen: Some(&agents_screen),
-            inbox: Some("closed"),
-            ..beside
-        });
+        // ADR-0051 §11: branches are read while the inbox is open and kept by nobody, so the
+        // three rows match.
+        for (metric, inbox) in [
+            (
+                "Core beside that window, 8 agent panes listed with branches",
+                None,
+            ),
+            (
+                "Core with the inbox open over 8 agent panes with branches",
+                Some("open"),
+            ),
+            (
+                "Core after the inbox closed over 8 agent panes with branches",
+                Some("closed"),
+            ),
+        ] {
+            budgets.push(mem_gate::Budget {
+                metric,
+                inbox,
+                agents: Some(&listed_agents),
+                ..beside
+            });
+        }
         budgets.push(beside);
     }
     let passed = mem_gate::run(&budgets);
