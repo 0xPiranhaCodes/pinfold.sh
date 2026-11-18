@@ -11,6 +11,8 @@ pub const CORE_LIMIT: u64 = 4_000_000;
 /// A ceiling on the core after 64 agent launches, which keeps about 1 MB more with or without
 /// checkpoints (#476). Not a core allowance: it returns to [`CORE_LIMIT`] once #476 is fixed.
 pub const LAUNCH_LIMIT: u64 = 5_000_000;
+/// A row that is shown with no budget, never failed.
+pub const INFORMATION: u64 = u64::MAX;
 /// The most 64 run records may add: the row with `[rewind]` on minus the one with it off.
 pub const RECORDS_LIMIT: u64 = 100_000;
 pub const PANE_LIMIT: u64 = 250_000;
@@ -253,6 +255,13 @@ pub fn run(budgets: &[Budget], deltas: &[(&str, &str, &str, u64)]) -> bool {
             measured.push((budget.metric, bytes));
         }
         match reading {
+            Ok((bytes, _)) if budget.limit == INFORMATION => {
+                println!(
+                    "| {} | {:.2} | | information only |",
+                    budget.metric,
+                    megabytes(bytes)
+                );
+            }
             Ok((bytes, true)) if bytes <= budget.limit => {
                 println!(
                     "| {} | {:.2} | {limit:.2} | no CJK font, so this leaves CJK out |",
