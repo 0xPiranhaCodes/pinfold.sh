@@ -2681,13 +2681,17 @@ mod tests {
         reactor.host.window.as_mut().unwrap().session.inbox = Some(Instant::now());
         serve(&mut reactor, &mut peer, |_, p| p.outside.len() == 17);
         assert_eq!(peer.outside[16], (0, 0, 0, String::new()));
-        let mut older = Peer::older(&mut reactor, VERSION - 1);
-        older.send(Request::Inbox { open: true });
-        for _ in 0..50 {
-            reactor.turn(Some(Duration::from_millis(5))).unwrap();
+        // The version before outside rows by name, as `VERSION - 1` moves with every new one.
+        // Once `OLDEST` passes it, no window without them can link at all.
+        if OLDEST < link::OUTSIDE {
+            let mut older = Peer::older(&mut reactor, link::OUTSIDE - 1);
+            older.send(Request::Inbox { open: true });
+            for _ in 0..50 {
+                reactor.turn(Some(Duration::from_millis(5))).unwrap();
+            }
+            older.read();
+            assert!(older.outside.is_empty());
         }
-        older.read();
-        assert!(older.outside.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
 
