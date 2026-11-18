@@ -196,6 +196,39 @@ fn measure_once(budget: &Budget, args: &[&str]) -> io::Result<Reading> {
             })
         })
         .and_then(|pid| Ok((pinfold_sys::footprint(pid)?, pid)));
+    // DIAGNOSTIC (#490), not for merge: the core's mappings by PSS.
+    if let Ok((bytes, pid)) = &measured
+        && cfg!(target_os = "linux")
+        && budget.metric.starts_with("Core")
+    {
+        let smaps = std::fs::read_to_string(format!("/proc/{pid}/smaps")).unwrap_or_default();
+        let status = std::fs::read_to_string(format!("/proc/{pid}/status")).unwrap_or_default();
+        let threads = status.lines().find(|l| l.starts_with("Threads:")).unwrap_or("");
+        println!("DIAG {} pss={bytes} {threads}", budget.metric);
+        let (mut head, mut size, mut pss, mut anon) = (String::new(), 0u64, 0u64, 0u64);
+        let mut rows = Vec::new();
+        let field = |l: &str| l.split_whitespace().nth(1).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+        for line in smaps.lines().chain(std::iter::once("ffff-ffff end")) {
+            let first = line.split_whitespace().next().unwrap_or("");
+            if first.contains('-') && !first.ends_with(':') {
+                if !head.is_empty() && pss >= 8 {
+                    rows.push((pss, size, anon, head.clone()));
+                }
+                head = line.to_owned();
+                (size, pss, anon) = (0, 0, 0);
+            } else if line.starts_with("Size:") {
+                size = field(line);
+            } else if line.starts_with("Pss:") {
+                pss = field(line);
+            } else if line.starts_with("Anonymous:") {
+                anon = field(line);
+            }
+        }
+        rows.sort_by(|a, b| b.0.cmp(&a.0));
+        for (pss, size, anon, head) in rows.iter().take(40) {
+            println!("DIAG   pss={pss}k size={size}k anon={anon}k {head}");
+        }
+    }
     let no_font = match &measured {
         // The window draws the screen; a core beside it opens no font.
         Ok((_, pid)) if budget.screen.is_some() && budget.window != Some(Side::Core) => {
