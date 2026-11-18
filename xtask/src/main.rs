@@ -300,6 +300,53 @@ fn write_webhook_inputs(dir: &Path, tools: &Path, rows: &[(&str, &str, &str)]) -
     Ok(())
 }
 
+/// Writes `on` and `off` under `dir` for the run-record rows (ADR-0050): each a config with
+/// `[rewind]` on or off and a profile whose agent exits at once, a `state` folder the core keeps
+/// its checkpoints in, a scratch `work` folder, and `agent.sh`, every pane's shell, which reports
+/// running, launches 8 agents in tabs, then takes and lists a checkpoint of each run through
+/// `pinfold mcp`, the other panes' runs refused, and waits. 8 panes make 64 closed runs.
+fn write_rewind_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let quote = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', r"'\''"));
+    for (row, enabled) in [("on", true), ("off", false)] {
+        let folder = dir.join(row);
+        for sub in ["pinfold", "state", "work"] {
+            fs::create_dir_all(folder.join(sub))?;
+        }
+        fs::write(folder.join("work/a.txt"), "a\n")?;
+        fs::write(
+            folder.join("pinfold/pinfold.toml"),
+            format!(
+                "[rewind]\nenabled = {enabled}\n\
+                 [agents.quick]\ncommand = [\"/bin/sh\", \"-c\", \"exit 0\"]\n"
+            ),
+        )?;
+        let call = |name: &str| {
+            format!(
+                "printf '{{\"jsonrpc\":\"2.0\",\"id\":%s,\"method\":\"tools/call\",\
+                 \"params\":{{\"name\":\"{name}\",\"arguments\":{{\"pane\":%s}}}}}}\\n' $p $p"
+            )
+        };
+        let tools = quote(tools);
+        let script = folder.join("agent.sh");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\ncd {work} || exit 1\n{tools} ctl status running 'checkpoints'\n\
+                 i=0; while [ $i -lt 8 ]; do {tools} agent quick --tab 2>/dev/null; i=$((i + 1)); done\n\
+                 {{ echo '{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{{}}}}'\n\
+                 p=8; while [ $p -lt 72 ]; do {take}; {list}; p=$((p + 1)); done; }} | {tools} mcp > /dev/null\n\
+                 exec /bin/sleep 86400\n",
+                work = quote(&folder.join("work")),
+                take = call("checkpoint_take_v1"),
+                list = call("checkpoint_list_v1"),
+            ),
+        )?;
+        fs::set_permissions(script, fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
 /// Takes webhook posts on loopback and answers each 204 at once, for the burst row. Returns its
 /// port. Std only: it reads a request's headers and the body they announce, and nothing else.
 fn answer_posts() -> io::Result<u16> {
@@ -354,7 +401,8 @@ fn mem_gate_task() -> ExitCode {
                     ("one", "https://127.0.0.1:9", "one"),
                     ("burst", &burst, "needs-you"),
                 ],
-            )
+            )?;
+            write_rewind_inputs(&inputs.join("rewind"), &tools)
         })
     {
         eprintln!("mem-gate: {error}");
@@ -465,6 +513,15 @@ fn mem_gate_task() -> ExitCode {
         inbox: None,
         agents: Some(&idle_hook),
     };
+    // ADR-0050 section 7 and slice 5: 64 run records over 8 agent panes, and no checkpoint list
+    // kept, against the same panes and launches with `[rewind]` off.
+    let (rewind_on, rewind_off) = (inputs.join("rewind/on"), inputs.join("rewind/off"));
+    let records = mem_gate::Budget {
+        metric: "Core, 8 agent panes plus 64 run records",
+        settle: mem_gate::REWIND_SETTLE,
+        agents: Some(&rewind_on),
+        ..webhook
+    };
     budgets.extend([
         mem_gate::Budget {
             metric: "Core, 8 agent panes listed, a webhook after one alert",
@@ -479,6 +536,14 @@ fn mem_gate_task() -> ExitCode {
             ..webhook
         },
         webhook,
+    ]);
+    budgets.extend([
+        mem_gate::Budget {
+            metric: "Core, 8 agent panes, 64 runs launched, [rewind] off",
+            agents: Some(&rewind_off),
+            ..records
+        },
+        records,
     ]);
     // ADR-0045 section 5. Each tool runs in a pane of a core, which prints the tool's pid.
     let idle_tool = ["--tool", "1", "files", empty.as_str()];

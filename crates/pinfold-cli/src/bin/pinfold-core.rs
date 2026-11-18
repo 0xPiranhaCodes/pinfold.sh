@@ -24,6 +24,7 @@ use pinfold_config::workspace as layout;
 use pinfold_core::family::{self, Family, SplitWay};
 use pinfold_core::grants::{Decision, Grants, Released};
 use pinfold_core::io::{Reactor, Waker};
+use pinfold_core::rewind::{self, Missing, Rewind, Settings};
 use pinfold_core::snapshot::{self, Saver, Snapshot};
 use pinfold_core::status::Status;
 use pinfold_core::wait::{Outcome, Waits};
@@ -145,13 +146,10 @@ fn grants_list<T, C: pinfold_core::grants::Clock>(grants: &mut Grants<T, C>) -> 
 /// a terminal may, in a pane or not, as a list shows no screen and little a same-user `ps` does
 /// not. Spawns and closes reach only the caller's own pane and the panes it spawned, the `self`
 /// and `children` scopes. Pane contents go to the caller alone, never to a log. Owner methods
-/// that change something are asked in the window first, by [`decide`], and refused here. An agent
-/// launches only by its profile's name in `agents`, the user's config, and a sandboxed agent and
-/// the panes under it start only sandboxed agents in its working directory.
+/// that change something are asked in the window first, by [`decide`], and refused here.
 fn immediate<T, C: pinfold_core::grants::Clock>(
     reactor: &mut Reactor,
     family: &mut Family,
-    agents: &BTreeMap<String, Agent>,
     grants: &mut Grants<T, C>,
     request: &Request,
 ) -> Result<Value, String> {
@@ -173,6 +171,8 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                     "events.subscribe",
                     "pane.status",
                     "tool.open",
+                    "checkpoint.take",
+                    "checkpoint.list",
                 ],
                 (true, None) => &[
                     "window.open",
@@ -185,6 +185,8 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                     "workspace.open",
                     "workspace.trust_state",
                     "workspace.ask_trust",
+                    "checkpoint.take",
+                    "checkpoint.list",
                 ],
                 (false, _) => &["window.open"],
             };
@@ -212,86 +214,6 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
             let own = own.ok_or("pane.spawn needs a caller in a pane")?;
             let of = spawn.of.unwrap_or(own);
             let pane = family.spawn(reactor, own, of, way(spawn.place), spawn.cwd.as_deref())?;
-            Ok(json!({"pane": pane}))
-        }
-        Method::AgentLaunch(launch) => {
-            let own = own.ok_or("agent.launch needs a caller in a pane")?;
-            let of = family.reach(reactor, Some(own), launch.of.unwrap_or(own))?;
-            // The caller's name is not echoed: the reason goes to the audit log.
-            let agent = agents
-                .get(&launch.profile)
-                .ok_or("no agent profile by that name in the config")?;
-            // Where `of` is: its last OSC 7, which any program there can print, or its shell's
-            // own directory. Never the core's, which a pane with neither would get.
-            let cwd = reactor.cwd(of).filter(|cwd| Path::new(cwd).is_dir());
-            let cwd = cwd.ok_or("the pane's directory is not known: its shell has none to read")?;
-            let (command, work) = if agent.sandbox {
-                // The sandbox needs a directory of the pane's, never one the core chose.
-                let refused = |error: io::Error| format!("the sandbox will not start: {error}");
-                let hidden = pinfold_config::private_dirs();
-                // Never waits: a shell still reading refuses this launch.
-                let state =
-                    pinfold_config::state_dir().ok_or("no state directory, as HOME is not set")?;
-                let path = sandbox::login_path(&state).map_err(refused)?;
-                let work = sandbox::working_directory(Path::new(&cwd), &hidden, &path);
-                let work = work.map_err(refused)?;
-                // Before the shadow is made, so a refused launch writes nothing.
-                family.contain(reactor, own, Some(work.path()))?;
-                let api = control::socket_path(&control::runtime_dir());
-                // A missing sandbox tool is an error, so the agent never runs unsandboxed.
-                // The agent's own git directory, one per profile and working directory (ADR-0039).
-                let name = Path::new(&launch.profile);
-                let named = matches!(
-                    name.components().collect::<Vec<_>>()[..],
-                    [Component::Normal(_)]
-                );
-                let shadow = pinfold_config::data_dir().filter(|_| named).map(|data| {
-                    let key = trust::sha256(work.path().as_os_str().as_encoded_bytes());
-                    data.join("agents").join(name).join(&key[..16])
-                });
-                let shadow = shadow.as_deref();
-                let command = sandbox::command(
-                    &agent.command,
-                    &hidden,
-                    &agent.keep_env,
-                    &work,
-                    &api,
-                    shadow,
-                );
-                if cfg!(target_os = "linux") {
-                    log_abstract_socket_gap();
-                }
-                (command.map_err(refused)?, Some(work))
-            } else {
-                let (program, args) = agent.command.split_first().ok_or("empty command")?;
-                let mut command = Command::new(program);
-                command.args(args);
-                (command, None)
-            };
-            let way = way(launch.place);
-            let pane = match work {
-                Some(work) => {
-                    family.spawn_sandboxed(reactor, own, of, way, work.path(), command)?
-                }
-                None => family.spawn_command(reactor, own, of, way, Some(&cwd), command)?,
-            };
-            // The profile's place in the config's, which the core read when it started; past 255
-            // profiles the index names none.
-            let profile = agents.keys().position(|name| *name == launch.profile);
-            let profile = profile
-                .and_then(|at| u8::try_from(at).ok())
-                .unwrap_or(u8::MAX);
-            reactor.read_agent_signals(pane, profile);
-            if agent.sandbox
-                && let Some((count, names)) = reactor.launched_sandboxed()
-            {
-                // Names only, never a value (ADR-0047).
-                let _ = writeln!(
-                    io::stderr(),
-                    "pinfold-core: warn secret_names={count} [{names}]: on macOS sandboxed agents \
-                     can read these variables in other panes; strip_secrets = true removes them"
-                );
-            }
             Ok(json!({"pane": pane}))
         }
         // A tool runs as the caller's child, so a sandboxed caller is refused as for any pane.
@@ -350,8 +272,352 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
         | Method::PaneRead { .. }
         | Method::PaneLastOutput { .. }
         | Method::PaneSend { .. }
+        | Method::AgentLaunch(_)
+        | Method::CheckpointTake { .. }
+        | Method::CheckpointList { .. }
         | Method::AuditRead { .. } => Err("not here".to_owned()),
     }
+}
+
+/// A launch whose agent waits for its checkpoint, or a checkpoint call waiting on a worker.
+enum Parked {
+    Launch(Request, Box<Prepared>),
+    Call(Request),
+}
+
+/// An `agent.launch` checked and ready to start: its pane, directory and command are fixed.
+struct Prepared {
+    own: usize,
+    of: usize,
+    way: Option<SplitWay>,
+    cwd: String,
+    command: Command,
+    work: Option<sandbox::WorkingDirectory>,
+    /// The profile's place in the config's, or `u8::MAX`.
+    profile: u8,
+    sandbox: bool,
+    /// Whether the profile takes checkpoints.
+    rewind: bool,
+}
+
+impl Prepared {
+    /// Where the agent starts, which its checkpoints cover.
+    fn dir(&self) -> &Path {
+        self.work
+            .as_ref()
+            .map_or(Path::new(&self.cwd), |work| work.path())
+    }
+}
+
+/// Checks an `agent.launch` and builds its command. An agent launches only by its profile's
+/// name in `agents`, the user's config, and a sandboxed agent and the panes under it start only
+/// sandboxed agents in its working directory.
+fn prepare(
+    reactor: &mut Reactor,
+    family: &mut Family,
+    agents: &BTreeMap<String, Agent>,
+    own: Option<usize>,
+    launch: &pinfold_api::spawn::Launch,
+) -> Result<Prepared, String> {
+    let own = own.ok_or("agent.launch needs a caller in a pane")?;
+    let of = family.reach(reactor, Some(own), launch.of.unwrap_or(own))?;
+    // The caller's name is not echoed: the reason goes to the audit log.
+    let agent = agents
+        .get(&launch.profile)
+        .ok_or("no agent profile by that name in the config")?;
+    // Where `of` is: its last OSC 7, which any program there can print, or its shell's
+    // own directory. Never the core's, which a pane with neither would get.
+    let cwd = reactor.cwd(of).filter(|cwd| Path::new(cwd).is_dir());
+    let cwd = cwd.ok_or("the pane's directory is not known: its shell has none to read")?;
+    let (command, work) = if agent.sandbox {
+        // The sandbox needs a directory of the pane's, never one the core chose.
+        let refused = |error: io::Error| format!("the sandbox will not start: {error}");
+        let hidden = pinfold_config::private_dirs();
+        // Never waits: a shell still reading refuses this launch.
+        let state = pinfold_config::state_dir().ok_or("no state directory, as HOME is not set")?;
+        let path = sandbox::login_path(&state).map_err(refused)?;
+        let work = sandbox::working_directory(Path::new(&cwd), &hidden, &path);
+        let work = work.map_err(refused)?;
+        // Before the shadow is made, so a refused launch writes nothing.
+        family.contain(reactor, own, Some(work.path()))?;
+        let api = control::socket_path(&control::runtime_dir());
+        // A missing sandbox tool is an error, so the agent never runs unsandboxed.
+        // The agent's own git directory, one per profile and working directory (ADR-0039).
+        let name = Path::new(&launch.profile);
+        let named = matches!(
+            name.components().collect::<Vec<_>>()[..],
+            [Component::Normal(_)]
+        );
+        let shadow = pinfold_config::data_dir().filter(|_| named).map(|data| {
+            let key = trust::sha256(work.path().as_os_str().as_encoded_bytes());
+            data.join("agents").join(name).join(&key[..16])
+        });
+        let shadow = shadow.as_deref();
+        let command = sandbox::command(
+            &agent.command,
+            &hidden,
+            &agent.keep_env,
+            &work,
+            &api,
+            shadow,
+        );
+        if cfg!(target_os = "linux") {
+            log_abstract_socket_gap();
+        }
+        (command.map_err(refused)?, Some(work))
+    } else {
+        let (program, args) = agent.command.split_first().ok_or("empty command")?;
+        let mut command = Command::new(program);
+        command.args(args);
+        (command, None)
+    };
+    // The profile's place in the config's, which the core read when it started; past 255
+    // profiles the index names none.
+    let profile = agents.keys().position(|name| *name == launch.profile);
+    let profile = profile
+        .and_then(|at| u8::try_from(at).ok())
+        .unwrap_or(u8::MAX);
+    Ok(Prepared {
+        own,
+        of,
+        way: way(launch.place),
+        cwd,
+        command,
+        work,
+        profile,
+        sandbox: agent.sandbox,
+        rewind: agent.rewind,
+    })
+}
+
+/// Starts a prepared agent in its pane, whose reach and containment are checked again.
+fn start_agent(
+    reactor: &mut Reactor,
+    family: &mut Family,
+    prepared: Prepared,
+) -> Result<usize, String> {
+    let Prepared {
+        own,
+        of,
+        way,
+        cwd,
+        command,
+        work,
+        profile,
+        sandbox,
+        ..
+    } = prepared;
+    let pane = match work {
+        Some(work) => family.spawn_sandboxed(reactor, own, of, way, work.path(), command)?,
+        None => family.spawn_command(reactor, own, of, way, Some(&cwd), command)?,
+    };
+    reactor.read_agent_signals(pane, profile);
+    if sandbox && let Some((count, names)) = reactor.launched_sandboxed() {
+        // Names only, never a value (ADR-0047).
+        let _ = writeln!(
+            io::stderr(),
+            "pinfold-core: warn secret_names={count} [{names}]: on macOS sandboxed agents \
+             can read these variables in other panes; strip_secrets = true removes them"
+        );
+    }
+    Ok(pane)
+}
+
+/// `agent.launch`: starts the agent at once, or with `[rewind]` on for its profile once its
+/// launch checkpoint is taken or `wait_s` passed (ADR-0050 section 4). Never waits here.
+fn launch_agent(
+    reactor: &mut Reactor,
+    family: &mut Family,
+    agents: &BTreeMap<String, Agent>,
+    rewind: Option<&mut Rewind<Parked>>,
+    log: &mut Log,
+    request: Request,
+) {
+    let Method::AgentLaunch(launch) = request.method().clone() else {
+        return;
+    };
+    let own = request.caller().and_then(|caller| reactor.pane_of(caller));
+    let prepared = match prepare(reactor, family, agents, own, &launch) {
+        Ok(prepared) => prepared,
+        Err(reason) => return audit::reply(log, reactor, request, Err(reason)),
+    };
+    let Some(rewind) = rewind.filter(|_| prepared.rewind) else {
+        let answer = start_agent(reactor, family, prepared).map(|pane| json!({"pane": pane}));
+        return audit::reply(log, reactor, request, answer);
+    };
+    let dir = prepared.dir().to_owned();
+    match rewind.open(prepared.own, &dir) {
+        Ok(run) => {
+            let parked = Parked::Launch(request, Box::new(prepared));
+            if let Err((Parked::Launch(request, prepared), missing)) =
+                rewind.launch(run, dir, parked, Instant::now())
+            {
+                no_checkpoint(rewind.run(run).map(rewind::Run::id), missing);
+                launched(
+                    reactor,
+                    family,
+                    rewind,
+                    log,
+                    (request, *prepared),
+                    run,
+                    None,
+                );
+            }
+        }
+        Err(missing) => {
+            no_checkpoint(None, missing);
+            let started = start_agent(reactor, family, prepared);
+            let answer = started.map(|pane| json!({"pane": pane, "checkpoint": null}));
+            audit::reply(log, reactor, request, answer);
+        }
+    }
+}
+
+/// Says why a launch has no checkpoint, naming the run and never a path.
+fn no_checkpoint(run: Option<String>, missing: Missing) {
+    let run = run.unwrap_or_else(|| "none".to_owned());
+    let _ = writeln!(
+        io::stderr(),
+        "pinfold-core: warn checkpoint=none run={run}: {}",
+        missing.word()
+    );
+}
+
+/// Starts a parked launch's agent and answers with its launch checkpoint, or null.
+fn launched(
+    reactor: &mut Reactor,
+    family: &mut Family,
+    rewind: &mut Rewind<Parked>,
+    log: &mut Log,
+    (request, prepared): (Request, Prepared),
+    run: usize,
+    checkpoint: Option<String>,
+) {
+    let started = start_agent(reactor, family, prepared);
+    rewind.started(run, started.as_ref().ok().copied());
+    let answer = started.map(|pane| json!({"pane": pane, "checkpoint": checkpoint}));
+    audit::reply(log, reactor, request, answer);
+}
+
+/// `checkpoint.take` and `checkpoint.list` (ADR-0050 section 7) for the run in `pane`, queued
+/// for a worker. A caller in a pane reaches its own run, a run in a pane it spawned while that
+/// is open, and a run it launched; a terminal outside every pane reaches any run.
+fn checkpoint_call(
+    reactor: &Reactor,
+    family: &mut Family,
+    rewind: Option<&mut Rewind<Parked>>,
+    log: &mut Log,
+    request: Request,
+    pane: usize,
+) {
+    let own = request.caller().and_then(|caller| reactor.pane_of(caller));
+    let mut reach = |rewind: &Rewind<Parked>| {
+        if request.caller().is_none() {
+            return Err("checkpoint calls need a caller in a terminal");
+        }
+        let run = rewind.of_pane(pane).ok_or("no agent run in that pane")?;
+        let launcher = rewind.run(run).map(rewind::Run::launcher);
+        match own {
+            Some(own)
+                if own != pane
+                    && Some(own) != launcher
+                    && family.reach(reactor, Some(own), pane).is_err() =>
+            {
+                Err("the run is neither the caller's own nor one it launched")
+            }
+            _ => Ok(run),
+        }
+    };
+    let Some(rewind) = rewind else {
+        let reason = "checkpoints are off: [rewind] enabled = false";
+        return audit::reply(log, reactor, request, Err(reason.to_owned()));
+    };
+    let run = match reach(rewind) {
+        Ok(run) => run,
+        Err(reason) => return audit::reply(log, reactor, request, Err(reason.to_owned())),
+    };
+    let queued = match request.method() {
+        Method::CheckpointTake { .. } => rewind.take(run, Parked::Call(request), Instant::now()),
+        _ => rewind.list(run, Parked::Call(request)),
+    };
+    if let Err((Parked::Call(request), reason)) = queued {
+        audit::reply(log, reactor, request, Err(reason.to_owned()));
+    }
+}
+
+/// Answers each launch and call whose checkpoint work ended.
+fn checkpoints_ended(
+    reactor: &mut Reactor,
+    family: &mut Family,
+    rewind: &mut Rewind<Parked>,
+    log: &mut Log,
+) {
+    for ended in rewind.poll(Instant::now()) {
+        match ended.payload {
+            Parked::Launch(request, prepared) => {
+                let checkpoint = match ended.result {
+                    Ok(line) => line["checkpoint"].as_str().map(str::to_owned),
+                    Err(_) => {
+                        let missing = rewind.run(ended.run).map(rewind::Run::missing);
+                        no_checkpoint(
+                            rewind.run(ended.run).map(rewind::Run::id),
+                            missing.unwrap_or_default(),
+                        );
+                        None
+                    }
+                };
+                let parked = (request, *prepared);
+                launched(reactor, family, rewind, log, parked, ended.run, checkpoint);
+            }
+            Parked::Call(request) => {
+                let answer = ended.result.map(|mut line| {
+                    if let Some(fields) = line.as_object_mut() {
+                        fields.remove("store");
+                    }
+                    line
+                });
+                // An error naming a path, such as a refused store, is never logged or answered.
+                let answer = answer.map_err(|why| match why {
+                    why if why == rewind::KILLED => "the checkpoint took over 60 s".to_owned(),
+                    why if why.contains('/') && !why.starts_with("checkpoint r") => {
+                        "the checkpoint was refused or failed".to_owned()
+                    }
+                    why => why,
+                });
+                audit::reply(log, reactor, request, answer);
+            }
+        }
+    }
+}
+
+/// The checkpoints of `[rewind]`, run by the sibling `pinfold`, or none if it is off. A debug
+/// build takes another program from `PINFOLD_TEST_CHECKPOINT`, so a session test can make a
+/// take slow.
+fn rewind(
+    config: &pinfold_config::Rewind,
+    waker: Arc<Waker>,
+) -> io::Result<Option<Rewind<Parked>>> {
+    if !config.enabled {
+        return Ok(None);
+    }
+    let program = env::var_os("PINFOLD_TEST_CHECKPOINT")
+        .filter(|_| cfg!(debug_assertions))
+        .map_or_else(|| sibling("pinfold"), |program| Ok(PathBuf::from(program)))?;
+    let settings = Settings {
+        on_done: config.on_done,
+        wait: Duration::from_secs(config.wait_s),
+        max_files: config.max_files,
+        max_file_mib: config.max_file_mib,
+        max_new_mib: config.max_new_mib,
+        include_ignored: config.include_ignored,
+        max_store_mib: config.max_store_mib,
+        keep_days: config.keep_days,
+        keep_per_run: config.keep_per_run,
+    };
+    let start = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    Ok(Some(Rewind::new(program, settings, start, Some(waker))))
 }
 
 /// What the window shows for a method that changes the session or its grants, which a terminal
@@ -558,7 +824,6 @@ fn answer_released(
 fn decide(
     reactor: &mut Reactor,
     family: &mut Family,
-    agents: &BTreeMap<String, Agent>,
     grants: &mut Grants<Request>,
     workspaces: &mut Workspaces,
     log: &mut Log,
@@ -574,7 +839,7 @@ fn decide(
         return ask_alone(reactor, grants, workspaces, log, decision);
     }
     let Some((target, action, text)) = cross_pane(request.method()) else {
-        let answer = immediate(reactor, family, agents, grants, &request);
+        let answer = immediate(reactor, family, grants, &request);
         return audit::reply(log, reactor, request, answer);
     };
     let Some(caller) = own else {
@@ -1040,13 +1305,17 @@ fn daemon(
     let names = std::env::vars_os().map(|(name, _)| name);
     reactor.set_exposed(sandbox::exposed(config.strip_secrets, names));
     let mut log = audit::open(&config.api);
+    let mut checkpoints = rewind(&config.rewind, reactor.waker())?;
     let mut window = reactor.has_window();
     // A core with no pane waits for its first window, as `pinfold up` asks for one next.
     let mut started = reactor.pane_count() > 0 || window;
     let empty_until = Instant::now() + empty_wait();
     loop {
         let now = Instant::now();
-        let deadline = waits.deadline().into_iter().chain(grants.deadline()).min();
+        let deadline = waits.deadline().into_iter().chain(grants.deadline());
+        let deadline = deadline
+            .chain(checkpoints.as_ref().and_then(Rewind::deadline))
+            .min();
         let wait = deadline.map(|at| at.saturating_duration_since(now));
         let wait = wait
             .into_iter()
@@ -1134,11 +1403,22 @@ fn daemon(
                         request,
                     );
                 }
+                Method::AgentLaunch(_) => launch_agent(
+                    &mut reactor,
+                    &mut family,
+                    &config.agents,
+                    checkpoints.as_mut(),
+                    &mut log,
+                    request,
+                ),
+                Method::CheckpointTake { pane } | Method::CheckpointList { pane } => {
+                    let rewind = checkpoints.as_mut();
+                    checkpoint_call(&reactor, &mut family, rewind, &mut log, request, pane);
+                }
                 _ => {
                     decide(
                         &mut reactor,
                         &mut family,
-                        &config.agents,
                         &mut grants,
                         &mut workspaces,
                         &mut log,
@@ -1146,6 +1426,16 @@ fn daemon(
                     );
                 }
             }
+        }
+        if let Some(rewind) = checkpoints.as_mut() {
+            // A pane that is gone counts as closed.
+            rewind.observe(Instant::now(), |pane| {
+                let done = reactor
+                    .status(pane)
+                    .map(|(status, ..)| status == Status::Done);
+                (reactor.is_closed(pane), done == Some(true))
+            });
+            checkpoints_ended(&mut reactor, &mut family, rewind, &mut log);
         }
         for (request, outcome) in waits.settle(&reactor, Instant::now()) {
             audit::reply(&mut log, &reactor, request, Ok(ended(outcome)));

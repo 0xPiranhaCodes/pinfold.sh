@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "checkpoint.take",
+  "description": "Takes a checkpoint of the working directory of the agent run in a pane, which a rewind can go back to (ADR-0050). A caller in a pane may name its own run (self), a run in a pane it spawned (children), or a run it launched whose pane has closed; a terminal outside every pane may name any run of this core. Once in 30 s per run. Waits for the take, at most 60 s. Needs hello version 2. Never returns a path.",
+  "type": "object",
+  "properties": {
+    "params": {
+      "type": "object",
+      "required": ["pane"],
+      "properties": {
+        "pane": { "type": "integer", "minimum": 0, "description": "The pane of the run, the agent's pane that agent.launch opened." }
+      }
+    },
+    "result": {
+      "type": "object",
+      "required": ["checkpoint", "files", "new_bytes", "complete", "changed"],
+      "properties": {
+        "checkpoint": { "type": "string", "description": "The checkpoint's id, <run>/<n>." },
+        "files": { "type": "integer", "minimum": 0, "description": "Files and links it covers." },
+        "new_bytes": { "type": "integer", "minimum": 0, "description": "Bytes read from files whose stat changed." },
+        "complete": { "type": "boolean", "description": "False if a cap stopped the walk; a restore from it deletes nothing." },
+        "changed": { "type": "integer", "minimum": 0, "description": "Paths that differ from the run's launch checkpoint, 0 without one." }
+      },
+      "additionalProperties": false
+    }
+  }
+}

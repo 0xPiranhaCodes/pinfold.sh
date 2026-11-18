@@ -9,6 +9,7 @@ use std::os::unix::net::UnixStream;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -784,14 +785,24 @@ fn agent(name: &str, place: &str) -> Result<(), Box<dyn Error>> {
     let params = json!({"profile": name, "place": place});
     // Past the core's own wait for the shell, which then asks it again.
     let give_up = Instant::now() + sandbox::LOGIN_WAIT + Duration::from_secs(2);
-    loop {
+    // The core answers once the launch checkpoint is taken, up to `[rewind] wait_s` (ADR-0050).
+    let (said, heard) = mpsc::channel::<()>();
+    let waiting = thread::spawn(move || {
+        if heard.recv_timeout(Duration::from_millis(500)) == Err(RecvTimeoutError::Timeout) {
+            let _ = writeln!(std::io::stderr(), "pinfold: taking a checkpoint");
+        }
+    });
+    let result = loop {
         match control::ask(&running()?, "agent.launch", &params) {
             Err(error) if reading_path(&error) && Instant::now() < give_up => {
                 thread::sleep(AGENT_RETRY);
             }
-            result => return result.map(drop).map_err(Into::into),
+            result => break result.map(drop),
         }
-    }
+    };
+    let _ = said.send(());
+    let _ = waiting.join();
+    result.map_err(Into::into)
 }
 
 /// `pinfold open <path> [--right | --down | --tab]`: opens a directory in the file manager and

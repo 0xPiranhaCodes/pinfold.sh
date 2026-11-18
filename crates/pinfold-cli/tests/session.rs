@@ -2077,6 +2077,8 @@ fn mcp_lists_tools_calls_the_core_as_its_pane_and_reports_a_refusal_as_a_tool_er
             "pane_close_v1",
             "pane_wait_v1",
             "tool_open_v1",
+            "checkpoint_take_v1",
+            "checkpoint_list_v1",
             "events_next_v1",
         ]
     );
@@ -2424,7 +2426,7 @@ fn mcp_waits_for_the_next_event_and_times_out_with_none() {
     let texts: Vec<serde_json::Value> = out
         .lines()
         .map(|line| {
-            let reply: serde_json::Value = serde_json::from_str(line).unwrap();
+            let reply: serde_json::Value = serde_json::from_str(line).unwrap_or_default();
             assert_eq!(reply["result"]["isError"], false, "{out}");
             serde_json::from_str(reply["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
         })
@@ -3301,7 +3303,9 @@ fn every_api_method_replies_as_its_snapshot() {
     );
     let session = Session::new("rs", Some(&window)).unwrap();
     fs::create_dir_all(session.directory.join("config/pinfold")).unwrap();
-    let toml = "[agents.plain]\ncommand = [\"/bin/sh\", \"-c\", \"exec sleep 30\"]\n";
+    // No checkpoint, whose run id holds the core's start time.
+    let toml =
+        "[agents.plain]\ncommand = [\"/bin/sh\", \"-c\", \"exec sleep 30\"]\nrewind = false\n";
     fs::write(session.directory.join("config/pinfold/pinfold.toml"), toml).unwrap();
     let shell = format!(
         "if mkdir \"$PINFOLD_TEST_CLIENT/first\" 2> /dev/null; then exec '{}' --exact \
@@ -3384,4 +3388,177 @@ fn the_documented_agent_hooks_set_their_panes_status() {
     );
     core.kill().unwrap();
     core.wait().unwrap();
+}
+
+/// The MCP lines of `calls`, after `initialize`: each a tool name and its arguments.
+fn mcp_lines(calls: &[(&str, serde_json::Value)]) -> String {
+    let initialize =
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}});
+    let mut lines = format!("echo '{initialize}'; ");
+    for (id, (name, arguments)) in (2..).zip(calls) {
+        let params = serde_json::json!({"name": name, "arguments": arguments});
+        let call = serde_json::json!({"jsonrpc": "2.0", "id": id, "method": "tools/call", "params": params});
+        lines += &format!("echo '{call}'; ");
+    }
+    lines
+}
+
+/// Each tool call's result after `initialize`, as `(isError, text)`.
+fn mcp_results(out: &str) -> Vec<(bool, String)> {
+    out.lines()
+        .skip(1)
+        .map(|line| {
+            let reply: serde_json::Value = serde_json::from_str(line).unwrap_or_default();
+            let result = &reply["result"];
+            let text = result["content"][0]["text"].as_str().unwrap_or_default();
+            (result["isError"] == true, text.to_owned())
+        })
+        .collect()
+}
+
+#[test]
+fn an_agent_run_takes_and_lists_checkpoints_only_for_callers_in_reach() {
+    let session = Session::new("cp", None).unwrap();
+    fs::create_dir_all(session.directory.join("config/pinfold")).unwrap();
+    let mcp = format!("'{}' mcp", session.directory.join("pinfold").display());
+    let client = "\"$PINFOLD_TEST_CLIENT\"";
+    // The peer, pane 2, launched beside the first agent, asks for its sibling's run and its own.
+    let peer = mcp_lines(&[
+        ("checkpoint_take_v1", serde_json::json!({"pane": 1})),
+        ("checkpoint_list_v1", serde_json::json!({"pane": 2})),
+    ]);
+    let peer = format!(
+        "until [ -e {client}/go ]; do sleep 0.05; done; {{ {peer} }} | {mcp} > {client}/p; \
+         mv {client}/p {client}/peer; exec sleep 30\n"
+    );
+    fs::write(session.directory.join("peer.sh"), peer).unwrap();
+    let toml = format!(
+        "[agents.sleepy]\ncommand = [\"sleep\", \"30\"]\n\
+         [agents.peer]\ncommand = [\"/bin/sh\", \"{}\"]\n",
+        session.directory.join("peer.sh").display()
+    );
+    fs::write(session.directory.join("config/pinfold/pinfold.toml"), toml).unwrap();
+    let calls = mcp_lines(&[
+        ("checkpoint_list_v1", serde_json::json!({"pane": 1})),
+        ("checkpoint_take_v1", serde_json::json!({"pane": 1})),
+        ("checkpoint_take_v1", serde_json::json!({"pane": 1})),
+        ("checkpoint_list_v1", serde_json::json!({"pane": 1})),
+        ("checkpoint_list_v1", serde_json::json!({"pane": 0})),
+    ]);
+    let pinfold = format!("'{}'", session.directory.join("pinfold").display());
+    let shell = format!(
+        "mkdir -p -m 700 \"$HOME/work\"; cd \"$HOME/work\"; echo a > a.txt; \
+         {pinfold} agent sleepy 2> {client}/e; {pinfold} agent peer 2>> {client}/e; \
+         {{ {calls} }} | {mcp} > {client}/o; mv {client}/o {client}/out; touch {client}/go; \
+         exec sleep 30"
+    );
+    let mut core = session.start_core(&["--idle", "1"], &shell).unwrap();
+    let ended = session.wait_beside("out", Some(&mut core)) && session.wait_for("peer");
+    assert!(ended, "{} {}", session.read("e"), session.read_log());
+    core.kill().unwrap();
+    core.wait().unwrap();
+
+    let out = mcp_results(&session.read("out"));
+    assert_eq!(out.len(), 5, "{out:?}");
+    let json = |text: &str| serde_json::from_str::<serde_json::Value>(text).unwrap();
+    // The launch checkpoint, read from the store on demand: metadata, never a path.
+    let (error, listed) = &out[0];
+    assert!(!error, "{listed} {}", session.read_log());
+    let first = &json(listed)["checkpoints"][0];
+    assert_eq!(first["reason"], "launch", "{listed}");
+    let launch = first["checkpoint"].as_str().unwrap();
+    assert!(
+        launch.starts_with('r') && launch.ends_with("-0/0"),
+        "{listed}"
+    );
+    assert!(
+        !listed.contains("work") && !listed.contains("a.txt"),
+        "{listed}"
+    );
+    let (error, taken) = &out[1];
+    assert!(!error, "{taken}");
+    let taken = json(taken);
+    assert_eq!(
+        taken["checkpoint"],
+        launch.replace("/0", "/1"),
+        "numbered from the store"
+    );
+    assert_eq!(
+        (taken["files"].as_u64(), taken["complete"].as_bool()),
+        (Some(1), Some(true))
+    );
+    assert!(taken.get("store").is_none(), "{taken}");
+    assert!(
+        out[2].0 && out[2].1.contains("once in 30 s"),
+        "{:?}",
+        out[2]
+    );
+    assert_eq!(
+        json(&out[3].1)["checkpoints"].as_array().map(Vec::len),
+        Some(2)
+    );
+    assert!(
+        out[4].0 && out[4].1.contains("no agent run"),
+        "{:?}",
+        out[4]
+    );
+
+    let peer = mcp_results(&session.read("peer"));
+    assert!(
+        peer[0].0 && peer[0].1.contains("neither the caller's own"),
+        "{peer:?}"
+    );
+    assert!(!peer[1].0, "an agent lists its own run: {peer:?}");
+}
+
+#[test]
+fn a_launch_checkpoint_past_wait_s_starts_the_agent_without_one() {
+    let session = Session::new("cw", None).unwrap();
+    fs::create_dir_all(session.directory.join("config/pinfold")).unwrap();
+    let pwd = format!(
+        "pwd -P > '{}/agent.cwd'; exec sleep 30",
+        session.directory.display()
+    );
+    let toml = format!(
+        "[rewind]\nwait_s = 1\n[agents.sleepy]\ncommand = [\"/bin/sh\", \"-c\", \"{pwd}\"]\n"
+    );
+    fs::write(session.directory.join("config/pinfold/pinfold.toml"), toml).unwrap();
+    // A take that never ends, as on a slow disk.
+    let slow = session.directory.join("slow-checkpoint");
+    fs::write(&slow, "#!/bin/sh\nexec sleep 30\n").unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&slow, fs::Permissions::from_mode(0o700)).unwrap();
+    let pinfold = format!("'{}'", session.directory.join("pinfold").display());
+    let client = "\"$PINFOLD_TEST_CLIENT\"";
+    let shell = format!(
+        "mkdir -p -m 700 \"$HOME/work\"; cd \"$HOME/work\"; s=$(date +%s); \
+         {pinfold} agent sleepy 2> {client}/e && echo $(($(date +%s) - s)) > {client}/t; \
+         mv {client}/t {client}/took; exec sleep 30"
+    );
+    let state = session.directory.join("state");
+    let slow = slow.to_str().unwrap();
+    let vars = [("PINFOLD_TEST_CHECKPOINT", slow)];
+    let mut core = session
+        .start_core_at(&["--idle", "1"], &shell, &state, &vars)
+        .unwrap();
+    let started = session.wait_beside("took", Some(&mut core));
+    assert!(started, "{} {}", session.read("e"), session.read_log());
+    assert!(session.wait_for("agent.cwd"), "the agent started");
+    core.kill().unwrap();
+    core.wait().unwrap();
+    let took: u64 = session.read("took").trim().parse().unwrap();
+    assert!(
+        (1..=5).contains(&took),
+        "answered at wait_s, not the take's end: {took} s"
+    );
+    assert!(
+        session.read("e").contains("taking a checkpoint"),
+        "{}",
+        session.read("e")
+    );
+    let log = session.read_log();
+    assert!(
+        log.contains("checkpoint=none") && log.contains("took over wait_s"),
+        "{log}"
+    );
 }

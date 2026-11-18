@@ -44,6 +44,9 @@ const RUNS: usize = 3;
 /// A webhook's worker ends a minute after its last post, and one alert to a closed port takes
 /// three tries over 35 s (ADR-0051).
 pub const WEBHOOK_SETTLE: Duration = Duration::from_secs(105);
+/// 64 launches, each with its launch, exit and API take and its prune, and 64 lists, two at a
+/// time, then the workers end (ADR-0050).
+pub const REWIND_SETTLE: Duration = Duration::from_secs(90);
 /// Long enough for a process to finish starting.
 pub const SETTLE: Duration = Duration::from_secs(1);
 /// A window takes seconds to fall from its startup peak, and budgets are for idle windows.
@@ -135,6 +138,11 @@ fn measure_once(budget: &Budget, args: &[&str]) -> io::Result<Reading> {
     if let Some(agents) = budget.agents {
         command.env("XDG_CONFIG_HOME", agents);
         command.env("SHELL", agents.join("agent.sh"));
+        // Checkpoints go under the row's folder, never the person's state directory.
+        if agents.join("state").is_dir() {
+            command.env("HOME", agents.join("state"));
+            command.env("XDG_STATE_HOME", agents.join("state"));
+        }
     }
     if let Some(inbox) = budget.inbox {
         command.env(INBOX_VARIABLE, inbox);

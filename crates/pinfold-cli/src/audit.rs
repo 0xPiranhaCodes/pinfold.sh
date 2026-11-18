@@ -122,6 +122,9 @@ fn record(
         Method::AgentLaunch(_) => ("agent.launch", spawned(result), "children"),
         Method::ToolOpen(_) => ("tool.open", spawned(result), "tool.open"),
         Method::PaneClose { pane } => ("pane.close", Some(*pane), scope(*pane)),
+        // No path is ever recorded, only the run's pane.
+        Method::CheckpointTake { pane } => ("checkpoint.take", Some(*pane), scope(*pane)),
+        Method::CheckpointList { pane } => ("checkpoint.list", Some(*pane), scope(*pane)),
         Method::PaneStatus { pane, .. } => ("pane.status", Some(*pane), scope(*pane)),
         Method::AuditRead { pane, .. } => ("audit.read", *pane, "outside"),
         Method::SessionSave => ("session.save", None, "outside"),
