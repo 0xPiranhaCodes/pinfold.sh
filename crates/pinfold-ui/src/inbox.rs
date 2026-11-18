@@ -4,7 +4,8 @@
 //! and takes every key while open, so program output can neither fake nor answer it. Each row
 //! is the state's glyph and word in its colour, `tab·pane`, the tab's label, the git branch, the
 //! agent's message, the run time and the time in the state, which tick while the inbox is open.
-//! With `[inbox] agent_files` on, a second line gives the agent's context use and last steps.
+//! With `[inbox] agent_files` on, a second line gives the agent's context use and last steps,
+//! and Claude Code sessions running outside PinFold follow PinFold's own rows.
 //! Its rows live only while it is open: closing drops the whole value.
 
 use std::time::{Duration, Instant};
@@ -15,7 +16,8 @@ use pinfold_proto::{Cell, Frame};
 use unicode_width::UnicodeWidthChar;
 use winit::keyboard::{Key, NamedKey};
 
-use crate::link::Listed;
+use crate::approval::visible;
+use crate::link::{Listed, Outside};
 use crate::top_bar::{self, STATES};
 
 /// The widest the inbox draws, border included.
@@ -39,9 +41,14 @@ const TIME: usize = 5;
 const WORD: usize = 9;
 /// Each state by its number on the link, in the order rows take: ◆ ✕ ● ✓ ○.
 const ORDER: [u8; 5] = [0, 3, 1, 2, 4];
+/// How recently an outside agent's file changed for its row to say ● running (ADR-0051 §8).
+const RUNNING: Duration = Duration::from_secs(30);
+/// What an outside row says in place of `tab·pane`, and the agent's name in PinFold's words.
+const OUTSIDE: &str = "outside PinFold";
+const CLAUDE: &str = "Claude Code";
 
 /// What a key did to the inbox.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Step {
     /// It stays open.
     Stay,
@@ -68,6 +75,12 @@ pub enum Step {
         /// The key pressed: `y` approves, `i` interrupts.
         choice: Choice,
     },
+    /// It stays open, and the window asks the person to confirm a new tab in an outside agent's
+    /// folder (ADR-0051 §8).
+    Open {
+        /// The folder, as the core's row named it.
+        dir: String,
+    },
 }
 
 /// One listed pane, as a row shows it.
@@ -91,6 +104,39 @@ struct Row {
     ctx: Option<u8>,
     /// The last steps joined by newlines, as the link's decoder lets only clean ones through.
     steps: String,
+    /// An outside agent's folder, a plain absolute path; empty for a pane's row.
+    dir: String,
+}
+
+impl Row {
+    /// The step for Enter or a click: a pane's row jumps, an outside one asks to open a tab.
+    fn step(&self) -> Step {
+        if self.dir.is_empty() {
+            Step::Jump {
+                tab: self.tab,
+                pane: self.pane,
+            }
+        } else {
+            Step::Open {
+                dir: self.dir.clone(),
+            }
+        }
+    }
+
+    /// Its state as drawn: an outside row is ● running while its file changed in the last 30 s,
+    /// else ○ idle.
+    fn state(&self, now: Instant) -> u8 {
+        match self.since {
+            Some(since) if !self.dir.is_empty() => {
+                if now.saturating_duration_since(since) < RUNNING {
+                    1
+                } else {
+                    4
+                }
+            }
+            _ => self.state,
+        }
+    }
 }
 
 /// An open inbox.
@@ -105,11 +151,19 @@ pub struct Inbox {
 
 impl Inbox {
     /// Rebuilds the rows from the window's latest: each listed pane, its tab from `members`,
-    /// and that tab's label from `labels`. The selection stays on its pane. Row buffers are
-    /// reused, so a refresh while open allocates only for longer text.
-    pub fn refresh(&mut self, listed: &[Listed], members: &[(u32, u8)], labels: &[String]) {
+    /// and that tab's label from `labels`, then the agents `outside` PinFold in the core's order.
+    /// The selection stays on its row. Row buffers are reused, so a refresh while open allocates
+    /// only for longer text.
+    pub fn refresh(
+        &mut self,
+        listed: &[Listed],
+        members: &[(u32, u8)],
+        labels: &[String],
+        outside: &[Outside],
+    ) {
         self.ready = true;
-        let chosen = self.rows.get(self.selected).map(|row| row.pane);
+        let chosen = self.rows.get(self.selected);
+        let chosen = chosen.map(|row| (row.pane, row.dir.clone()));
         let placed = listed.iter().filter_map(|listed| {
             let (index, &(_, tab)) =
                 (members.iter().enumerate()).find(|(_, (pane, _))| *pane == listed.pane)?;
@@ -136,23 +190,41 @@ impl Inbox {
             // The core cleaned it; this keeps state glyphs and the like out of PinFold's rows.
             row.message
                 .extend(listed.message.chars().filter(|&c| top_bar::safe(c)));
+            row.dir.clear();
         }
-        self.rows.truncate(count);
         let rank = |state: u8| {
             ORDER
                 .iter()
                 .position(|&s| s == state)
                 .unwrap_or(ORDER.len())
         };
+        self.rows.truncate(count);
         self.rows
             .sort_by_key(|row| (rank(row.state), row.since, row.tab, row.place));
-        let kept = self.rows.iter().position(|row| Some(row.pane) == chosen);
-        self.selected = kept.unwrap_or(self.selected.min(count.saturating_sub(1)));
+        // Outside rows come after PinFold's own; their pane is none and their state is drawn
+        // from the time, so `y` and `i` pass them by.
+        for outside in outside {
+            let mut row = Row {
+                state: 1,
+                since: Some(outside.changed),
+                ..Row::default()
+            };
+            row.dir.clone_from(&outside.dir);
+            self.rows.push(row);
+        }
+        let total = self.rows.len();
+        let kept = (self.rows.iter()).position(|row| chosen == Some((row.pane, row.dir.clone())));
+        self.selected = kept.unwrap_or(self.selected.min(total.saturating_sub(1)));
     }
 
     /// Returns when a shown time next changes: at most once a minute, as times show no
     /// seconds, so the window redraws for the clock that rarely (ADR-0051 §4).
     pub fn next_change(&self, now: Instant) -> Option<Instant> {
+        // An outside row turns from ● running to ○ idle 30 s after its file changed.
+        let idle = (self.rows.iter())
+            .filter(|row| !row.dir.is_empty())
+            .filter_map(|row| row.since.map(|since| since + RUNNING))
+            .filter(|&idle| idle > now);
         self.rows
             .iter()
             .flat_map(|row| [row.since, row.started])
@@ -161,6 +233,7 @@ impl Inbox {
                 let seconds = now.saturating_duration_since(since).as_secs();
                 (seconds < CAPPED).then(|| since + Duration::from_secs((seconds / 60 + 1) * 60))
             })
+            .chain(idle)
             .min()
     }
 
@@ -177,10 +250,7 @@ impl Inbox {
             Key::Named(NamedKey::Escape) => return Step::Close,
             Key::Named(NamedKey::Enter) => {
                 if let Some(row) = self.rows.get(self.selected) {
-                    return Step::Jump {
-                        tab: row.tab,
-                        pane: row.pane,
-                    };
+                    return row.step();
                 }
             }
             Key::Named(NamedKey::ArrowUp) => {
@@ -202,7 +272,8 @@ impl Inbox {
                     "i" => Choice::Interrupt,
                     _ => return Step::Stay,
                 };
-                if let Some(row) = self.rows.get(self.selected).filter(|row| row.state == 0) {
+                let waiting = |row: &&Row| row.state == 0 && row.dir.is_empty();
+                if let Some(row) = self.rows.get(self.selected).filter(waiting) {
                     return Step::Answer {
                         pane: row.pane,
                         tab: row.tab,
@@ -217,8 +288,8 @@ impl Inbox {
         Step::Stay
     }
 
-    /// Takes a press at a cell of the panes' grid, `rows` by `columns`: a row jumps to its
-    /// pane, and anywhere else closes.
+    /// Takes a press at a cell of the panes' grid, `rows` by `columns`: a row does what Enter
+    /// on it does, and anywhere else closes.
     pub fn click(&self, rows: u16, columns: u16, (row, column): (u16, u16)) -> Step {
         let Some(area) = self.area(rows, columns) else {
             return Step::Close;
@@ -226,10 +297,7 @@ impl Inbox {
         let inside = (area.left + 1..area.left + area.width - 1).contains(&column);
         let line = usize::from(row.wrapping_sub(area.top + 1)) / usize::from(area.per);
         match self.rows.get(area.first + line) {
-            Some(row) if inside && line < usize::from(area.lines) => Step::Jump {
-                tab: row.tab,
-                pane: row.pane,
-            },
+            Some(row) if inside && line < usize::from(area.lines) => row.step(),
             _ => Step::Close,
         }
     }
@@ -317,7 +385,11 @@ impl Inbox {
         let visible = self.rows.iter().enumerate().skip(area.first);
         for (line, (index, row)) in visible.take(area.lines.into()).enumerate() {
             let at = top + 1 + line as u16 * area.per;
-            self.draw_row(frame, theme, (at, left, right), &columns, (index, row), now);
+            if row.dir.is_empty() {
+                self.draw_row(frame, theme, (at, left, right), &columns, (index, row), now);
+            } else {
+                self.draw_outside(frame, theme, (at, left, right), (index, row), now);
+            }
             if area.per == 2 {
                 self.draw_second(frame, theme, (at + 1, left, right), (index, row));
             }
@@ -499,6 +571,66 @@ impl Inbox {
 }
 
 impl Inbox {
+    /// Draws an outside agent's row at `at`: its glyph and word, `outside PinFold`, the agent's
+    /// name, its folder escaped and cut from the left with `…`, and the time since its file
+    /// changed (ADR-0051 §8).
+    fn draw_outside(
+        &self,
+        frame: &mut Frame,
+        theme: &Theme,
+        (at, left, right): (u16, u16, u16),
+        (index, row): (usize, &Row),
+        now: Instant,
+    ) {
+        let chrome = theme.chrome;
+        let chosen = index == self.selected;
+        let ground = if chosen {
+            chrome.tab_active
+        } else {
+            chrome.palette
+        };
+        for column in left + 1..right {
+            put(frame, at, column, ' ', theme.foreground, ground);
+        }
+        if chosen {
+            put(frame, at, left + 1, '▌', chrome.accent, ground);
+        }
+        let end = usize::from(right) - 1;
+        let state = row.state(now);
+        let (glyph, word) = STATES[usize::from(state)];
+        let colour = top_bar::state_colour(theme, state).unwrap_or(theme.foreground);
+        let mut column = usize::from(left) + 3;
+        put(frame, at, column as u16, glyph, colour, ground);
+        write(frame, at, column + 2, word, colour, ground, end);
+        column += 2 + WORD + 2;
+        column = write(frame, at, column, OUTSIDE, chrome.dim, ground, end) + 2;
+        column = write(frame, at, column, CLAUDE, theme.foreground, ground, end) + 2;
+        let since = row
+            .since
+            .map_or(Duration::ZERO, |since| now.saturating_duration_since(since));
+        let time = held_for(since);
+        let room = (end - TIME - 1).saturating_sub(column);
+        // `visible` gives one cell a character, so the folder's end shows when it is cut.
+        let dir = visible(&row.dir);
+        let count = dir.chars().count();
+        if room > 1 && count > room {
+            put(frame, at, column as u16, '…', chrome.dim, ground);
+            let tail: String = dir.chars().skip(count - (room - 1)).collect();
+            write(frame, at, column + 1, &tail, chrome.dim, ground, end);
+        } else if room > 1 {
+            write(frame, at, column, &dir, chrome.dim, ground, end);
+        }
+        write(
+            frame,
+            at,
+            end - cells(&time),
+            &time,
+            chrome.dim,
+            ground,
+            end,
+        );
+    }
+
     /// Draws a row's second line at `at`: its context use as `ctx 64%` and its last steps,
     /// each cut to an even share of the room, in `chrome.dim` (ADR-0051 §4).
     fn draw_second(
@@ -746,7 +878,7 @@ pub(crate) mod tests {
         let members = [(2, 0), (4, 0), (5, 1), (6, 1), (9, 2), (11, 2)];
         let labels = ["api-refactor", "docs-site", "infra"].map(str::to_owned);
         let mut inbox = Inbox::default();
-        inbox.refresh(&listed, &members, &labels);
+        inbox.refresh(&listed, &members, &labels, &[]);
         inbox
     }
 
@@ -831,6 +963,91 @@ pub(crate) mod tests {
             .collect()
     }
 
+    /// One pane needing you, then two agents outside PinFold: one whose file changed 5 s ago
+    /// and one 10 minutes ago with a long, hostile folder.
+    pub(crate) fn with_outside(now: Instant) -> Inbox {
+        let outside = [
+            Outside {
+                dir: "/Users/me/src/api".to_owned(),
+                changed: now - Duration::from_secs(5),
+            },
+            Outside {
+                dir: format!("/Users/me/{}x\u{202e}y/end", "deep/".repeat(30)),
+                changed: now - Duration::from_secs(600),
+            },
+        ];
+        let mut inbox = Inbox::default();
+        let listed = [listed(2, 0, 42, "Allow edit?", now)];
+        inbox.refresh(&listed, &[(2, 0)], &["api".into()], &outside);
+        inbox
+    }
+
+    /// ADR-0051 §8: outside rows follow PinFold's own, with glyph, colour and word, `outside
+    /// PinFold`, the agent's name, the folder escaped and cut from the left, and the time since
+    /// the file changed; ● running turns ○ idle 30 s after it.
+    #[test]
+    fn outside_rows_follow_pinfolds_own_and_cut_their_folder_from_the_left() {
+        let now = Instant::now();
+        let inbox = with_outside(now);
+        let shown = lines(&drawn(&inbox, 20, 100, now));
+        assert!(shown[0].contains("◆ needs you"), "{shown:?}");
+        assert!(
+            shown[1].contains("● running    outside PinFold  Claude Code  /Users/me/src/api"),
+            "{shown:?}"
+        );
+        assert!(shown[1].ends_with("<1m"), "{}", shown[1]);
+        let long = &shown[2];
+        assert!(
+            long.contains("○ idle       outside PinFold  Claude Code  …"),
+            "{long}"
+        );
+        assert!(
+            long.contains("x<U+202E>y/end") && long.ends_with("10m"),
+            "{long}"
+        );
+        let colour = |frame: &Frame, glyph| {
+            frame
+                .cells
+                .iter()
+                .find(|c| c.character == glyph)
+                .map(|c| c.foreground)
+        };
+        let frame = drawn(&inbox, 20, 100, now);
+        assert_eq!(colour(&frame, '●'), Some(GRAPHITE.states.running));
+        assert!(inbox.next_change(now) <= Some(now + Duration::from_secs(25)));
+        let later = drawn(&inbox, 20, 100, now + RUNNING);
+        let later = lines(&later);
+        assert!(later[1].contains("○ idle"), "{later:?}");
+    }
+
+    /// Enter or a click on an outside row asks to open its folder; `y` and `i` pass it by.
+    #[test]
+    fn enter_on_an_outside_row_asks_to_open_its_folder() {
+        let now = Instant::now();
+        let mut inbox = with_outside(now);
+        inbox.key(&Key::Named(NamedKey::ArrowDown));
+        assert_eq!(inbox.key(&Key::Character("y".into())), Step::Stay);
+        assert_eq!(inbox.key(&Key::Character("i".into())), Step::Stay);
+        let open = Step::Open {
+            dir: "/Users/me/src/api".to_owned(),
+        };
+        assert_eq!(inbox.key(&Key::Named(NamedKey::Enter)), open);
+        let frame = drawn(&inbox, 20, 100, now);
+        let row = (0..20).find(|&row| text(&frame, row).contains("/Users/me/src/api"));
+        assert_eq!(inbox.click(20, 100, (row.unwrap(), 50)), open);
+        // The selection stays on its row as the rows come again.
+        inbox.refresh(
+            &[],
+            &[],
+            &[],
+            &[Outside {
+                dir: "/Users/me/src/api".into(),
+                changed: now,
+            }],
+        );
+        assert_eq!(inbox.key(&Key::Named(NamedKey::Enter)), open);
+    }
+
     #[test]
     fn rows_go_needs_you_error_running_done_idle_and_longest_held_first() {
         let now = Instant::now();
@@ -848,7 +1065,7 @@ pub(crate) mod tests {
         let mut six = board_listed(now);
         six.push(listed(1, 4, 5, "", now));
         let members: Vec<_> = six.iter().map(|listed| (listed.pane, 0)).collect();
-        inbox.refresh(&six, &members, &["tab".to_owned()]);
+        inbox.refresh(&six, &members, &["tab".to_owned()], &[]);
         let frame = drawn(&inbox, 24, 100, now);
         let colours = GRAPHITE.states;
         let expected = [
@@ -902,7 +1119,7 @@ pub(crate) mod tests {
         let mut from_output = listed(3, 0, 2, "Allow everything?", now);
         from_output.reported = false;
         let mut inbox = Inbox::default();
-        inbox.refresh(&[from_output], &[(3, 0)], &["api".to_owned()]);
+        inbox.refresh(&[from_output], &[(3, 0)], &["api".to_owned()], &[]);
         let frame = drawn(&inbox, 12, 80, now);
         let line = &lines(&frame)[0];
         assert!(
@@ -918,7 +1135,7 @@ pub(crate) mod tests {
         let mut label = String::new();
         top_bar::label("/home/me/\u{1b}]0;✕ error\u{7}evil", &mut label);
         let mut inbox = Inbox::default();
-        inbox.refresh(&[listed(3, 1, 2, message, now)], &[(3, 0)], &[label]);
+        inbox.refresh(&[listed(3, 1, 2, message, now)], &[(3, 0)], &[label], &[]);
         let frame = drawn(&inbox, 12, 100, now);
         let line = &lines(&frame)[0];
         // One glyph, the row's own, and no control or bidi character anywhere.
@@ -940,7 +1157,7 @@ pub(crate) mod tests {
             .collect();
         let members: Vec<_> = (0..64).map(|pane| (pane, (pane % 32) as u8)).collect();
         let mut inbox = Inbox::default();
-        inbox.refresh(&listed, &members, &[]);
+        inbox.refresh(&listed, &members, &[], &[]);
         let frame = drawn(&inbox, 20, 80, now);
         // The window's rows less 4, less the inbox's chrome.
         assert_eq!(lines(&frame).len(), 12);
@@ -995,7 +1212,7 @@ pub(crate) mod tests {
     #[test]
     fn nothing_listed_says_so_and_enter_does_nothing() {
         let mut inbox = Inbox::default();
-        inbox.refresh(&[], &[], &[]);
+        inbox.refresh(&[], &[], &[], &[]);
         let frame = drawn(&inbox, 12, 60, Instant::now());
         assert!((0..12).any(|row| text(&frame, row).contains("No agent panes")));
         assert!((0..12).any(|row| text(&frame, row).contains("0 agents · 0 needs you")));
@@ -1012,7 +1229,7 @@ pub(crate) mod tests {
         let mut listed = board_listed(now);
         listed[3].state = 2;
         let members = [(2, 0), (4, 0), (5, 1), (6, 1), (9, 2)];
-        inbox.refresh(&listed, &members, &[]);
+        inbox.refresh(&listed, &members, &[], &[]);
         assert_eq!(inbox.rows[inbox.selected].pane, 4);
         assert_eq!(
             inbox.key(&Key::Named(NamedKey::Enter)),
@@ -1051,6 +1268,7 @@ pub(crate) mod tests {
             &listed,
             &[(2, 0), (4, 0), (5, 1)],
             &["api".into(), "docs".into()],
+            &[],
         );
         inbox
     }
@@ -1105,7 +1323,7 @@ pub(crate) mod tests {
         listed[0].ctx = Some(64);
         listed[0].steps = "Read\nNow the parser reads the session tail\nEdit".to_owned();
         let mut inbox = Inbox::default();
-        inbox.refresh(&listed, &[(2, 0)], &["api".into()]);
+        inbox.refresh(&listed, &[(2, 0)], &["api".into()], &[]);
         let frame = drawn(&inbox, 24, 66, now);
         let second = (0..24)
             .map(|row| text(&frame, row))
@@ -1149,9 +1367,9 @@ pub(crate) mod tests {
             .next_change(now)
             .map(|at| at.duration_since(now).as_secs());
         assert_eq!(next, Some(18));
-        inbox.refresh(&[listed(2, 0, 400_000, "", now)], &[(2, 0)], &[]);
+        inbox.refresh(&[listed(2, 0, 400_000, "", now)], &[(2, 0)], &[], &[]);
         assert_eq!(inbox.next_change(now), None, "99h+ never changes");
-        inbox.refresh(&[], &[], &[]);
+        inbox.refresh(&[], &[], &[], &[]);
         assert_eq!(inbox.next_change(now), None);
     }
 

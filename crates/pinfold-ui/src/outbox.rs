@@ -40,6 +40,8 @@ pub(crate) enum Request {
     NextWaiting,
     /// Go to this pane, in whichever tab holds it.
     GoTo(u32),
+    /// A confirmed tab in an outside agent's folder, as the core's row named it.
+    OpenTabIn(String),
     /// A confirmed Approve or Interrupt, with the profile and key names its prompt showed.
     Answer(crate::approval::Confirm),
     /// Anything that owns all it says.
@@ -52,6 +54,7 @@ impl Request {
             Self::Input(_, bytes) => bytes.capacity(),
             Self::Paste(_, text)
             | Self::OpenMarkdown(_, text)
+            | Self::OpenTabIn(text)
             | Self::Search { query: text, .. } => text.capacity(),
             _ => 0,
         }
@@ -95,6 +98,7 @@ impl Request {
             Self::OpenMarkdown(pane, name) => {
                 link.send(proto::Request::OpenMarkdown { pane, name: &name })
             }
+            Self::OpenTabIn(dir) => link.send(proto::Request::OpenTabIn { dir: &dir }),
             // The link holds a palette that would overtake the hello.
             Self::Core(proto::Request::Palette(palette)) => {
                 link.theme(palette);
