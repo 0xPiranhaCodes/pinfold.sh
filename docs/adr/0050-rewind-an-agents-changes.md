@@ -82,14 +82,16 @@ the store on demand. Tracked in [#442](https://github.com/0xPiranhaCodes/pinfold
 - Beside it, `stat/<run>-<n>` holds, sorted by path, each covered file's path, size, modification
   time, inode, change time and blob id. The next checkpoint merges its walk with this list in
   order, streaming, and reuses the old blob id for a file whose stat is unchanged, so it reads
-  only changed files. Its commit names the checkpoint whose list it merged as its parent and
-  lists only what differs from it: `M` for a path added or changed, `D` for one gone. The
-  launch checkpoint of a run has no parent, and lists every covered file, unless the store
-  holds an earlier run's checkpoint, which it then takes as its parent (amendment). Memory stays
+  only changed files. Its commit starts from the tree of the checkpoint whose list it merged,
+  the store's newest, and lists only what differs from it: `M` for a path added or changed, `D`
+  for one gone. It names no parent, so a pruned checkpoint is reachable from no later one
+  (amendments). A store with no checkpoint yet lists every covered file. Memory stays
   flat in the tree's size. A first
   checkpoint reads every covered file: it never takes stat data or blob ids from the repository's
   own `.git/index`, which an unsandboxed agent can forge (decision 3).
-- One writer at a time per store, by a lock file made with `O_EXCL`.
+- One writer at a time per store: `<store>/pinfold.lock`, mode 0600, opened without following
+  a link and held with `flock`, so the kernel drops it when the take dies; a second take or
+  prune refuses at once (amendment of slice 3).
 
 ### 2. Who takes it, and how git is run
 
@@ -135,7 +137,8 @@ that keeps `run`'s environment scrubbing, absolute-`PATH` lookup, timeout, outpu
 creation and names no command: `core.compression = 1`, as deltas come later from `repack`.
 Only these subcommands run there: `fast-import --quiet --depth=0` (with `feature done`),
 `diff-tree`, `diff` between two commits (with `--no-ext-diff --no-textconv --no-color`),
-`cat-file --batch`, `for-each-ref`, `update-ref -d`, `repack -a -d -q` and `prune`. None of them reads the working directory.
+`cat-file --batch`, `for-each-ref`, `update-ref -d`, `repack -a -d -q`, `prune` and
+`rev-list --objects --all --disk-usage` (amendment of slice 3). None of them reads the working directory.
 
 ### 3. What a checkpoint skips
 
@@ -489,3 +492,34 @@ Also decided during slice 2, by the coordinator for the maintainer:
   place, same pid and descriptors, with `posix_spawnattr_set_qos_clamp_np` and
   `POSIX_SPAWN_SETEXEC`, as `taskpolicy -c utility` does: a thread's QoS is not inherited by the
   git it starts. On Linux it sets nice 10 and I/O class idle before any thread starts.
+
+## Amendment 2026-11-18, slice 3
+
+Decided by the coordinator for the maintainer while building `pinfold checkpoint take` and
+`prune`, as three sentences above could not all hold:
+
+1. **No parent** (section 1). A commit that names the previous checkpoint as its parent keeps
+   every older checkpoint reachable from the newest, so deleting refs and running `prune` would
+   free nothing and neither `keep_days` nor the cap could work. The commit instead starts from
+   the previous checkpoint's tree (`M 040000 <tree> ""` in the fast-import stream) and lists
+   only `M` and `D`, so the speed of amendment 3 above stands and the tree is the same. Diffs
+   between checkpoints are `diff-tree` or `diff` of two commits, which need no parent. Test:
+   `over_the_cap_closed_runs_go_first_and_their_objects_are_freed_by_the_repack`.
+2. **Space comes back at a repack** (section 5). A take's objects go into packs, or stay loose
+   under fast-import's 100-object limit, and `prune` frees only loose ones. So `keep_per_run`
+   and `keep_days` delete refs and stat lists, then `prune`; their space in packs returns at the
+   next repack past 32 packs or 512 MiB. Over `max_store_mib`, `prune` deletes in section 5's
+   order until `git rev-list --objects --all --disk-usage` of what each changed store keeps,
+   plus its stat lists, fits, then repacks each store it changed whatever its packs. If the cap
+   cannot be met without a live run's launch checkpoint, it writes `<state>/checkpoints/full`,
+   and every take refuses with `over max_store_mib` until a prune meets the cap. `rev-list`
+   joins `git::store`'s list with fixed arguments and `repack`'s 300 s.
+3. **The lock is `flock`** (section 1). A lock file made with `O_EXCL` outlives a take the core
+   kills at `wait_s`, and would refuse every later take. `File::try_lock` on
+   `<store>/pinfold.lock` is dropped by the kernel instead; a second take refuses at once with
+   "another checkpoint is being taken or pruned in this store", and a prune skips a locked
+   store, counting its size.
+
+Until slice 5 reads `[rewind]`, `pinfold checkpoint prune` takes the live runs and the limits
+as flags: `--live <run>`, `--max-store-mib`, `--keep-days` and `--keep-per-run`, defaults 2048,
+14 and 20. The core runs it after each take, and after a take refused as over the cap.

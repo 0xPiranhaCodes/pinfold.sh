@@ -599,9 +599,19 @@ fn take_into(store: &Path, root: &Path, n: &str, parent: Option<&str>) -> Walked
     }
     fs::write(&stat_path, &stat).expect("stat");
     let mut import = git::import(store).expect("git");
-    let from = parent.map(|p| format!("refs/pinfold/t/{p}"));
+    let base = parent.map(|p| {
+        let tree = store_git(
+            store,
+            &[
+                "for-each-ref",
+                "--format=%(tree)",
+                &format!("refs/pinfold/t/{p}"),
+            ],
+        );
+        tree.trim().to_owned()
+    });
     let mut parent_list = previous.as_deref();
-    let parent = from
+    let parent = base
         .as_deref()
         .zip(parent_list.as_mut().map(|p| p as &mut dyn BufRead));
     let refname = format!("refs/pinfold/t/{n}");
@@ -621,7 +631,7 @@ fn store_git(store: &Path, args: &[&str]) -> String {
 }
 
 #[test]
-fn a_commit_on_its_parent_lists_only_changes_and_has_the_tree_of_one_from_scratch() {
+fn a_commit_on_the_previous_tree_lists_only_changes_and_has_the_tree_of_one_from_scratch() {
     let dir = scratch("commit");
     let (root, store) = (dir.join("root"), dir.join("store"));
     git::create_store(&store).expect("store");
@@ -667,14 +677,7 @@ fn a_commit_on_its_parent_lists_only_changes_and_has_the_tree_of_one_from_scratc
         &store,
         &["for-each-ref", "--format=%(parent)", "refs/pinfold/t/1"],
     );
-    assert_eq!(
-        parent.trim(),
-        store_git(
-            &store,
-            &["for-each-ref", "--format=%(objectname)", "refs/pinfold/t/0"]
-        )
-        .trim()
-    );
+    assert_eq!(parent.trim(), "", "no parent, so pruning 0 can free it");
     let listed = store_git(
         &store,
         &[

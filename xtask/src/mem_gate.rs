@@ -31,6 +31,10 @@ pub const GIT_OUTPUT_CAP: u64 = 8_000_000;
 pub const READER_LIMIT: u64 = TOOL_LIMIT + 3 * MARKDOWN_CAP;
 pub const FILES_LIMIT: u64 = TOOL_LIMIT + 512 * ENTRY_CAP;
 pub const DIFF_LIMIT: u64 = TOOL_LIMIT + 3 * GIT_OUTPUT_CAP;
+/// ADR-0050: a `pinfold checkpoint take` process, its reader threads included, at any tree size.
+pub const TAKE_LIMIT: u64 = 4_000_000;
+/// Files in the generated tree the take rows checkpoint.
+pub const TAKE_FILES: usize = 100_000;
 /// Long enough for a tool to read and lay out what it opened at its cap.
 pub const TOOL_SETTLE: Duration = Duration::from_secs(3);
 /// How soon a core is back within its budget after a tool pane closes.
@@ -251,6 +255,81 @@ pub fn run(budgets: &[Budget]) -> bool {
         println!("| {metric} | not measured | | waits for {issue} |");
     }
     passed
+}
+
+/// Runs checkpoint `n` of `tree` into a store under `state` and returns the take's own peak
+/// footprint, which it prints as `peak` with `PINFOLD_MEASURE` set: a take exits, so nothing is
+/// left to read from outside. Git's processes are not PinFold's and are not counted (ADR-0050
+/// decision 9).
+fn take_peak(program: &Path, tree: &Path, state: &Path, n: u64) -> io::Result<u64> {
+    let output = Command::new(program)
+        .args(["checkpoint", "take", "r1-0", &n.to_string(), "api", "--"])
+        .arg(tree)
+        .env("HOME", state)
+        .env("XDG_STATE_HOME", state)
+        .env("PINFOLD_MEASURE", "1")
+        .output()?;
+    let line: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|_| io::Error::other("the take printed no JSON line"))?;
+    if let Some(error) = line["error"].as_str() {
+        return Err(io::Error::other(format!("the take failed: {error}")));
+    }
+    if line["files"].as_u64() != Some(TAKE_FILES as u64) || line["complete"] != true {
+        return Err(io::Error::other("the take did not cover the whole tree"));
+    }
+    line["peak"]
+        .as_u64()
+        .filter(|&peak| peak > 0)
+        .ok_or_else(|| io::Error::other("the take printed no peak"))
+}
+
+/// Median of [`RUNS`] of a first take of `tree`, then a take with every 100th file changed.
+fn take_peaks(program: &Path, tree: &Path, state: &Path) -> io::Result<[u64; 2]> {
+    let (mut first, mut changed) = (Vec::new(), Vec::new());
+    for run in 0..RUNS {
+        let _ = std::fs::remove_dir_all(state);
+        std::fs::create_dir_all(state)?;
+        first.push(take_peak(program, tree, state, 0)?);
+        for file in (0..TAKE_FILES).step_by(100) {
+            let path = tree.join(format!("{:03}/{file:06}.txt", file / 1000));
+            std::fs::write(path, format!("changed in run {run}\n"))?;
+        }
+        changed.push(take_peak(program, tree, state, 1)?);
+    }
+    let _ = std::fs::remove_dir_all(state);
+    first.sort_unstable();
+    changed.sort_unstable();
+    Ok([first[RUNS / 2], changed[RUNS / 2]])
+}
+
+/// Prints the take rows under [`run`]'s table, with `program` as `pinfold`. Returns false if a
+/// row is over budget or cannot be measured.
+pub fn run_takes(program: &Path, tree: &Path, state: &Path) -> bool {
+    let metrics = [
+        "Checkpoint take with its readers, 100,000 files",
+        "Checkpoint take with its readers, 100,000 files, 1% changed",
+    ];
+    let limit = megabytes(TAKE_LIMIT);
+    match take_peaks(program, tree, state) {
+        Ok(peaks) => metrics.iter().zip(peaks).all(|(metric, bytes)| {
+            let result = if bytes <= TAKE_LIMIT {
+                "pass"
+            } else {
+                "**FAIL**"
+            };
+            println!(
+                "| {metric} | {:.2} | {limit:.2} | {result} |",
+                megabytes(bytes)
+            );
+            bytes <= TAKE_LIMIT
+        }),
+        Err(error) => {
+            for metric in metrics {
+                println!("| {metric} | error: {error} | {limit:.2} | **FAIL** |");
+            }
+            false
+        }
+    }
 }
 
 #[cfg(test)]
