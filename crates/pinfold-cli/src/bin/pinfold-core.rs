@@ -914,6 +914,10 @@ fn daemon(
     // must reach.
     let config = pinfold_cli::config();
     strip_secrets(config.strip_secrets);
+    // A bad URL turns webhooks off, and the log names the rule, never the URL (ADR-0051).
+    if let Err(refused) = pinfold_core::webhook::Webhook::new(&config.alerts.webhook) {
+        let _ = writeln!(io::stderr(), "pinfold-core: webhooks are off: {refused}");
+    }
     let mut reactor = Reactor::new()?;
     // The built-in tools (ADR-0045), resolved before a restore runs them again.
     reactor.set_tools(sibling("pinfold")?);
