@@ -12,11 +12,11 @@
 use std::env;
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
+use std::process::{Child, ChildStdin, ChildStdout, Command, ExitStatus, Stdio};
 use std::sync::OnceLock;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -453,6 +453,101 @@ impl Drop for Import {
             let _ = self.child.kill();
             let _ = self.child.wait();
         }
+    }
+}
+
+/// A `git cat-file --batch` in a checkpoint store, run as [`store`] runs git, that copies blobs
+/// out one at a time so none is held whole. It waits on its writer, so it has no timeout of its
+/// own; it is killed when dropped.
+#[derive(Debug)]
+pub struct Blobs {
+    child: Child,
+    input: ChildStdin,
+    output: io::BufReader<ChildStdout>,
+}
+
+/// Starts a `git cat-file --batch` in `store`.
+///
+/// # Errors
+///
+/// Returns an error if no git is found or it cannot start.
+///
+/// # Examples
+///
+/// ```no_run
+/// let store = "/path/to/state/checkpoints/0123456789abcdef".as_ref();
+/// let mut blobs = pinfold_tools::git::blobs(store)?;
+/// let mut text = Vec::new();
+/// blobs.copy("ce013625030ba8dba906f756967f9e9ca394464a", 64, &mut text)?;
+/// assert_eq!(text, b"hello\n");
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn blobs(store: &Path) -> io::Result<Blobs> {
+    let mut command = store_command(&locate()?, store);
+    command
+        .args(["cat-file", "--batch"])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn()?;
+    let pipes = child.stdin.take().zip(child.stdout.take());
+    let Some((input, output)) = pipes else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err(io::Error::other("git cat-file has no pipes"));
+    };
+    let output = io::BufReader::with_capacity(64 * 1024, output);
+    Ok(Blobs {
+        child,
+        input,
+        output,
+    })
+}
+
+impl Blobs {
+    /// Copies the blob `id`, 40 hex digits, to `out` and returns its size.
+    ///
+    /// # Errors
+    ///
+    /// [`io::ErrorKind::InvalidInput`] for a bad id, [`io::ErrorKind::InvalidData`] if it is
+    /// not a blob in the store or is larger than `max` bytes, otherwise a failed read or write.
+    pub fn copy(&mut self, id: &str, max: u64, out: &mut dyn Write) -> io::Result<u64> {
+        if id.len() != 40 || !id.bytes().all(|c| c.is_ascii_hexdigit()) {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a blob id"));
+        }
+        writeln!(self.input, "{id}")?;
+        self.input.flush()?;
+        let mut header = Vec::new();
+        (&mut self.output)
+            .take(128)
+            .read_until(b'\n', &mut header)?;
+        let header = String::from_utf8_lossy(&header);
+        let size = header
+            .strip_prefix(id)
+            .and_then(|rest| rest.strip_prefix(" blob "))
+            .and_then(|size| size.trim_end().parse::<u64>().ok());
+        let not = |why: &str| io::Error::new(io::ErrorKind::InvalidData, format!("{id} {why}"));
+        let size = size.ok_or_else(|| not("is not a blob in the store"))?;
+        let copied = if size <= max {
+            io::copy(&mut (&mut self.output).take(size), out)?
+        } else {
+            io::copy(&mut (&mut self.output).take(size), &mut io::sink())?
+        };
+        let mut end = [0];
+        self.output.read_exact(&mut end)?;
+        if copied != size || end != *b"\n" {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+        if size > max {
+            return Err(not("is larger than expected"));
+        }
+        Ok(size)
+    }
+}
+
+impl Drop for Blobs {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 

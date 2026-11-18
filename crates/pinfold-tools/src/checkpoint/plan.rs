@@ -15,7 +15,7 @@ use crate::git;
 /// Paths a plan or restore may be limited to, as `checkpoint.restore`'s `paths`.
 pub const MAX_PATHS: usize = 1000;
 /// Paths the prompt shows, each cut to 256 bytes.
-const SHOWN: usize = 10;
+pub(crate) const SHOWN: usize = 10;
 const SHOWN_BYTES: usize = 256;
 /// The longest line a `pinfold checkpoint` command prints, which the core reads whole.
 pub(crate) const LINE: usize = 4096;
@@ -225,7 +225,7 @@ fn stopped(store: &Path, run: &str, shown: u64) -> io::Result<Option<u64>> {
     Ok(None)
 }
 
-fn display(path: &[u8]) -> String {
+pub(crate) fn display(path: &[u8]) -> String {
     let mut path = String::from_utf8_lossy(path).into_owned();
     if path.len() > SHOWN_BYTES {
         let end = (0..=SHOWN_BYTES)

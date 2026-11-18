@@ -232,16 +232,36 @@ pub fn take(
     let (dir, key) = resolve(dir)?;
     let store = open_store(state, &key)?;
     let _lock = lock(&store)?;
+    take_in(state, &store, &dir, run, n, reason, time, &Caps::default())
+}
+
+/// [`take`] of the resolved `dir` into its `store`, whose lock the caller holds, as a restore
+/// holds it across its restore checkpoint and its writes.
+#[expect(clippy::too_many_arguments, reason = "take's, with the store and caps")]
+pub(crate) fn take_in(
+    state: &Path,
+    store: &Path,
+    dir: &Path,
+    run: &str,
+    n: u64,
+    reason: &str,
+    time: u64,
+    caps: &Caps,
+) -> io::Result<Taken> {
+    let key = store
+        .file_name()
+        .map(|key| key.to_string_lossy().into_owned())
+        .unwrap_or_default();
     if let Ok(why) = fs::read_to_string(state.join("checkpoints").join(super::prune::FULL)) {
         return Err(refused(why));
     }
     let refname = format!("refs/pinfold/{run}/{n}");
-    let exists = git::store(&store, ["for-each-ref", "--count=1", &refname], b"")?;
+    let exists = git::store(store, ["for-each-ref", "--count=1", &refname], b"")?;
     if !exists.stdout.is_empty() {
         let taken = format!("checkpoint {run}/{n} exists");
         return Err(io::Error::new(io::ErrorKind::AlreadyExists, taken));
     }
-    let base = newest(&store)?;
+    let base = newest(store)?;
     let open = |list: &str| {
         File::open(store.join("stat").join(list)).map(|f| BufReader::with_capacity(BUF, f))
     };
@@ -249,12 +269,12 @@ pub fn take(
 
     let readers = thread::available_parallelism().map_or(1, |n| n.get().min(4));
     let importers = (0..readers)
-        .map(|_| git::import(&store))
+        .map(|_| git::import(store))
         .collect::<io::Result<Vec<_>>>()?;
     let mut previous = base.as_ref().map(|(list, _)| open(list)).transpose()?;
     let mut stat = BufWriter::with_capacity(BUF, File::create(&list)?);
     let old = previous.as_mut().map(|p| p as &mut dyn BufRead);
-    let (walked, importers) = walk(&dir, &Caps::default(), old, &mut stat, importers)?;
+    let (walked, importers) = walk(dir, caps, old, &mut stat, importers)?;
     stat.into_inner().map_err(io::IntoInnerError::into_error)?;
     // The commit names blobs from every reader's pack, so they must all be in first.
     for import in importers {
@@ -278,7 +298,7 @@ pub fn take(
         "skipped": skipped,
     })
     .to_string();
-    let mut import = git::import(&store)?;
+    let mut import = git::import(store)?;
     let mut previous = base.as_ref().map(|(list, _)| open(list)).transpose()?;
     let base = base
         .as_ref()
@@ -293,7 +313,7 @@ pub fn take(
         0 => 0,
         _ => {
             let diff = ["diff-tree", "-r", "--name-only", "-z", &launch, &refname];
-            let diff = git::store(&store, diff, b"")?;
+            let diff = git::store(store, diff, b"")?;
             match diff.status {
                 Some(status) if status.success() => {
                     diff.stdout.iter().filter(|&&c| c == 0).count() as u64
