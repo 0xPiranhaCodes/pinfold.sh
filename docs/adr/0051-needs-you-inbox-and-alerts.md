@@ -490,3 +490,24 @@ So times show no seconds: `<1m` under a minute, then `6m`, then `3h07`, then `99
 open inbox wakes the window only when a shown time's text changes (`Inbox::next_change`), at
 most once a minute, never at `99h+`. A state change still redraws at once. With this, the same
 row measures **50.35** against **50.66**, and 50.30 after it closes.
+
+## Amendment 2026-11-18: what the answer prompt shows is what is sent
+
+Decided by the coordinator for the maintainer while building slice 7. Section 6 has the window
+name the profile and its `approve` key, but only the core kept a pane's profile, and the window
+reloads the config while the core reads profiles once, at start, so a prompt drawn from the
+window's config could name a key the core would not send. So, at link version 19:
+
+- `Notice::Status` gains the pane's profile index, one byte, 255 for none. The window looks the
+  name and `approve` key up in the config it already holds, so it keeps nothing new.
+- `Request::Answer { pane, choice }` also carries the profile name and key name the prompt
+  showed: the name at most 64 bytes, the key a name from the key table, empty for Interrupt,
+  each refused on decoding past that. The core refuses with "the agent's profile changed since
+  the core started; restart the session to use it" unless both are its own, so a person never
+  confirms one key and gets another.
+- The key table is `pinfold_proto::link::key_bytes`, used by the config's check, the core's
+  send and a test against the window's key encoder: `Enter`, `Tab`, `Escape`, `Backspace`,
+  `Space`, or one printable ASCII character. Arrows and Home or End are left out, as the bytes
+  they write depend on the program's cursor mode.
+- The confirmation is armed 500 ms after it appears, as a trust prompt is, so a double press of
+  `y` cannot open and answer it in one.
