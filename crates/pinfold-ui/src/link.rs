@@ -39,6 +39,8 @@ use pinfold_proto::link::{
 };
 use pinfold_proto::{Frame, Palette};
 
+use crate::top_bar::{ERROR, NEEDS_YOU};
+
 /// Most bytes read per turn, so a flooding core cannot hold the window's thread.
 const READ_BUDGET: usize = 64 * 1024;
 /// Most encoded bytes held for a core that is not reading. Two full pastes, so a resize still
@@ -214,6 +216,11 @@ struct State {
     relisted: bool,
     /// Whether the window last said its inbox is open.
     inbox: bool,
+    /// Listed panes that came to need you or to an error, and that state, oldest first, at
+    /// most [`MAX_PANES`], for the window's desktop alerts (ADR-0051).
+    alerting: Vec<(u32, u8)>,
+    /// Whether a go to the next pane that needs you found none.
+    none_waiting: bool,
 }
 
 impl State {
@@ -365,6 +372,7 @@ impl State {
             }
             return;
         };
+        let old = index.map(|index| self.listed[index].state);
         let now = Instant::now();
         let since = now
             .checked_sub(Duration::from_secs(since.into()))
@@ -385,6 +393,11 @@ impl State {
             None => return,
         };
         let listed = &mut self.listed[index];
+        // A pane first heard of comes to its state too, as on a window's first link.
+        let came = old != Some(state) && matches!(state, NEEDS_YOU | ERROR);
+        if came && self.alerting.len() < MAX_PANES {
+            self.alerting.push((pane, state));
+        }
         (listed.state, listed.reported, listed.since) = (state, reported, since);
         message.clone_into(&mut listed.message);
         self.relisted = true;
@@ -742,6 +755,76 @@ impl Link {
     /// that.
     pub fn take_relisted(&mut self) -> bool {
         std::mem::take(&mut self.state.relisted)
+    }
+
+    /// Returns the next pane that needs you, and its tab's index: from a focused ◆ pane the
+    /// one after it in the inbox's order, waiting longest first, and else the first (ADR-0051).
+    /// Nothing if no listed pane needs you.
+    #[must_use]
+    pub fn next_waiting(&self) -> Option<(u8, u32)> {
+        let state = &self.state;
+        // As the inbox sorts its ◆ rows; the pane breaks a tie.
+        let key = |listed: &Listed| {
+            let members = &state.members;
+            let index = members.iter().position(|(pane, _)| *pane == listed.pane)?;
+            let tab = members[index].1;
+            let place = members[..index].iter().filter(|(_, t)| *t == tab).count();
+            Some((listed.since, tab, place, listed.pane))
+        };
+        let waiting = || {
+            let listed = state.listed.iter();
+            listed
+                .filter(|listed| listed.state == NEEDS_YOU)
+                .filter_map(key)
+        };
+        let focused = waiting().find(|(.., pane)| *pane == state.focused);
+        let after = focused.and_then(|focused| waiting().filter(|key| *key > focused).min());
+        let (_, tab, _, pane) = after.or_else(|| waiting().min())?;
+        Some((tab, pane))
+    }
+
+    /// Goes to the next pane that needs you, as [`Link::next_waiting`] finds it, or notes that
+    /// none does for [`Link::take_none_waiting`]. Returns what [`Link::send`] returns.
+    pub fn go_to_next_waiting(&mut self) -> bool {
+        match self.next_waiting() {
+            Some((tab, pane)) => self.go_to(tab, pane),
+            None => {
+                self.state.none_waiting = true;
+                true
+            }
+        }
+    }
+
+    /// Goes to `pane`, wherever its tab is: the switch to the tab, then the focus. Nothing for a
+    /// pane the session no longer holds. Returns what [`Link::send`] returns.
+    pub fn go_to_pane(&mut self, pane: u32) -> bool {
+        match self.tab_of(pane) {
+            Some(tab) => self.go_to(tab, pane),
+            None => true,
+        }
+    }
+
+    fn go_to(&mut self, tab: u8, pane: u32) -> bool {
+        self.send(Request::SwitchTab { index: tab.into() }) && self.send(Request::Focus { pane })
+    }
+
+    /// Returns the index of `pane`'s tab, or nothing if the session does not hold it.
+    fn tab_of(&self, pane: u32) -> Option<u8> {
+        let mut members = self.state.members.iter();
+        members.find(|(at, _)| *at == pane).map(|(_, tab)| *tab)
+    }
+
+    /// Returns whether a go to the next pane that needs you found none, once.
+    pub fn take_none_waiting(&mut self) -> bool {
+        std::mem::take(&mut self.state.none_waiting)
+    }
+
+    /// Takes the oldest listed pane that came to need you or to an error: the pane, the state
+    /// and its tab's index, or no tab if the session no longer holds it.
+    pub fn take_alert(&mut self) -> Option<(u32, u8, Option<u8>)> {
+        let alerting = &mut self.state.alerting;
+        let (pane, state) = (!alerting.is_empty()).then(|| alerting.remove(0))?;
+        Some((pane, state, self.tab_of(pane)))
     }
 
     /// Returns whether the window's inbox is open, as the last [`Request::Inbox`] said.
@@ -1513,6 +1596,78 @@ mod tests {
         let last = (set.0, None);
         assert!(turn_until(&mut link, |link| shows(link, PANE + 1, last)));
         assert_eq!(link.state.colours.len(), MAX_COLOURED);
+    }
+
+    /// ADR-0051: prefix `w` goes to the ◆ pane waiting longest, then on in the inbox's order,
+    /// round again past the last; with none it sends nothing and says so.
+    #[test]
+    fn next_waiting_cycles_in_inbox_order_and_says_when_none_waits() {
+        let (mut link, mut peer) = answered().unwrap();
+        // Tab 0 holds 10 and 11, tab 1 holds 12 and 13; 99 is no longer in the session.
+        link.state.members = vec![(10, 0), (11, 0), (12, 1), (13, 1)];
+        for (pane, state, since) in [
+            (12, 1, 90),
+            (11, 0, 20),
+            (13, 0, 50),
+            (10, 0, 30),
+            (99, 0, 99),
+        ] {
+            link.state.list(pane, Some((state, true, since, "")));
+        }
+        let next = |link: &mut Link, focused| {
+            link.state.focused = focused;
+            link.next_waiting()
+        };
+        assert_eq!(next(&mut link, 12), Some((1, 13)), "longest first");
+        assert_eq!(next(&mut link, 13), Some((0, 10)));
+        assert_eq!(next(&mut link, 10), Some((0, 11)));
+        assert_eq!(next(&mut link, 11), Some((1, 13)), "round again");
+
+        link.state.focused = 11;
+        assert!(link.go_to_next_waiting());
+        let expected = [Request::SwitchTab { index: 1 }, Request::Focus { pane: 13 }];
+        let expected = expected.map(|request| format!("{request:?}"));
+        assert_eq!(peer.requests(2), expected);
+        assert!(!link.take_none_waiting());
+
+        for pane in [10, 11, 13] {
+            link.state.list(pane, Some((1, true, 0, "")));
+        }
+        assert!(link.go_to_next_waiting());
+        assert!(link.take_none_waiting() && !link.take_none_waiting());
+        link.send(Request::Zoom);
+        assert_eq!(
+            peer.requests(1),
+            [format!("{:?}", Request::Zoom)],
+            "nothing before it"
+        );
+    }
+
+    /// ADR-0051: a listed pane alerts when it comes to ◆ or ✕, not again while it stays, and
+    /// never for another state or a pane that is not listed.
+    #[test]
+    fn a_listed_pane_alerts_once_on_coming_to_needs_you_or_error() {
+        let (mut link, _peer) = linked().unwrap();
+        link.state.members = vec![(10, 0), (11, 2)];
+        let taken = |link: &mut Link| std::iter::from_fn(|| link.take_alert()).collect::<Vec<_>>();
+        link.state.list(10, Some((0, true, 0, "")));
+        link.state.list(10, Some((0, false, 0, "new message")));
+        link.state.list(11, Some((1, true, 0, "")));
+        link.state.list(12, Some((3, true, 0, "")));
+        assert_eq!(taken(&mut link), [(10, 0, Some(0)), (12, 3, None)]);
+        link.state.list(11, Some((2, true, 0, "")));
+        link.state.list(11, Some((3, true, 0, "")));
+        link.state.list(10, Some((4, true, 0, "")));
+        link.state.list(10, None);
+        link.state.list(10, None);
+        assert_eq!(taken(&mut link), [(11, 3, Some(2))]);
+        // A flood of panes coming and going is held to the inbox's own cap.
+        for step in 0..1_000 {
+            link.state
+                .list(step % 7, Some(((step % 2) as u8 * 3, true, 0, "")));
+        }
+        assert_eq!(link.state.alerting.len(), MAX_PANES);
+        assert_eq!(taken(&mut link).len(), MAX_PANES);
     }
 
     #[test]
