@@ -367,6 +367,7 @@ name = "pinfold-config"
 version = "0.1.0-beta.4"
 dependencies = [
  "libc",
+ "pinfold-proto",
  "pinfold-sys",
  "serde",
  "thiserror",
@@ -436,6 +437,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "similar",
+ "unicode-width",
 ]
 
 [[package]]

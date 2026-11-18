@@ -105,6 +105,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "agent_session_tail"
+path = "fuzz_targets/agent_session_tail.rs"
+test = false
+doc = false
+bench = false
+
 [dependencies]
 libfuzzer-sys = "0.4"
 pinfold-api = { path = "../crates/pinfold-api" }
