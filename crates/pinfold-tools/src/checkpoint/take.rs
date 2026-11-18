@@ -3,7 +3,7 @@
 
 use std::ffi::OsStr;
 use std::fs::{self, File};
-use std::io::{self, BufRead, BufReader, BufWriter};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::os::fd::AsFd;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
@@ -233,6 +233,128 @@ pub fn take(
     let store = open_store(state, &key)?;
     let _lock = lock(&store)?;
     take_in(state, &store, &dir, run, n, reason, time, &Caps::default())
+}
+
+/// Where [`take_next`] finds the working directory.
+#[derive(Clone, Copy, Debug)]
+pub enum Dir<'a> {
+    /// The directory itself, as at launch. Its resolved path is kept in the store as `dir`.
+    Path(&'a Path),
+    /// The key of a store a take of the directory made, which holds its path, so the core
+    /// keeps a 16-digit key per run and no path.
+    Key(&'a str),
+}
+
+/// Where `take`'s arguments name the directory: the index of `<dir>` after the flags, or a key.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum At<'a> {
+    Dir(usize),
+    Key(&'a str),
+}
+
+/// Reads `take`'s words after the reason: the caps' flags, then `-- <dir>` or `--key <key>`.
+pub(crate) fn parse<'a>(mut words: &[&'a [u8]]) -> Option<(Caps, At<'a>)> {
+    let (mut caps, mut at) = (Caps::default(), 0);
+    loop {
+        let number = || std::str::from_utf8(words.get(1)?).ok()?.parse::<u64>().ok();
+        let mib = || number()?.checked_mul(1 << 20);
+        match words {
+            [b"--", _] => return Some((caps, At::Dir(at + 1))),
+            [b"--key", key] => return Some((caps, At::Key(std::str::from_utf8(key).ok()?))),
+            [b"--include-ignored", ..] => {
+                caps.include_ignored = true;
+                (words, at) = (&words[1..], at + 1);
+                continue;
+            }
+            [b"--max-files", ..] => caps.max_files = number()?,
+            [b"--max-file-mib", ..] => caps.max_file_bytes = mib()?,
+            [b"--max-new-mib", ..] => caps.max_new_bytes = mib()?,
+            _ => return None,
+        }
+        (words, at) = (words.get(2..)?, at + 2);
+    }
+}
+
+/// The file in a store holding its working directory's resolved path.
+const DIR: &str = "dir";
+
+/// The store with `key` under `state` and the working directory it records, checked to hash to
+/// `key` again, so a store can name no other directory.
+fn by_key(state: &Path, key: &str) -> io::Result<(PathBuf, PathBuf)> {
+    let store = super::plan::store_by_key(state, key)?;
+    let mut path = Vec::new();
+    let held = at::open_dir(&store).map_err(io_error)?;
+    at::open_file_at(held.as_fd(), OsStr::new(DIR))
+        .map_err(io_error)?
+        .take(super::plan::LINE as u64)
+        .read_to_end(&mut path)?;
+    let written = Path::new(OsStr::from_bytes(&path));
+    let (dir, again) = resolve(written)?;
+    // Never the path as given: one that now resolves elsewhere is refused.
+    if dir != written || again != key {
+        return Err(refused(format!(
+            "store {key} names a directory that now resolves elsewhere"
+        )));
+    }
+    Ok((store, dir))
+}
+
+/// Takes the next checkpoint of `run` for `reason`, numbered after the run's newest in the
+/// store, or 0 for its first, with `caps`. `dir` is the working directory, or the key of its
+/// store. Otherwise as [`take`].
+///
+/// # Errors
+///
+/// As [`take`], and refuses a key that is not 16 hex digits, names no store, or whose store
+/// holds no directory or one that no longer hashes to it.
+///
+/// # Examples
+///
+/// ```no_run
+/// use pinfold_tools::checkpoint::{Caps, take::{Dir, take_next}};
+///
+/// let state = "/path/to/state".as_ref();
+/// let caps = Caps::default();
+/// let work = Dir::Path("/path/to/work".as_ref());
+/// let launch = take_next(state, "r1700000000-0", "launch", work, 1_700_000_000, &caps)?;
+/// let key = Dir::Key(&launch.store);
+/// let done = take_next(state, "r1700000000-0", "done", key, 1_700_000_060, &caps)?;
+/// assert_eq!(done.checkpoint, "r1700000000-0/1");
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub fn take_next(
+    state: &Path,
+    run: &str,
+    reason: &str,
+    dir: Dir<'_>,
+    time: u64,
+    caps: &Caps,
+) -> io::Result<Taken> {
+    if !is_run(run) || !REASONS.contains(&reason) {
+        let bad = format!("not a run and reason: {run} {reason}");
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, bad));
+    }
+    let (store, dir) = match dir {
+        Dir::Path(dir) => {
+            let (dir, key) = resolve(dir)?;
+            (open_store(state, &key)?, dir)
+        }
+        Dir::Key(key) => by_key(state, key)?,
+    };
+    let _lock = lock(&store)?;
+    // Written once, never through a link: O_EXCL does not follow one.
+    if fs::symlink_metadata(store.join(DIR)).is_err() {
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true).mode(0o600);
+        options
+            .open(store.join(DIR))?
+            .write_all(dir.as_os_str().as_bytes())?;
+    }
+    let n = super::plan::numbers(&store, run)?
+        .into_iter()
+        .max()
+        .map_or(0, |n| n + 1);
+    take_in(state, &store, &dir, run, n, reason, time, caps)
 }
 
 /// [`take`] of the resolved `dir` into its `store`, whose lock the caller holds, as a restore
