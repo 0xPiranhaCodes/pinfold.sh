@@ -1,5 +1,5 @@
 //! Snapshots of the chrome as cells: pane borders, the bar with its status line, an approval
-//! prompt, the right-click menu and the command palette.
+//! prompt, the right-click menu, the command palette and the inbox.
 
 use pinfold_config::theme::GRAPHITE;
 use std::fmt::Write as _;
@@ -245,6 +245,19 @@ fn the_command_palette_filtered_to_open() {
     );
     palette.draw(&mut frame, &GRAPHITE);
     insta::assert_snapshot!(cells(&frame));
+}
+
+/// The inbox over a pane: five agents in three tabs, ◆ first, the ◆ row focused (ADR-0051).
+pub(crate) fn inbox() -> Frame {
+    let mut frame = pane('x', 14, 92);
+    let now = Instant::now();
+    crate::inbox::tests::board(now).draw(&mut frame, &GRAPHITE, now);
+    frame
+}
+
+#[test]
+fn the_inbox_needs_you_first() {
+    insta::assert_snapshot!(cells(&inbox()));
 }
 
 /// ADR-0049: every colour of the chrome is read from the theme. Under a light theme with only

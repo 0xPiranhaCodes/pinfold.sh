@@ -242,6 +242,18 @@ fn write_tool_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
             quote(&dir.join("reader.md"))
         ),
     )?;
+    fs::set_permissions(script, fs::Permissions::from_mode(0o755))?;
+    // Every pane says its agent needs you, which lists it in the inbox (ADR-0051), then draws
+    // the heavy screen.
+    let script = dir.join("agents-screen.sh");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n{} ctl status needs-you 'Allow edit to src/config.rs?'\nexec {}\n",
+            quote(tools),
+            quote(&fs::canonicalize(HEAVY_SCREEN)?)
+        ),
+    )?;
     fs::set_permissions(script, fs::Permissions::from_mode(0o755))
 }
 
@@ -284,6 +296,7 @@ fn mem_gate_task() -> ExitCode {
         input("repo"),
     );
     let tool_screen = inputs.join("tool-screen.sh");
+    let agents_screen = inputs.join("agents-screen.sh");
     let replay_typical = ["--replay", typical.as_str()];
     let replay_hostile = ["--replay", hostile.as_str()];
     let replay_baseline: &[&str] = &["--replay", "/dev/null"];
@@ -300,6 +313,7 @@ fn mem_gate_task() -> ExitCode {
             screen: None,
             window: None,
             menu: false,
+            inbox: None,
         },
         mem_gate::Budget {
             metric: "10k lines of typical text",
@@ -312,6 +326,7 @@ fn mem_gate_task() -> ExitCode {
             screen: None,
             window: None,
             menu: false,
+            inbox: None,
         },
         mem_gate::Budget {
             metric: "Scrollback at its cap",
@@ -324,6 +339,7 @@ fn mem_gate_task() -> ExitCode {
             screen: None,
             window: None,
             menu: false,
+            inbox: None,
         },
         mem_gate::Budget {
             metric: "Each idle pane",
@@ -336,6 +352,7 @@ fn mem_gate_task() -> ExitCode {
             screen: None,
             window: None,
             menu: false,
+            inbox: None,
         },
     ];
     // ADR-0045 section 5. Each tool runs in a pane of a core, which prints the tool's pid.
@@ -358,6 +375,7 @@ fn mem_gate_task() -> ExitCode {
         screen: None,
         window: Some(Side::Window),
         menu: false,
+        inbox: None,
     };
     budgets.extend([
         mem_gate::Budget { ..tool },
@@ -420,6 +438,7 @@ fn mem_gate_task() -> ExitCode {
             screen: None,
             window: Some(Side::Window),
             menu: false,
+            inbox: None,
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on macOS with text, 1512x1890",
@@ -432,6 +451,7 @@ fn mem_gate_task() -> ExitCode {
             screen: Some(Path::new(HEAVY_SCREEN)),
             window: Some(Side::Window),
             menu: false,
+            inbox: None,
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on macOS with a full glyph cache, 1512x1890",
@@ -444,6 +464,7 @@ fn mem_gate_task() -> ExitCode {
             screen: Some(Path::new(FULL_CACHE)),
             window: Some(Side::Window),
             menu: false,
+            inbox: None,
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on macOS with 8 tabs, 1512x1890",
@@ -456,6 +477,7 @@ fn mem_gate_task() -> ExitCode {
             screen: None,
             window: Some(Side::Window),
             menu: false,
+            inbox: None,
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on macOS with its context menu open, 1512x1890",
@@ -468,6 +490,7 @@ fn mem_gate_task() -> ExitCode {
             screen: Some(Path::new(HEAVY_SCREEN)),
             window: Some(Side::Window),
             menu: true,
+            inbox: None,
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on macOS with the markdown reader, 1512x1890",
@@ -480,7 +503,32 @@ fn mem_gate_task() -> ExitCode {
             screen: Some(&tool_screen),
             window: Some(Side::Window),
             menu: false,
+            inbox: None,
         });
+        let agents = mem_gate::Budget {
+            metric: "Window on macOS with 8 agents needing you, 1512x1890",
+            limit: mem_gate::WINDOW_LIMIT_HALF_RETINA,
+            program: &core,
+            args: &["--window", "8", "1512x1890"],
+            per_pane_over: None,
+            settle: mem_gate::WINDOW_SETTLE,
+            wait_for_line: true,
+            screen: Some(&agents_screen),
+            window: Some(Side::Window),
+            menu: false,
+            inbox: None,
+        };
+        budgets.push(mem_gate::Budget {
+            metric: "Window on macOS with the inbox open over 8 agents, 1512x1890",
+            inbox: Some("open"),
+            ..agents
+        });
+        budgets.push(mem_gate::Budget {
+            metric: "Window on macOS after the inbox closed over 8 agents, 1512x1890",
+            inbox: Some("closed"),
+            ..agents
+        });
+        budgets.push(agents);
         budgets.push(mem_gate::Budget {
             metric: "Core beside that window, 8 idle tabs",
             limit: mem_gate::CORE_LIMIT,
@@ -492,6 +540,7 @@ fn mem_gate_task() -> ExitCode {
             screen: None,
             window: Some(Side::Core),
             menu: false,
+            inbox: None,
         });
     }
     if cfg!(target_os = "linux") {
@@ -506,6 +555,7 @@ fn mem_gate_task() -> ExitCode {
             screen: None,
             window: Some(Side::Window),
             menu: false,
+            inbox: None,
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on X11 with text, 1920x1080",
@@ -518,6 +568,7 @@ fn mem_gate_task() -> ExitCode {
             screen: Some(Path::new(HEAVY_SCREEN)),
             window: Some(Side::Window),
             menu: false,
+            inbox: None,
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on X11 with a full glyph cache, 1920x1080",
@@ -530,6 +581,7 @@ fn mem_gate_task() -> ExitCode {
             screen: Some(Path::new(FULL_CACHE)),
             window: Some(Side::Window),
             menu: false,
+            inbox: None,
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on X11 with 8 tabs, 1920x1080",
@@ -542,6 +594,7 @@ fn mem_gate_task() -> ExitCode {
             screen: None,
             window: Some(Side::Window),
             menu: false,
+            inbox: None,
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on X11 with its context menu open, 1920x1080",
@@ -554,6 +607,7 @@ fn mem_gate_task() -> ExitCode {
             screen: Some(Path::new(HEAVY_SCREEN)),
             window: Some(Side::Window),
             menu: true,
+            inbox: None,
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on X11 with the markdown reader, 1920x1080",
@@ -566,7 +620,32 @@ fn mem_gate_task() -> ExitCode {
             screen: Some(&tool_screen),
             window: Some(Side::Window),
             menu: false,
+            inbox: None,
         });
+        let agents = mem_gate::Budget {
+            metric: "Window on X11 with 8 agents needing you, 1920x1080",
+            limit: mem_gate::WINDOW_LIMIT_FULL_HD,
+            program: &core,
+            args: &["--window", "8", "1920x1080"],
+            per_pane_over: None,
+            settle: mem_gate::WINDOW_SETTLE,
+            wait_for_line: true,
+            screen: Some(&agents_screen),
+            window: Some(Side::Window),
+            menu: false,
+            inbox: None,
+        };
+        budgets.push(mem_gate::Budget {
+            metric: "Window on X11 with the inbox open over 8 agents, 1920x1080",
+            inbox: Some("open"),
+            ..agents
+        });
+        budgets.push(mem_gate::Budget {
+            metric: "Window on X11 after the inbox closed over 8 agents, 1920x1080",
+            inbox: Some("closed"),
+            ..agents
+        });
+        budgets.push(agents);
         budgets.push(mem_gate::Budget {
             metric: "Core beside that window, 8 idle tabs",
             limit: mem_gate::CORE_LIMIT,
@@ -578,6 +657,7 @@ fn mem_gate_task() -> ExitCode {
             screen: None,
             window: Some(Side::Core),
             menu: false,
+            inbox: None,
         });
     }
     let passed = mem_gate::run(&budgets);
