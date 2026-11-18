@@ -242,6 +242,18 @@ impl Reactor {
                 self.open_tab(command, size.rows, size.cols)?;
                 false
             }
+            // The folder came from an agent's session file, then the window: a hint, checked
+            // as a restored pane's OSC 7 directory is (ADR-0051 §8).
+            Request::OpenTabIn { dir } => {
+                if !crate::snapshot::is_private(std::path::Path::new(dir)) {
+                    return Err(Refusal::Folder);
+                }
+                let size = self.area.unwrap_or(FIRST_SIZE);
+                let mut command = (self.shell)();
+                command.current_dir(dir);
+                self.open_tab(command, size.rows, size.cols)?;
+                false
+            }
             Request::Split { pane, way } => {
                 let command = self.shell_from(Some(pane as usize));
                 self.split(pane as usize, command, way)?;

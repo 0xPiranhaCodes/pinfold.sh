@@ -58,8 +58,9 @@ const PEEK_KILL: Duration = Duration::from_secs(2);
 const PEEK_POLL: Duration = Duration::from_millis(20);
 /// The longest line of a peek's taken as one.
 const PEEK_LINE: usize = 1024;
-/// The most of a peek's output read: a line of 1 KiB and its newline for each of 64 panes.
-const PEEK_OUTPUT: usize = 64 * (PEEK_LINE + 1);
+/// The most of a peek's output read: a line of 1 KiB and its newline for each of 64 panes and
+/// 16 agents outside PinFold.
+const PEEK_OUTPUT: usize = (64 + link::MAX_OUTSIDE as usize) * (PEEK_LINE + 1);
 /// One read from the socket, which lives on the stack and costs nothing when idle.
 const READ_CHUNK: usize = 16 * 1024;
 
@@ -201,6 +202,40 @@ impl Peek {
     }
 }
 
+impl Peek {
+    /// The agents outside PinFold its lines after the panes' name, as seconds since their
+    /// file changed and their folder: absolute, plain and in none of `dirs`, at most 16
+    /// (ADR-0051 §8). The folder is only ever a hint.
+    fn outside(&self, dirs: &[PathBuf]) -> Vec<(u32, String)> {
+        let lines = self
+            .output
+            .split(|&byte| byte == b'\n')
+            .skip(self.panes.len());
+        let mut rows: Vec<(u32, String)> = Vec::new();
+        for line in lines.filter(|line| line.len() <= PEEK_LINE) {
+            let Ok(serde_json::Value::Object(line)) = serde_json::from_slice(line) else {
+                continue;
+            };
+            let dir = line.get("outside").and_then(serde_json::Value::as_str);
+            let secs = line.get("secs").and_then(serde_json::Value::as_u64);
+            let (Some(dir), Some(secs)) = (dir, secs) else {
+                continue;
+            };
+            let plain = dir.starts_with('/')
+                && dir.len() <= link::MAX_DIR
+                && dir.chars().all(|c| !c.is_control() && !bidi(c));
+            let inside = dirs.iter().any(|pane| pane == Path::new(dir));
+            if plain && !inside && !rows.iter().any(|(_, seen)| seen == dir) {
+                rows.push((u32::try_from(secs).unwrap_or(u32::MAX), dir.to_owned()));
+            }
+            if rows.len() == usize::from(link::MAX_OUTSIDE) {
+                break;
+            }
+        }
+        rows
+    }
+}
+
 impl Drop for Peek {
     fn drop(&mut self) {
         // A peek that ended is reaped; one still running is killed first, which is at once.
@@ -274,6 +309,7 @@ impl Session {
             Notice::Copied { text, .. } => text.len(),
             Notice::Linked { uri, .. } => uri.len(),
             Notice::Markdown { names, .. } => names.len(),
+            Notice::Outside { dir, .. } => dir.len(),
             _ => 0,
         };
         if self.pending() + NOTICE_HEAD + text > MAX_PENDING {
@@ -464,7 +500,7 @@ impl Session {
     /// Sends each listed pane's branch, read now and kept by neither side, if the open inbox
     /// is due them, and sets when it is next (ADR-0051 §7). With `[inbox] agent_files` on, a
     /// window of 21 or later gets them once `pinfold agents peek` has ended, with its context
-    /// use and steps.
+    /// use and steps, and one of 22 or later the agents outside PinFold after them (§8).
     fn send_extras(&mut self, reactor: &Reactor) -> Result<(), Ended> {
         let now = Instant::now();
         if let Some(peek) = self.peek.as_mut() {
@@ -483,6 +519,18 @@ impl Session {
                         (None, String::new())
                     };
                     self.send_extra(reactor, pane, ctx, &steps)?;
+                }
+                if self.version >= link::OUTSIDE {
+                    // Every pane's directory, listed or not, as the system reports it.
+                    let dirs = self.panes.iter().map(|state| state.number);
+                    let dirs: Vec<PathBuf> =
+                        dirs.filter_map(|pane| reactor.shell_cwd(pane)).collect();
+                    let rows = if ended {
+                        peek.outside(&dirs)
+                    } else {
+                        Vec::new()
+                    };
+                    self.send_outside(&rows)?;
                 }
             }
             return Ok(());
@@ -503,7 +551,9 @@ impl Session {
                 }
             }
         }
-        if let Some(tools) = tools.filter(|_| !peeked.0.is_empty()) {
+        // A window of 22 lists agents outside PinFold, so its peek runs with no pane too.
+        let outside = self.version >= link::OUTSIDE;
+        if let Some(tools) = tools.filter(|_| !peeked.0.is_empty() || outside) {
             match Peek::start(tools, peeked.0.clone(), &peeked.1) {
                 Ok(peek) => self.peek = Some(peek),
                 Err(error) => {
@@ -518,6 +568,29 @@ impl Session {
         }
         for pane in listed.into_iter().filter(|pane| !peeked.0.contains(pane)) {
             self.send_extra(reactor, pane, None, "")?;
+        }
+        Ok(())
+    }
+
+    /// Sends a refresh of the agents outside PinFold: each row in order, or one empty notice
+    /// for none, so the window drops the rows that went (ADR-0051 §8).
+    fn send_outside(&mut self, rows: &[(u32, String)]) -> Result<(), Ended> {
+        let count = rows.len().min(usize::from(link::MAX_OUTSIDE)) as u8;
+        if count == 0 {
+            return self.notice(&Notice::Outside {
+                index: 0,
+                count,
+                secs: 0,
+                dir: "",
+            });
+        }
+        for (index, (secs, dir)) in rows.iter().take(count.into()).enumerate() {
+            self.notice(&Notice::Outside {
+                index: index as u8,
+                count,
+                secs: *secs,
+                dir,
+            })?;
         }
         Ok(())
     }
@@ -1191,6 +1264,8 @@ mod tests {
         extras: Vec<(u32, String)>,
         /// Each extra's context use and steps, beside `extras`.
         peeked: Vec<(Option<u8>, String)>,
+        /// Each outside row told: index, count, seconds and folder.
+        outside: Vec<(u8, u8, u32, String)>,
         /// Each pane's OSC 12 cursor colour and OSC 11 background, as told.
         colours: Vec<(u32, Option<u32>, Option<u32>)>,
     }
@@ -1231,6 +1306,7 @@ mod tests {
                 webhooks: Vec::new(),
                 extras: Vec::new(),
                 peeked: Vec::new(),
+                outside: Vec::new(),
                 colours: Vec::new(),
             }
         }
@@ -1362,6 +1438,12 @@ mod tests {
                             self.extras.push((pane, branch.to_owned()));
                             self.peeked.push((ctx, steps.to_owned()));
                         }
+                        Notice::Outside {
+                            index,
+                            count,
+                            secs,
+                            dir,
+                        } => self.outside.push((index, count, secs, dir.to_owned())),
                     }
                 }
             }
@@ -1658,16 +1740,6 @@ mod tests {
             .is_some()));
         peer.send(Request::Inbox { open: false });
         assert!(turn_until(&mut reactor, |r| r.host.deadline().is_none()));
-
-        // A window of 20 gets branches only, so no peek runs for it.
-        fs::remove_file(root.join("args")).unwrap();
-        let mut older = Peer::older(&mut reactor, VERSION - 1);
-        older.fit(&reactor, agent);
-        serve(&mut reactor, &mut older, |_, p| p.status.is_some());
-        older.send(Request::Inbox { open: true });
-        serve(&mut reactor, &mut older, |_, p| !p.extras.is_empty());
-        assert_eq!(older.peeked, [(None, String::new())]);
-        assert!(!root.join("args").exists(), "a peek ran for a window of 20");
         fs::remove_dir_all(root).unwrap();
     }
 
@@ -2575,6 +2647,101 @@ mod tests {
             p.matches(r, first as usize) && p.matches(r, second as usize)
         });
         assert_eq!(reactor.engine(first as usize).unwrap().size(), (24, 39));
+    }
+
+    /// ADR-0051 §8: after the panes' lines, the peek's outside rows go to the window in order,
+    /// at most 16, none in a pane's directory, none relative, and each folder once.
+    #[test]
+    fn an_open_inbox_lists_agents_outside_pinfold_once_and_at_most_sixteen() {
+        let root = scratch("outside");
+        let mut reactor = Reactor::new().unwrap();
+        let mut lines = vec![
+            r#"{"ctx":null,"steps":[]}"#.to_owned(),
+            format!(r#"{{"outside":"{}","secs":1}}"#, root.display()),
+            r#"{"outside":"work","secs":1}"#.to_owned(),
+            r#"{"outside":"/w\u001b]0;x","secs":1}"#.to_owned(),
+        ];
+        lines.extend(
+            (0..20).map(|index| format!(r#"{{"outside":"/w{}","secs":{index}}}"#, index % 18)),
+        );
+        let body = format!("cat <<'EOF'\n{}\nEOF", lines.join("\n"));
+        reactor.set_tools(stub_tools(&root, &body));
+        reactor.set_agent_files(true);
+        let (_, mut peer) = listed_in(&root, &mut reactor);
+        peer.send(Request::Inbox { open: true });
+        serve(&mut reactor, &mut peer, |_, p| p.outside.len() == 16);
+        let rows: Vec<String> = (0..16).map(|index| format!("/w{index}")).collect();
+        let told: Vec<&String> = peer.outside.iter().map(|row| &row.3).collect();
+        assert_eq!(told, rows.iter().collect::<Vec<_>>());
+        let places: Vec<(u8, u8)> = peer.outside.iter().map(|row| (row.0, row.1)).collect();
+        assert_eq!(places, (0..16).map(|index| (index, 16)).collect::<Vec<_>>());
+
+        // A peek that lists none clears the rows, and a window of 21 gets none at all.
+        reactor.set_tools(stub_tools(&root, "echo '{}'"));
+        reactor.host.window.as_mut().unwrap().session.inbox = Some(Instant::now());
+        serve(&mut reactor, &mut peer, |_, p| p.outside.len() == 17);
+        assert_eq!(peer.outside[16], (0, 0, 0, String::new()));
+        let mut older = Peer::older(&mut reactor, VERSION - 1);
+        older.send(Request::Inbox { open: true });
+        for _ in 0..50 {
+            reactor.turn(Some(Duration::from_millis(5))).unwrap();
+        }
+        older.read();
+        assert!(older.outside.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// ADR-0051 §8: the folder came from a session file, so a tab opens there only if it is a
+    /// private existing absolute directory; a link, a relative path or a folder others can
+    /// write is refused and opens nothing.
+    #[test]
+    fn a_tab_opens_in_an_outside_folder_only_if_it_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        // Linux's `/tmp` is sticky and world-writable, so there the tree goes in the crate.
+        let bases = [
+            std::env::temp_dir(),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")),
+        ];
+        let base = bases.iter().filter_map(|base| base.canonicalize().ok());
+        let base = base
+            .into_iter()
+            .find(|base| crate::snapshot::is_private(base));
+        let root = base
+            .unwrap()
+            .join(format!("pinfold-open-in-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let kept = root.join("kept");
+        let open = root.join("open");
+        fs::create_dir_all(&kept).unwrap();
+        fs::create_dir_all(&open).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&kept, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::set_permissions(&open, fs::Permissions::from_mode(0o777)).unwrap();
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&kept, &link).unwrap();
+        let (mut reactor, mut peer, _) = session(24, 80);
+        reactor.shell = || shell(r#"echo "at-$(basename "$(pwd -P)")"; read line"#);
+        let tabs = peer.tabs.len();
+        let refused = [
+            link.display().to_string(),
+            "kept".to_owned(),
+            open.display().to_string(),
+            kept.join("../open").display().to_string(),
+            root.join("gone").display().to_string(),
+        ];
+        for (index, dir) in refused.iter().enumerate() {
+            peer.send(Request::OpenTabIn { dir });
+            serve(&mut reactor, &mut peer, |_, p| p.refused.len() == index + 1);
+        }
+        assert!(peer.refused.iter().all(|reason| *reason == Refusal::Folder));
+        assert_eq!(peer.tabs.len(), tabs, "a refused folder opened a tab");
+
+        let dir = kept.display().to_string();
+        peer.send(Request::OpenTabIn { dir: &dir });
+        serve(&mut reactor, &mut peer, |_, p| p.tabs.len() == tabs + 1);
+        let tab = peer.focused as usize;
+        assert!(turn_until(&mut reactor, |r| on_screen(r, tab, "at-kept")));
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
