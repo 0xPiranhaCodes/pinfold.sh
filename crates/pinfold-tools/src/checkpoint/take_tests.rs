@@ -172,7 +172,7 @@ fn a_second_take_on_a_locked_store_refuses_at_once_and_a_left_lock_file_does_not
     let (state, work, dir) = scratch("lock");
     take(&state, "r1-0", 0, "launch", &work, 1).expect("take");
     let store = store_of(&state, &work);
-    let held = lock(&store).expect("lock");
+    let held = settled(|| lock(&store)).expect("lock");
     let started = std::time::Instant::now();
     let busy = take(&state, "r1-0", 1, "api", &work, 2).expect_err("locked");
     assert_eq!(busy.kind(), io::ErrorKind::WouldBlock);
