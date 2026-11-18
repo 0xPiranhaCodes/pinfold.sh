@@ -108,6 +108,24 @@ pub fn on_terminate(pipe: &OwnedFd) -> io::Result<()> {
     Ok(())
 }
 
+/// Returns the process's file mode creation mask. It is read by setting it to 022 and back, so
+/// a file another thread makes in between gets 022: call it before starting threads.
+///
+/// ```
+/// assert_eq!(pinfold_sys::umask() & !0o777, 0);
+/// ```
+#[allow(
+    clippy::useless_conversion,
+    reason = "mode_t is u16 on macOS, u32 on Linux"
+)]
+pub fn umask() -> u32 {
+    // SAFETY: umask cannot fail and touches no memory.
+    let mask = unsafe { libc::umask(0o022) };
+    // SAFETY: as above; this sets the mask back.
+    unsafe { libc::umask(mask) };
+    u32::from(mask)
+}
+
 /// Returns the user this process acts as.
 pub fn effective_uid() -> u32 {
     // SAFETY: geteuid takes no arguments, cannot fail and touches no memory.

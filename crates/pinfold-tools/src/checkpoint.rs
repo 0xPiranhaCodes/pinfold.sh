@@ -25,7 +25,9 @@ use sha1::{Digest, Sha1};
 
 use crate::gitignore::{self, Pattern};
 
+pub mod plan;
 pub mod prune;
+pub mod restore;
 pub mod take;
 
 const BUF: usize = 64 * 1024;
@@ -921,15 +923,38 @@ fn blob(
 /// footprint in bytes.
 const MEASURE: &str = "PINFOLD_MEASURE";
 const USAGE: &str = "usage: pinfold checkpoint take <run> <n> <reason> -- <dir> | prune \
-                     [--live <run>]... [--max-store-mib N] [--keep-days N] [--keep-per-run N]";
+                     [--live <run>]... [--max-store-mib N] [--keep-days N] [--keep-per-run N] \
+                     | plan|restore <run> <c> <shown> -- <dir> [<path>]...";
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
+
+/// A checkpoint number on the command line.
+fn number(word: &[u8]) -> io::Result<u64> {
+    std::str::from_utf8(word)
+        .ok()
+        .and_then(|word| word.parse().ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a checkpoint number"))
+}
+
+/// The paths after `-- <dir>`, `None` for none, which means all.
+fn paths(args: &[OsString]) -> Option<Vec<Vec<u8>>> {
+    (!args.is_empty()).then(|| args.iter().map(|p| p.as_bytes().to_vec()).collect())
+}
 
 /// Runs `pinfold checkpoint <args>`, the hidden commands the core starts (ADR-0050 section 2),
 /// and prints one JSON line on standard output: on success the command's result, otherwise
 /// `{"error":"<reason>"}`. Returns whether it succeeded.
 ///
-/// Both run at background priority. `take <run> <n> <reason> -- <dir>` prints
+/// Take and prune run at background priority. `take <run> <n> <reason> -- <dir>` prints
 /// [`take::Taken`]'s line; `prune [--live <run>]... [--max-store-mib N] [--keep-days N]
-/// [--keep-per-run N]`, defaults 2048, 14 and 20, prints [`prune::Pruned`]'s.
+/// [--keep-per-run N]`, defaults 2048, 14 and 20, prints [`prune::Pruned`]'s. `plan <run> <c>
+/// <shown> -- <dir> [<path>]...`, limited to the paths if any are given and all otherwise,
+/// prints [`plan::Planned`]'s, and `restore` with the same arguments [`restore::Restored`]'s,
+/// both at normal priority as the person waits on them.
 ///
 /// # Examples
 ///
@@ -972,6 +997,58 @@ pub fn command(state: Option<&Path>, args: &[OsString]) -> bool {
                     "changed": t.changed,
                 })
             })
+        }
+        (Some(state), [b"plan", run, c, shown, b"--", _, ..]) => {
+            let run = std::str::from_utf8(run).unwrap_or_default();
+            number(c)
+                .and_then(|c| Ok((c, number(shown)?)))
+                .and_then(|(c, shown)| {
+                    plan::plan(state, run, c, shown, Path::new(&args[5]), paths(&args[6..]))
+                })
+                .map(|p| {
+                    let paths: Vec<_> = p
+                        .paths
+                        .iter()
+                        .map(|(path, what, later)| serde_json::json!([path, what, later]))
+                        .collect();
+                    let mut line = serde_json::json!({
+                        "restore": p.restore,
+                        "delete": p.delete,
+                        "bring_back": p.bring_back,
+                        "not_covered": p.not_covered,
+                        "later": p.later,
+                        "complete": p.complete,
+                        "more": p.total() - paths.len() as u64,
+                        "paths": paths,
+                    });
+                    plan::fit(&mut line, "paths", "more");
+                    line
+                })
+        }
+        (Some(state), [b"restore", run, c, shown, b"--", _, ..]) => {
+            let run = std::str::from_utf8(run).unwrap_or_default();
+            let dir = Path::new(&args[5]);
+            number(c)
+                .and_then(|c| Ok((c, number(shown)?)))
+                .and_then(|(c, shown)| {
+                    restore::restore(state, run, c, shown, dir, paths(&args[6..]), now())
+                })
+                .map(|r| {
+                    let skipped: Vec<_> = r
+                        .skipped_paths
+                        .iter()
+                        .map(|(path, why)| serde_json::json!([path, why]))
+                        .collect();
+                    let mut line = serde_json::json!({
+                        "restored": r.restored,
+                        "deleted": r.deleted,
+                        "skipped": r.skipped,
+                        "skipped_paths": skipped,
+                        "restore_checkpoint": r.restore_checkpoint,
+                    });
+                    plan::fit(&mut line, "skipped_paths", "unlisted");
+                    line
+                })
         }
         (Some(state), [b"prune", rest @ ..]) => {
             let _ = pinfold_sys::background();
