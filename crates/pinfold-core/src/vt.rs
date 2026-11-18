@@ -14,7 +14,7 @@ use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, Processor, Rgb};
 use pinfold_proto::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode, Palette};
 
-use crate::marks::{AgentMarks, Marks, ShellMarks, ShellPhase, WorkingDirectory};
+use crate::marks::{AgentMarks, Marks, ShellMarks, ShellPhase, Toast, WorkingDirectory};
 use crate::scrollback::Scrollback;
 use crate::search::{self, CopyStep, Copying, Position, Search, SearchStep, Selection};
 
@@ -114,6 +114,13 @@ pub trait VtEngine {
     /// Returns what an agent CLI last signalled through OSC 7501 and OSC 9. Output can fake
     /// all of it, so only a pane launched from an agent profile reads it (ADR-0046).
     fn agent_marks(&self) -> AgentMarks;
+
+    /// Turns the text of program notifications on or off, `[alerts] program_notifications`.
+    /// Off, none is kept (ADR-0051 §9).
+    fn set_toasts(&mut self, on: bool);
+
+    /// Takes the latest finished program notification, if one is in flight.
+    fn take_toast(&mut self) -> Option<Toast>;
 
     /// Returns the last valid OSC 7 directory, which is a hint that output can fake.
     fn cwd(&self) -> Option<&WorkingDirectory>;
@@ -277,6 +284,7 @@ impl Scan {
                     index += 1;
                 }
                 Self::Osc(length) if length >= MAX_SEQUENCE => {
+                    marks.cut();
                     pass(&bytes[start..index], None);
                     index += bytes[index..]
                         .iter()
@@ -714,6 +722,14 @@ impl VtEngine for AlacrittyEngine {
 
     fn shell_marks(&self) -> ShellMarks {
         self.marks.shell
+    }
+
+    fn set_toasts(&mut self, on: bool) {
+        self.marks.set_toasts(on);
+    }
+
+    fn take_toast(&mut self) -> Option<Toast> {
+        self.marks.take_toast()
     }
 
     fn agent_marks(&self) -> AgentMarks {

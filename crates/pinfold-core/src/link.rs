@@ -1419,7 +1419,7 @@ mod tests {
                             runnable,
                             command,
                         } => self.was_running.push((pane, runnable, command.to_owned())),
-                        Notice::Approval(_) => {}
+                        Notice::Approval(_) | Notice::Toast { .. } => {}
                         Notice::Unhardened { checked } => self.unhardened.push(checked),
                         Notice::Secrets { count, names } => {
                             self.secrets.push((count, names.to_owned()));

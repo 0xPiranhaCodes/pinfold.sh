@@ -455,7 +455,9 @@ impl State {
             Notice::Copied { .. }
             | Notice::WasRunning { .. }
             | Notice::InboxExtra { .. }
-            | Notice::Outside { .. } => {}
+            | Notice::Outside { .. }
+            // Shown from link version 24's window side, ADR-0051 slice 11.
+            | Notice::Toast { .. } => {}
         }
         Ok(())
     }

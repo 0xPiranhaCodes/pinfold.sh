@@ -9,7 +9,7 @@ expression: said
       "id": 1,
       "jsonrpc": "2.0",
       "result": {
-        "link": 22,
+        "link": 24,
         "methods": [
           "window.open",
           "pane.list",
