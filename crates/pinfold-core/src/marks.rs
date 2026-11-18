@@ -410,20 +410,32 @@ impl Marks {
             && !body.first().is_some_and(u8::is_ascii_digit)
         {
             self.agent.signal(AgentSignal::Notified);
-            if self.toasts {
-                self.toast = Toast::new(OSC_9, body).map(Box::new);
-            }
         }
-        if !self.toasts {
-            return false;
-        }
-        if let Some(body) = self.text.strip_prefix(b"777;notify;") {
-            self.toast = rxvt(body).map(Box::new);
-        }
-        if let Some(body) = self.text.strip_prefix(b"99;") {
-            self.toast = kitty(body, self.toast.take().map(|toast| *toast)).map(Box::new);
+        if self.toasts {
+            self.read_toast();
         }
         false
+    }
+
+    /// Reads a finished notification's text. Out of line, so a parser with toasts off pays no
+    /// stack for it.
+    #[cold]
+    #[inline(never)]
+    fn read_toast(&mut self) {
+        let text = &self.text;
+        let toast = if let Some(body) = text
+            .strip_prefix(b"9;")
+            .filter(|body| !body.first().is_some_and(u8::is_ascii_digit))
+        {
+            Toast::new(OSC_9, body)
+        } else if let Some(body) = text.strip_prefix(b"777;notify;") {
+            rxvt(body)
+        } else if let Some(body) = text.strip_prefix(b"99;") {
+            kitty(body, self.toast.take().map(|toast| *toast))
+        } else {
+            return;
+        };
+        self.toast = toast.map(Box::new);
     }
 }
 
