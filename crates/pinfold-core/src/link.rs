@@ -1929,18 +1929,21 @@ mod tests {
         assert_eq!(peer.restored, [(8, 1, String::new())]);
         drop(peer);
         assert!(turn_until(&mut reactor, |r| !r.has_window()));
-        // A window a version older shows neither, so it counts as told and gets nothing.
-        let mut old = Peer::older(&mut reactor, link::REWIND - 1);
-        serve(&mut reactor, &mut old, |r, _| r.is_window_ready());
-        assert!(reactor.tell_checkpoint(pane, 1));
-        reactor.tell_restored(0, 0, "the restore was refused or failed");
-        assert!(!reactor.can_ask(ApprovalAction::Rewind));
-        reactor.write(pane, b"more\n");
-        serve(&mut reactor, &mut old, |r, _| {
-            on_screen(r, pane, "got-more")
-        });
-        old.read();
-        assert!(old.checkpoints.is_empty() && old.restored.is_empty());
+        // A window a version older shows neither, so it counts as told and gets nothing. Once
+        // OLDEST reaches REWIND, no window served lacks them (ADR-0043).
+        if link::REWIND > OLDEST {
+            let mut old = Peer::older(&mut reactor, link::REWIND - 1);
+            serve(&mut reactor, &mut old, |r, _| r.is_window_ready());
+            assert!(reactor.tell_checkpoint(pane, 1));
+            reactor.tell_restored(0, 0, "the restore was refused or failed");
+            assert!(!reactor.can_ask(ApprovalAction::Rewind));
+            reactor.write(pane, b"more\n");
+            serve(&mut reactor, &mut old, |r, _| {
+                on_screen(r, pane, "got-more")
+            });
+            old.read();
+            assert!(old.checkpoints.is_empty() && old.restored.is_empty());
+        }
     }
 
     #[test]

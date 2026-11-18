@@ -658,3 +658,9 @@ and `pinfold rewind`:
    caller's own pane, else in the agent pane focused last, as the viewer's `a` picks one; since
    the run's oldest listed checkpoint, its launch one, unless `--checkpoint` names another. The
    tool's `path` is the caller's working directory, which the viewer never reads.
+8. **The palette's Rewind Agent Changes** is `Tool::Rewind` on `Request::OpenTool`, link
+   version 24 (ADR-0043). The window offers it only on a core that speaks 24 with an agent
+   reported in the focused pane; the core picks the run in that pane and its launch
+   checkpoint, never the window, takes the view checkpoint without the API's rate limit, as the
+   person chose it, and opens the viewer right of the pane. A pane with no run, or a take that
+   fails, flashes `✕ error · <why>` and opens nothing.

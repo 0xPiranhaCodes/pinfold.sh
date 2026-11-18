@@ -39,7 +39,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode, Palette};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 23;
+pub const VERSION: u16 = 24;
 
 /// The oldest version this side still speaks, one before [`VERSION`] (ADR-0043).
 pub const OLDEST: u16 = VERSION - 1;
@@ -68,6 +68,10 @@ pub const AGENT_FILES: u16 = 21;
 /// The first version with [`ApprovalAction::Rewind`], [`Notice::Checkpoint`] and
 /// [`Notice::Restored`] (ADR-0050).
 pub const REWIND: u16 = 23;
+
+/// The first version with [`Tool::Rewind`], the palette's "Rewind agent changes" (ADR-0050,
+/// slice 7).
+pub const REWIND_VIEW: u16 = 24;
 
 /// Why a run has no checkpoint, by [`Notice::Checkpoint`]'s `missing`: the words the strip shows
 /// after `no checkpoint ·`, none for 0, which clears it (ADR-0050 section 4).
@@ -405,6 +409,9 @@ pub enum Tool {
     Files,
     /// `pinfold diff`, the git diff viewer.
     Diff,
+    /// The diff viewer on the run in the pane, since its launch checkpoint, which the core picks
+    /// (ADR-0050 section 6). Since [`REWIND_VIEW`].
+    Rewind,
 }
 
 /// Which way a search runs.
@@ -1194,6 +1201,9 @@ impl Request<'_> {
     #[must_use]
     pub fn since(&self) -> u16 {
         match self {
+            Self::OpenTool {
+                tool: Tool::Rewind, ..
+            } => REWIND_VIEW,
             Self::OpenTool { .. } => 12,
             Self::ListMarkdown { .. } | Self::OpenMarkdown { .. } => 13,
             Self::Palette(_) => 14,
@@ -1437,7 +1447,7 @@ impl Request<'_> {
             },
             OPEN_TOOL => Request::OpenTool {
                 pane: body.u32()?,
-                tool: body.tag("tool", &[Tool::Files, Tool::Diff])?,
+                tool: body.tag("tool", &[Tool::Files, Tool::Diff, Tool::Rewind])?,
             },
             WAS_RUNNING_ANSWER => Request::WasRunningAnswer {
                 pane: body.u32()?,
@@ -2703,7 +2713,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 23, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 24, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -2951,7 +2961,7 @@ mod tests {
             failed: 0,
         };
         assert_eq!(at_oldest(webhook), Ok(true));
-        // ADR-0050: a window a version older never gets a rewind prompt, a strip or a flash.
+        // ADR-0050: a window a version older still gets a rewind prompt, a strip and a flash.
         let rewind = Notice::Approval(Approval {
             id: 1,
             caller: 2,
@@ -2968,10 +2978,25 @@ mod tests {
             skipped: 0,
             error: "",
         };
-        for (notice, kind) in [(rewind, APPROVAL), (strip, CHECKPOINT), (flash, RESTORED)] {
-            let since = REWIND;
-            assert_eq!(at_oldest(notice), Err(Error::Newer { kind, since }));
+        for notice in [rewind, strip, flash] {
+            assert_eq!(at_oldest(notice), Ok(true));
         }
+        // But a core a version older is never asked to open the viewer on a run.
+        let mut wire = raw(HELLO, &OLDEST.to_le_bytes());
+        let open = Request::OpenTool {
+            pane: 2,
+            tool: Tool::Rewind,
+        };
+        open.encode(&mut wire).unwrap();
+        let (mut decoder, mut input) = (Decoder::default(), wire.as_slice());
+        decoder.next_request(&mut input).unwrap();
+        let (kind, since) = (OPEN_TOOL, REWIND_VIEW);
+        assert_eq!(
+            decoder
+                .next_request(&mut input)
+                .map(|request| request.is_some()),
+            Err(Error::Newer { kind, since })
+        );
         // Nothing is new in 16 but a layout, so a stand-in `since` checks the gate.
         let mut wire = raw(HELLO, &OLDEST.to_le_bytes());
         Notice::Raise.encode(&mut wire).unwrap();

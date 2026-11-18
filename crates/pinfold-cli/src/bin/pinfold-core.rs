@@ -291,17 +291,20 @@ enum Parked {
     Plan(Request),
     Restore(Request),
     View(Request),
+    /// The window's "Rewind agent changes" on the agent's pane, which no caller asked for.
+    Window(usize),
 }
 
 impl Parked {
-    fn request(&self) -> &Request {
-        match self {
+    fn request(&self) -> Option<&Request> {
+        Some(match self {
             Self::Launch(request, _)
             | Self::Call(request)
             | Self::Plan(request)
             | Self::Restore(request)
             | Self::View(request) => request,
-        }
+            Self::Window(_) => return None,
+        })
     }
 }
 
@@ -643,6 +646,43 @@ fn viewed(
     Ok(json!({"pane": opened}))
 }
 
+/// The window's "Rewind agent changes" on `pane` (ADR-0050 slice 7): the run's view
+/// checkpoint is queued, and the viewer opens since the launch checkpoint once it is taken. A
+/// pane with no run is refused with the window's flash, never an empty viewer.
+fn window_view(reactor: &mut Reactor, rewind: Option<&mut Rewind<Parked>>, pane: usize) {
+    let refused = match rewind.map(|rewind| (rewind.of_pane(pane), rewind)) {
+        None => "checkpoints are off",
+        Some((None, _)) => "no agent run in this pane",
+        Some((Some(run), rewind)) => match rewind.view(run, Parked::Window(pane), None) {
+            Ok(()) => return,
+            Err(_) => "the core is busy taking checkpoints",
+        },
+    };
+    reactor.tell_restored(0, 0, refused);
+}
+
+/// Opens the window's viewer of the run in `pane` once its view checkpoint `taken` ended, since
+/// the run's first checkpoint, its launch one, or flashes why not.
+fn window_viewed(
+    reactor: &mut Reactor,
+    rewind: &Rewind<Parked>,
+    pane: usize,
+    run: usize,
+    taken: &Result<Value, String>,
+) {
+    let opened = (|| {
+        let shown = taken.as_ref().ok()?["checkpoint"].as_str()?;
+        let record = rewind.run(run)?;
+        let launch = format!("{}/0", record.id());
+        reactor
+            .open_rewind(pane, &record.key(), &launch, shown)
+            .ok()
+    })();
+    if opened.is_none() {
+        reactor.tell_restored(0, 0, "the viewer could not open");
+    }
+}
+
 /// Whether `request` is a `checkpoint.restore` from `caller`.
 fn restore_from(request: &Request, caller: Option<pinfold_sys::Terminal>) -> bool {
     matches!(request.method(), Method::CheckpointRestore { .. }) && request.caller() == caller
@@ -695,7 +735,7 @@ fn restore_call(
         if !reactor.can_ask(ApprovalAction::Rewind) {
             return Err("approval needs an open PinFold window");
         }
-        let waiting = |parked: &Parked| restore_from(parked.request(), caller);
+        let waiting = |parked: &Parked| parked.request().is_some_and(|r| restore_from(r, caller));
         if grants.any(|ticket| restore_from(ticket, caller)) || rewind.any(waiting) {
             return Err("a restore from this caller is already waiting");
         }
@@ -860,6 +900,7 @@ fn checkpoints_ended(
                 let answer = viewed(reactor, family, rewind, &request, ended.run, ended.result);
                 audit::reply(log, reactor, request, answer);
             }
+            Parked::Window(pane) => window_viewed(reactor, rewind, pane, ended.run, &ended.result),
             Parked::Call(request) => {
                 let answer = ended.result.map(|mut line| {
                     if let Some(fields) = line.as_object_mut() {
@@ -1621,6 +1662,9 @@ fn daemon(
         let mut released = Vec::new();
         while let Some((id, answer)) = reactor.take_approval_answer() {
             released.extend(grants.answer(id, answer));
+        }
+        if let Some(pane) = reactor.take_rewind() {
+            window_view(&mut reactor, checkpoints.as_mut(), pane);
         }
         if !reactor.has_window() && grants.deadline().is_some() {
             released.extend(grants.window_closed());

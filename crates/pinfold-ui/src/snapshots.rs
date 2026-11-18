@@ -278,7 +278,7 @@ fn the_right_click_menu_with_a_link() {
 #[test]
 fn the_command_palette_filtered_to_open() {
     let mut frame = pane('x', 12, 60);
-    let mut palette = Palette::commands();
+    let mut palette = Palette::commands(false);
     let open = winit::keyboard::Key::Character("open".into());
     palette.key(
         &open,
@@ -400,7 +400,7 @@ fn a_light_theme_colours_every_piece_of_chrome() {
     Menu::open((1, 2), (14, 20), Some("https://pinfold.sh".to_owned())).draw(&mut frame, &theme);
     drawn.push(frame);
     let mut frame = screen(12, 60);
-    Palette::commands().draw(&mut frame, &theme);
+    Palette::commands(false).draw(&mut frame, &theme);
     drawn.push(frame);
 
     let mut queue = Queue::default();
