@@ -25,6 +25,8 @@ Every connection starts with `hello`:
 | `agent.launch`     | Version 2 and its own pane  | [`agent.launch.schema.json`](agent.launch.schema.json)       |
 | `tool.open`        | Version 2 and its own pane  | [`tool.open.schema.json`](tool.open.schema.json)             |
 | `pane.close`       | Version 2, a spawned pane   | [`pane.close.schema.json`](pane.close.schema.json)           |
+| `checkpoint.take`  | Version 2, a run in reach   | [`checkpoint.take.schema.json`](checkpoint.take.schema.json) |
+| `checkpoint.list`  | Version 2, a run in reach   | [`checkpoint.list.schema.json`](checkpoint.list.schema.json) |
 | `events.subscribe` | Version 2 and a terminal    | [`events.subscribe.schema.json`](events.subscribe.schema.json) |
 | `pane.status`      | Version 2 and its own pane  | [`pane.status.schema.json`](pane.status.schema.json)         |
 | `audit.read`       | Version 2, outside any pane | [`audit.read.schema.json`](audit.read.schema.json)           |
@@ -174,7 +176,8 @@ and never from the snapshot.
 `pinfold mcp` is an MCP server over stdio (protocol version 2025-06-18) and a thin client of
 this API. Its stdout carries only newline-delimited JSON-RPC, and a line over 1,000,000 bytes is
 refused. Its tools are `pane_list_v1`, `pane_read_v1`, `pane_last_output_v1`, `pane_send_v1`,
-`pane_spawn_v1`, `pane_close_v1`, `pane_wait_v1` and `tool_open_v1`, named with their version as ADR-0009 asks,
+`pane_spawn_v1`, `pane_close_v1`, `pane_wait_v1`, `tool_open_v1`, `checkpoint_take_v1` and
+`checkpoint_list_v1`, named with their version as ADR-0009 asks,
 each taking its method's params and returning the method's result as JSON text.
 `events_next_v1` takes `events.subscribe`'s `events` and an optional `timeout_ms` (default
 30,000, at most 600,000), and returns the next such event, or `{"timeout": true}`. MCP

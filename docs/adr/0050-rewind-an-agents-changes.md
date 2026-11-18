@@ -574,7 +574,7 @@ section 7's 48-byte record holds a store key but no path, and later takes need t
 3. **`list <run> --key <key>`** prints `{checkpoints, more}`, each
    `{checkpoint, reason, time, files, new_bytes, complete}`, newest first, cut to 4 KiB with
    `more` counting the oldest left out. No path.
-4. **Bounds.** A launch take is killed at `wait_s` (1 to 60 s, as a client waits 62 s for an answer), done, exit and API takes at 120 s, the
+4. **Bounds.** A launch take is killed at `wait_s` (1 to 60 s, as a client waits 62 s for an answer), done and exit takes at 120 s, an API take at 60 s, as its caller waits 62 s, the
    prune after a take at 900 s (its `repack` and `prune` have 300 s each inside), a list at
    10 s.
 5. **The record** is the core's start, the store key as 8 bytes, the run's `n`, its pane, the

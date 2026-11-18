@@ -50,7 +50,7 @@ const EVENTS_NEXT: &str = r#"{
 }"#;
 
 /// Each tool, the API method it calls, and that method's schema.
-const TOOLS: [(&str, &str, &str); 9] = [
+const TOOLS: [(&str, &str, &str); 11] = [
     (
         "pane_list_v1",
         "pane.list",
@@ -90,6 +90,16 @@ const TOOLS: [(&str, &str, &str); 9] = [
         "tool_open_v1",
         "tool.open",
         include_str!("../../../docs/api/tool.open.schema.json"),
+    ),
+    (
+        "checkpoint_take_v1",
+        "checkpoint.take",
+        include_str!("../../../docs/api/checkpoint.take.schema.json"),
+    ),
+    (
+        "checkpoint_list_v1",
+        "checkpoint.list",
+        include_str!("../../../docs/api/checkpoint.list.schema.json"),
     ),
     ("events_next_v1", "events.subscribe", EVENTS_NEXT),
 ];
@@ -307,6 +317,8 @@ mod tests {
             "pane_close_v1",
             "pane_wait_v1",
             "tool_open_v1",
+            "checkpoint_take_v1",
+            "checkpoint_list_v1",
             "events_next_v1",
         ];
         assert_eq!(names, expected);
@@ -322,7 +334,9 @@ mod tests {
             json!(["pane", "until", "timeout_ms"])
         );
         assert_eq!(tools[7]["inputSchema"]["required"], json!(["tool", "path"]));
-        assert_eq!(tools[8]["inputSchema"]["required"], json!(["events"]));
+        assert_eq!(tools[8]["inputSchema"]["required"], json!(["pane"]));
+        assert_eq!(tools[9]["inputSchema"]["required"], json!(["pane"]));
+        assert_eq!(tools[10]["inputSchema"]["required"], json!(["events"]));
     }
 
     #[test]

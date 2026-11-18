@@ -8,6 +8,11 @@ use std::time::Duration;
 
 /// Budgets use MB of 10^6 bytes, the unit of the M0 measurements behind them.
 pub const CORE_LIMIT: u64 = 4_000_000;
+/// A ceiling on the core after 64 agent launches, which keeps about 1 MB more with or without
+/// checkpoints (#476). Not a core allowance: it returns to [`CORE_LIMIT`] once #476 is fixed.
+pub const LAUNCH_LIMIT: u64 = 5_000_000;
+/// A row that is shown with no budget, never failed.
+pub const INFORMATION: u64 = u64::MAX;
 pub const PANE_LIMIT: u64 = 250_000;
 /// The window budget on Linux for an inner size of 1920x1080.
 pub const WINDOW_LIMIT_FULL_HD: u64 = 8_000_000 + 2 * 4 * 1920 * 1080;
@@ -48,6 +53,9 @@ const RUNS: usize = 3;
 /// A webhook's worker ends a minute after its last post, and one alert to a closed port takes
 /// three tries over 35 s (ADR-0051).
 pub const WEBHOOK_SETTLE: Duration = Duration::from_secs(105);
+/// 64 launches, each with its launch, exit and API take and its prune, and 64 lists, two at a
+/// time, then the workers end (ADR-0050).
+pub const REWIND_SETTLE: Duration = Duration::from_secs(90);
 /// Long enough for a process to finish starting.
 pub const SETTLE: Duration = Duration::from_secs(1);
 /// A window takes seconds to fall from its startup peak, and budgets are for idle windows.
@@ -139,6 +147,11 @@ fn measure_once(budget: &Budget, args: &[&str]) -> io::Result<Reading> {
     if let Some(agents) = budget.agents {
         command.env("XDG_CONFIG_HOME", agents);
         command.env("SHELL", agents.join("agent.sh"));
+        // Checkpoints go under the row's folder, never the person's state directory.
+        if agents.join("state").is_dir() {
+            command.env("HOME", agents.join("state"));
+            command.env("XDG_STATE_HOME", agents.join("state"));
+        }
         // A folder holding agents' session files is their home too (ADR-0051 §7).
         if agents.join(".claude").is_dir() {
             command.env("HOME", agents);
@@ -243,6 +256,13 @@ pub fn run(budgets: &[Budget]) -> bool {
     for budget in budgets {
         let limit = megabytes(budget.limit);
         match measure(budget) {
+            Ok((bytes, _)) if budget.limit == INFORMATION => {
+                println!(
+                    "| {} | {:.2} | | information only |",
+                    budget.metric,
+                    megabytes(bytes)
+                );
+            }
             Ok((bytes, true)) if bytes <= budget.limit => {
                 println!(
                     "| {} | {:.2} | {limit:.2} | no CJK font, so this leaves CJK out |",
@@ -453,7 +473,7 @@ mod tests {
 
     #[test]
     fn a_real_process_under_budget_passes() {
-        assert!(run(&[sleep(u64::MAX, &["30"])]));
+        assert!(run(&[sleep(u64::MAX - 1, &["30"])]));
     }
 
     #[test]

@@ -22,7 +22,9 @@ expression: said
           "pane.close",
           "events.subscribe",
           "pane.status",
-          "tool.open"
+          "tool.open",
+          "checkpoint.take",
+          "checkpoint.list"
         ],
         "pane": 0,
         "version": 2
