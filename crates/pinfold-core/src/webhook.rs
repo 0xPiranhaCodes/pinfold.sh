@@ -1,5 +1,5 @@
 //! Webhook building blocks (ADR-0051 section 5): the URL rules, the body built from status
-//! fields only, and the config `curl` reads from standard input. Nothing here sends.
+//! fields only, the config `curl` reads from standard input, and the [`Sender`] that runs it.
 //!
 //! The config's `[alerts] webhook` is read when the core starts. A URL these rules refuse turns
 //! webhooks off with a [`Refused`] reason, which never quotes the URL: its path or query can
@@ -8,6 +8,10 @@
 use std::fmt::{self, Write as _};
 
 use crate::status::Status;
+
+mod send;
+
+pub use send::{MOST, PER_PANE, PROXIES, QUEUE, Record, Sender, WINDOW, find_curl};
 
 /// The longest URL taken, in bytes.
 pub const MAX_URL: usize = 2048;

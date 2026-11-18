@@ -28,7 +28,7 @@ use pinfold_core::snapshot::{self, Saver, Snapshot};
 use pinfold_core::status::Status;
 use pinfold_core::wait::{Outcome, Waits};
 use pinfold_core::workspace::Workspaces;
-use pinfold_core::{sandbox, shell, tool};
+use pinfold_core::{sandbox, shell, tool, webhook};
 use pinfold_proto::link::{self, ApprovalAction, ApprovalAnswer};
 use serde_json::{Value, json};
 
@@ -899,6 +899,62 @@ fn strip_secrets(on: bool) {
     }
 }
 
+/// The webhook's sender, when `[alerts] webhook` is a URL the rules allow and `curl` is found,
+/// with `reactor` keeping alerts in `webhook_states` for it. Otherwise webhooks are off, and the
+/// log says why once, naming the rule or the host, never the URL (ADR-0051).
+fn webhook(config: &pinfold_config::Config, reactor: &mut Reactor) -> Option<webhook::Sender> {
+    let alerts = &config.alerts;
+    let hook = match webhook::Webhook::new(&alerts.webhook) {
+        Ok(hook) => hook?,
+        Err(refused) => {
+            let _ = writeln!(io::stderr(), "pinfold-core: webhooks are off: {refused}");
+            return None;
+        }
+    };
+    let Some(curl) = webhook::find_curl() else {
+        let place = if cfg!(target_os = "macos") {
+            "no /usr/bin/curl"
+        } else {
+            "no curl on an absolute PATH entry"
+        };
+        let _ = writeln!(
+            io::stderr(),
+            "pinfold-core: webhooks to {} are off: {place}",
+            hook.host()
+        );
+        return None;
+    };
+    reactor.post_states(alerts.webhook_states.iter().map(|alert| match alert {
+        pinfold_config::Alert::NeedsYou => Status::NeedsYou,
+        pinfold_config::Alert::Error => Status::Error,
+    }));
+    let format = match alerts.webhook_format {
+        pinfold_config::WebhookFormat::Json => webhook::Format::Json,
+        pinfold_config::WebhookFormat::Text => webhook::Format::Text,
+    };
+    // By index, as `agent.launch` keeps a pane's profile.
+    let agents = config
+        .agents
+        .keys()
+        .map(|name| name.as_str().into())
+        .collect();
+    let waker = Some(reactor.waker());
+    Some(webhook::Sender::new(curl, hook, format, agents, waker))
+}
+
+/// Hands the sender each alert `reactor` kept, as a record of fixed fields.
+fn post(reactor: &mut Reactor, sender: &mut webhook::Sender) {
+    let now = Instant::now();
+    let unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    while let Some((pane, status)) = reactor.take_post() {
+        if let Some(record) = reactor.post_record(pane, status, now, unix) {
+            sender.push(record, now);
+        }
+    }
+}
+
 /// Runs the saved session if `restore` and there is one, else `panes` shells, a tab each, until every pane has gone and no window is left to tell, or
 /// until SIGTERM or SIGHUP, saving the session on the way out, when the window closes and a
 /// minute after a change (ADR-0034). With a size, it opens a window for `cargo xtask mem-gate` and
@@ -914,11 +970,8 @@ fn daemon(
     // must reach.
     let config = pinfold_cli::config();
     strip_secrets(config.strip_secrets);
-    // A bad URL turns webhooks off, and the log names the rule, never the URL (ADR-0051).
-    if let Err(refused) = pinfold_core::webhook::Webhook::new(&config.alerts.webhook) {
-        let _ = writeln!(io::stderr(), "pinfold-core: webhooks are off: {refused}");
-    }
     let mut reactor = Reactor::new()?;
+    let mut webhook = webhook(&config, &mut reactor);
     // The built-in tools (ADR-0045), resolved before a restore runs them again.
     reactor.set_tools(sibling("pinfold")?);
     if let Some(checked) = unhardened {
@@ -996,6 +1049,9 @@ fn daemon(
             .chain(unready.map(|(_, by)| by.saturating_duration_since(now)));
         output::tap(&mut reactor, &waits, &subscribers);
         reactor.turn(Some(wait.min().unwrap_or(IDLE)))?;
+        if let Some(sender) = webhook.as_mut() {
+            post(&mut reactor, sender);
+        }
         output::hand_out(&mut reactor, &mut waits, &subscribers);
         waits.retain(|request| !request.is_gone());
         grants.retain(|request| !request.is_gone());
