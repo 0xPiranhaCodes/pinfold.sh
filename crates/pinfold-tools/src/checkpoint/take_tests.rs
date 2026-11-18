@@ -14,7 +14,7 @@ fn scratch(name: &str) -> (PathBuf, PathBuf, PathBuf) {
 /// `call`, tried again for up to a second while the lock looks held: in this test process
 /// another test's `fork` can hold a copy of a lock just dropped until its child execs, though
 /// the descriptor is close-on-exec. A take is its own process, so it never sees this.
-pub(super) fn settled<T>(call: impl Fn() -> io::Result<T>) -> io::Result<T> {
+pub(crate) fn settled<T>(call: impl Fn() -> io::Result<T>) -> io::Result<T> {
     for _ in 0..50 {
         match call() {
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
@@ -194,5 +194,19 @@ fn a_second_take_on_a_locked_store_refuses_at_once_and_a_left_lock_file_does_not
     fs::remove_file(store.join(LOCK)).expect("rm");
     symlink(dir.join("work/a.txt"), store.join(LOCK)).expect("link");
     take(&state, "r1-0", 3, "api", &work, 4).expect_err("a linked lock is not opened");
+    fs::remove_dir_all(dir).expect("clean");
+}
+
+#[test]
+fn a_full_store_refuses_every_take_with_the_reason() {
+    let (state, work, dir) = scratch("full");
+    take(&state, "r1-0", 0, "launch", &work, 1).expect("take");
+    fs::write(
+        state.join("checkpoints/full"),
+        "over max_store_mib: 9 MiB of 8 MiB",
+    )
+    .expect("full");
+    let full = take(&state, "r1-0", 1, "api", &work, 2).expect_err("full");
+    assert!(full.to_string().starts_with("over max_store_mib"), "{full}");
     fs::remove_dir_all(dir).expect("clean");
 }

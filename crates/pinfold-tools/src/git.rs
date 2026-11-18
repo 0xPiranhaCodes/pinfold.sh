@@ -273,7 +273,8 @@ pub fn create_store(store: &Path) -> io::Result<()> {
 /// lookup, output cap and 10 s timeout hold; `repack` and `prune` get 300 s.
 ///
 /// Only these run: `diff-tree`, `diff` (given `--no-ext-diff --no-textconv --no-color`),
-/// `cat-file --batch`, `for-each-ref`, `update-ref -d`, `repack -a -d -q` and `prune`.
+/// `cat-file --batch`, `for-each-ref`, `update-ref -d`, `repack -a -d -q`, `prune` and
+/// `rev-list --objects --all --disk-usage`, which gets 300 s too.
 /// `fast-import` is [`import`].
 ///
 /// # Errors
@@ -299,6 +300,7 @@ where
         [b"diff-tree" | b"diff" | b"for-each-ref", ..] | [b"cat-file", b"--batch"] => TIMEOUT,
         [b"update-ref", b"-d", ..] => TIMEOUT,
         [b"repack", b"-a", b"-d", b"-q"] | [b"prune", ..] => STORE_UPKEEP,
+        [b"rev-list", b"--objects", b"--all", b"--disk-usage"] => STORE_UPKEEP,
         _ => {
             let refused = "not a subcommand a checkpoint store runs";
             return Err(io::Error::new(io::ErrorKind::InvalidInput, refused));

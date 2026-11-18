@@ -25,6 +25,7 @@ use sha1::{Digest, Sha1};
 
 use crate::gitignore::{self, Pattern};
 
+pub mod prune;
 pub mod take;
 
 const BUF: usize = 64 * 1024;
@@ -919,14 +920,16 @@ fn blob(
 /// measures it: the line then adds `ms`, the take's wall time, and `peak`, its own peak
 /// footprint in bytes.
 const MEASURE: &str = "PINFOLD_MEASURE";
-const USAGE: &str = "usage: pinfold checkpoint take <run> <n> <reason> -- <dir>";
+const USAGE: &str = "usage: pinfold checkpoint take <run> <n> <reason> -- <dir> | prune \
+                     [--live <run>]... [--max-store-mib N] [--keep-days N] [--keep-per-run N]";
 
 /// Runs `pinfold checkpoint <args>`, the hidden commands the core starts (ADR-0050 section 2),
 /// and prints one JSON line on standard output: on success the command's result, otherwise
 /// `{"error":"<reason>"}`. Returns whether it succeeded.
 ///
-/// `take <run> <n> <reason> -- <dir>` runs at background priority and prints
-/// [`take::Taken`]'s line.
+/// Both run at background priority. `take <run> <n> <reason> -- <dir>` prints
+/// [`take::Taken`]'s line; `prune [--live <run>]... [--max-store-mib N] [--keep-days N]
+/// [--keep-per-run N]`, defaults 2048, 14 and 20, prints [`prune::Pruned`]'s.
 ///
 /// # Examples
 ///
@@ -969,6 +972,26 @@ pub fn command(state: Option<&Path>, args: &[OsString]) -> bool {
                     "changed": t.changed,
                 })
             })
+        }
+        (Some(state), [b"prune", rest @ ..]) => {
+            let _ = pinfold_sys::background();
+            let rest: Option<Vec<&str>> =
+                rest.iter().map(|w| std::str::from_utf8(w).ok()).collect();
+            let time = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| since.as_secs());
+            match rest.as_deref().and_then(prune::parse) {
+                Some((live, limits)) => prune::prune(state, &live, &limits, time).map(|p| {
+                    serde_json::json!({
+                        "deleted": p.deleted,
+                        "repacked": p.repacked,
+                        "bytes": p.bytes,
+                        "full": p.full,
+                        "busy": p.busy,
+                    })
+                }),
+                None => Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE)),
+            }
         }
         _ => Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE)),
     };
