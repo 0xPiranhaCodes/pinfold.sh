@@ -120,6 +120,17 @@ the shell's own working directory, read from the system
 ([ADR-0040](adr/0040-pane-directory-falls-back-to-its-shell.md)). With neither, the launch is
 refused. A sandboxed profile's directory must also pass the checks below. The core reads profiles once, at start.
 
+`approve` names the one key the [inbox](#the-inbox)'s Approve sends to the agent's permission
+prompt: `Enter`, `Tab`, `Escape`, `Backspace`, `Space`, or one printable ASCII character such
+as `y` or `1`. Any other value is refused when the file is read, with a message naming
+`approve`. Without it the inbox offers Interrupt (Ctrl+C) only.
+
+```toml
+[agents.claude]
+command = ["claude"]
+approve = "Enter"
+```
+
 A profile's pane reads its CLI's own state from output: OSC 7501 `state=blocked` (codex-cli
 sends it at its approval prompt) or an OSC 9 notification shows ◆ needs you, labelled from
 output, and `working`, `done`, `idle` and `clear` move it on. Typing into the pane clears a
@@ -387,6 +398,16 @@ minute. A state that came from output's marks rather than the agent says "from o
 message goes. ↑ and ↓ move, Enter goes to the pane, a click on a row does too, and Esc or
 prefix `!` closes. While it is open every key and paste goes to it, never to a pane. It holds
 its rows only while open.
+
+On a ◆ row of an agent profile's pane, `y` is Approve and `i` is Interrupt. Neither sends
+anything yet: PinFold asks first, below the panes where program output cannot draw, "Send
+`Enter` to `claude` in tab 2 · pane 1?" or "Send Ctrl+C to …". `y` sends that one key once, and
+`n` or Esc cancels; `y` counts only half a second after the question appears, so a quick
+double press cannot answer it. Nothing is remembered. The core checks again before it types
+the key, and refuses, with the reason under the pane, if the pane has gone, no longer needs
+you, was not started from a profile, is [protected](#protected-panes), or if the profile or its
+`approve` key differs from what the core read when it started; restart the session to use an
+edited profile. There is no API method for this.
 
 Prefix `w`, or Next Needs You in the palette, goes from anywhere in the window to the ◆ pane
 that has needed you longest; pressed again on a ◆ pane, it goes to the next in the inbox's order,

@@ -17,7 +17,7 @@ use mio::{Events, Interest, Poll, Token};
 use pinfold_api::tool::Run;
 use pinfold_mux::{Session, Size};
 use pinfold_proto::Palette;
-use pinfold_proto::link::{ApprovalAnswer, MAX_PANES};
+use pinfold_proto::link::{self, ApprovalAnswer, Choice, MAX_PANES, Refusal};
 use pinfold_sys::Terminal;
 use pinfold_sys::pty::Pty;
 
@@ -244,6 +244,9 @@ pub struct Reactor {
     /// A configured webhook's host, whether `curl` was found, and how many alerts were given
     /// up on, for every window (ADR-0051).
     pub(crate) webhook: Option<(Box<str>, bool, u32)>,
+    /// Each agent profile's name and `approve` key name, in the config's order, as read when
+    /// the core started, for the inbox's Approve and Interrupt (ADR-0051).
+    profiles: Vec<(Box<str>, Option<Box<str>>)>,
 }
 
 impl Reactor {
@@ -285,7 +288,65 @@ impl Reactor {
             posted: 0,
             posts: Vec::new(),
             webhook: None,
+            profiles: Vec::new(),
         })
+    }
+
+    /// Sets each agent profile's name and `approve` key name, in the config's order, so the
+    /// inbox's answers can be checked against them.
+    pub fn set_profiles<'a>(
+        &mut self,
+        profiles: impl IntoIterator<Item = (&'a str, Option<&'a str>)>,
+    ) {
+        self.profiles = (profiles.into_iter())
+            .map(|(name, approve)| (name.into(), approve.map(Into::into)))
+            .collect();
+    }
+
+    /// Types one key into an agent's pane for a person's confirmed Approve or Interrupt in the
+    /// inbox (ADR-0051 §6): the profile's `approve` key, or Ctrl+C. `profile` and `key` are the
+    /// names the person's prompt showed. Refused, with nothing sent, unless the pane still
+    /// exists, still needs you, was launched from an agent profile, is not protected, and its
+    /// profile and key are still the ones shown.
+    ///
+    /// # Errors
+    ///
+    /// The [`Refusal`] the window flashes.
+    pub fn answer(
+        &mut self,
+        pane: usize,
+        choice: Choice,
+        (profile, key): (&str, &str),
+        now: Instant,
+    ) -> Result<(), Refusal> {
+        let held = self.pane(pane).filter(|held| !held.closed);
+        let held = held.ok_or(Refusal::Gone)?;
+        if pane_status(held).0 != Status::NeedsYou {
+            return Err(Refusal::NotWaiting);
+        }
+        let index = self.profile(pane);
+        let (name, approve) = (index.and_then(|index| self.profiles.get(usize::from(index))))
+            .ok_or(Refusal::NotAgent)?;
+        // Compared with what the core read, then typed from the request's equal names.
+        let bytes = match choice {
+            Choice::Approve if approve.as_deref() == Some(key) => link::key_bytes(key),
+            Choice::Approve => None,
+            Choice::Interrupt => Some(link::INTERRUPT),
+        };
+        let bytes = bytes
+            .filter(|_| **name == *profile)
+            .ok_or(Refusal::ProfileChanged)?;
+        if let Some(reason) = self.protection(pane) {
+            return Err(match reason {
+                crate::protect::Reason::Busy => Refusal::Input,
+                _ => Refusal::Protected,
+            });
+        }
+        if !self.write(pane, bytes) {
+            return Err(Refusal::Input);
+        }
+        self.typed(pane, now);
+        Ok(())
     }
 
     /// Tells every window that a webhook to `host` is configured, and with `sender` whether
@@ -878,6 +939,14 @@ impl Reactor {
             .is_some_and(|pane| pane.tool.is_none() && pane.status.listed())
     }
 
+    /// The agent profile a pane was launched from, as an index into the config's profiles.
+    #[must_use]
+    pub fn profile(&self, pane: usize) -> Option<u8> {
+        self.pane(pane)
+            .filter(|pane| pane.tool.is_none())
+            .and_then(|pane| pane.status.profile())
+    }
+
     /// Whole seconds at `now` a pane has been in its state and its program has run.
     #[must_use]
     pub fn held(&self, pane: usize, now: Instant) -> Option<(u32, u32)> {
@@ -1351,6 +1420,92 @@ mod tests {
 
         reactor.typed(agent, Instant::now());
         assert_eq!(reactor.status(agent), Some((Status::Idle, false, "")));
+    }
+
+    /// ADR-0051 §6: an inbox answer types one key, and only into a ◆ agent profile's pane that is
+    /// not protected and whose profile is still the one shown. The pane prints the first byte it
+    /// reads, so every refusal before the answer that lands is shown to have sent nothing.
+    #[test]
+    fn an_inbox_answer_is_refused_unless_every_check_holds_and_then_sends_one_key() {
+        let mut reactor = Reactor::new().unwrap();
+        reactor.set_profiles([("claude", Some("Enter")), ("codex", None)]);
+        let script = |app: &str| {
+            format!(
+                "stty raw; printf '\\033]7501;state=blocked:app={app}:kind=permission\\007ready'; \
+                 dd bs=1 count=1 2>/dev/null | od -An -tx1; sleep 30"
+            )
+        };
+        let claude = reactor.spawn(shell(&script("claude")), 24, 80).unwrap();
+        let codex = reactor.spawn(shell(&script("codex")), 24, 80).unwrap();
+        let plain = reactor.spawn(shell(&script("plain")), 24, 80).unwrap();
+        let now = Instant::now();
+        let answer = |reactor: &mut Reactor, pane, choice, names| {
+            reactor.answer(pane, choice, names, Instant::now())
+        };
+        // Still idle: nothing has said it needs you yet.
+        reactor.read_agent_signals(claude, 0);
+        assert_eq!(
+            answer(&mut reactor, claude, Choice::Approve, ("claude", "Enter")),
+            Err(Refusal::NotWaiting)
+        );
+        reactor.read_agent_signals(codex, 1);
+        let ready = |r: &Reactor| {
+            [claude, codex, plain]
+                .iter()
+                .all(|&p| on_screen(r, p, "ready"))
+        };
+        assert!(turn_until(&mut reactor, ready));
+        assert_eq!(reactor.status(claude).map(|s| s.0), Some(Status::NeedsYou));
+        // A pane that reports ◆ through the API is listed but is no profile's.
+        reactor
+            .report_status(plain, Status::NeedsYou, "", now)
+            .unwrap();
+        assert_eq!(
+            answer(&mut reactor, plain, Choice::Interrupt, ("claude", "")),
+            Err(Refusal::NotAgent)
+        );
+        assert_eq!(
+            answer(&mut reactor, 999, Choice::Interrupt, ("claude", "")),
+            Err(Refusal::Gone)
+        );
+        // The prompt showed another profile or key than the core read: the config changed.
+        for names in [("codex", "Enter"), ("claude", "y")] {
+            assert_eq!(
+                answer(&mut reactor, claude, Choice::Approve, names),
+                Err(Refusal::ProfileChanged)
+            );
+        }
+        // A profile without `approve` has nothing to approve with.
+        assert_eq!(
+            answer(&mut reactor, codex, Choice::Approve, ("codex", "Enter")),
+            Err(Refusal::ProfileChanged)
+        );
+        reactor.set_marked(claude, true);
+        assert_eq!(
+            answer(&mut reactor, claude, Choice::Approve, ("claude", "Enter")),
+            Err(Refusal::Protected)
+        );
+        reactor.set_marked(claude, false);
+
+        assert_eq!(
+            answer(&mut reactor, claude, Choice::Approve, ("claude", "Enter")),
+            Ok(())
+        );
+        assert_eq!(
+            answer(&mut reactor, codex, Choice::Interrupt, ("codex", "")),
+            Ok(())
+        );
+        let read = |r: &Reactor| on_screen(r, claude, " 0d") && on_screen(r, codex, " 03");
+        assert!(
+            turn_until(&mut reactor, read),
+            "{:?}",
+            reactor.read(claude, None)
+        );
+        // Typing clears a ◆ from output, so a second answer finds nothing waiting.
+        assert_eq!(
+            answer(&mut reactor, claude, Choice::Approve, ("claude", "Enter")),
+            Err(Refusal::NotWaiting)
+        );
     }
 
     #[test]

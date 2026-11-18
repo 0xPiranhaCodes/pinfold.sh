@@ -9,6 +9,7 @@
 use std::time::{Duration, Instant};
 
 use pinfold_config::theme::Theme;
+use pinfold_proto::link::Choice;
 use pinfold_proto::{Cell, Frame};
 use unicode_width::UnicodeWidthChar;
 use winit::keyboard::{Key, NamedKey};
@@ -47,6 +48,20 @@ pub enum Step {
         /// The pane.
         pane: u32,
     },
+    /// It stays open, and the window asks the person to confirm Approve or Interrupt for a ◆
+    /// row's pane (ADR-0051 §6).
+    Answer {
+        /// The pane.
+        pane: u32,
+        /// Its tab's index.
+        tab: u8,
+        /// Its place in the tab, from 1, as the row shows it.
+        place: u8,
+        /// The agent profile it was launched from, if any.
+        profile: Option<u8>,
+        /// The key pressed: `y` approves, `i` interrupts.
+        choice: Choice,
+    },
 }
 
 /// One listed pane, as a row shows it.
@@ -62,6 +77,7 @@ struct Row {
     label: String,
     /// The agent's message, already safe to draw.
     message: String,
+    profile: Option<u8>,
 }
 
 /// An open inbox.
@@ -96,6 +112,7 @@ impl Inbox {
             count += 1;
             (row.pane, row.state, row.reported) = (listed.pane, listed.state, listed.reported);
             (row.tab, row.place, row.since) = (tab, place.min(99) as u8, Some(listed.since));
+            row.profile = listed.profile;
             row.label.clear();
             row.label
                 .push_str(labels.get(usize::from(tab)).map_or("", String::as_str));
@@ -161,6 +178,23 @@ impl Inbox {
             }
             Key::Named(NamedKey::Home) => self.selected = 0,
             Key::Named(NamedKey::End) => self.selected = last,
+            // Only on a ◆ row; the window's confirmation, not this key, sends anything.
+            Key::Character(key) => {
+                let choice = match key.as_str() {
+                    "y" => Choice::Approve,
+                    "i" => Choice::Interrupt,
+                    _ => return Step::Stay,
+                };
+                if let Some(row) = self.rows.get(self.selected).filter(|row| row.state == 0) {
+                    return Step::Answer {
+                        pane: row.pane,
+                        tab: row.tab,
+                        place: row.place,
+                        profile: row.profile,
+                        choice,
+                    };
+                }
+            }
             _ => {}
         }
         Step::Stay
@@ -325,7 +359,12 @@ impl Inbox {
             }
         }
         let said = at.max(usize::from(left) + 28);
-        let keys: [(&str, &str); 3] = [("↑↓", " move  "), ("⏎", " jump  "), ("esc", " close")];
+        let keys: [(&str, &str); 4] = [
+            ("⏎", " jump · "),
+            ("y", " approve · "),
+            ("i", " interrupt · "),
+            ("esc", ""),
+        ];
         let width: usize = keys
             .iter()
             .map(|(key, word)| cells(key) + cells(word))
@@ -553,6 +592,7 @@ pub(crate) mod tests {
             reported: true,
             since: now - Duration::from_secs(ago),
             message: message.to_owned(),
+            profile: Some(0),
         }
     }
 
@@ -572,6 +612,27 @@ pub(crate) mod tests {
         inbox
     }
 
+    /// ADR-0051 §6: `y` and `i` ask for a confirmation on a ◆ row only, naming its pane and
+    /// profile; elsewhere they do nothing.
+    #[test]
+    fn y_and_i_on_a_needs_you_row_ask_and_on_any_other_do_nothing() {
+        let mut inbox = board(Instant::now());
+        let key = |text: &str| Key::Character(text.into());
+        let answer = |choice| Step::Answer {
+            pane: 2,
+            tab: 0,
+            place: 1,
+            profile: Some(0),
+            choice,
+        };
+        assert_eq!(inbox.key(&key("y")), answer(Choice::Approve));
+        assert_eq!(inbox.key(&key("i")), answer(Choice::Interrupt));
+        assert_eq!(inbox.key(&key("Y")), Step::Stay);
+        inbox.key(&Key::Named(NamedKey::ArrowDown));
+        assert_eq!(inbox.key(&key("y")), Step::Stay, "an error row");
+        assert_eq!(inbox.key(&key("i")), Step::Stay);
+    }
+
     #[test]
     fn the_footer_says_when_the_webhook_is_not_posting() {
         let now = Instant::now();
@@ -586,7 +647,7 @@ pub(crate) mod tests {
         };
         let plain = footer(None).unwrap();
         assert!(
-            !plain.contains("webhook") && plain.contains("esc close"),
+            !plain.contains("webhook") && plain.contains("⏎ jump · y approve · i interrupt · esc"),
             "{plain}"
         );
         assert!(

@@ -11,6 +11,7 @@ publish.workspace = true
 
 [dependencies]
 libc = "0.2.191"
+pinfold-proto = { path = "../pinfold-proto", version = "0.1.0-beta.4" }
 pinfold-sys = { path = "../pinfold-sys", version = "0.1.0-beta.4" }
 serde = { version = "1.0.229", default-features = false, features = ["derive"] }
 thiserror = "2.0.21"

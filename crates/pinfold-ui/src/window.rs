@@ -17,7 +17,9 @@ use std::time::Instant;
 use mio::Waker;
 use pinfold_config::theme::{self, GRAPHITE, Theme};
 use pinfold_config::{Alert, Config, Keys, MAX_FONT_SIZE, MIN_FONT_SIZE};
-use pinfold_proto::link::{self as proto, MAX_DIMENSION, MAX_PASTE, Position, Rect, Selection};
+use pinfold_proto::link::{
+    self as proto, MAX_ANSWER_NAME, MAX_DIMENSION, MAX_PASTE, Position, Rect, Selection,
+};
 use pinfold_proto::{Frame, MouseMode};
 use pinfold_render::cpu::{CpuRenderer, Renderer};
 use pinfold_render::font::{Font, FontError};
@@ -137,6 +139,8 @@ struct Shown {
     laid: bool,
     /// Whether the core is new enough for the inbox (ADR-0051).
     inbox: bool,
+    /// Whether it is new enough to answer an agent from it.
+    answer: bool,
     /// The inbox's panes and every pane's tab, only while the inbox is open.
     listed: Vec<Listed>,
     members: Vec<(u32, u8)>,
@@ -183,6 +187,12 @@ fn publish(link: &mut Link, shown: &mut Shown) -> bool {
         shown.focused = link.focused();
         shown.total = link.total();
         shown.inbox = link.speaks(&proto::Request::Inbox { open: true });
+        shown.answer = link.speaks(&proto::Request::Answer {
+            pane: 0,
+            choice: proto::Choice::Interrupt,
+            profile: "",
+            key: "",
+        });
         shown.laid = true;
     }
     // Copied only while the inbox is open, and freed once it closes.
@@ -498,6 +508,13 @@ struct App {
     inbox: Option<inbox::Inbox>,
     /// Whether the core is new enough for the inbox.
     inbox_spoken: bool,
+    /// PinFold's confirmation of an Approve or Interrupt, only while shown over the inbox.
+    confirm: Option<approval::Confirm>,
+    /// Whether the core is new enough to take one.
+    answer_spoken: bool,
+    /// In a window `cargo xtask mem-gate` measures, whether to show a confirmation once the
+    /// inbox it opens has drawn its rows.
+    measuring_answer: bool,
     /// In a window `cargo xtask mem-gate` measures, whether to close the inbox it opens once
     /// that has drawn its rows.
     measuring: Option<bool>,
@@ -604,9 +621,13 @@ impl App {
             picking: None,
             inbox: None,
             inbox_spoken: false,
+            confirm: None,
+            answer_spoken: false,
             measuring: size
                 .and(std::env::var_os("PINFOLD_MEASURE_INBOX"))
                 .map(|value| value == "closed"),
+            measuring_answer: size.is_some()
+                && std::env::var_os("PINFOLD_MEASURE_INBOX").is_some_and(|value| value == "answer"),
             asking: None,
             flash: Flash::default(),
             unhardened: None,
@@ -811,6 +832,7 @@ impl App {
             active.and_then(|tab| Some((tab.status?.0, tab.status?.1, tab.message.clone())));
         self.total = shown.total;
         self.inbox_spoken = shown.inbox;
+        self.answer_spoken = shown.answer;
         if self.measuring.is_some() && self.inbox.is_none() && self.inbox_spoken {
             self.toggle_inbox();
         }
@@ -964,6 +986,9 @@ impl App {
                 self.approvals
                     .draw(&mut self.composed, Instant::now(), theme);
                 self.was_running.hide();
+            } else if let Some(confirm) = &self.confirm {
+                confirm.draw(&mut self.composed, theme);
+                self.was_running.hide();
             } else if let Some(prompt) = &self.prompt {
                 paste::banner(&mut self.composed, prompt, theme);
                 self.was_running.hide();
@@ -1021,6 +1046,19 @@ impl App {
         if drawn && self.measuring == Some(true) {
             self.measuring = None;
             self.close_inbox();
+        }
+        // The measured panes report through `ctl`, so a stand-in names their profile.
+        if drawn
+            && std::mem::take(&mut self.measuring_answer)
+            && let Some(inbox::Step::Answer {
+                pane, tab, place, ..
+            }) = (self.inbox.as_mut()).map(|inbox| inbox.key(&Key::Character("i".into())))
+        {
+            let (names, now) = (("claude", ""), Instant::now());
+            let confirm =
+                approval::Confirm::new((pane, tab, place), proto::Choice::Interrupt, names, now);
+            self.confirm = Some(confirm);
+            self.redraw_soon();
         }
         Ok(())
     }
@@ -1184,6 +1222,7 @@ impl App {
 
     /// Closes the inbox, which frees its rows here and the I/O thread's copy.
     fn close_inbox(&mut self) {
+        self.confirm = None;
         if self.inbox.take().is_some() {
             self.core(proto::Request::Inbox { open: false });
             self.redraw_soon();
@@ -1201,12 +1240,72 @@ impl App {
                 self.core(proto::Request::SwitchTab { index: tab.into() });
                 self.core(proto::Request::Focus { pane });
             }
+            inbox::Step::Answer {
+                pane,
+                tab,
+                place,
+                profile,
+                choice,
+            } => self.ask_answer((pane, tab, place), profile, choice),
         }
+    }
+
+    /// Shows PinFold's confirmation of `choice` for a ◆ pane, naming the profile and key from
+    /// this window's config by the core's profile index; the core refuses if they are no longer
+    /// its own (ADR-0051 §6). A profile without `approve` offers Interrupt only.
+    fn ask_answer(&mut self, at: (u32, u8, u8), profile: Option<u8>, choice: proto::Choice) {
+        let now = Instant::now();
+        let agents = &self.config.agents;
+        let agent = profile.and_then(|index| agents.iter().nth(usize::from(index)));
+        let note = match agent {
+            _ if !self.answer_spoken => Some("answering needs the core updated"),
+            None => Some("Not answered: not an agent profile's pane"),
+            Some((name, _)) if name.len() > MAX_ANSWER_NAME => {
+                Some("Not answered: the profile's name is over 64 bytes")
+            }
+            Some((_, agent)) if choice == proto::Choice::Approve && agent.approve.is_none() => {
+                Some("This profile has no approve key; i interrupts")
+            }
+            Some(_) => None,
+        };
+        match (note, agent) {
+            (None, Some((name, agent))) => {
+                let key = match choice {
+                    proto::Choice::Approve => agent.approve.as_deref().unwrap_or_default(),
+                    proto::Choice::Interrupt => "",
+                };
+                self.confirm = Some(approval::Confirm::new(at, choice, (name, key), now));
+            }
+            (note, _) => self.flash.note(note.unwrap_or_default(), now),
+        }
+        self.redraw_soon();
+    }
+
+    /// Takes a fresh key for the confirmation on screen: `y` sends the answer once, and `n` or
+    /// Esc drops it. Either way it is gone, as no answer lasts.
+    fn confirm_key(&mut self, key: &Key) {
+        let Some(confirm) = &self.confirm else {
+            return;
+        };
+        let Some(send) = confirm.key(key, Instant::now(), self.has_focus, self.area) else {
+            return;
+        };
+        if let Some(confirm) = self.confirm.take().filter(|_| send) {
+            self.request(Request::Answer(confirm));
+        }
+        self.redraw_soon();
     }
 
     /// Hands a key to the open inbox. The prefix still works, so its inbox key closes it; any
     /// other command waits until the inbox is closed, as the inbox holds the keyboard.
     fn inbox_key(&mut self, key: &Key, repeat: bool) {
+        // A held key repeating must not answer a prompt it did not see.
+        if self.confirm.is_some() {
+            if !repeat {
+                self.confirm_key(key);
+            }
+            return;
+        }
         match self.prefix.key(key, self.modifiers, repeat) {
             prefix::Step::Run(Command::Inbox) => self.close_inbox(),
             prefix::Step::Run(Command::NextWaiting) => {
@@ -1663,7 +1762,7 @@ impl App {
 
     /// Takes a press or release, and returns the step for an open menu it clicked.
     fn pressed(&mut self, button: MouseButton, state: ElementState) -> Option<menu::Step> {
-        if !self.approvals.is_empty() {
+        if !self.approvals.is_empty() || self.confirm.is_some() {
             // A click cannot answer a prompt, and goes nowhere else while one is up.
             return None;
         }
@@ -2393,6 +2492,163 @@ mod tests {
             sent.len()
         );
         assert!(app.approvals.is_empty());
+    }
+
+    /// A window over an open inbox whose one row, pane 7, is ◆ and was launched from the
+    /// config's first profile, `claude`, with `approve` if given (ADR-0051 §6).
+    fn answering(approve: Option<&str>) -> (App, Inbox, Poll) {
+        let (mut app, inbox, poll) = app();
+        let approve = approve.map_or(String::new(), |key| format!("approve = \"{key}\"\n"));
+        let config = format!("[agents.claude]\ncommand = [\"claude\"]\n{approve}");
+        app.config = pinfold_config::parse(config.as_bytes()).unwrap();
+        (app.inbox_spoken, app.answer_spoken, app.has_focus) = (true, true, true);
+        let now = Instant::now();
+        let mut open = inbox::Inbox::default();
+        let listed = [inbox::tests::listed(7, 0, 5, "Allow edit?", now)];
+        open.refresh(
+            &listed,
+            &[(3, 1), (7, 1)],
+            &["a".to_owned(), "b".to_owned()],
+        );
+        app.inbox = Some(open);
+        (app, inbox, poll)
+    }
+
+    fn press(app: &mut App, key: &str, repeat: bool) {
+        let key = match key {
+            "Escape" => Key::Named(NamedKey::Escape),
+            text => Key::Character(text.into()),
+        };
+        app.inbox_key(&key, repeat);
+    }
+
+    fn answers(inbox: &Inbox) -> Vec<(u32, proto::Choice, String, String)> {
+        let sent = inbox.take().into_iter();
+        let answers = sent.filter_map(|request| match request {
+            Request::Answer(confirm) => {
+                Some((confirm.pane, confirm.choice, confirm.profile, confirm.key))
+            }
+            _ => None,
+        });
+        answers.collect()
+    }
+
+    #[test]
+    fn the_window_sends_an_answer_only_for_the_confirmation_key_and_once() {
+        let (mut app, inbox, _poll) = answering(Some("Enter"));
+        press(&mut app, "y", false);
+        assert!(
+            app.confirm.is_some() && inbox.take().is_empty(),
+            "y in the inbox only asks"
+        );
+        // Unarmed, a second y as quick as a double press sends nothing.
+        press(&mut app, "y", false);
+        app.confirm.as_mut().unwrap().rewind();
+        press(&mut app, "y", true);
+        press(&mut app, "a", false);
+        press(&mut app, "x", false);
+        assert!(app.confirm.is_some() && inbox.take().is_empty());
+        press(&mut app, "y", false);
+        assert_eq!(
+            answers(&inbox),
+            [(
+                7,
+                proto::Choice::Approve,
+                "claude".to_owned(),
+                "Enter".to_owned()
+            )]
+        );
+        assert!(app.confirm.is_none(), "no lasting grant");
+        assert!(app.inbox.is_some(), "the inbox stays open");
+    }
+
+    #[test]
+    fn cancelling_an_answer_sends_nothing() {
+        let (mut app, inbox, _poll) = answering(Some("Enter"));
+        for (open, cancel) in [("y", "n"), ("i", "Escape"), ("y", "N")] {
+            press(&mut app, open, false);
+            assert!(app.confirm.is_some());
+            app.confirm.as_mut().unwrap().rewind();
+            press(&mut app, cancel, false);
+            assert!(app.confirm.is_none(), "{cancel}");
+        }
+        assert!(inbox.take().is_empty());
+        // Closing the inbox drops a confirmation with it.
+        press(&mut app, "i", false);
+        app.close_inbox();
+        assert!(app.confirm.is_none() && answers(&inbox).is_empty());
+    }
+
+    #[test]
+    fn a_profile_without_an_approve_key_offers_interrupt_only() {
+        let (mut app, inbox, _poll) = answering(None);
+        press(&mut app, "y", false);
+        assert!(app.confirm.is_none());
+        assert!(app.flash.until().is_some(), "it says why");
+        press(&mut app, "i", false);
+        app.confirm.as_mut().unwrap().rewind();
+        press(&mut app, "y", false);
+        assert_eq!(
+            answers(&inbox),
+            [(
+                7,
+                proto::Choice::Interrupt,
+                "claude".to_owned(),
+                String::new()
+            )]
+        );
+    }
+
+    /// The core refuses names that are no longer its own (see `Reactor::answer`), so the window
+    /// sends the names its prompt showed, never the config it has read since.
+    #[test]
+    fn an_answer_names_what_its_prompt_showed_after_the_config_changes() {
+        let (mut app, inbox, _poll) = answering(Some("Enter"));
+        press(&mut app, "y", false);
+        let changed = "[agents.claude]\ncommand = [\"claude\"]\napprove = \"1\"\n";
+        app.configure(pinfold_config::parse(changed.as_bytes()).unwrap());
+        app.confirm.as_mut().unwrap().rewind();
+        press(&mut app, "y", false);
+        assert_eq!(
+            answers(&inbox),
+            [(
+                7,
+                proto::Choice::Approve,
+                "claude".to_owned(),
+                "Enter".to_owned()
+            )]
+        );
+    }
+
+    #[test]
+    fn a_pane_with_no_profile_or_an_old_core_is_not_asked() {
+        let (mut app, inbox, _poll) = answering(Some("Enter"));
+        app.config = Config::default();
+        press(&mut app, "y", false);
+        assert!(app.confirm.is_none());
+        let (mut app, _, _poll) = answering(Some("Enter"));
+        app.answer_spoken = false;
+        press(&mut app, "i", false);
+        assert!(app.confirm.is_none() && answers(&inbox).is_empty());
+    }
+
+    /// Pane output that draws the prompt's exact words is only pane text: with no confirmation
+    /// of PinFold's on screen, `y` is a key for the pane, never an answer.
+    #[test]
+    fn pane_output_that_draws_a_fake_prompt_cannot_be_answered() {
+        let (mut app, inbox, _poll) = app();
+        let fake = " ◆ needs you  Send `Enter` to `claude` in tab 1 · pane 1? y send once";
+        let screen = app.panes.first_mut().unwrap();
+        crate::panes::blank(&mut screen.frame, 24, 80);
+        for (cell, character) in screen.frame.cells.iter_mut().zip(fake.chars()) {
+            cell.character = character;
+        }
+        let y = Key::Character("y".into());
+        assert!(
+            !app.prompted(&y, ElementState::Pressed, false),
+            "no prompt took it"
+        );
+        assert!(app.confirm.is_none() && answers(&inbox).is_empty());
     }
 
     #[test]

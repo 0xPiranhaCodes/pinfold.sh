@@ -50,7 +50,8 @@ const CJK_FONTS: [&str; 4] = ["Hiragino", "AppleSDGothicNeo", "NotoSansCJK", "wq
 
 /// Read by `pinfold-ui`'s window, and only in a measured one.
 const MENU_VARIABLE: &str = "PINFOLD_MEASURE_MENU";
-/// Likewise: `open` keeps the inbox open, `closed` closes it once it has drawn its rows.
+/// Likewise: `open` keeps the inbox open, `closed` closes it once it has drawn its rows, and
+/// `answer` shows PinFold's confirmation of an Interrupt over it (ADR-0051 §6).
 const INBOX_VARIABLE: &str = "PINFOLD_MEASURE_INBOX";
 
 /// ADR-0021 budgets with nothing to measure yet, and the issue that makes them measurable.
@@ -89,7 +90,8 @@ pub struct Budget<'a> {
     pub window: Option<Side>,
     /// Asks a measured window to open its right-click menu.
     pub menu: bool,
-    /// Asks a measured window to open its inbox, and with `closed` to close it again.
+    /// Asks a measured window to open its inbox, with `closed` to close it again, and with
+    /// `answer` to show an answer prompt over it.
     pub inbox: Option<&'a str>,
     /// Runs the core with this folder as its config home and its `agent.sh` as every pane's
     /// shell.

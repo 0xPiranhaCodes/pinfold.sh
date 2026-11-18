@@ -652,6 +652,11 @@ fn mem_gate_task() -> ExitCode {
             inbox: Some("closed"),
             ..agents
         });
+        budgets.push(mem_gate::Budget {
+            metric: "Window on macOS with an answer prompt over the inbox, 8 agents, 1512x1890",
+            inbox: Some("answer"),
+            ..agents
+        });
         budgets.push(agents);
         budgets.push(mem_gate::Budget {
             metric: "Core beside that window, 8 idle tabs",

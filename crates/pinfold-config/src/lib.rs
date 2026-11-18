@@ -91,6 +91,18 @@ pub struct Agent {
     /// ```
     #[serde(default, deserialize_with = "keep_env")]
     pub keep_env: Vec<String>,
+    /// The one key the inbox's Approve sends to this agent's permission prompt, after the
+    /// person confirms (ADR-0051): a name from the window's key table, as
+    /// [`pinfold_proto::link::key_bytes`] lists it. Without it the inbox offers Interrupt only.
+    ///
+    /// ```
+    /// let text = b"[agents.claude]\ncommand = [\"claude\"]\napprove = \"Enter\"";
+    /// let config = pinfold_config::parse(text)?;
+    /// assert_eq!(config.agents["claude"].approve.as_deref(), Some("Enter"));
+    /// # Ok::<(), pinfold_config::Error>(())
+    /// ```
+    #[serde(default, deserialize_with = "approve")]
+    pub approve: Option<String>,
 }
 
 /// The most variables an agent profile's `keep_env` names.
@@ -314,6 +326,18 @@ fn keep_env<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<String>, D
              most 128 bytes",
         )),
         None => Ok(names),
+    }
+}
+
+fn approve<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    let name = String::deserialize(deserializer)?;
+    match pinfold_proto::link::key_bytes(&name) {
+        Some(_) => Ok(Some(name)),
+        // Not quoted: the value may hold control characters.
+        None => Err(de::Error::custom(
+            "approve must be one key: Enter, Tab, Escape, Backspace, Space, or one printable \
+             ASCII character",
+        )),
     }
 }
 
@@ -741,6 +765,34 @@ mod tests {
             );
         }
         assert!(message(b"[agents.a]\nsandbox = true\n").contains("command"));
+    }
+
+    #[test]
+    fn an_approve_key_comes_from_the_key_table() {
+        let profile = |key: &str| format!("[agents.a]\ncommand = [\"a\"]\napprove = {key}\n");
+        assert_eq!(
+            parse(b"[agents.a]\ncommand = [\"a\"]\n").unwrap().agents["a"].approve,
+            None
+        );
+        for key in ["Enter", "y", "1", "Tab", "Escape"] {
+            let config = parse(profile(&format!("\"{key}\"")).as_bytes()).unwrap();
+            assert_eq!(config.agents["a"].approve.as_deref(), Some(key));
+        }
+        for bad in [
+            "\"\"",
+            "\"enter\"",
+            "\"yes\"",
+            "\"ArrowUp\"",
+            "\"\\u001b[A\"",
+            "\"é\"",
+            "\"\\r\"",
+            "1",
+            "[\"Enter\"]",
+        ] {
+            let text = message(profile(bad).as_bytes());
+            assert!(text.contains("approve"), "{bad}: {text}");
+            assert!(!text.contains('\u{1b}'), "{bad}: {text}");
+        }
     }
 
     #[test]
