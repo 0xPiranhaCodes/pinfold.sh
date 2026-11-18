@@ -783,3 +783,46 @@ fn nothing_a_hostile_work_tree_configures_runs_in_a_take_or_a_diff() {
     assert!(!marker.exists(), "a command the work tree named ran");
     fs::remove_dir_all(dir).expect("clean");
 }
+
+/// What the core sends, `--key <key> [-- <path>...]`, finds the directory the store recorded,
+/// and a plan names it with the checkpoint's own reason and time.
+#[test]
+fn plan_and_restore_by_key_read_the_directory_from_the_store() {
+    let dir = scratch("by-key");
+    write(dir.join("root/a.txt"), "a\n");
+    let (state, work) = (
+        dir.join("state"),
+        dir.join("root").canonicalize().expect("root"),
+    );
+    let caps = Caps::default();
+    let launch = take::take_next(&state, "r9-0", "launch", take::Dir::Path(&work), 77, &caps);
+    let key = launch.expect("launch").store;
+    let at = |words: &[&str]| -> Vec<OsString> { words.iter().map(OsString::from).collect() };
+    let all = at(&["plan", "r9-0", "0", "0", "--key", &key]);
+    assert_eq!(located(&state, &all).expect("all"), (work.clone(), None));
+    let some = at(&["plan", "r9-0", "0", "0", "--key", &key, "--", "a.txt"]);
+    let one = Some(vec![b"a.txt".to_vec()]);
+    assert_eq!(located(&state, &some).expect("some"), (work.clone(), one));
+    let by_path = at(&[
+        "plan",
+        "r9-0",
+        "0",
+        "0",
+        "--",
+        work.to_str().expect("utf-8"),
+    ]);
+    assert_eq!(
+        located(&state, &by_path).expect("path"),
+        (work.clone(), None)
+    );
+    for bad in [
+        at(&["plan", "r9-0", "0", "0", "--key", "../../etc"]),
+        at(&["plan", "r9-0", "0", "0", "--key", &key, "a.txt"]),
+        at(&["plan", "r9-0", "0", "0"]),
+    ] {
+        assert!(located(&state, &bad).is_err(), "{bad:?}");
+    }
+    let planned = plan::plan(&state, "r9-0", 0, 0, &work, None).expect("plan");
+    assert_eq!((planned.reason, planned.time), ("launch", 77));
+    fs::remove_dir_all(dir).expect("clean");
+}

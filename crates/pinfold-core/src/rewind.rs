@@ -32,7 +32,7 @@ pub const TAKE_BOUND: Duration = Duration::from_secs(120);
 pub const API_BOUND: Duration = Duration::from_secs(60);
 /// The prune after a take; its `repack` and `prune` have 300 s each inside.
 pub const PRUNE_BOUND: Duration = Duration::from_secs(900);
-/// A list still running after this is killed.
+/// A list or a restore's plan still running after this is killed.
 pub const LIST_BOUND: Duration = Duration::from_secs(10);
 /// Seconds between two done takes of a run, and two API takes.
 const DONE_EVERY: u32 = 60;
@@ -76,14 +76,7 @@ impl Missing {
     /// The strip's words after `no checkpoint ·`, or empty.
     #[must_use]
     pub fn word(self) -> &'static str {
-        match self {
-            Self::None => "",
-            Self::TookOver => "took over wait_s",
-            Self::NoGit => "git not found",
-            Self::Failed => "the take failed",
-            Self::TooManyRuns => "too many runs",
-            Self::Busy => "busy",
-        }
+        pinfold_proto::link::MISSING[self as usize]
     }
 }
 
@@ -214,6 +207,15 @@ enum Work {
     Launch,
     Take(&'static str),
     List,
+    Plan,
+    Restore,
+}
+
+impl Work {
+    /// Whether it takes the store's lock, and a prune follows it.
+    fn locks(self) -> bool {
+        !matches!(self, Self::List | Self::Plan)
+    }
 }
 
 /// A launch or API call waiting for a worker.
@@ -223,6 +225,8 @@ struct Queued<T> {
     payload: T,
     /// A launch's directory and when it gives up.
     launch: Option<(PathBuf, Instant)>,
+    /// A plan's or restore's arguments after the run: `<c> <shown> [-- <path>...]`.
+    args: Vec<OsString>,
 }
 
 /// A worker's job, as the core tracks it.
@@ -264,6 +268,8 @@ pub struct Rewind<T> {
     queue: VecDeque<Queued<T>>,
     notes: Option<(Sender<Note>, Receiver<Note>)>,
     waker: Option<Arc<Waker>>,
+    /// One bit a record: the window was told its strip as it is now.
+    told: u64,
 }
 
 impl<T> Rewind<T> {
@@ -287,6 +293,7 @@ impl<T> Rewind<T> {
             queue: VecDeque::new(),
             notes: None,
             waker,
+            told: 0,
         }
     }
 
@@ -300,6 +307,95 @@ impl<T> Rewind<T> {
     #[must_use]
     pub fn of_pane(&self, pane: usize) -> Option<usize> {
         self.runs.iter().position(|run| run.pane() == Some(pane))
+    }
+
+    /// Whether a queued or running call's payload is `parked`.
+    pub fn any(&self, mut parked: impl FnMut(&T) -> bool) -> bool {
+        self.queue.iter().any(|queued| parked(&queued.payload))
+            || (self.slots.iter().flatten())
+                .any(|slot| slot.payload.as_ref().is_some_and(&mut parked))
+    }
+
+    /// The first live run whose strip the window was not told, with its pane and why it has no
+    /// checkpoint, for [`Rewind::told`].
+    #[must_use]
+    pub fn untold(&self) -> Option<(usize, usize, Missing)> {
+        self.runs.iter().enumerate().find_map(|(at, run)| {
+            let pane = run
+                .pane()
+                .filter(|_| !run.is_closed() && self.told & 1 << at == 0)?;
+            Some((at, pane, run.missing))
+        })
+    }
+
+    /// Notes that the window was told `run`'s strip.
+    pub fn told(&mut self, run: usize) {
+        self.told |= 1_u64
+            .checked_shl(u32::try_from(run).unwrap_or(u32::MAX))
+            .unwrap_or(0);
+    }
+
+    /// Forgets what any window was told, as a new one knows nothing.
+    pub fn untell(&mut self) {
+        self.told = 0;
+    }
+
+    /// Queues `pinfold checkpoint plan` of `run` from `c` over the view checkpoint `shown`,
+    /// limited to `paths` if any, for `checkpoint.restore`'s prompt.
+    ///
+    /// # Errors
+    ///
+    /// Gives `payload` back with [`BUSY`].
+    pub fn plan(
+        &mut self,
+        run: usize,
+        (c, shown): (u32, u32),
+        paths: Option<&[String]>,
+        payload: T,
+    ) -> Result<(), (T, &'static str)> {
+        self.restore_work(Work::Plan, run, (c, shown), paths, payload)
+    }
+
+    /// Queues `pinfold checkpoint restore`, as [`Rewind::plan`], once the window allowed it.
+    ///
+    /// # Errors
+    ///
+    /// Gives `payload` back with [`BUSY`].
+    pub fn restore(
+        &mut self,
+        run: usize,
+        (c, shown): (u32, u32),
+        paths: Option<&[String]>,
+        payload: T,
+    ) -> Result<(), (T, &'static str)> {
+        self.restore_work(Work::Restore, run, (c, shown), paths, payload)
+    }
+
+    fn restore_work(
+        &mut self,
+        work: Work,
+        run: usize,
+        (c, shown): (u32, u32),
+        paths: Option<&[String]>,
+        payload: T,
+    ) -> Result<(), (T, &'static str)> {
+        let mut args: Vec<OsString> = vec![c.to_string().into(), shown.to_string().into()];
+        // An absent list means all, so none is never sent as an empty one.
+        if let Some(paths) = paths.filter(|paths| !paths.is_empty()) {
+            args.push("--".into());
+            args.extend(paths.iter().map(OsString::from));
+        }
+        if self.queue.len() >= QUEUE || run >= self.runs.len() {
+            return Err((payload, BUSY));
+        }
+        self.queue.push_back(Queued {
+            run,
+            work,
+            payload,
+            launch: None,
+            args,
+        });
+        Ok(())
     }
 
     /// Records a new run launched from `launcher` in the working directory `dir`, reusing the
@@ -426,6 +522,7 @@ impl<T> Rewind<T> {
             work,
             payload,
             launch,
+            args: Vec::new(),
         });
         Ok(())
     }
@@ -511,6 +608,11 @@ impl<T> Rewind<T> {
 
     fn set_missing(&mut self, run: usize, missing: Missing) {
         if let Some(record) = self.runs.get_mut(run) {
+            if record.missing != missing {
+                self.told &= !(1_u64
+                    .checked_shl(u32::try_from(run).unwrap_or(u32::MAX))
+                    .unwrap_or(0));
+            }
             record.missing = missing;
         }
     }
@@ -519,30 +621,27 @@ impl<T> Rewind<T> {
         let busy = self.slots[slot].as_mut()?;
         let run = busy.run;
         let work = busy.work;
-        busy.pruning = work != Work::List;
+        busy.pruning = work.locks();
         let payload = busy.payload.take();
         if let Some(record) = self.runs.get_mut(run) {
             let n = result.as_ref().ok().and_then(|line| {
                 let checkpoint = line["checkpoint"].as_str()?;
                 checkpoint.rsplit_once('/')?.1.parse::<u32>().ok()
             });
-            match (work, n, &result) {
-                (Work::List, ..) => {}
+            let missing = match (work, n, &result) {
+                (Work::List | Work::Plan | Work::Restore, ..) => record.missing,
                 (Work::Take("done" | "exit"), Some(n), _) => {
                     record.newest = n;
-                    record.missing = Missing::None;
+                    Missing::None
                 }
-                (_, Some(_), _) => record.missing = Missing::None,
-                (Work::Launch, None, Err(why)) if why == KILLED => {
-                    record.missing = Missing::TookOver;
-                }
-                (Work::Launch, None, Err(why)) if why.contains("no git") => {
-                    record.missing = Missing::NoGit;
-                }
-                (Work::Launch, None, _) => record.missing = Missing::Failed,
+                (_, Some(_), _) => Missing::None,
+                (Work::Launch, None, Err(why)) if why == KILLED => Missing::TookOver,
+                (Work::Launch, None, Err(why)) if why.contains("no git") => Missing::NoGit,
+                (Work::Launch, None, _) => Missing::Failed,
                 // A later take that fails leaves the strip as it was.
-                (Work::Take(_), None, _) => {}
-            }
+                (Work::Take(_), None, _) => record.missing,
+            };
+            self.set_missing(run, missing);
         }
         payload.map(|payload| Finished {
             payload,
@@ -556,14 +655,14 @@ impl<T> Rewind<T> {
         self.slots
             .iter()
             .flatten()
-            .any(|slot| slot.pruning || (slot.key == key && slot.work != Work::List))
+            .any(|slot| slot.pruning || (slot.key == key && slot.work.locks()))
     }
 
     /// Starts in `slot` the first queued launch that can start, else a done or exit take, so
     /// API calls never starve them, else the first queued call.
     fn start_next(&mut self, slot: usize, now: Instant) -> bool {
         let key = |run: usize| self.runs[run].key;
-        let can = |queued: &Queued<T>| queued.work == Work::List || !self.locked(key(queued.run));
+        let can = |queued: &Queued<T>| !queued.work.locks() || !self.locked(key(queued.run));
         let launch = self
             .queue
             .iter()
@@ -582,6 +681,18 @@ impl<T> Rewind<T> {
                 (Work::List, _) => {
                     let key = self.runs[queued.run].key();
                     (args(&["list", &id, "--key", &key]), LIST_BOUND)
+                }
+                (Work::Plan | Work::Restore, _) => {
+                    let (word, bound) = match queued.work {
+                        Work::Plan => ("plan", LIST_BOUND),
+                        _ => ("restore", API_BOUND),
+                    };
+                    let mut args = args(&[word, &id]);
+                    let (numbers, paths) = queued.args.split_at(queued.args.len().min(2));
+                    args.extend(numbers.iter().cloned());
+                    args.extend(["--key".into(), self.runs[queued.run].key().into()]);
+                    args.extend(paths.iter().cloned());
+                    (args, bound)
                 }
                 (Work::Launch, Some((dir, by))) => {
                     let mut args = args(&["take", &id, "launch"]);
@@ -639,7 +750,7 @@ impl<T> Rewind<T> {
         take: Vec<OsString>,
         bound: Duration,
     ) {
-        let prune = (work != Work::List).then(|| {
+        let prune = work.locks().then(|| {
             let mut prune = args(&["prune"]);
             for live in self.runs.iter().filter(|run| !run.is_closed()) {
                 prune.extend(["--live".into(), live.id().into()]);
@@ -684,6 +795,91 @@ impl<T> Rewind<T> {
         let since = now.saturating_duration_since(self.epoch).as_secs();
         // Plus one, so 0 is never.
         u32::try_from(since).unwrap_or(u32::MAX - 1) + 1
+    }
+}
+
+/// The texts of the window's `Rewind` prompt (ADR-0050 section 6), from `plan`, the line
+/// `pinfold checkpoint plan` printed from the store: the directory, when and why the checkpoint
+/// was taken, as long ago from `now` (Unix seconds), who asks (`tool`, the caller's tool pane,
+/// or a terminal outside every pane), the counts, notes, each path shown with `! ` before one
+/// changed later and `  ` before the rest, and how many more. Every text that came from a file
+/// name or the store is escaped and cut, so nothing in it can pass for PinFold's own words.
+#[must_use]
+pub fn prompt_texts(plan: &Value, tool: Option<usize>, running: bool, now: u64) -> Vec<String> {
+    let count = |name: &str| plan[name].as_u64().unwrap_or(0);
+    let shown = |text: &str| {
+        let mut out = String::new();
+        crate::tool::escape(text, &mut out);
+        out.chars().take(SHOWN).collect::<String>()
+    };
+    let ago = now.saturating_sub(count("time"));
+    let ago = match ago {
+        0..60 => format!("{ago} s"),
+        60..3600 => format!("{} min", ago / 60),
+        3600..86_400 => format!("{} h", ago / 3600),
+        _ => format!("{} d", ago / 86_400),
+    };
+    let reason = plan["reason"].as_str().unwrap_or("unknown");
+    let caller = match tool {
+        Some(pane) => format!("asked by the tool in pane {pane}"),
+        None => "asked by a terminal outside every pane".to_owned(),
+    };
+    let mut counts = format!(
+        "restore {} · delete {} the agent added · bring back {} it deleted",
+        count("restore"),
+        count("delete"),
+        count("bring_back")
+    );
+    for (name, words) in [
+        ("later", "changed later"),
+        ("not_covered", "not covered, left alone"),
+    ] {
+        if count(name) > 0 {
+            counts.push_str(&format!(" · {} {words}", count(name)));
+        }
+    }
+    let mut texts = vec![
+        shown(plan["dir"].as_str().unwrap_or_default()),
+        format!("since {ago} ago ({})", shown(reason)),
+        caller,
+        counts,
+    ];
+    if plan["complete"] != true {
+        texts.push("the checkpoint is incomplete, so nothing is deleted".to_owned());
+    }
+    if running {
+        texts.push("the agent is still running, and may change these files again".to_owned());
+    }
+    for path in plan["paths"].as_array().into_iter().flatten() {
+        let mark = if path[2] == true { "!" } else { " " };
+        let what = path[1].as_str().unwrap_or_default();
+        let path = path[0].as_str().unwrap_or_default();
+        texts.push(format!("{mark} {} {}", shown(what), shown(path)));
+    }
+    if count("more") > 0 {
+        texts.push(format!("and {} more", count("more")));
+    }
+    texts
+}
+
+/// The most characters of one shown text: a path cut to 256 bytes stays whole unless escaping
+/// grew it (ADR-0050's memory row: at most 10 paths of 256).
+const SHOWN: usize = 256;
+
+/// The flash's words for a restore that failed: a fixed phrase for each reason a restore gives,
+/// never the child's own text, which could name a path or carry a store's forged message.
+#[must_use]
+pub fn restore_error(why: &str) -> &'static str {
+    if why == KILLED {
+        "the restore took over 60 s"
+    } else if why.contains("no longer exists") {
+        "the checkpoint no longer exists"
+    } else if why.contains("another checkpoint is being taken") {
+        "another checkpoint is being taken or pruned"
+    } else if why == BUSY {
+        "the core is busy taking checkpoints"
+    } else {
+        "the restore was refused or failed"
     }
 }
 

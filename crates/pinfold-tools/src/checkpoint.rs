@@ -14,7 +14,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::{self, BufRead, Read, Write};
 use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{self, AtomicUsize};
 use std::sync::mpsc::{self, Receiver, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
@@ -927,7 +927,8 @@ const USAGE: &str = "usage: pinfold checkpoint take <run> <reason> [--max-files 
                      [--max-file-mib N] [--max-new-mib N] [--include-ignored] \
                      (-- <dir> | --key <key>) | list <run> --key <key> | prune \
                      [--live <run>]... [--max-store-mib N] [--keep-days N] [--keep-per-run N] \
-                     | plan|restore <run> <c> <shown> -- <dir> [<path>]...";
+                     | plan|restore <run> <c> <shown> (-- <dir> [<path>]... \
+                     | --key <key> [-- <path>...])";
 
 fn now() -> u64 {
     std::time::SystemTime::now()
@@ -948,6 +949,23 @@ fn paths(args: &[OsString]) -> Option<Vec<Vec<u8>>> {
     (!args.is_empty()).then(|| args.iter().map(|p| p.as_bytes().to_vec()).collect())
 }
 
+/// The working directory and paths of `plan|restore <run> <c> <shown>`'s `args`: `-- <dir>
+/// [<path>]...`, or `--key <key> [-- <path>...]`, as the core names it, the directory then read
+/// from the store as a take by key reads it.
+fn located(state: &Path, args: &[OsString]) -> io::Result<(PathBuf, Option<Vec<Vec<u8>>>)> {
+    let words: Vec<&[u8]> = args.iter().map(|a| a.as_bytes()).collect();
+    match words.get(4..).unwrap_or_default() {
+        [b"--", _, ..] => Ok((PathBuf::from(&args[5]), paths(&args[6..]))),
+        [b"--key", key] => Ok((take::by_key(state, &text(key))?.1, None)),
+        [b"--key", key, b"--", ..] => Ok((take::by_key(state, &text(key))?.1, paths(&args[7..]))),
+        _ => Err(io::Error::new(io::ErrorKind::InvalidInput, USAGE)),
+    }
+}
+
+fn text(word: &[u8]) -> String {
+    std::str::from_utf8(word).unwrap_or_default().to_owned()
+}
+
 /// Runs `pinfold checkpoint <args>`, the hidden commands the core starts (ADR-0050 section 2),
 /// and prints one JSON line on standard output: on success the command's result, otherwise
 /// `{"error":"<reason>"}`. Returns whether it succeeded.
@@ -959,8 +977,9 @@ fn paths(args: &[OsString]) -> Option<Vec<Vec<u8>>> {
 /// `{"checkpoints":[...],"more":M}`, newest first, as [`list::list`] reads them, cut to fit
 /// 4 KiB with `more` counting the oldest left out; `prune [--live <run>]... [--max-store-mib N] [--keep-days N]
 /// [--keep-per-run N]`, defaults 2048, 14 and 20, prints [`prune::Pruned`]'s. `plan <run> <c>
-/// <shown> -- <dir> [<path>]...`, limited to the paths if any are given and all otherwise,
-/// prints [`plan::Planned`]'s, and `restore` with the same arguments [`restore::Restored`]'s,
+/// <shown> -- <dir> [<path>]...`, or `--key <key> [-- <path>...]` as the core calls it, limited
+/// to the paths if any are given and all otherwise, prints [`plan::Planned`]'s with the
+/// directory (cut to 256 bytes) and `C`'s reason and time, and `restore` with the same arguments [`restore::Restored`]'s,
 /// both at normal priority as the person waits on them.
 ///
 /// # Examples
@@ -1007,14 +1026,15 @@ pub fn command(state: Option<&Path>, args: &[OsString]) -> bool {
                 line
             })
         }
-        (Some(state), [b"plan", run, c, shown, b"--", _, ..]) => {
+        (Some(state), [b"plan", run, c, shown, ..]) => {
             let run = std::str::from_utf8(run).unwrap_or_default();
             number(c)
                 .and_then(|c| Ok((c, number(shown)?)))
                 .and_then(|(c, shown)| {
-                    plan::plan(state, run, c, shown, Path::new(&args[5]), paths(&args[6..]))
+                    let (dir, paths) = located(state, args)?;
+                    Ok((plan::plan(state, run, c, shown, &dir, paths)?, dir))
                 })
-                .map(|p| {
+                .map(|(p, dir)| {
                     let paths: Vec<_> = p
                         .paths
                         .iter()
@@ -1027,6 +1047,9 @@ pub fn command(state: Option<&Path>, args: &[OsString]) -> bool {
                         "not_covered": p.not_covered,
                         "later": p.later,
                         "complete": p.complete,
+                        "dir": plan::display(dir.as_os_str().as_bytes()),
+                        "reason": p.reason,
+                        "time": p.time,
                         "more": p.total() - paths.len() as u64,
                         "paths": paths,
                     });
@@ -1034,13 +1057,13 @@ pub fn command(state: Option<&Path>, args: &[OsString]) -> bool {
                     line
                 })
         }
-        (Some(state), [b"restore", run, c, shown, b"--", _, ..]) => {
+        (Some(state), [b"restore", run, c, shown, ..]) => {
             let run = std::str::from_utf8(run).unwrap_or_default();
-            let dir = Path::new(&args[5]);
             number(c)
                 .and_then(|c| Ok((c, number(shown)?)))
                 .and_then(|(c, shown)| {
-                    restore::restore(state, run, c, shown, dir, paths(&args[6..]), now())
+                    let (dir, paths) = located(state, args)?;
+                    restore::restore(state, run, c, shown, &dir, paths, now())
                 })
                 .map(|r| {
                     let skipped: Vec<_> = r
