@@ -236,6 +236,11 @@ fn golden_unhardened() {
 }
 
 #[test]
+fn golden_inbox() {
+    check("inbox", draw(&crate::snapshots::inbox(), false));
+}
+
+#[test]
 fn golden_approval_prompt() {
     check("approval", draw(&approval(), false));
 }

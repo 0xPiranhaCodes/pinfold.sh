@@ -28,6 +28,8 @@ enum Said {
     Unhardened(bool, String),
     /// How many secret-looking variables, and the first few names.
     Secrets(u32, String),
+    /// PinFold's own words, such as what an older core cannot do.
+    Note(&'static str),
 }
 
 // shortcut: writes stay blocked though the threat model allows them, until the core hands
@@ -64,6 +66,12 @@ impl Flash {
     pub fn secrets(&mut self, count: u32, names: String, now: Instant) {
         self.until = Some(now + UNHARDENED_SHOWN);
         self.said = Said::Secrets(count, names);
+    }
+
+    /// Shows PinFold's `text`.
+    pub fn note(&mut self, text: &'static str, now: Instant) {
+        self.until = Some(now + SHOWN);
+        self.said = Said::Note(text);
     }
 
     /// Ends the flash once due.
@@ -117,6 +125,7 @@ impl Flash {
                 ],
                 theme,
             ),
+            Said::Note(note) => paste::row(frame, &[(format!(" {note}"), text)], theme),
             Said::Blocked => paste::row(
                 frame,
                 &[

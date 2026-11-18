@@ -20,7 +20,7 @@ const CLOSE_HINT: &str = "esc close";
 
 /// The window's commands, as the palette names them. Focus, resize and a tab by number are
 /// keys only, as in the menus.
-pub const COMMANDS: [(&str, Command); 20] = [
+pub const COMMANDS: [(&str, Command); 21] = [
     ("Open Markdown", Command::OpenMarkdown),
     ("Open Files", Command::OpenFiles),
     ("Open Diff", Command::OpenDiff),
@@ -41,6 +41,7 @@ pub const COMMANDS: [(&str, Command); 20] = [
     ("Settings", Command::OpenConfig),
     ("PinFold Help", Command::OpenDocs),
     ("Detach", Command::Detach),
+    ("Agents", Command::Inbox),
 ];
 
 /// What a key did to the palette.
@@ -391,8 +392,8 @@ mod tests {
         };
         assert_eq!(row(0), "┌──────────────────┐");
         assert_eq!(row(1), "│ ❯      esc close │");
-        assert_eq!(row(2), "│ PinFold Help     │");
-        assert_eq!(row(3), "│ Detach           │");
+        assert_eq!(row(2), "│ Detach           │");
+        assert_eq!(row(3), "│ Agents           │");
         assert_eq!(row(4), "└──────────────────┘");
         assert_eq!(frame.cursor, Some((1, 4)));
     }

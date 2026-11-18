@@ -9,6 +9,7 @@ mod flash;
 mod golden;
 mod hyperlink;
 mod ime;
+mod inbox;
 mod input;
 pub mod link;
 mod menu_bar;
