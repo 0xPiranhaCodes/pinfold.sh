@@ -162,13 +162,8 @@ impl Confirm {
         focused: bool,
         (rows, columns): (u16, u16),
     ) -> Option<bool> {
-        let armed = focused && now.saturating_duration_since(self.opened) >= ARMED_AFTER;
         let whole = self.lines(usize::from(columns)).len() <= usize::from(rows);
-        match answer(key, armed, whole)? {
-            ApprovalAnswer::AllowOnce => Some(true),
-            ApprovalAnswer::Deny => Some(false),
-            ApprovalAnswer::AllowForThirtyMinutes => None,
-        }
+        confirmed(key, focused && armed(self.opened, now), whole)
     }
 
     /// Moves the opening back past [`ARMED_AFTER`], as if the prompt had waited.
@@ -198,6 +193,70 @@ impl Confirm {
     pub fn draw(&self, frame: &mut Frame, theme: &Theme) {
         let lines = self.lines(usize::from(frame.columns));
         draw(frame, &lines, &[], ("y send once", "n/Esc cancel"), theme);
+    }
+}
+
+/// PinFold's confirmation of a new tab in the folder of an agent outside PinFold (ADR-0051 §8),
+/// drawn as a trust prompt is, with the folder escaped and in full. It lives only while shown,
+/// and `y` opens once.
+#[derive(Debug)]
+pub struct OpenIn {
+    /// The folder, as the core's outside row named it.
+    pub dir: String,
+    opened: Instant,
+}
+
+impl OpenIn {
+    /// A confirmation opened at `now` for a tab in `dir`.
+    pub fn new(dir: String, now: Instant) -> Self {
+        Self { dir, opened: now }
+    }
+
+    /// Takes a key as [`Confirm::key`] does: `Some(true)` opens, `Some(false)` cancels.
+    pub fn key(
+        &self,
+        key: &Key,
+        now: Instant,
+        focused: bool,
+        (rows, columns): (u16, u16),
+    ) -> Option<bool> {
+        let whole = self.lines(usize::from(columns)).len() <= usize::from(rows);
+        confirmed(key, focused && armed(self.opened, now), whole)
+    }
+
+    /// Moves the opening back past [`ARMED_AFTER`], as if the prompt had waited.
+    #[cfg(test)]
+    pub(crate) fn rewind(&mut self) {
+        self.opened -= ARMED_AFTER;
+    }
+
+    fn lines(&self, columns: usize) -> Vec<String> {
+        let border = format!("{:─<columns$}", "── PinFold new tab ");
+        let mut lines: Vec<String> = vec![border.chars().take(columns.max(1)).collect()];
+        let head = format!(" ◆ needs you  Open a tab in `{}`?", visible(&self.dir));
+        lines.extend(wrap(&head, columns));
+        lines
+    }
+
+    /// Draws the prompt over the bottom of the pane area, as a trust prompt is drawn.
+    pub fn draw(&self, frame: &mut Frame, theme: &Theme) {
+        let lines = self.lines(usize::from(frame.columns));
+        draw(frame, &lines, &[], ("y open once", "n/Esc cancel"), theme);
+    }
+}
+
+/// Whether a prompt opened at `opened` takes `y` at `now`.
+fn armed(opened: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(opened) >= ARMED_AFTER
+}
+
+/// A key's answer to a one-time confirmation: `Some(true)` for `y` once `armed` and shown
+/// `whole`, `Some(false)` for `n` or Esc at any time.
+fn confirmed(key: &Key, armed: bool, whole: bool) -> Option<bool> {
+    match answer(key, armed, whole)? {
+        ApprovalAnswer::AllowOnce => Some(true),
+        ApprovalAnswer::Deny => Some(false),
+        ApprovalAnswer::AllowForThirtyMinutes => None,
     }
 }
 
@@ -549,6 +608,22 @@ mod tests {
         assert_eq!(press(&confirm, y(), true), Some(true));
         // Cut short, it offers only cancelling.
         assert_eq!(confirm.key(&y(), Instant::now(), true, (1, 20)), None);
+    }
+
+    /// ADR-0051 §8: the folder came from a session file, so the prompt shows it whole and
+    /// escaped, and `y` opens only once armed.
+    #[test]
+    fn an_open_prompt_shows_the_folder_escaped_and_opens_once_armed() {
+        let now = Instant::now();
+        let open = OpenIn::new("/w/a\u{202e}b\nc".to_owned(), now);
+        let text = open.lines(200).join("\n");
+        assert!(text.contains("Open a tab in `/w/a<U+202E>b⏎c`?"), "{text}");
+        let y = Key::Character("y".into());
+        assert_eq!(open.key(&y, now, true, (24, 80)), None, "unarmed");
+        assert_eq!(open.key(&y, now + ARMED_AFTER, true, (24, 80)), Some(true));
+        assert_eq!(open.key(&y, now + ARMED_AFTER, false, (24, 80)), None);
+        let esc = Key::Named(NamedKey::Escape);
+        assert_eq!(open.key(&esc, now, true, (24, 80)), Some(false));
     }
 
     #[test]

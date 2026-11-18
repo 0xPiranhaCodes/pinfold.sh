@@ -145,10 +145,12 @@ struct Shown {
     inbox: bool,
     /// Whether it is new enough to answer an agent from it.
     answer: bool,
-    /// The inbox's panes and every pane's tab, only while the inbox is open.
+    /// The inbox's panes, every pane's tab and the agents outside PinFold, only while the
+    /// inbox is open.
     listed: Vec<Listed>,
     members: Vec<(u32, u8)>,
-    /// Whether `listed` or `members` changed since the window read them.
+    outside: Vec<link::Outside>,
+    /// Whether `listed`, `members` or `outside` changed since the window read them.
     relisted: bool,
 }
 
@@ -205,10 +207,12 @@ fn publish(link: &mut Link, shown: &mut Shown) -> bool {
         shown.listed.extend_from_slice(link.listed());
         shown.members.clear();
         shown.members.extend_from_slice(link.members());
+        shown.outside.clear();
+        shown.outside.extend_from_slice(link.outside());
         shown.relisted = true;
         changed = true;
     } else if !link.inbox_open() && shown.listed.capacity() + shown.members.capacity() > 0 {
-        (shown.listed, shown.members) = (Vec::new(), Vec::new());
+        (shown.listed, shown.members, shown.outside) = (Vec::new(), Vec::new(), Vec::new());
     }
     for screen in link.screens_mut().iter_mut().filter(|screen| screen.dirty) {
         screen.dirty = false;
@@ -526,6 +530,9 @@ struct App {
     inbox_spoken: bool,
     /// PinFold's confirmation of an Approve or Interrupt, only while shown over the inbox.
     confirm: Option<approval::Confirm>,
+    /// PinFold's confirmation of a tab in an outside agent's folder, only while shown over the
+    /// inbox (ADR-0051 §8).
+    opening: Option<approval::OpenIn>,
     /// Whether the core is new enough to take one.
     answer_spoken: bool,
     /// In a window `cargo xtask mem-gate` measures, whether to show a confirmation once the
@@ -639,6 +646,7 @@ impl App {
             inbox: None,
             inbox_spoken: false,
             confirm: None,
+            opening: None,
             answer_spoken: false,
             measuring: size
                 .and(std::env::var_os("PINFOLD_MEASURE_INBOX"))
@@ -895,7 +903,7 @@ impl App {
         if std::mem::take(&mut shown.relisted)
             && let Some(inbox) = &mut self.inbox
         {
-            inbox.refresh(&shown.listed, &shown.members, &self.labels);
+            inbox.refresh(&shown.listed, &shown.members, &self.labels, &shown.outside);
         }
         for fresh in shown.screens.iter_mut().filter(|screen| screen.dirty) {
             fresh.dirty = false;
@@ -1010,6 +1018,9 @@ impl App {
                 self.was_running.hide();
             } else if let Some(confirm) = &self.confirm {
                 confirm.draw(&mut self.composed, theme);
+                self.was_running.hide();
+            } else if let Some(opening) = &self.opening {
+                opening.draw(&mut self.composed, theme);
                 self.was_running.hide();
             } else if let Some(prompt) = &self.prompt {
                 paste::banner(&mut self.composed, prompt, theme);
@@ -1248,7 +1259,7 @@ impl App {
 
     /// Closes the inbox, which frees its rows here and the I/O thread's copy.
     fn close_inbox(&mut self) {
-        self.confirm = None;
+        (self.confirm, self.opening) = (None, None);
         if self.inbox.take().is_some() {
             self.core(proto::Request::Inbox { open: false });
             self.redraw_soon();
@@ -1273,6 +1284,10 @@ impl App {
                 profile,
                 choice,
             } => self.ask_answer((pane, tab, place), profile, choice),
+            inbox::Step::Open { dir } => {
+                self.opening = Some(approval::OpenIn::new(dir, Instant::now()));
+                self.redraw_soon();
+            }
         }
     }
 
@@ -1331,6 +1346,20 @@ impl App {
                 self.confirm_key(key);
             }
             return;
+        }
+        if let Some(opening) = &self.opening {
+            let answered =
+                (!repeat).then(|| opening.key(key, Instant::now(), self.has_focus, self.area));
+            match answered.flatten() {
+                Some(true) => {
+                    let dir = self.opening.take().map(|opening| opening.dir);
+                    self.close_inbox();
+                    self.request(Request::OpenTabIn(dir.unwrap_or_default()));
+                }
+                Some(false) => self.opening = None,
+                None => {}
+            }
+            return self.redraw_soon();
         }
         match self.prefix.key(key, self.modifiers, repeat) {
             prefix::Step::Run(Command::Inbox) => self.close_inbox(),
@@ -1788,7 +1817,7 @@ impl App {
 
     /// Takes a press or release, and returns the step for an open menu it clicked.
     fn pressed(&mut self, button: MouseButton, state: ElementState) -> Option<menu::Step> {
-        if !self.approvals.is_empty() || self.confirm.is_some() {
+        if !self.approvals.is_empty() || self.confirm.is_some() || self.opening.is_some() {
             // A click cannot answer a prompt, and goes nowhere else while one is up.
             return None;
         }
@@ -2546,6 +2575,7 @@ mod tests {
             &listed,
             &[(3, 1), (7, 1)],
             &["a".to_owned(), "b".to_owned()],
+            &[],
         );
         app.inbox = Some(open);
         (app, inbox, poll)
@@ -2614,6 +2644,38 @@ mod tests {
         press(&mut app, "i", false);
         app.close_inbox();
         assert!(app.confirm.is_none() && answers(&inbox).is_empty());
+    }
+
+    /// ADR-0051 §8: Enter on an outside row only asks; `y`, once armed and not a held key,
+    /// opens a tab in that folder once and closes the inbox, and `n` drops the prompt.
+    #[test]
+    fn a_tab_opens_in_an_outside_folder_only_after_its_confirmation() {
+        let (mut app, inbox, _poll) = app();
+        (app.inbox_spoken, app.has_focus) = (true, true);
+        app.inbox = Some(inbox::tests::with_outside(Instant::now()));
+        let enter = Key::Named(NamedKey::Enter);
+        app.inbox_key(&Key::Named(NamedKey::ArrowDown), false);
+        app.inbox_key(&enter, false);
+        assert!(
+            app.opening.is_some() && inbox.take().is_empty(),
+            "Enter only asks"
+        );
+        press(&mut app, "y", false);
+        press(&mut app, "n", false);
+        assert!(app.opening.is_none() && app.inbox.is_some());
+        app.inbox_key(&enter, false);
+        app.opening.as_mut().unwrap().rewind();
+        press(&mut app, "y", true);
+        assert!(inbox.take().is_empty(), "unarmed or held, y opened");
+        press(&mut app, "y", false);
+        let opened: Vec<String> = (inbox.take().into_iter())
+            .filter_map(|request| match request {
+                Request::OpenTabIn(dir) => Some(dir),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(opened, ["/Users/me/src/api"]);
+        assert!(app.opening.is_none() && app.inbox.is_none());
     }
 
     #[test]
