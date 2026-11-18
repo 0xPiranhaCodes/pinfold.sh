@@ -218,7 +218,7 @@ fn a_locked_store_is_counted_but_untouched_and_orphan_lists_go() {
     take_at(&state, &work, "r1-0", 0, 10);
     let orphan = store(&state).join("stat/r1-0-7");
     fs::write(&orphan, "").expect("orphan");
-    let held = lock(&store(&state)).expect("lock");
+    let held = settled(|| lock(&store(&state))).expect("lock");
     let pruned = prune(&state, &[], &Limits::default(), 100 * DAY).expect("prune");
     assert_eq!((pruned.deleted, pruned.busy), (0, 1));
     assert!(pruned.bytes > 300_000 && orphan.exists());
