@@ -202,7 +202,9 @@ fn word(why: Why) -> &'static str {
 ///
 /// Refuses a relative or linked `dir`, a store or `checkpoints` directory that is a link, not a
 /// directory, another user's or open to others, a store whose lock another process holds
-/// ([`io::ErrorKind::WouldBlock`]), a bad run, `n` or reason, and a checkpoint that exists.
+/// ([`io::ErrorKind::WouldBlock`]), every take while the last prune could not meet
+/// `max_store_mib` (`over max_store_mib`), a bad run, `n` or reason, and a checkpoint that
+/// exists.
 /// Otherwise a failed walk or git.
 ///
 /// # Examples
@@ -230,6 +232,9 @@ pub fn take(
     let (dir, key) = resolve(dir)?;
     let store = open_store(state, &key)?;
     let _lock = lock(&store)?;
+    if let Ok(why) = fs::read_to_string(state.join("checkpoints").join(super::prune::FULL)) {
+        return Err(refused(why));
+    }
     let refname = format!("refs/pinfold/{run}/{n}");
     let exists = git::store(&store, ["for-each-ref", "--count=1", &refname], b"")?;
     if !exists.stdout.is_empty() {
@@ -310,4 +315,4 @@ pub fn take(
 
 #[cfg(test)]
 #[path = "take_tests.rs"]
-mod tests;
+pub(crate) mod tests;
