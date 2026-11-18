@@ -516,8 +516,14 @@ fn mem_gate_task() -> ExitCode {
     // ADR-0050 section 7 and slice 5: 64 run records over 8 agent panes, and no checkpoint list
     // kept, against the same panes and launches with `[rewind]` off.
     let (rewind_on, rewind_off) = (inputs.join("rewind/on"), inputs.join("rewind/off"));
+    // Their records are gated as the on-off delta; both rows only against #476's ceiling.
+    let (records_on, records_off) = (
+        "Core, 8 agent panes plus 64 run records",
+        "Core, 8 agent panes, 64 runs launched, [rewind] off",
+    );
     let records = mem_gate::Budget {
-        metric: "Core, 8 agent panes plus 64 run records",
+        metric: records_on,
+        limit: mem_gate::LAUNCH_LIMIT,
         settle: mem_gate::REWIND_SETTLE,
         agents: Some(&rewind_on),
         ..webhook
@@ -539,7 +545,7 @@ fn mem_gate_task() -> ExitCode {
     ]);
     budgets.extend([
         mem_gate::Budget {
-            metric: "Core, 8 agent panes, 64 runs launched, [rewind] off",
+            metric: records_off,
             agents: Some(&rewind_off),
             ..records
         },
@@ -872,7 +878,13 @@ fn mem_gate_task() -> ExitCode {
             agents: None,
         });
     }
-    let passed = mem_gate::run(&budgets);
+    let deltas = [(
+        "64 run records: the row with [rewind] on minus the row with it off",
+        records_on,
+        records_off,
+        mem_gate::RECORDS_LIMIT,
+    )];
+    let passed = mem_gate::run(&budgets, &deltas);
     let tools = Path::new(&target).join("release-core/pinfold");
     let tree = inputs.join("tree");
     let passed = mem_gate::run_takes(&tools, &tree, &inputs.join("state")) && passed;
