@@ -177,7 +177,8 @@ fn git(repo: &Path, args: &[&str]) -> io::Result<()> {
 
 /// Fills the tools' caps in `dir`, outside any repository so the file manager runs no git:
 /// `reader.md`, `prose.md` and `defs.md` of exactly 5 MB, an `empty` directory, `entries` of
-/// 10,000 files, a `repo` whose work tree's diff is over 8 MB, and `tool-screen.sh`, a window's
+/// 10,000 files, `tree` of 100,000 for the checkpoint take, a `repo` whose work tree's diff is
+/// over 8 MB, and `tool-screen.sh`, a window's
 /// shell that runs the reader.
 fn write_tool_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -220,6 +221,14 @@ fn write_tool_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
     }
     for entry in 0..mem_gate::ENTRY_CAP {
         fs::write(dir.join(format!("entries/{entry:05}.txt")), "")?;
+    }
+    // The take rows' tree: 100 directories of 1,000 small files.
+    for file in 0..mem_gate::TAKE_FILES {
+        let sub = dir.join(format!("tree/{:03}", file / 1000));
+        if file % 1000 == 0 {
+            fs::create_dir_all(&sub)?;
+        }
+        fs::write(sub.join(format!("{file:06}.txt")), format!("file {file}\n"))?;
     }
     let repo = dir.join("repo");
     let lines = |side: &str| -> String {
@@ -794,6 +803,9 @@ fn mem_gate_task() -> ExitCode {
         });
     }
     let passed = mem_gate::run(&budgets);
+    let tools = Path::new(&target).join("release-core/pinfold");
+    let tree = inputs.join("tree");
+    let passed = mem_gate::run_takes(&tools, &tree, &inputs.join("state")) && passed;
     let _ = fs::remove_dir_all(&inputs);
     if passed {
         ExitCode::SUCCESS

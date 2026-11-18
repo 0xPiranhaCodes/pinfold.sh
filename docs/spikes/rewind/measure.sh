@@ -8,7 +8,7 @@
 #                                         writes results/<label>-peaks.jsonl)
 #        measure.sh --real <work-dir> <label>
 #                                        (Linux tree only, on this host: the real take,
-#                                         crates/pinfold-tools/examples/checkpoint.rs, beside
+#                                         `pinfold checkpoint take` (ADR-0050 slice 3), beside
 #                                         the spike's recommended take, both at background
 #                                         priority, interleaved so they share the machine's
 #                                         load; writes results/<label>-real.jsonl)
@@ -47,8 +47,8 @@ avail_kb=$(df -Pk "$W" | awk 'NR==2 {print $4}')
 
 cargo build -q --release --manifest-path "$HERE/Cargo.toml" --target-dir "$W/target"
 B="$W/target/release/spike-rewind"
-R="$W/target/release/examples/checkpoint"
-[ "$PEAKS" = -real ] && cargo build -q --release --manifest-path "$REPO/Cargo.toml" -p pinfold-tools --example checkpoint --target-dir "$W/target"
+R="$W/target/release/pinfold"
+[ "$PEAKS" = -real ] && cargo build -q --release --manifest-path "$REPO/Cargo.toml" -p pinfold-cli --bin pinfold --target-dir "$W/target"
 emit() { printf '{"fs":"%s","corpus":"%s","config":"%s","step":"%s","r":%s}\n' "$LABEL" "$1" "$2" "$3" "$4" >> "$OUT"; }
 du_kb() { du -sk "$1" | awk '{print $1}'; }
 
@@ -166,7 +166,8 @@ real() { # <corpus> <dir>
   CAPS="REWIND_MAX_FILES=200000 REWIND_MAX_NEW_MIB=2048"
   one() { # <take> <step> <n>
     if [ "$1" = real ]; then
-      emit "$name" real "$2" "$("$B" peaks "$R" "$dir" "$W/store-real" "$3")"
+      # Its store goes under a state directory of its own, and PINFOLD_MEASURE adds ms and peak.
+      emit "$name" real "$2" "$("$B" peaks env HOME="$W/state" XDG_STATE_HOME="$W/state" PINFOLD_MEASURE=1 "$R" checkpoint take r1-0 "$3" api -- "$dir")"
     else
       # shellcheck disable=SC2086
       emit "$name" spike "$2" "$("$B" peaks $BG env $CAPS "$B" "$dir" "$W/store-spike" "$3")"
@@ -178,17 +179,17 @@ real() { # <corpus> <dir>
     turn=$((1 - turn))
     if [ $turn = 1 ]; then one real "$1" "$2"; one spike "$1" "$2"; else one spike "$1" "$2"; one real "$1" "$2"; fi
   }
-  for i in 1 2 3 4; do rm -rf "$W/store-real" "$W/store-spike"; sync; both first 0; done
-  emit "$name" real du_take "{\"kb\":$(du_kb "$W/store-real")}"
+  for i in 1 2 3 4; do rm -rf "$W/state" "$W/store-spike"; sync; both first 0; done
+  emit "$name" real du_take "{\"kb\":$(du_kb "$W/state")}"
   for n in 1 2 3; do both unchanged $n; done
   for n in 4 5 6; do
     # Append a line to every 100th covered regular file, from the real take's list.
-    tr '\0' '\n' < "$W/store-real/stat/spike-$((n - 1))" |
+    tr '\0' '\n' < "$(find "$W/state" -path "*/stat/r1-0-$((n - 1))")" |
       awk 'NR % 100 == 0 && $1 != "120000" { sub(/^[^ ]+ [^ ]+ [^ ]+ [^ ]+ [^ ]+ [^ ]+ /, ""); print }' |
       while IFS= read -r p; do echo "// changed" >> "$dir/$p"; done
     both changed $n
   done
-  rm -rf "$W/store-real" "$W/store-spike"
+  rm -rf "$W/state" "$W/store-spike"
 }
 
 case "$PEAKS" in
