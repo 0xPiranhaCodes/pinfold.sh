@@ -39,7 +39,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode, Palette};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 20;
+pub const VERSION: u16 = 21;
 
 /// The oldest version this side still speaks, one before [`VERSION`] (ADR-0043).
 pub const OLDEST: u16 = VERSION - 1;
@@ -60,6 +60,17 @@ const ANSWER: u16 = 19;
 
 /// The first version with [`Notice::InboxExtra`] (ADR-0051).
 const INBOX_EXTRA: u16 = 20;
+
+/// The first version whose [`Notice::InboxExtra`] carries an agent's context use and steps
+/// (ADR-0051, slice 9).
+pub const AGENT_FILES: u16 = 21;
+
+/// The most bytes of steps a [`Notice::InboxExtra`] carries: three of 80 cells and two
+/// newlines fit, as `pinfold agents peek` prints at most 1 KiB a pane.
+pub const MAX_STEPS: usize = 1024;
+
+/// How many steps a [`Notice::InboxExtra`] carries at most.
+pub const STEPS: usize = 3;
 
 /// The longest branch a [`Notice::InboxExtra`] carries: 40 bytes of printable ASCII (ADR-0051).
 pub const MAX_BRANCH: usize = 40;
@@ -218,6 +229,8 @@ const COLOURS: u8 = 15;
 const SECRETS: u8 = 16;
 const WEBHOOK: u8 = 17;
 const INBOX_EXTRA_KIND: u8 = 18;
+/// [`Notice::InboxExtra`]'s `ctx` byte when it has none.
+const NO_CTX: u8 = 255;
 
 /// How many agent states there are. [`Notice::Status`] numbers them in the order of the
 /// contributor rule: needs you, running, done, error, idle.
@@ -854,6 +867,13 @@ pub enum Notice<'a> {
         /// The git branch of the pane's directory, at most [`MAX_BRANCH`] bytes of printable
         /// ASCII, a detached head's first 7 hex digits, or empty for none.
         branch: &'a str,
+        /// The agent's context use as a whole percent, at most 100, from its own session file
+        /// with `[inbox] agent_files` on. Since version 21; none below it.
+        ctx: Option<u8>,
+        /// Its last steps, oldest first, at most [`STEPS`] joined by newlines and
+        /// [`MAX_STEPS`] bytes, none empty and none holding a control or bidi character. Since
+        /// version 21; empty below it.
+        steps: &'a str,
     },
 }
 
@@ -1524,7 +1544,24 @@ impl Notice<'_> {
                 out.push(u8::from(*sender));
                 put_tail(out, start, MAX_MESSAGE, WEBHOOK, *failed, host.as_bytes())?
             }
-            Self::InboxExtra { pane, branch } => put_tail(
+            Self::InboxExtra {
+                pane,
+                branch,
+                ctx,
+                steps,
+            } if version >= AGENT_FILES => {
+                let size = branch.len().max(steps.len());
+                if branch.len() > MAX_BRANCH || steps.len() > MAX_STEPS || ctx > &Some(100) {
+                    out.truncate(start);
+                    return Err(Error::TooLarge { size: size as u64 });
+                }
+                let count = u8::try_from(branch.len()).unwrap_or(u8::MAX);
+                put!(out; pane, ctx.unwrap_or(NO_CTX), count);
+                out.extend_from_slice(branch.as_bytes());
+                out.extend_from_slice(steps.as_bytes());
+                INBOX_EXTRA_KIND
+            }
+            Self::InboxExtra { pane, branch, .. } => put_tail(
                 out,
                 start,
                 MAX_BRANCH,
@@ -1657,6 +1694,38 @@ impl Notice<'_> {
                 failed: body.u32()?,
                 host: body.text()?,
             },
+            INBOX_EXTRA_KIND if version >= AGENT_FILES => {
+                let pane = body.u32()?;
+                let ctx = match body.u8()? {
+                    NO_CTX => None,
+                    ctx @ 0..=100 => Some(ctx),
+                    tag => return Err(Error::BadTag { field: "ctx", tag }),
+                };
+                let count = usize::from(body.u8()?);
+                let branch = std::str::from_utf8(body.take(count)?).map_err(|_| Error::BadText)?;
+                let steps = body.text()?;
+                if branch.len() > MAX_BRANCH || steps.len() > MAX_STEPS {
+                    return Err(Error::TooLarge {
+                        size: branch.len().max(steps.len()) as u64,
+                    });
+                }
+                // The window draws both as they are, so only what a core's cleaning lets through.
+                let shown = |step: &str| {
+                    !step.is_empty() && step.chars().all(|c| !c.is_control() && !bidi(c))
+                };
+                if !branch.bytes().all(|byte| matches!(byte, b' '..=b'~'))
+                    || !(steps.is_empty() || steps.split('\n').all(shown))
+                    || steps.split('\n').count() > STEPS
+                {
+                    return Err(Error::BadText);
+                }
+                Notice::InboxExtra {
+                    pane,
+                    branch,
+                    ctx,
+                    steps,
+                }
+            }
             INBOX_EXTRA_KIND => {
                 let pane = body.u32()?;
                 let branch = body.text()?;
@@ -1669,7 +1738,12 @@ impl Notice<'_> {
                 if !branch.bytes().all(|byte| matches!(byte, b' '..=b'~')) {
                     return Err(Error::BadText);
                 }
-                Notice::InboxExtra { pane, branch }
+                Notice::InboxExtra {
+                    pane,
+                    branch,
+                    ctx: None,
+                    steps: "",
+                }
             }
             UNHARDENED => Notice::Unhardened {
                 checked: body.tag("checked", &[false, true])?,
@@ -2314,6 +2388,14 @@ fn read_layout<'a>(body: &mut Reader<'a>, version: u16) -> Result<Layout<'a>, Er
 }
 
 /// Reads fields from the front of a body, and never past its end.
+/// Whether `character` reorders text: the bidi controls and marks.
+fn bidi(character: char) -> bool {
+    matches!(
+        character,
+        '\u{61c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'
+    )
+}
+
 struct Reader<'a>(&'a [u8]);
 
 impl<'a> Reader<'a> {
@@ -2422,7 +2504,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 20, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 21, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -2653,12 +2735,21 @@ mod tests {
         let extra = Notice::InboxExtra {
             pane: 1,
             branch: "main",
+            ctx: Some(64),
+            steps: "Bash",
         };
-        let newer = Error::Newer {
-            kind: INBOX_EXTRA_KIND,
-            since: INBOX_EXTRA,
+        // 20, the oldest spoken, has it, laid out as 20 reads it: the branch only.
+        let mut wire = raw(HELLO, &OLDEST.to_le_bytes());
+        extra.encode_at(OLDEST, &mut wire).unwrap();
+        let (mut decoder, mut input) = (Decoder::default(), wire.as_slice());
+        decoder.next_notice(&mut input).unwrap();
+        let branch_only = Notice::InboxExtra {
+            pane: 1,
+            branch: "main",
+            ctx: None,
+            steps: "",
         };
-        assert_eq!(at_oldest(extra), Err(newer), "a window of 19 never gets it");
+        assert_eq!(decoder.next_notice(&mut input), Ok(Some(branch_only)));
         assert_eq!(at_oldest(COLOURS_SEED), Ok(true));
         let secrets = Notice::Secrets {
             count: 1,
@@ -3455,6 +3546,7 @@ mod tests {
     fn an_inbox_branch_is_short_printable_ascii() {
         let wire = |branch: &[u8]| {
             let mut body = 7u32.to_le_bytes().to_vec();
+            body.extend([NO_CTX, branch.len() as u8]);
             body.extend_from_slice(branch);
             raw(INBOX_EXTRA_KIND, &body)
         };
@@ -3466,6 +3558,43 @@ mod tests {
         assert_eq!(read(&[b'a'; MAX_BRANCH + 1]), Err(long));
         for hostile in [&b"a\x1bb"[..], b"a\nb", "a\u{202e}b".as_bytes(), b"\x7f"] {
             assert_eq!(read(hostile), Err(Error::BadText), "{hostile:?}");
+        }
+    }
+
+    /// ADR-0051 §7: the window draws an agent's steps as they come, so the decoder takes only
+    /// what the core's cleaning lets through.
+    #[test]
+    fn inbox_steps_are_three_short_clean_lines_at_most() {
+        let wire = |ctx: u8, steps: &[u8]| {
+            let mut body = 7u32.to_le_bytes().to_vec();
+            body.extend([ctx, 4]);
+            body.extend_from_slice(b"main");
+            body.extend_from_slice(steps);
+            raw(INBOX_EXTRA_KIND, &body)
+        };
+        let read = |ctx, steps: &[u8]| notice_error(&wire(ctx, steps));
+        assert_eq!(read(64, "Read\nNow the parser.\n編集".as_bytes()), Ok(()));
+        assert_eq!(read(NO_CTX, b""), Ok(()));
+        assert_eq!(read(100, &[b'a'; MAX_STEPS]), Ok(()));
+        let long = Error::TooLarge {
+            size: MAX_STEPS as u64 + 1,
+        };
+        assert_eq!(read(1, &[b'a'; MAX_STEPS + 1]), Err(long));
+        let ctx = Error::BadTag {
+            field: "ctx",
+            tag: 101,
+        };
+        assert_eq!(read(101, b"a"), Err(ctx));
+        let hostile: [&[u8]; 6] = [
+            b"a\nb\nc\nd",
+            b"a\n\nb",
+            b"a\n",
+            b"a\x1b]0;x\x07",
+            "a\u{202e}b".as_bytes(),
+            b"\xff",
+        ];
+        for steps in hostile {
+            assert_eq!(read(1, steps), Err(Error::BadText), "{steps:?}");
         }
     }
 
@@ -3922,8 +4051,15 @@ mod tests {
         }
 
         #[test]
-        fn inbox_extra_round_trips(pane in any::<u32>(), branch in "[ -~]{0,40}", chunk in chunks()) {
-            let notice = Notice::InboxExtra { pane, branch: &branch };
+        fn inbox_extra_round_trips(
+            pane in any::<u32>(),
+            branch in "[ -~]{0,40}",
+            ctx in proptest::option::of(0..=100_u8),
+            steps in "([^\\p{C}\n]{1,80}(\n[^\\p{C}\n]{1,80}){0,2})?",
+            chunk in chunks(),
+        ) {
+            prop_assume!(!steps.chars().any(bidi));
+            let notice = Notice::InboxExtra { pane, branch: &branch, ctx, steps: &steps };
             prop_assert!(notice_survives(&notice, chunk), "changed on the link");
         }
 

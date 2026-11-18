@@ -399,6 +399,23 @@ message goes. ↑ and ↓ move, Enter goes to the pane, a click on a row does to
 prefix `!` closes. While it is open every key and paste goes to it, never to a pane. It holds
 its rows only while open.
 
+```toml
+[inbox]
+agent_files = true   # default false
+```
+
+With `agent_files` on, each row gets a second line: the agent's context use, such as
+`ctx 64%`, and its last three steps, each a tool's name or the first words of a message. They
+come from the agent's own session file, the newest `*.jsonl` Claude Code keeps for the pane's
+directory under `~/.claude/projects/`. While the inbox is open, and every 5 s, the core starts
+`pinfold agents peek`, which reads at most the last 64 KiB of that file, never through a
+link, and is stopped after 2 s. Nothing it reads is kept once the inbox closes, written to a
+log, sent in a webhook or a notification, or given over the API. OpenCode now keeps its
+sessions in a database PinFold does not read, so its rows show no second line for now
+([#479](https://github.com/0xPiranhaCodes/pinfold.sh/issues/479)). Off, no such file is read. Under 66
+columns the second line is dropped first. The core reads this key when it starts, so a change
+takes effect in the next session.
+
 On a ◆ row of an agent profile's pane, `y` is Approve and `i` is Interrupt. Neither sends
 anything yet: PinFold asks first, below the panes where program output cannot draw, "Send
 `Enter` to `claude` in tab 2 · pane 1?" or "Send Ctrl+C to …". `y` sends that one key once, and

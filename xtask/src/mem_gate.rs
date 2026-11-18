@@ -139,6 +139,10 @@ fn measure_once(budget: &Budget, args: &[&str]) -> io::Result<Reading> {
     if let Some(agents) = budget.agents {
         command.env("XDG_CONFIG_HOME", agents);
         command.env("SHELL", agents.join("agent.sh"));
+        // A folder holding agents' session files is their home too (ADR-0051 §7).
+        if agents.join(".claude").is_dir() {
+            command.env("HOME", agents);
+        }
     }
     if let Some(inbox) = budget.inbox {
         command.env(INBOX_VARIABLE, inbox);

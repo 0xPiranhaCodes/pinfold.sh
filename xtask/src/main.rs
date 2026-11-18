@@ -278,8 +278,17 @@ fn write_tool_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
             quote(tools)
         ),
     )?;
-    fs::set_permissions(script, fs::Permissions::from_mode(0o755))?;
-    write_peek_session(&dir.join("peek"), &repo)
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
+    // ADR-0051 §7's rows: the same agents with `[inbox] agent_files` on, whose home holds a
+    // 64 MiB Claude Code session for the repository, which the peek row reads too.
+    let files = dir.join("agent-files");
+    fs::create_dir_all(files.join("pinfold"))?;
+    fs::write(
+        files.join("pinfold/pinfold.toml"),
+        "[inbox]\nagent_files = true\n",
+    )?;
+    fs::copy(&script, files.join("agent.sh"))?;
+    write_peek_session(&files, &fs::canonicalize(&repo)?)
 }
 
 /// Writes, under `home`, a Claude Code session of [`mem_gate::PEEK_SESSION`] bytes for `dir`,
@@ -427,6 +436,7 @@ fn mem_gate_task() -> ExitCode {
     let tool_screen = inputs.join("tool-screen.sh");
     let agents_screen = inputs.join("agents-screen.sh");
     let listed_agents = inputs.join("agents");
+    let agent_files = inputs.join("agent-files");
     let replay_typical = ["--replay", typical.as_str()];
     let replay_hostile = ["--replay", hostile.as_str()];
     let replay_baseline: &[&str] = &["--replay", "/dev/null"];
@@ -749,6 +759,24 @@ fn mem_gate_task() -> ExitCode {
                 ..beside
             });
         }
+        // ADR-0051 §11: the peek's lines are forwarded and kept by nobody.
+        for (metric, inbox) in [
+            (
+                "Core with the inbox open over 8 agent panes, agent files on",
+                Some("open"),
+            ),
+            (
+                "Core after the inbox closed over 8 agent panes, agent files on",
+                Some("closed"),
+            ),
+        ] {
+            budgets.push(mem_gate::Budget {
+                metric,
+                inbox,
+                agents: Some(&agent_files),
+                ..beside
+            });
+        }
         budgets.push(beside);
     }
     if cfg!(target_os = "linux") {
@@ -898,13 +926,35 @@ fn mem_gate_task() -> ExitCode {
                 ..beside
             });
         }
+        // ADR-0051 §11: the peek's lines are forwarded and kept by nobody.
+        for (metric, inbox) in [
+            (
+                "Core with the inbox open over 8 agent panes, agent files on",
+                Some("open"),
+            ),
+            (
+                "Core after the inbox closed over 8 agent panes, agent files on",
+                Some("closed"),
+            ),
+        ] {
+            budgets.push(mem_gate::Budget {
+                metric,
+                inbox,
+                agents: Some(&agent_files),
+                ..beside
+            });
+        }
         budgets.push(beside);
     }
     let passed = mem_gate::run(&budgets);
     let tools = Path::new(&target).join("release-core/pinfold");
     let tree = inputs.join("tree");
     let passed = mem_gate::run_takes(&tools, &tree, &inputs.join("state")) && passed;
-    let passed = mem_gate::run_peek(&tools, &inputs.join("peek"), &inputs.join("repo")) && passed;
+    let (files, repo) = (
+        inputs.join("agent-files"),
+        fs::canonicalize(inputs.join("repo")),
+    );
+    let passed = repo.is_ok_and(|repo| mem_gate::run_peek(&tools, &files, &repo)) && passed;
     let _ = fs::remove_dir_all(&inputs);
     if passed {
         ExitCode::SUCCESS
