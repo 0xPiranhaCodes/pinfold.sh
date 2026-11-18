@@ -62,7 +62,7 @@ pub(crate) fn gone(run: &str, n: u64) -> io::Error {
 }
 
 /// The message of checkpoint `n` of `run`, or `None` if it is not in the store.
-fn message(store: &Path, run: &str, n: u64) -> io::Result<Option<serde_json::Value>> {
+pub(crate) fn message(store: &Path, run: &str, n: u64) -> io::Result<Option<serde_json::Value>> {
     let refname = refname(run, n);
     let out = git::store(
         store,
@@ -162,7 +162,17 @@ impl Selection {
 /// The store of the working directory `dir` under `state`, refused as a take refuses it; never
 /// made.
 pub(crate) fn store_of(state: &Path, dir: &Path) -> io::Result<PathBuf> {
-    let (_, key) = resolve(dir)?;
+    store_by_key(state, &resolve(dir)?.1)
+}
+
+/// The store `key`, 16 lowercase hex digits, under `state`, refused as a take refuses it;
+/// never made.
+pub(crate) fn store_by_key(state: &Path, key: &str) -> io::Result<PathBuf> {
+    let hex = |c: u8| c.is_ascii_digit() || (b'a'..=b'f').contains(&c);
+    if key.len() != 16 || !key.bytes().all(hex) {
+        let bad = format!("not a store key: {key}");
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, bad));
+    }
     let checkpoints = state.join("checkpoints");
     private(&checkpoints)?;
     let store = checkpoints.join(key);
