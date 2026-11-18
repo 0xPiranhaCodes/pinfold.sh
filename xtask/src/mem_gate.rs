@@ -257,19 +257,31 @@ pub fn run(budgets: &[Budget]) -> bool {
     passed
 }
 
-/// Runs checkpoint `n` of `tree` into a store under `state` and returns the take's own peak
-/// footprint, which it prints as `peak` with `PINFOLD_MEASURE` set: a take exits, so nothing is
-/// left to read from outside. Git's processes are not PinFold's and are not counted (ADR-0050
-/// decision 9).
+/// Runs checkpoint `n` of `tree` into a store under `state` and returns its peak, in each
+/// platform's metric of the other rows. On macOS that is the take's own lifetime peak
+/// `phys_footprint`, which it prints as `peak` with `PINFOLD_MEASURE` set. Linux keeps no peak
+/// PSS, and the take's `VmHWM` counts shared libraries whole, so its PSS is sampled every
+/// millisecond until it exits. Git's processes are not PinFold's and are not counted
+/// (ADR-0050 decision 9).
 fn take_peak(program: &Path, tree: &Path, state: &Path, n: u64) -> io::Result<u64> {
-    let output = Command::new(program)
+    let mut child = Command::new(program)
         .args(["checkpoint", "take", "r1-0", &n.to_string(), "api", "--"])
         .arg(tree)
         .env("HOME", state)
         .env("XDG_STATE_HOME", state)
         .env("PINFOLD_MEASURE", "1")
-        .output()?;
-    let line: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .stdout(Stdio::piped())
+        .spawn()?;
+    let mut sampled = 0;
+    while child.try_wait()?.is_none() {
+        sampled = sampled.max(pinfold_sys::footprint(child.id()).unwrap_or(0));
+        thread::sleep(Duration::from_millis(1));
+    }
+    let mut out = Vec::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        io::Read::read_to_end(&mut stdout, &mut out)?;
+    }
+    let line: serde_json::Value = serde_json::from_slice(&out)
         .map_err(|_| io::Error::other("the take printed no JSON line"))?;
     if let Some(error) = line["error"].as_str() {
         return Err(io::Error::other(format!("the take failed: {error}")));
@@ -277,10 +289,13 @@ fn take_peak(program: &Path, tree: &Path, state: &Path, n: u64) -> io::Result<u6
     if line["files"].as_u64() != Some(TAKE_FILES as u64) || line["complete"] != true {
         return Err(io::Error::other("the take did not cover the whole tree"));
     }
-    line["peak"]
-        .as_u64()
-        .filter(|&peak| peak > 0)
-        .ok_or_else(|| io::Error::other("the take printed no peak"))
+    let peak = if cfg!(target_os = "linux") {
+        Some(sampled)
+    } else {
+        line["peak"].as_u64()
+    };
+    peak.filter(|&peak| peak > 0)
+        .ok_or_else(|| io::Error::other("no peak was read"))
 }
 
 /// Median of [`RUNS`] of a first take of `tree`, then a take with every 100th file changed.
@@ -311,18 +326,20 @@ pub fn run_takes(program: &Path, tree: &Path, state: &Path) -> bool {
     ];
     let limit = megabytes(TAKE_LIMIT);
     match take_peaks(program, tree, state) {
-        Ok(peaks) => metrics.iter().zip(peaks).all(|(metric, bytes)| {
-            let result = if bytes <= TAKE_LIMIT {
-                "pass"
-            } else {
-                "**FAIL**"
-            };
-            println!(
-                "| {metric} | {:.2} | {limit:.2} | {result} |",
-                megabytes(bytes)
-            );
-            bytes <= TAKE_LIMIT
-        }),
+        Ok(peaks) => {
+            for (metric, bytes) in metrics.iter().zip(peaks) {
+                let result = if bytes <= TAKE_LIMIT {
+                    "pass"
+                } else {
+                    "**FAIL**"
+                };
+                println!(
+                    "| {metric} | {:.2} | {limit:.2} | {result} |",
+                    megabytes(bytes)
+                );
+            }
+            peaks.iter().all(|&bytes| bytes <= TAKE_LIMIT)
+        }
         Err(error) => {
             for metric in metrics {
                 println!("| {metric} | error: {error} | {limit:.2} | **FAIL** |");
