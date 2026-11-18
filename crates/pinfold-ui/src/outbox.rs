@@ -36,6 +36,10 @@ pub(crate) enum Request {
     Copy(u32, Selection),
     /// The `*.md` name picked for a pane, as the core listed it.
     OpenMarkdown(u32, String),
+    /// Go to the next pane that needs you, which the link knows when the window does not.
+    NextWaiting,
+    /// Go to this pane, in whichever tab holds it.
+    GoTo(u32),
     /// Anything that owns all it says.
     Core(proto::Request<'static>),
 }
@@ -78,6 +82,8 @@ impl Request {
                 query: &query,
             }),
             Self::Copy(pane, selection) => link.copy(pane, selection),
+            Self::NextWaiting => link.go_to_next_waiting(),
+            Self::GoTo(pane) => link.go_to_pane(pane),
             Self::OpenMarkdown(pane, name) => {
                 link.send(proto::Request::OpenMarkdown { pane, name: &name })
             }

@@ -20,6 +20,7 @@
 //! | `g`                 | Open the git diff here  | the design doc             |
 //! | `m`                 | Pick markdown to read   | ADR-0045                   |
 //! | `!`                 | Open or close the inbox | ADR-0051, `keys.inbox`     |
+//! | `w`                 | Go to the next ◆ pane   | ADR-0051, `keys.next_waiting` |
 //!
 //! Alt+arrows matter on macOS, where the desktop takes Ctrl+arrows. `h` `j` `k` `l` stay free,
 //! because the design keeps `l` for the audit log, as it keeps `u` and `A`. `f`, `g` and `m` open a
@@ -100,6 +101,9 @@ pub enum Command {
     OpenMarkdown,
     /// Open the inbox of every agent pane, or close it (ADR-0051).
     Inbox,
+    /// Go to the pane that has needed you longest, or from one that needs you to the next in the
+    /// inbox's order (ADR-0051).
+    NextWaiting,
 }
 
 impl Command {
@@ -137,7 +141,8 @@ impl Command {
             | Self::OpenFiles
             | Self::OpenDiff
             | Self::OpenMarkdown
-            | Self::Inbox => "",
+            | Self::Inbox
+            | Self::NextWaiting => "",
         }
     }
 }
@@ -186,9 +191,13 @@ fn is_modifier(key: &Key) -> bool {
     )
 }
 
-/// The command for a key after the prefix, or nothing if the key is unbound. `inbox` is
-/// `keys.inbox`, which the config keeps off the keys bound here.
-fn command(key: &Key, modifiers: ModifiersState, inbox: char) -> Option<Command> {
+/// The command for a key after the prefix, or nothing if the key is unbound. `inbox` and
+/// `next_waiting` are `[keys]`'s, which the config keeps off the keys bound here and apart.
+fn command(
+    key: &Key,
+    modifiers: ModifiersState,
+    (inbox, next_waiting): (char, char),
+) -> Option<Command> {
     const NONE: ModifiersState = ModifiersState::empty();
     match key {
         Key::Named(named) => {
@@ -218,6 +227,7 @@ fn command(key: &Key, modifiers: ModifiersState, inbox: char) -> Option<Command>
             b"g" => Some(Command::OpenDiff),
             b"m" => Some(Command::OpenMarkdown),
             _ if text.chars().eq([inbox]) => Some(Command::Inbox),
+            _ if text.chars().eq([next_waiting]) => Some(Command::NextWaiting),
             _ => None,
         },
         _ => None,
@@ -233,6 +243,7 @@ fn command(key: &Key, modifiers: ModifiersState, inbox: char) -> Option<Command>
 pub struct Prefix {
     letter: char,
     inbox: char,
+    next_waiting: char,
     armed: bool,
     /// Whether the key last taken was the prefix's, so its repeats stay out of the pane.
     consumed: bool,
@@ -245,6 +256,7 @@ impl Prefix {
         Self {
             letter,
             inbox: '!',
+            next_waiting: 'w',
             armed: false,
             consumed: false,
         }
@@ -254,6 +266,16 @@ impl Prefix {
     #[must_use]
     pub const fn with_inbox(self, key: char) -> Self {
         Self { inbox: key, ..self }
+    }
+
+    /// Makes `key` after the prefix go to the next pane that needs you, as `keys.next_waiting`
+    /// gives it.
+    #[must_use]
+    pub const fn with_next_waiting(self, key: char) -> Self {
+        Self {
+            next_waiting: key,
+            ..self
+        }
     }
 
     fn is_prefix(&self, key: &Key, modifiers: ModifiersState) -> bool {
@@ -300,7 +322,7 @@ impl Prefix {
             return Step::Pass;
         }
         self.consumed = true;
-        command(key, modifiers, self.inbox).map_or(Step::Swallow, Step::Run)
+        command(key, modifiers, (self.inbox, self.next_waiting)).map_or(Step::Swallow, Step::Run)
     }
 
     /// Disarms, for when the window loses focus, so the first key back is not a command.
@@ -378,6 +400,19 @@ mod tests {
     }
 
     #[test]
+    fn the_next_waiting_key_is_w_or_the_configs() {
+        assert_after_prefix(&text("w"), NONE, Step::Run(Command::NextWaiting));
+        let mut prefix = Prefix::new('a').with_next_waiting('N');
+        prefix.key(&text("a"), CONTROL, false);
+        assert_eq!(
+            prefix.key(&text("N"), SHIFT, false),
+            Step::Run(Command::NextWaiting)
+        );
+        prefix.key(&text("a"), CONTROL, false);
+        assert_eq!(prefix.key(&text("w"), NONE, false), Step::Swallow);
+    }
+
+    #[test]
     fn the_inbox_key_is_bang_or_the_configs_and_never_one_already_bound() {
         assert_after_prefix(&text("!"), SHIFT, Step::Run(Command::Inbox));
         let mut prefix = Prefix::new('a').with_inbox('i');
@@ -392,7 +427,10 @@ mod tests {
         for key in pinfold_config::PREFIX_KEYS.chars() {
             let key = text(&key.to_string());
             assert!(
-                !matches!(command(&key, NONE, '!'), None | Some(Command::Inbox)),
+                !matches!(
+                    command(&key, NONE, ('!', 'w')),
+                    None | Some(Command::Inbox | Command::NextWaiting)
+                ),
                 "{key:?}"
             );
         }

@@ -74,6 +74,7 @@ pub(crate) fn state_colour(theme: &Theme, state: u8) -> Option<u32> {
 pub const UNHARDENED: char = '▲';
 pub const VIOLET: u32 = 0x00c7_92ea;
 pub(crate) const NEEDS_YOU: u8 = 0;
+pub(crate) const ERROR: u8 = 3;
 const IDLE: u8 = 4;
 /// Widest message in cells, so it cannot crowd out the clock for long.
 const MAX_MESSAGE: usize = 48;
