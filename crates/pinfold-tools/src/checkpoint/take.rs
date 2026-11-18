@@ -72,7 +72,7 @@ pub(crate) fn private(path: &Path) -> io::Result<()> {
 
 /// The resolved working directory and its store's key: the first 16 hex digits of the SHA-256
 /// of the resolved path, as ADR-0039's shadow. A relative path or a link is refused.
-fn resolve(dir: &Path) -> io::Result<(PathBuf, String)> {
+pub(crate) fn resolve(dir: &Path) -> io::Result<(PathBuf, String)> {
     if !dir.is_absolute() {
         return Err(refused(format!("{} is not absolute", dir.display())));
     }

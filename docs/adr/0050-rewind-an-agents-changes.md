@@ -523,3 +523,34 @@ Decided by the coordinator for the maintainer while building `pinfold checkpoint
 Until slice 5 reads `[rewind]`, `pinfold checkpoint prune` takes the live runs and the limits
 as flags: `--live <run>`, `--max-store-mib`, `--keep-days` and `--keep-per-run`, defaults 2048,
 14 and 20. The core runs it after each take, and after a take refused as over the cap.
+
+## Amendment 2026-11-18, slice 4
+
+Decided by the coordinator for the maintainer while building `pinfold checkpoint plan` and
+`restore`, as section 6's parent rule could not hold beside section 3 and T11:
+
+1. **A parent goes only through the deletion rule** (section 6). Read literally, "a parent that
+   is now a symbolic link or a file where `C` has a directory is removed" would delete one when
+   `C` is incomplete, one planted after `N` was shown, and a regular file no checkpoint covers,
+   such as one over 16 MiB, which would then be in no checkpoint, the restore checkpoint
+   included. Such a parent is removed only if it is in `N` as that link or file, unchanged since
+   shown, and `C` is complete and covered it. Deletions run before writes, and a path above a
+   chosen one counts as chosen, so the parent goes first. Otherwise the path under it is skipped
+   and reported as changed since shown. Links are never followed either way.
+2. **Changed since shown** is the entry's kind and mode, then the git blob id of what is on disk
+   now, against its entry in `N`; a matching stat alone is not trusted.
+3. **A checkpoint that skipped more paths than it lists** (`more`) covers no path it does not
+   hold, so a restore from it deletes nothing, as from an incomplete one.
+4. **What `plan` prints.** `{restore, delete, bring_back, not_covered, later, complete, paths,
+   more}`: `not_covered` counts paths only `N` holds that a restore leaves alone; `later` counts
+   paths changed since the run's newest `done` or `exit` checkpoint before `N`; `paths` holds up
+   to 10 `[path, what, later]`, each cut to 256 bytes, fewer if the line would pass the 4 KiB the
+   core reads, and `more` the rest. A restore treats a `later` path like any other: the caller
+   picks the paths. Its line is `{restored, deleted, skipped, skipped_paths,
+   restore_checkpoint}`, `skipped_paths` up to 10 `[path, "changed" or "failed"]`.
+5. **Memory stays flat.** Diffs are written by git into a file in the store that is unlinked at
+   once (`git::store_to`) and read back streaming, and blobs come through one `cat-file --batch`,
+   so neither a diff nor a file is ever held whole.
+6. **`plan` takes no lock**, as it only reads. A prune that removed either checkpoint before or
+   while it read makes it fail with "checkpoint `<run>/<n>` no longer exists", never a partial
+   count. `restore` reads the diff again under the lock and never trusts a plan's counts.
