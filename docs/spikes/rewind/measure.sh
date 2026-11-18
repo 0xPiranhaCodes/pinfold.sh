@@ -164,13 +164,21 @@ real() { # <corpus> <dir>
   find "$dir" -name .git -prune -o -type f -exec cat {} + > /dev/null # warm the cache
   if [ "$(uname)" = Darwin ]; then BG="taskpolicy -c utility"; else BG="nice -n 10 ionice -c 3"; fi
   CAPS="REWIND_MAX_FILES=200000 REWIND_MAX_NEW_MIB=2048"
-  both() { # <step> <n>
-    # shellcheck disable=SC2086
-    emit "$name" real "$1" "$("$B" peaks "$R" "$dir" "$W/store-real" "$2")"
-    # shellcheck disable=SC2086
-    emit "$name" spike "$1" "$("$B" peaks $BG env $CAPS "$B" "$dir" "$W/store-spike" "$2")"
+  one() { # <take> <step> <n>
+    if [ "$1" = real ]; then
+      emit "$name" real "$2" "$("$B" peaks "$R" "$dir" "$W/store-real" "$3")"
+    else
+      # shellcheck disable=SC2086
+      emit "$name" spike "$2" "$("$B" peaks $BG env $CAPS "$B" "$dir" "$W/store-spike" "$3")"
+    fi
   }
-  for i in 1 2 3; do rm -rf "$W/store-real" "$W/store-spike"; both first 0; done
+  # Which goes first alternates, as the first after a store is removed ran slower.
+  turn=0
+  both() { # <step> <n>
+    turn=$((1 - turn))
+    if [ $turn = 1 ]; then one real "$1" "$2"; one spike "$1" "$2"; else one spike "$1" "$2"; one real "$1" "$2"; fi
+  }
+  for i in 1 2 3 4; do rm -rf "$W/store-real" "$W/store-spike"; sync; both first 0; done
   emit "$name" real du_take "{\"kb\":$(du_kb "$W/store-real")}"
   for n in 1 2 3; do both unchanged $n; done
   for n in 4 5 6; do
