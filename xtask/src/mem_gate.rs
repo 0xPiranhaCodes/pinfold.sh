@@ -276,8 +276,25 @@ pub fn run(budgets: &[Budget]) -> bool {
 /// millisecond until it exits. Git's processes are not PinFold's and are not counted
 /// (ADR-0050 decision 9).
 fn take_peak(program: &Path, tree: &Path, state: &Path, n: u64) -> io::Result<u64> {
+    let take = ["checkpoint", "take", "r1-0", &n.to_string(), "api", "--"];
+    let whole = |line: &serde_json::Value| {
+        line["files"].as_u64() == Some(TAKE_FILES as u64) && line["complete"] == true
+    };
+    checkpoint_peak(program, &take, tree, state, whole)
+        .map_err(|error| io::Error::other(format!("the take {error}")))
+}
+
+/// Runs `pinfold <args> <tree>` with `state` and returns its peak as [`take_peak`] does, once
+/// `done` accepts its JSON line.
+fn checkpoint_peak(
+    program: &Path,
+    args: &[&str],
+    tree: &Path,
+    state: &Path,
+    done: impl Fn(&serde_json::Value) -> bool,
+) -> io::Result<u64> {
     let mut child = Command::new(program)
-        .args(["checkpoint", "take", "r1-0", &n.to_string(), "api", "--"])
+        .args(args)
         .arg(tree)
         .env("HOME", state)
         .env("XDG_STATE_HOME", state)
@@ -293,13 +310,13 @@ fn take_peak(program: &Path, tree: &Path, state: &Path, n: u64) -> io::Result<u6
     if let Some(mut stdout) = child.stdout.take() {
         io::Read::read_to_end(&mut stdout, &mut out)?;
     }
-    let line: serde_json::Value = serde_json::from_slice(&out)
-        .map_err(|_| io::Error::other("the take printed no JSON line"))?;
+    let line: serde_json::Value =
+        serde_json::from_slice(&out).map_err(|_| io::Error::other("printed no JSON line"))?;
     if let Some(error) = line["error"].as_str() {
-        return Err(io::Error::other(format!("the take failed: {error}")));
+        return Err(io::Error::other(format!("failed: {error}")));
     }
-    if line["files"].as_u64() != Some(TAKE_FILES as u64) || line["complete"] != true {
-        return Err(io::Error::other("the take did not cover the whole tree"));
+    if !done(&line) {
+        return Err(io::Error::other(format!("did not do it all: {line}")));
     }
     let peak = if cfg!(target_os = "linux") {
         Some(sampled)
@@ -310,9 +327,13 @@ fn take_peak(program: &Path, tree: &Path, state: &Path, n: u64) -> io::Result<u6
         .ok_or_else(|| io::Error::other("no peak was read"))
 }
 
-/// Median of [`RUNS`] of a first take of `tree`, then a take with every 100th file changed.
-fn take_peaks(program: &Path, tree: &Path, state: &Path) -> io::Result<[u64; 2]> {
-    let (mut first, mut changed) = (Vec::new(), Vec::new());
+/// Median of [`RUNS`] of a first take of `tree`, then a take with every 100th file changed,
+/// then the restore of the first over the second, its `restore` take of 100,000 files included,
+/// which writes the 1,000 back.
+fn take_peaks(program: &Path, tree: &Path, state: &Path) -> io::Result<[u64; 3]> {
+    let (mut first, mut changed, mut restored) = (Vec::new(), Vec::new(), Vec::new());
+    let restore = ["checkpoint", "restore", "r1-0", "0", "1", "--"];
+    let all_back = |line: &serde_json::Value| line["restored"] == 1000 && line["skipped"] == 0;
     for run in 0..RUNS {
         let _ = std::fs::remove_dir_all(state);
         std::fs::create_dir_all(state)?;
@@ -322,11 +343,14 @@ fn take_peaks(program: &Path, tree: &Path, state: &Path) -> io::Result<[u64; 2]>
             std::fs::write(path, format!("changed in run {run}\n"))?;
         }
         changed.push(take_peak(program, tree, state, 1)?);
+        let peak = checkpoint_peak(program, &restore, tree, state, all_back);
+        restored.push(peak.map_err(|error| io::Error::other(format!("the restore {error}")))?);
     }
     let _ = std::fs::remove_dir_all(state);
-    first.sort_unstable();
-    changed.sort_unstable();
-    Ok([first[RUNS / 2], changed[RUNS / 2]])
+    for peaks in [&mut first, &mut changed, &mut restored] {
+        peaks.sort_unstable();
+    }
+    Ok([first[RUNS / 2], changed[RUNS / 2], restored[RUNS / 2]])
 }
 
 /// Prints the take rows under [`run`]'s table, with `program` as `pinfold`. Returns false if a
@@ -335,6 +359,7 @@ pub fn run_takes(program: &Path, tree: &Path, state: &Path) -> bool {
     let metrics = [
         "Checkpoint take with its readers, 100,000 files",
         "Checkpoint take with its readers, 100,000 files, 1% changed",
+        "Checkpoint restore of that 1%, its restore take included",
     ];
     let limit = megabytes(TAKE_LIMIT);
     match take_peaks(program, tree, state) {

@@ -27,6 +27,7 @@ use crate::gitignore::{self, Pattern};
 
 pub mod plan;
 pub mod prune;
+pub mod restore;
 pub mod take;
 
 const BUF: usize = 64 * 1024;
@@ -923,7 +924,13 @@ fn blob(
 const MEASURE: &str = "PINFOLD_MEASURE";
 const USAGE: &str = "usage: pinfold checkpoint take <run> <n> <reason> -- <dir> | prune \
                      [--live <run>]... [--max-store-mib N] [--keep-days N] [--keep-per-run N] \
-                     | plan <run> <c> <shown> -- <dir> [<path>]...";
+                     | plan|restore <run> <c> <shown> -- <dir> [<path>]...";
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs())
+}
 
 /// A checkpoint number on the command line.
 fn number(word: &[u8]) -> io::Result<u64> {
@@ -946,7 +953,8 @@ fn paths(args: &[OsString]) -> Option<Vec<Vec<u8>>> {
 /// [`take::Taken`]'s line; `prune [--live <run>]... [--max-store-mib N] [--keep-days N]
 /// [--keep-per-run N]`, defaults 2048, 14 and 20, prints [`prune::Pruned`]'s. `plan <run> <c>
 /// <shown> -- <dir> [<path>]...`, limited to the paths if any are given and all otherwise,
-/// prints [`plan::Planned`]'s, at normal priority as the person waits on it.
+/// prints [`plan::Planned`]'s, and `restore` with the same arguments [`restore::Restored`]'s,
+/// both at normal priority as the person waits on them.
 ///
 /// # Examples
 ///
@@ -1014,6 +1022,31 @@ pub fn command(state: Option<&Path>, args: &[OsString]) -> bool {
                         "paths": paths,
                     });
                     plan::fit(&mut line, "paths", "more");
+                    line
+                })
+        }
+        (Some(state), [b"restore", run, c, shown, b"--", _, ..]) => {
+            let run = std::str::from_utf8(run).unwrap_or_default();
+            let dir = Path::new(&args[5]);
+            number(c)
+                .and_then(|c| Ok((c, number(shown)?)))
+                .and_then(|(c, shown)| {
+                    restore::restore(state, run, c, shown, dir, paths(&args[6..]), now())
+                })
+                .map(|r| {
+                    let skipped: Vec<_> = r
+                        .skipped_paths
+                        .iter()
+                        .map(|(path, why)| serde_json::json!([path, why]))
+                        .collect();
+                    let mut line = serde_json::json!({
+                        "restored": r.restored,
+                        "deleted": r.deleted,
+                        "skipped": r.skipped,
+                        "skipped_paths": skipped,
+                        "restore_checkpoint": r.restore_checkpoint,
+                    });
+                    plan::fit(&mut line, "skipped_paths", "unlisted");
                     line
                 })
         }
