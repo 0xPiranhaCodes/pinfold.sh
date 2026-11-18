@@ -470,7 +470,11 @@ mod tests {
             "\x1b]7;file://evil/{secret}\x07\x1b]2;{secret}\x07\x1b]9;{secret}\x07\
              {secret}\r\n\x1b]777;notify;{secret};body\x1b\\\u{202e}\"}}\\"
         );
+        // With program notifications on, so their text was read and still goes nowhere (§9).
+        engine.set_toasts(true);
         engine.feed(printed.as_bytes(), &mut Vec::new());
+        let toast = engine.take_toast().map(|toast| toast.text);
+        assert!(toast.is_some_and(|text| text.contains(secret)));
         let mut tracker = Tracker::new(Instant::now());
         tracker.read_agent_signals(0);
         tracker.observe_agent(engine.agent_marks(), Instant::now());

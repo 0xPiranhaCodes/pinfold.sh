@@ -22,7 +22,7 @@ use pinfold_sys::Terminal;
 use pinfold_sys::pty::Pty;
 
 use crate::link::{Host, LINK};
-use crate::marks::ShellMarks;
+use crate::marks::{ShellMarks, Toast};
 use crate::opener::{OPEN_DEADLINE, Opener};
 use crate::protect::Protect;
 use crate::search::{CopyStep, Copying, Direction, Position, Search, SearchStep, Selection};
@@ -241,6 +241,8 @@ pub struct Reactor {
     tools: Option<PathBuf>,
     /// Whether an open inbox reads agents' session files, `[inbox] agent_files` (ADR-0051 §7).
     pub(crate) agent_files: bool,
+    /// Whether the window has `[alerts] program_notifications` on (ADR-0051 §9).
+    toasts: bool,
     /// The directory last listed for a window's markdown picker.
     pub(crate) markdown: Option<crate::tool::Listing>,
     /// The states a webhook posts, one bit each by `Status as u8`; 0 when webhooks are off.
@@ -292,6 +294,7 @@ impl Reactor {
             palette: Arc::new(Mutex::new(Palette::GRAPHITE_GRID)),
             tools: None,
             agent_files: false,
+            toasts: false,
             markdown: None,
             posted: 0,
             posts: Vec::new(),
@@ -428,15 +431,13 @@ impl Reactor {
             .registry()
             .register(&mut SourceFd(&fd), Token(pane), interest)?;
         self.next_pane += 1;
+        let mut engine = AlacrittyEngine::with_palette(rows, columns, self.palette.clone());
+        engine.set_toasts(self.toasts);
         self.panes.push(Pane {
             number: pane,
             pty,
             program,
-            engine: Box::new(AlacrittyEngine::with_palette(
-                rows,
-                columns,
-                self.palette.clone(),
-            )),
+            engine: Box::new(engine),
             replies: Vec::new(),
             input: Vec::new(),
             readable: true,
@@ -893,6 +894,21 @@ impl Reactor {
     /// it starts, no peek runs and no such file is read.
     pub fn set_agent_files(&mut self, on: bool) {
         self.agent_files = on;
+    }
+
+    /// Turns program notifications' text on or off in every pane, as the window's
+    /// `[alerts] program_notifications` says (ADR-0051 §9). Off, as it starts and once the window
+    /// goes, no pane keeps any.
+    pub fn set_toasts(&mut self, on: bool) {
+        self.toasts = on;
+        for pane in &mut self.panes {
+            pane.engine.set_toasts(on);
+        }
+    }
+
+    /// Takes a pane's latest program notification, if one is in flight. Never a state.
+    pub fn take_toast(&mut self, pane: usize) -> Option<Toast> {
+        pane_mut(&mut self.panes, pane)?.engine.take_toast()
     }
 
     /// The `pinfold` binary that runs the built-in tools, once [`Reactor::set_tools`] set it.
@@ -1470,6 +1486,45 @@ mod tests {
 
         reactor.typed(agent, Instant::now());
         assert_eq!(reactor.status(agent), Some((Status::Idle, false, "")));
+    }
+
+    /// ADR-0051 §9: a program notification is text for a toast and nothing else. In any pane it
+    /// sets no state, raises no alert and queues no post; a webhook's record has no field for
+    /// text. Off, the same bytes leave nothing to take.
+    #[test]
+    fn a_toast_never_sets_a_state_and_never_reaches_a_webhook() {
+        let mut reactor = Reactor::new().unwrap();
+        reactor.post_states([Status::NeedsYou, Status::Error]);
+        let script = |end: &str| {
+            format!(
+                "printf '\\033]99;i=1:d=0;ghp_secret\\033\\\\\\033]99;i=1:p=body;done\\033\\\\'; \
+                 printf '\\033]777;notify;ghp_secret;body\\007{end}'; sleep 30"
+            )
+        };
+        let off = reactor.spawn(shell(&script("off")), 24, 80).unwrap();
+        assert!(turn_until(&mut reactor, |r| on_screen(r, off, "off")));
+        assert_eq!(reactor.take_toast(off), None, "off keeps no text");
+        reactor.set_toasts(true);
+        let shell_pane = reactor.spawn(shell(&script("end")), 24, 80).unwrap();
+        let agent = reactor.spawn(shell(&script("end")), 24, 80).unwrap();
+        reactor.read_agent_signals(agent, 0);
+        let done = |r: &Reactor| on_screen(r, shell_pane, "end") && on_screen(r, agent, "end");
+        assert!(turn_until(&mut reactor, done));
+        for pane in [shell_pane, agent] {
+            assert_eq!(reactor.status(pane), Some((Status::Idle, false, "")));
+            assert!(!reactor.take_alert(pane));
+            let toast = reactor.take_toast(pane).map(|toast| toast.text);
+            assert_eq!(
+                toast.as_deref(),
+                Some("ghp_secret: body"),
+                "the latest only"
+            );
+            assert_eq!(reactor.take_toast(pane), None, "taken once");
+        }
+        assert_eq!(reactor.take_post(), None);
+        assert!(!on_screen(&reactor, agent, "ghp_secret"));
+        reactor.set_toasts(false);
+        assert_eq!(reactor.take_toast(off), None);
     }
 
     /// ADR-0051 §6: an inbox answer types one key, and only into a ◆ agent profile's pane that is
