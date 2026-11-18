@@ -54,6 +54,8 @@ const LONGEST: usize = size_of::<u32>() + MAX_REQUEST;
 /// Most panes whose OSC colours are kept. Past it the oldest goes back to the theme's, so
 /// panes that closed with a colour set cannot add up.
 const MAX_COLOURED: usize = 256;
+/// How far apart two reports of an outside agent's file time may be and still be the same.
+const SLACK: Duration = Duration::from_secs(2);
 
 const LINK: Token = Token(0);
 const WAKE: Token = Token(1);
@@ -153,6 +155,15 @@ pub struct Listed {
     pub steps: String,
 }
 
+/// An agent outside PinFold that the open inbox lists after its own rows (ADR-0051 §8).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Outside {
+    /// Its folder as its session file names it: a hint, absolute and plain, drawn escaped.
+    pub dir: String,
+    /// When its session file changed, on this window's clock.
+    pub changed: Instant,
+}
+
 /// An approval copied out of the decoder's borrowed message.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Approval {
@@ -228,7 +239,10 @@ struct State {
     members: Vec<(u32, u8)>,
     /// The inbox's panes, at most [`MAX_PANES`].
     listed: Vec<Listed>,
-    /// Whether `listed` or `members` changed since they were last read.
+    /// The agents outside PinFold the open inbox lists, at most 16. Empty
+    /// while it is closed.
+    outside: Vec<Outside>,
+    /// Whether `listed`, `members` or `outside` changed since they were last read.
     relisted: bool,
     /// Whether the window last said its inbox is open.
     inbox: bool,
@@ -377,6 +391,41 @@ impl State {
                     self.relisted = true;
                 }
             }
+            // Kept only while the inbox is open, as its extras are.
+            Notice::Outside {
+                index,
+                count,
+                secs,
+                dir,
+            } if self.inbox => {
+                let (index, count) = (usize::from(index), usize::from(count));
+                let now = Instant::now();
+                let changed = now.checked_sub(Duration::from_secs(secs.into()));
+                let changed = changed.unwrap_or(now);
+                if self.outside.len() > count {
+                    self.outside.truncate(count);
+                    self.relisted = true;
+                }
+                // Whole seconds arrive up to a second late, so an unchanged file is no news.
+                let same = |row: &Outside| {
+                    row.dir == dir && row.changed.max(changed) - row.changed.min(changed) <= SLACK
+                };
+                let next = self.outside.len();
+                match self.outside.get_mut(index) {
+                    Some(row) if same(row) => {}
+                    Some(row) => {
+                        dir.clone_into(&mut row.dir);
+                        row.changed = changed;
+                        self.relisted = true;
+                    }
+                    None if index == next && index < count => {
+                        let dir = dir.to_owned();
+                        self.outside.push(Outside { dir, changed });
+                        self.relisted = true;
+                    }
+                    None => {}
+                }
+            }
             Notice::Refused { reason } => self.refused = Some(reason),
             Notice::Checkpoint { pane, missing } => {
                 self.checkpoints.retain(|(other, _)| *other != pane);
@@ -419,7 +468,10 @@ impl State {
                     None => self.approvals.push(owned),
                 }
             }
-            Notice::Copied { .. } | Notice::WasRunning { .. } | Notice::InboxExtra { .. } => {}
+            Notice::Copied { .. }
+            | Notice::WasRunning { .. }
+            | Notice::InboxExtra { .. }
+            | Notice::Outside { .. } => {}
         }
         Ok(())
     }
@@ -757,6 +809,7 @@ impl Link {
                     (listed.branch, listed.ctx, listed.steps) =
                         (String::new(), None, String::new());
                 }
+                self.state.outside = Vec::new();
             }
         }
         // Before the core's hello this is the oldest version, so a newer request waits for none.
@@ -826,6 +879,12 @@ impl Link {
     #[must_use]
     pub fn listed(&self) -> &[Listed] {
         &self.state.listed
+    }
+
+    /// Returns the agents outside PinFold the open inbox lists, newest first.
+    #[must_use]
+    pub fn outside(&self) -> &[Outside] {
+        &self.state.outside
     }
 
     /// Returns whether the inbox's panes or their tabs changed since the last call, and clears
@@ -1813,6 +1872,42 @@ mod tests {
             (None, 0),
             "not freed on close"
         );
+    }
+
+    /// ADR-0051 §8: outside rows are kept in order only while the inbox is open, a refresh with
+    /// fewer drops the rest, an unchanged file is no news, and closing frees them.
+    #[test]
+    fn outside_rows_are_kept_only_while_the_inbox_is_open() {
+        let (mut link, _peer) = linked().unwrap();
+        let row = |index, count, secs, dir| Notice::Outside {
+            index,
+            count,
+            secs,
+            dir,
+        };
+        link.state.apply(row(0, 1, 5, "/work")).unwrap();
+        assert!(link.outside().is_empty(), "kept while closed");
+        link.send(Request::Inbox { open: true });
+        let _ = link.take_relisted();
+        for notice in [
+            row(0, 2, 5, "/work"),
+            row(1, 2, 700, "/old"),
+            row(3, 2, 0, "/x"),
+        ] {
+            link.state.apply(notice).unwrap();
+        }
+        let dirs: Vec<&str> = link.outside().iter().map(|row| row.dir.as_str()).collect();
+        assert_eq!(dirs, ["/work", "/old"]);
+        let age = link.outside()[1].changed.elapsed().as_secs();
+        assert!((700..710).contains(&age), "{age}");
+        assert!(link.take_relisted());
+        link.state.apply(row(0, 2, 6, "/work")).unwrap();
+        assert!(!link.take_relisted(), "an unchanged file redrew the inbox");
+        link.state.apply(row(0, 0, 0, "")).unwrap();
+        assert!(link.outside().is_empty() && link.take_relisted());
+        link.state.apply(row(0, 1, 5, "/work")).unwrap();
+        link.send(Request::Inbox { open: false });
+        assert_eq!(link.state.outside.capacity(), 0, "not freed on close");
     }
 
     /// ADR-0051: a listed pane alerts when it comes to ◆ or ✕, not again while it stays, and

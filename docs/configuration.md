@@ -444,6 +444,19 @@ sessions in a database PinFold does not read, so its rows show no second line fo
 columns the second line is dropped first. The core reads this key when it starts, so a change
 takes effect in the next session.
 
+With `agent_files` on, Claude Code sessions running outside PinFold are listed too, after
+PinFold's own rows: those whose newest file under `~/.claude/projects/` changed in the last 10
+minutes and whose folder no PinFold pane is in, newest first, at most 16. Each row is ● running
+when its file changed in the last 30 s and ○ idle otherwise, then `outside PinFold`, `Claude
+Code`, its folder escaped and cut from the left with `…`, and the time since the file changed.
+Only Claude Code sessions are listed, as OpenCode's are not read (#479). The folder is what the
+session file says, so it is only a hint: Enter or a click on the row asks, below the panes,
+"Open a tab in `<folder>`?", and `y` opens a new tab whose shell starts there, once the
+question has been up half a second. The core opens it only if the folder is an absolute path to
+a directory that exists, with no link on the way, owned by you or root and writable by no one
+else, the rule a restored pane's directory follows; otherwise it says "Not opened: the folder
+is missing, relative or not private". The rows are dropped when the inbox closes.
+
 On a ◆ row of an agent profile's pane, `y` is Approve and `i` is Interrupt. Neither sends
 anything yet: PinFold asks first, below the panes where program output cannot draw, "Send
 `Enter` to `claude` in tab 2 · pane 1?" or "Send Ctrl+C to …". `y` sends that one key once, and

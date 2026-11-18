@@ -562,3 +562,32 @@ Decided by the coordinator for the maintainer while building slice 9.
   `Notice::InboxExtra` goes with its branch and, at **link version 21**, `ctx` (255 for none)
   and the steps, cleaned again and joined by newlines; a window of 20 gets the branch only.
   Off, no peek starts and no file is read.
+
+## Amendment 2026-11-18: slice 10, agents outside PinFold as built
+
+Decided by the coordinator for the maintainer while building slice 10.
+
+- **Claude Code only,** as the slice 9 amendment reads: an outside row is a Claude Code session,
+  and OpenCode sessions are not listed until #479 settles how to read them.
+- **Which sessions.** `pinfold agents peek` looks at each folder under `~/.claude/projects/`
+  (links skipped, at most 10,000), takes its newest regular `*.jsonl` as slice 9 does, and keeps
+  those changed in the last 10 minutes, newest first. The directory is the last `cwd` the file's
+  last 64 KiB names; a relative one, or none, gives no row. One row a directory, at most 16. Each
+  prints after the panes' lines as `{"outside":"<dir>","secs":<n>}`, at most 1 KiB.
+- **Not twice.** The peek leaves out the listed panes' directories it was given, and the core
+  then leaves out every pane's directory as the system reports it, listed or not, compared
+  exactly. The core also drops a directory that is not absolute, is over 1 KiB, or holds a
+  control or bidi character. While the window's inbox is open and `agent_files` is on, the peek
+  runs at each refresh even with no listed pane; off, it never runs and no file is read.
+- **Link version 22.** Section 2's "existing new tab request with a directory" does not exist:
+  `Request::NewTab` opens where the focused shell is. So 22 adds `Notice::Outside { index, count,
+  secs, dir }`, a refresh's rows `0..count` in order or one with `count` 0 for none, and
+  `Request::OpenTabIn { dir }`, which the window sends only with a folder the core sent in a
+  `Notice::Outside` and only after PinFold's own prompt. A window of 21 gets no outside rows.
+- **The directory check.** "As OSC 7's rule is" is the rule a restored pane's OSC 7 directory
+  meets (`snapshot::is_private`): absolute, only plain components, and the directory and every
+  one above it a real directory, not a link, owned by the user or root and writable by no one
+  else, since a shell started in a planted directory can run its code. The core checks the folder
+  again on `Request::OpenTabIn`, never trusting the window's copy, and otherwise refuses with
+  "Not opened: the folder is missing, relative or not private". The shell starts in it directly,
+  as any new tab's does; the folder is never on a command line.

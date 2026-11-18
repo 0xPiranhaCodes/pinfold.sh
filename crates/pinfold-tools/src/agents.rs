@@ -2,6 +2,9 @@
 //! session file for an open inbox's second line (ADR-0051 §7). The core starts it with fixed
 //! arguments and kills it after 2 s, so a hostile or huge file costs only this process.
 //!
+//! It also lists Claude Code sessions running outside PinFold, from their files that changed in
+//! the last 10 minutes, for the inbox's outside rows (ADR-0051 §8).
+//!
 //! Claude Code only: OpenCode keeps its sessions in SQLite, which needs a C library to read
 //! (ADR-0051, amendment "slice 9, session files as built").
 
@@ -10,7 +13,7 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use serde_json::Value;
 use unicode_width::UnicodeWidthChar;
@@ -30,6 +33,10 @@ const MAX_ENTRIES: usize = 10_000;
 /// The context window a model has unless its name asks for the long one.
 const WINDOW: u64 = 200_000;
 const LONG_WINDOW: u64 = 1_000_000;
+/// How recently a session's file changed for it to be listed as outside PinFold (ADR-0051 §8).
+const RECENT: Duration = Duration::from_secs(10 * 60);
+/// The most sessions listed as outside PinFold.
+pub const MAX_OUTSIDE: usize = 16;
 
 /// Read by `pinfold agents peek` only when `cargo xtask mem-gate` measures it: a last line then
 /// gives `ms`, the peek's wall time, and `peak`, its own peak footprint in bytes.
@@ -65,6 +72,31 @@ impl Peeked {
             }
             steps = &steps[1..];
         }
+    }
+}
+
+/// A Claude Code session running outside PinFold: its directory, from its own file and so only a
+/// hint, and how long ago that file changed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Outside {
+    /// The session's directory, absolute, as its file says.
+    pub dir: String,
+    /// Seconds since its file changed.
+    pub secs: u64,
+}
+
+impl Outside {
+    /// The JSON line printed for it, after the directories' lines.
+    ///
+    /// ```
+    /// use pinfold_tools::agents::Outside;
+    ///
+    /// let outside = Outside { dir: "/work".into(), secs: 12 };
+    /// assert_eq!(outside.line(), r#"{"outside":"/work","secs":12}"#);
+    /// ```
+    #[must_use]
+    pub fn line(&self) -> String {
+        serde_json::json!({ "outside": self.dir, "secs": self.secs }).to_string()
     }
 }
 
@@ -169,8 +201,8 @@ fn project_name(dir: &Path) -> String {
         .collect()
 }
 
-/// The newest regular `*.jsonl` file in `folder`, never through a link.
-fn newest(folder: &Path) -> Option<PathBuf> {
+/// The newest regular `*.jsonl` file in `folder`, never through a link, and when it changed.
+fn newest(folder: &Path) -> Option<(SystemTime, PathBuf)> {
     let mut best: Option<(SystemTime, PathBuf)> = None;
     for entry in std::fs::read_dir(folder).ok()?.flatten().take(MAX_ENTRIES) {
         let path = entry.path();
@@ -190,7 +222,7 @@ fn newest(folder: &Path) -> Option<PathBuf> {
             best = Some((changed, path));
         }
     }
-    best.map(|(_, path)| path)
+    best
 }
 
 /// At most [`TAIL`] bytes from the end of the regular file at `path`, opened read-only without
@@ -213,14 +245,69 @@ fn tail(path: &Path) -> io::Result<(Vec<u8>, bool)> {
 #[must_use]
 pub fn peek(home: &Path, dir: &Path) -> Peeked {
     let folder = home.join(".claude/projects").join(project_name(dir));
-    let read = newest(&folder).and_then(|path| tail(&path).ok());
+    let read = newest(&folder).and_then(|(_, path)| tail(&path).ok());
     read.map(|(bytes, whole)| parse(&bytes, whole))
         .unwrap_or_default()
 }
 
+/// The last `cwd` a session's tail names, if that one is absolute. `whole` is as for [`parse`].
+fn cwd(tail: &[u8], whole: bool) -> Option<String> {
+    let mut lines = tail.split(|&byte| byte == b'\n');
+    if !whole {
+        lines.next();
+    }
+    let cwd = lines.rev().find_map(|line| {
+        let entry = serde_json::from_slice::<Value>(line).ok()?;
+        entry.get("cwd")?.as_str().map(str::to_owned)
+    })?;
+    cwd.starts_with('/').then_some(cwd)
+}
+
+/// Claude Code sessions under `home` whose newest file changed in the last 10 minutes, as of
+/// `now`, and whose directory is none of `dirs`: newest first, one a directory, at most
+/// [`MAX_OUTSIDE`] (ADR-0051 §8). Project folders and files are never reached through a link.
+#[must_use]
+pub fn outside(home: &Path, dirs: &[OsString], now: SystemTime) -> Vec<Outside> {
+    let projects = home.join(".claude/projects");
+    let Ok(entries) = std::fs::read_dir(projects) else {
+        return Vec::new();
+    };
+    let age = |changed: SystemTime| now.duration_since(changed).unwrap_or_default();
+    let mut recent: Vec<(SystemTime, PathBuf)> = (entries.flatten().take(MAX_ENTRIES))
+        .map(|entry| entry.path())
+        .filter(|folder| std::fs::symlink_metadata(folder).is_ok_and(|meta| meta.is_dir()))
+        .filter_map(|folder| newest(&folder))
+        .filter(|(changed, _)| age(*changed) <= RECENT)
+        .collect();
+    recent.sort_by_key(|(changed, _)| std::cmp::Reverse(*changed));
+    let mut listed: Vec<Outside> = Vec::new();
+    for (changed, path) in recent {
+        let Some(dir) = tail(&path)
+            .ok()
+            .and_then(|(bytes, whole)| cwd(&bytes, whole))
+        else {
+            continue;
+        };
+        let inside = dirs.iter().any(|pane| Path::new(pane) == Path::new(&dir));
+        let seen = listed.iter().any(|row| row.dir == dir);
+        let row = Outside {
+            dir,
+            secs: age(changed).as_secs(),
+        };
+        if !inside && !seen && row.line().len() <= MAX_LINE {
+            listed.push(row);
+        }
+        if listed.len() == MAX_OUTSIDE {
+            break;
+        }
+    }
+    listed
+}
+
 /// Runs `pinfold agents peek -- <dir>...`, the hidden command the core starts while the inbox
-/// is open (ADR-0051 §7): one [`Peeked::line`] per directory, in order, on standard output.
-/// Returns whether the arguments were right and every line was written.
+/// is open (ADR-0051 §7): one [`Peeked::line`] per directory, in order, on standard output, then
+/// an [`Outside::line`] for each session in none of them (§8). Returns whether the arguments
+/// were right and every line was written.
 ///
 /// ```no_run
 /// let args = ["peek", "--", "/path/to/work"].map(Into::into);
@@ -234,9 +321,15 @@ pub fn command(home: Option<&Path>, args: &[OsString]) -> bool {
     if verb.as_bytes() != b"peek" || dashes.as_bytes() != b"--" {
         return false;
     }
+    let dirs = &dirs[..dirs.len().min(MAX_DIRS)];
     let mut out = io::stdout().lock();
-    for dir in dirs.iter().take(MAX_DIRS) {
+    for dir in dirs {
         if writeln!(out, "{}", peek(home, Path::new(dir)).line()).is_err() {
+            return false;
+        }
+    }
+    for row in outside(home, dirs, SystemTime::now()) {
+        if writeln!(out, "{}", row.line()).is_err() {
             return false;
         }
     }
@@ -430,6 +523,62 @@ mod tests {
             .set_modified(earlier)
             .unwrap();
         assert_eq!(peek(&root, Path::new("/work")).steps, ["Grep"]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// A session of `dir` under `home` whose file names `cwd` and changed `ago` before now.
+    fn running(home: &Path, dir: &str, cwd: &str, ago: u64) {
+        let line = serde_json::json!({"type": "user", "cwd": cwd}).to_string();
+        let path = session(home, dir, format!("{RECORDED}{line}\n").as_bytes());
+        let changed = SystemTime::now() - Duration::from_secs(ago);
+        let file = File::options().write(true).open(path).unwrap();
+        file.set_modified(changed).unwrap();
+    }
+
+    /// ADR-0051 §8: a session in a PinFold pane's directory is that pane's row, not listed
+    /// again; others changed in the last 10 minutes are, newest first.
+    #[test]
+    fn a_session_in_a_panes_directory_is_not_listed_twice() {
+        let root = home("outside");
+        running(&root, "/work", "/work", 5);
+        running(&root, "/elsewhere", "/elsewhere", 40);
+        running(&root, "/later", "/later", 1);
+        running(&root, "/stale", "/stale", 11 * 60);
+        let listed = outside(&root, &["/work/".into()], SystemTime::now());
+        let dirs: Vec<&str> = listed.iter().map(|row| row.dir.as_str()).collect();
+        assert_eq!(dirs, ["/later", "/elsewhere"]);
+        assert!((40..45).contains(&listed[1].secs), "{}", listed[1].secs);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn at_most_sixteen_sessions_are_listed_outside() {
+        let root = home("sixteen");
+        for index in 0..20 {
+            let dir = format!("/w{index}");
+            running(&root, &dir, &dir, index);
+        }
+        let listed = outside(&root, &[], SystemTime::now());
+        assert_eq!(listed.len(), MAX_OUTSIDE);
+        assert_eq!(
+            (listed[0].dir.as_str(), listed[15].dir.as_str()),
+            ("/w0", "/w15")
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    /// The directory is the file's word only: a relative one, none, or a linked project folder
+    /// gives no row.
+    #[test]
+    fn a_relative_missing_or_linked_directory_is_not_listed() {
+        let root = home("hint");
+        running(&root, "/rel", "work/../etc", 1);
+        session(&root, "/none", b"{\"type\":\"user\"}\n");
+        let elsewhere = root.join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::write(elsewhere.join("s.jsonl"), "{\"cwd\":\"/linked\"}\n").unwrap();
+        symlink(&elsewhere, root.join(".claude/projects/-linked")).unwrap();
+        assert_eq!(outside(&root, &[], SystemTime::now()), []);
         fs::remove_dir_all(root).unwrap();
     }
 
