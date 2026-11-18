@@ -511,3 +511,21 @@ window's config could name a key the core would not send. So, at link version 19
   they write depend on the program's cursor mode.
 - The confirmation is armed 500 ms after it appears, as a trust prompt is, so a double press of
   `y` cannot open and answer it in one.
+
+## Amendment 2026-11-18: slice 8, the branch read as built
+
+Decided by the coordinator for the maintainer while building slice 8. Section 7 says how `HEAD`
+is read, but not what to do when `.git` is a file, as in a `git worktree`. As built
+(`pinfold-core/src/branch.rs`):
+
+- The core reads branches only while the window's inbox is open: once when it opens, then every
+  5 s. With it closed there is no timer, and a window below link version 20 starts no reads.
+- The directory is the one the system reports for the pane's shell, never OSC 7's.
+- The walk up stops at the first `.git`. A directory is used as it is. A file is followed only
+  if its `gitdir:` line leads to `<common dir>/worktrees/<name>` and that directory's `gitdir`
+  file names this `.git` file back, as `git worktree add` writes both, with `.` and `..`
+  resolved by name and never through links. Anything else there, a link included, gives no
+  branch.
+- Every read, of `HEAD`, the `.git` file and the `gitdir` back link, takes at most 256 bytes,
+  opened without following a last link, non-blocking and with `O_NOCTTY`, and only from a
+  regular file. A link, FIFO or device gives an empty branch.
