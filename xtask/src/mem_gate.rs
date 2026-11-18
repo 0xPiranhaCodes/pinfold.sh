@@ -97,7 +97,7 @@ pub struct Budget<'a> {
     pub settle: Duration,
     /// Starts the settle time when the process prints a line, not when it starts.
     pub wait_for_line: bool,
-    /// Runs this as the shell, and checks that the window opened a CJK font for it.
+    /// Runs this as the shell, and checks that the window, if measured, opened a CJK font for it.
     pub screen: Option<&'a Path>,
     /// The program prints a window's pid as its line, and this says which process to read. The
     /// two are separate processes and neither count holds the other (ADR-0003).
@@ -191,7 +191,10 @@ fn measure_once(budget: &Budget, args: &[&str]) -> io::Result<Reading> {
         })
         .and_then(|pid| Ok((pinfold_sys::footprint(pid)?, pid)));
     let no_font = match &measured {
-        Ok((_, pid)) if budget.screen.is_some() => !has_cjk_font(*pid)?,
+        // The window draws the screen; a core beside it opens no font.
+        Ok((_, pid)) if budget.screen.is_some() && budget.window != Some(Side::Core) => {
+            !has_cjk_font(*pid)?
+        }
         _ => false,
     };
     let _ = child.kill();
