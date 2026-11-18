@@ -56,10 +56,10 @@ const INBOX_REFRESH: Duration = Duration::from_secs(5);
 const PEEK_KILL: Duration = Duration::from_secs(2);
 /// How often a running peek is looked at.
 const PEEK_POLL: Duration = Duration::from_millis(20);
-/// The most of a peek's output read: a line of 1 KiB for each of 64 panes.
-const PEEK_OUTPUT: usize = 64 * 1024;
 /// The longest line of a peek's taken as one.
 const PEEK_LINE: usize = 1024;
+/// The most of a peek's output read: a line of 1 KiB and its newline for each of 64 panes.
+const PEEK_OUTPUT: usize = 64 * (PEEK_LINE + 1);
 /// One read from the socket, which lives on the stack and costs nothing when idle.
 const READ_CHUNK: usize = 16 * 1024;
 
