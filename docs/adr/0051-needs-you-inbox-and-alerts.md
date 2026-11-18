@@ -529,3 +529,36 @@ is read, but not what to do when `.git` is a file, as in a `git worktree`. As bu
 - Every read, of `HEAD`, the `.git` file and the `gitdir` back link, takes at most 256 bytes,
   opened without following a last link, non-blocking and with `O_NOCTTY`, and only from a
   regular file. A link, FIFO or device gives an empty branch.
+
+## Amendment 2026-11-18: slice 9, session files as built
+
+Decided by the coordinator for the maintainer while building slice 9.
+
+- **Claude Code only.** OpenCode no longer writes the `storage/` directory section 7 names:
+  since its storage move it keeps sessions in SQLite (`~/.local/share/opencode/opencode.db`,
+  OpenCode 2.1.4 checked on 2026-11-18), and the last 64 KiB of a database or its WAL is not a
+  session. Reading it needs a C library or a new crate, which needs the maintainer under
+  CLAUDE.md. So `pinfold agents peek` reads no OpenCode file, and an OpenCode pane's row shows
+  no second line. [#479](https://github.com/0xPiranhaCodes/pinfold.sh/issues/479) weighs running
+  OpenCode's own export as a bounded short-lived child against a SQLite reader.
+- **Which file.** The newest regular `*.jsonl` (by modification time, links skipped, at most
+  10,000 entries looked at) in `~/.claude/projects/<name>/`, where `<name>` is the pane's
+  directory with every UTF-16 unit that is not an ASCII letter or digit written as `-`, as
+  Claude Code names its folders. `HOME` is the one variable the peek gets.
+- **What is read.** Lines of `"type":"assistant"` that are not `"isSidechain":true`. Context use
+  is the last such line's `input_tokens`, `cache_creation_input_tokens` and
+  `cache_read_input_tokens` over 200,000 tokens, or 1,000,000 when the model's name holds
+  `[1m]`, floored and capped at 100. A step is a `tool_use` part's `name` or a `text` part's
+  first line; thinking is not a step. When the read starts past the file's start, its first,
+  cut line is skipped. Nesting past `serde_json`'s 128 levels fails that line only.
+- **The line.** `{"ctx":64,"steps":["Read","Now the parser.","Edit"]}`, one a directory in the
+  order given, at most 64; past 1 KiB the oldest steps are dropped. A step is cut to 80 cells
+  with `…`, by `unicode-width`, already in the workspace.
+- **The core's side.** While the window's inbox is open and `agent_files` is on, at each 5 s
+  refresh the core starts the sibling `pinfold agents peek --` with the listed panes'
+  directories as the system reports them (never OSC 7), a cleared environment but `HOME`, no
+  standard input, standard error discarded, at most 64 KiB of standard output read without
+  blocking, killed after 2 s; one at a time. When it ends, each listed pane's
+  `Notice::InboxExtra` goes with its branch and, at **link version 21**, `ctx` (255 for none)
+  and the steps, cleaned again and joined by newlines; a window of 20 gets the branch only.
+  Off, no peek starts and no file is read.

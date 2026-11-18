@@ -4,6 +4,7 @@
 //! and takes every key while open, so program output can neither fake nor answer it. Each row
 //! is the state's glyph and word in its colour, `tab·pane`, the tab's label, the git branch, the
 //! agent's message, the run time and the time in the state, which tick while the inbox is open.
+//! With `[inbox] agent_files` on, a second line gives the agent's context use and last steps.
 //! Its rows live only while it is open: closing drops the whole value.
 
 use std::time::{Duration, Instant};
@@ -27,6 +28,9 @@ const CHROME: u16 = 4;
 const LABEL: usize = 16;
 /// The widest a branch column gets; a longer branch is cut with `…`.
 const BRANCH: usize = 24;
+/// The fewest cells between the borders that keep a row's second line; narrower windows drop it
+/// before the message (ADR-0051 §4).
+const SECOND: usize = 60;
 /// A message narrower than this is dropped rather than cut to nothing.
 const MESSAGE: usize = 8;
 /// Cells of the time column: `99h+` and `59:59` fit.
@@ -83,6 +87,10 @@ struct Row {
     /// The agent's message, already safe to draw.
     message: String,
     profile: Option<u8>,
+    /// Context use, a whole percent, for the second line.
+    ctx: Option<u8>,
+    /// The last steps joined by newlines, as the link's decoder lets only clean ones through.
+    steps: String,
 }
 
 /// An open inbox.
@@ -119,7 +127,8 @@ impl Inbox {
             (row.tab, row.place, row.since) = (tab, place.min(99) as u8, Some(listed.since));
             row.started = Some(listed.started);
             row.branch.clone_from(&listed.branch);
-            row.profile = listed.profile;
+            row.steps.clone_from(&listed.steps);
+            (row.profile, row.ctx) = (listed.profile, listed.ctx);
             row.label.clear();
             row.label
                 .push_str(labels.get(usize::from(tab)).map_or("", String::as_str));
@@ -215,7 +224,7 @@ impl Inbox {
             return Step::Close;
         };
         let inside = (area.left + 1..area.left + area.width - 1).contains(&column);
-        let line = usize::from(row.wrapping_sub(area.top + 1));
+        let line = usize::from(row.wrapping_sub(area.top + 1)) / usize::from(area.per);
         match self.rows.get(area.first + line) {
             Some(row) if inside && line < usize::from(area.lines) => Step::Jump {
                 tab: row.tab,
@@ -235,14 +244,22 @@ impl Inbox {
         if width < 24 || tallest <= CHROME {
             return None;
         }
-        let lines = (self.rows.len().max(1) as u16).min(tallest - CHROME);
-        let height = lines + CHROME;
+        let extra = |row: &Row| row.ctx.is_some() || !row.steps.is_empty();
+        let second = usize::from(width) - 2 >= SECOND && self.rows.iter().any(extra);
+        let per = if second && tallest - CHROME >= 2 {
+            2
+        } else {
+            1
+        };
+        let lines = (self.rows.len().max(1) as u16).min((tallest - CHROME) / per);
+        let height = lines * per + CHROME;
         let first = self.selected.saturating_sub(usize::from(lines) - 1);
         Some(Area {
             top: (rows - height) / 3,
             left: (columns - width) / 2,
             width,
             lines,
+            per,
             first,
         })
     }
@@ -263,7 +280,7 @@ impl Inbox {
         let chrome = theme.chrome;
         let (ground, dim, text) = (chrome.palette, chrome.dim, theme.foreground);
         let (top, left, right) = (area.top, area.left, area.left + area.width - 1);
-        let rule = top + area.lines + 1;
+        let rule = top + area.lines * area.per + 1;
         let bottom = rule + 2;
         for row in top..=bottom {
             let edge = row == top || row == rule || row == bottom;
@@ -299,8 +316,11 @@ impl Inbox {
         let columns = Columns::fit(usize::from(area.width) - 2, &self.rows);
         let visible = self.rows.iter().enumerate().skip(area.first);
         for (line, (index, row)) in visible.take(area.lines.into()).enumerate() {
-            let at = top + 1 + line as u16;
+            let at = top + 1 + line as u16 * area.per;
             self.draw_row(frame, theme, (at, left, right), &columns, (index, row), now);
+            if area.per == 2 {
+                self.draw_second(frame, theme, (at + 1, left, right), (index, row));
+            }
         }
         if self.rows.is_empty() {
             write(
@@ -318,7 +338,8 @@ impl Inbox {
         if total > shown {
             let thumb = (shown * shown).div_ceil(total).max(1);
             let start = area.first * shown / total;
-            for line in start..(start + thumb).min(shown) {
+            let per = usize::from(area.per);
+            for line in start * per..(start + thumb).min(shown) * per {
                 put(
                     frame,
                     top + 1 + line as u16,
@@ -477,6 +498,73 @@ impl Inbox {
     }
 }
 
+impl Inbox {
+    /// Draws a row's second line at `at`: its context use as `ctx 64%` and its last steps,
+    /// each cut to an even share of the room, in `chrome.dim` (ADR-0051 §4).
+    fn draw_second(
+        &self,
+        frame: &mut Frame,
+        theme: &Theme,
+        (at, left, right): (u16, u16, u16),
+        (index, row): (usize, &Row),
+    ) {
+        let chrome = theme.chrome;
+        let chosen = index == self.selected;
+        let ground = if chosen {
+            chrome.tab_active
+        } else {
+            chrome.palette
+        };
+        for column in left + 1..right {
+            put(frame, at, column, ' ', theme.foreground, ground);
+        }
+        if chosen {
+            put(frame, at, left + 1, '▌', chrome.accent, ground);
+        }
+        let end = usize::from(right) - 1;
+        // Under the word, past the glyph.
+        let mut column = usize::from(left) + 5;
+        if let Some(ctx) = row.ctx {
+            column = write(
+                frame,
+                at,
+                column,
+                &format!("ctx {ctx}%"),
+                chrome.dim,
+                ground,
+                end,
+            );
+            column += 2;
+        }
+        let steps: Vec<&str> = row
+            .steps
+            .split('\n')
+            .filter(|step| !step.is_empty())
+            .collect();
+        for (done, step) in steps.iter().enumerate() {
+            let left_over = steps.len() - done;
+            // Each step's share, less the ` · ` before the next.
+            let share = (end.saturating_sub(column) / left_over).saturating_sub(3);
+            if share == 0 {
+                break;
+            }
+            cut(
+                frame,
+                at,
+                column,
+                step,
+                chrome.dim,
+                ground,
+                share.min(cells(step)),
+            );
+            column += share.min(cells(step));
+            if left_over > 1 {
+                column = write(frame, at, column, " · ", chrome.dim, ground, end);
+            }
+        }
+    }
+}
+
 /// The inbox's place in the grid.
 struct Area {
     top: u16,
@@ -484,6 +572,8 @@ struct Area {
     width: u16,
     /// Rows of the list shown.
     lines: u16,
+    /// Lines each row takes: 2 when rows show a second line.
+    per: u16,
     /// The first row shown.
     first: usize,
 }
@@ -631,6 +721,8 @@ pub(crate) mod tests {
             message: message.to_owned(),
             profile: Some(0),
             branch: String::new(),
+            ctx: None,
+            steps: String::new(),
         }
     }
 
@@ -942,6 +1034,87 @@ pub(crate) mod tests {
         );
         assert_eq!(inbox.click(24, 100, (0, 0)), Step::Close);
         assert_eq!(inbox.click(24, 100, (row, 1)), Step::Close);
+    }
+
+    /// The board with its ◆ and ✕ agents' context use and steps, as `[inbox] agent_files`
+    /// brings them.
+    fn board_with_steps(now: Instant) -> Inbox {
+        let mut listed = [
+            listed(2, 0, 42, "Allow edit to src/config.rs?", now),
+            listed(4, 3, 70, "exit 101 · 1 failed", now),
+            listed(5, 1, 363, "Writing guides/limits.md", now),
+        ];
+        (listed[0].ctx, listed[0].steps) = (Some(64), "Read\nNow the parser.\nEdit".to_owned());
+        listed[1].steps = "cargo test --workspace".to_owned();
+        let mut inbox = Inbox::default();
+        inbox.refresh(
+            &listed,
+            &[(2, 0), (4, 0), (5, 1)],
+            &["api".into(), "docs".into()],
+        );
+        inbox
+    }
+
+    /// ADR-0051 §4: with steps, every row takes two lines, the second `ctx 64%` and the steps
+    /// under the word; a click on either line jumps; a narrow window drops the second line
+    /// before the message.
+    #[test]
+    fn a_second_line_shows_context_and_steps_and_goes_first_when_narrow() {
+        let now = Instant::now();
+        let inbox = board_with_steps(now);
+        let frame = drawn(&inbox, 24, 100, now);
+        let lines: Vec<String> = (0..24).map(|row| text(&frame, row)).collect();
+        let first = lines.iter().position(|line| line.contains("◆")).unwrap();
+        assert!(
+            lines[first + 1].contains("ctx 64%  Read · Now the parser. · Edit"),
+            "{}",
+            lines[first + 1]
+        );
+        assert!(lines[first + 2].contains("✕ error"), "{}", lines[first + 2]);
+        assert!(lines[first + 3].contains("cargo test --workspace"));
+        assert!(!lines[first + 3].contains("ctx"), "no ctx shows none");
+        assert!(lines[first + 4].contains("● running"));
+        assert!(
+            lines[first + 5].trim_matches(['│', ' ']).is_empty(),
+            "{}",
+            lines[first + 5]
+        );
+        let first = first as u16;
+        assert_eq!(
+            inbox.click(24, 100, (first + 3, 50)),
+            Step::Jump { tab: 0, pane: 4 }
+        );
+        assert_eq!(
+            inbox.click(24, 100, (first + 2, 50)),
+            Step::Jump { tab: 0, pane: 4 }
+        );
+        assert_eq!(
+            inbox.click(24, 100, (first + 1, 50)),
+            Step::Jump { tab: 0, pane: 2 }
+        );
+
+        // Narrow: no second line, the message still shows.
+        let frame = drawn(&inbox, 24, 63, now);
+        let lines: Vec<String> = (0..24).map(|row| text(&frame, row)).collect();
+        let first = lines.iter().position(|line| line.contains("◆")).unwrap();
+        assert!(lines[first + 1].contains("✕"), "{}", lines[first + 1]);
+        assert!(!lines.iter().any(|line| line.contains("ctx")));
+        assert!(lines[first].contains("Allow"), "{}", lines[first]);
+        // Each step is cut to an even share where they do not all fit.
+        let mut listed = [listed(2, 0, 42, "Allow", now)];
+        listed[0].ctx = Some(64);
+        listed[0].steps = "Read\nNow the parser reads the session tail\nEdit".to_owned();
+        let mut inbox = Inbox::default();
+        inbox.refresh(&listed, &[(2, 0)], &["api".into()]);
+        let frame = drawn(&inbox, 24, 66, now);
+        let second = (0..24)
+            .map(|row| text(&frame, row))
+            .find(|line| line.contains("ctx"));
+        let second = second.unwrap();
+        assert!(
+            second.contains("ctx 64%  Read · Now the parser … · Edit"),
+            "{second}"
+        );
     }
 
     #[test]

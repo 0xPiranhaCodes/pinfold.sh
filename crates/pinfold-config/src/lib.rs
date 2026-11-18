@@ -55,6 +55,8 @@ pub struct Config {
     pub api: Api,
     /// The `[alerts]` table.
     pub alerts: Alerts,
+    /// The `[inbox]` table.
+    pub inbox: Inbox,
     /// The `[agents.<name>]` tables: agent profiles, by name.
     pub agents: BTreeMap<String, Agent>,
     /// The `[rewind]` table (ADR-0050). Read when the core starts.
@@ -262,6 +264,22 @@ impl Default for Alerts {
     }
 }
 
+/// The `[inbox]` table (ADR-0051 §7).
+///
+/// ```
+/// let config = pinfold_config::parse(b"[inbox]\nagent_files = true")?;
+/// assert!(config.inbox.agent_files);
+/// assert!(!pinfold_config::parse(b"")?.inbox.agent_files);
+/// # Ok::<(), pinfold_config::Error>(())
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Inbox {
+    /// Whether an open inbox reads Claude Code's own session files for each row's context use
+    /// and last steps. Off by default, when no such file is read. Read when the core starts.
+    pub agent_files: bool,
+}
+
 /// `[alerts] webhook_format`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -300,6 +318,7 @@ impl Default for Config {
             keys: Keys::default(),
             api: Api::default(),
             alerts: Alerts::default(),
+            inbox: Inbox::default(),
             agents: BTreeMap::new(),
             rewind: Rewind::default(),
             strip_secrets: false,

@@ -235,6 +235,8 @@ pub struct Reactor {
     palette: Arc<Mutex<Palette>>,
     /// The `pinfold` binary that runs the built-in tools.
     tools: Option<PathBuf>,
+    /// Whether an open inbox reads agents' session files, `[inbox] agent_files` (ADR-0051 §7).
+    pub(crate) agent_files: bool,
     /// The directory last listed for a window's markdown picker.
     pub(crate) markdown: Option<crate::tool::Listing>,
     /// The states a webhook posts, one bit each by `Status as u8`; 0 when webhooks are off.
@@ -284,6 +286,7 @@ impl Reactor {
             secrets: None,
             palette: Arc::new(Mutex::new(Palette::GRAPHITE_GRID)),
             tools: None,
+            agent_files: false,
             markdown: None,
             posted: 0,
             posts: Vec::new(),
@@ -866,6 +869,13 @@ impl Reactor {
     /// through `PATH`. Until it is set, no tool starts.
     pub fn set_tools(&mut self, binary: PathBuf) {
         self.tools = Some(binary);
+    }
+
+    /// Lets an open inbox run `pinfold agents peek` for each listed pane's context use and last
+    /// steps, from the agent's own session file, `[inbox] agent_files` (ADR-0051 §7). Off, as
+    /// it starts, no peek runs and no such file is read.
+    pub fn set_agent_files(&mut self, on: bool) {
+        self.agent_files = on;
     }
 
     /// The `pinfold` binary that runs the built-in tools, once [`Reactor::set_tools`] set it.
