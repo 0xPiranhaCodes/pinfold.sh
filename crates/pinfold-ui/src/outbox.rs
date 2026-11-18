@@ -40,6 +40,8 @@ pub(crate) enum Request {
     NextWaiting,
     /// Go to this pane, in whichever tab holds it.
     GoTo(u32),
+    /// A confirmed Approve or Interrupt, with the profile and key names its prompt showed.
+    Answer(crate::approval::Confirm),
     /// Anything that owns all it says.
     Core(proto::Request<'static>),
 }
@@ -84,6 +86,12 @@ impl Request {
             Self::Copy(pane, selection) => link.copy(pane, selection),
             Self::NextWaiting => link.go_to_next_waiting(),
             Self::GoTo(pane) => link.go_to_pane(pane),
+            Self::Answer(confirm) => link.send(proto::Request::Answer {
+                pane: confirm.pane,
+                choice: confirm.choice,
+                profile: &confirm.profile,
+                key: &confirm.key,
+            }),
             Self::OpenMarkdown(pane, name) => {
                 link.send(proto::Request::OpenMarkdown { pane, name: &name })
             }

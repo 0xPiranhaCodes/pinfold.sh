@@ -138,6 +138,8 @@ pub struct Listed {
     pub since: Instant,
     /// The message its agent reported, cleaned by the core. Empty if none.
     pub message: String,
+    /// The agent profile it was launched from, as an index into the config's profiles.
+    pub profile: Option<u8>,
 }
 
 /// An approval copied out of the decoder's borrowed message.
@@ -324,6 +326,7 @@ impl State {
                 naming,
                 listed,
                 since,
+                profile,
                 message,
                 ..
             } => {
@@ -334,6 +337,9 @@ impl State {
                     self.laid = true;
                 }
                 self.list(pane, listed.then_some((state, reported, since, message)));
+                if let Some(listed) = self.listed.iter_mut().find(|listed| listed.pane == pane) {
+                    listed.profile = profile;
+                }
             }
             Notice::Refused { reason } => self.refused = Some(reason),
             // The core restores at most this many panes, once.
@@ -397,6 +403,7 @@ impl State {
                     reported,
                     since,
                     message: String::new(),
+                    profile: None,
                 });
                 self.listed.len() - 1
             }
@@ -1730,6 +1737,7 @@ mod tests {
             listed: true,
             since: 0,
             started: 0,
+            profile: None,
             message: "ok?",
         };
         // A plain shell's pane names its tab but is not in the inbox.
@@ -1741,6 +1749,7 @@ mod tests {
             listed: false,
             since: 0,
             started: 0,
+            profile: None,
             message: "",
         };
         // A pane in the tab that does not name it leaves the tab's state as it is.
@@ -1752,6 +1761,7 @@ mod tests {
             listed: true,
             since: 5,
             started: 9,
+            profile: Some(2),
             message: "",
         };
         let alerts = Notice::Activity {
@@ -1770,6 +1780,7 @@ mod tests {
             (listed[0].pane, listed[0].state, listed[0].reported),
             (PANE, 3, false)
         );
+        assert_eq!(listed[0].profile, Some(2), "for the inbox's answers");
         let five = Duration::from_secs(5);
         assert!((start - five..=Instant::now() - five).contains(&listed[0].since));
         assert!(link.take_relisted() && !link.take_relisted());

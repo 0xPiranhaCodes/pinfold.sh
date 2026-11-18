@@ -241,6 +241,11 @@ fn golden_inbox() {
 }
 
 #[test]
+fn golden_answer_prompt() {
+    check("answer", draw(&crate::snapshots::answer(), false));
+}
+
+#[test]
 fn golden_approval_prompt() {
     check("approval", draw(&approval(), false));
 }

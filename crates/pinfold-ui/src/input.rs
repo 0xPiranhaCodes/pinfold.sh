@@ -195,6 +195,31 @@ mod tests {
         encode(&Key::Named(key), None, modifiers, false, false)
     }
 
+    /// ADR-0051: a profile's `approve` key writes what the same key typed in the window does.
+    #[test]
+    fn the_approve_key_table_writes_what_the_window_types() {
+        use pinfold_proto::link::key_bytes;
+
+        for (name, key) in [
+            ("Enter", NamedKey::Enter),
+            ("Tab", NamedKey::Tab),
+            ("Escape", NamedKey::Escape),
+            ("Backspace", NamedKey::Backspace),
+        ] {
+            assert_eq!(key_bytes(name), Some(named(key, NONE).as_slice()), "{name}");
+        }
+        let space = encode(&Key::Named(NamedKey::Space), Some(" "), NONE, false, false);
+        assert_eq!(key_bytes("Space"), Some(space.as_slice()));
+        for byte in b'!'..=b'~' {
+            let text = char::from(byte).to_string();
+            assert_eq!(
+                key_bytes(&text),
+                Some(press(&text, NONE).as_slice()),
+                "{text}"
+            );
+        }
+    }
+
     #[test]
     fn text_passes_through() {
         assert_eq!(press("é", NONE), "é".as_bytes());

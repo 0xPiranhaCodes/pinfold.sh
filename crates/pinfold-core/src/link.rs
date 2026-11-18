@@ -230,6 +230,17 @@ impl Session {
             // The inbox's extra rows come with ADR-0051's eighth slice; until then the core
             // keeps nothing for an open inbox.
             Request::Inbox { .. } => {}
+            // Only a person's confirmation in the window sends this; no API method does.
+            Request::Answer {
+                pane,
+                choice,
+                profile,
+                key,
+            } => {
+                let now = std::time::Instant::now();
+                let answered = reactor.answer(pane as usize, choice, (profile, key), now);
+                self.refused = answered.err().or(self.refused);
+            }
             Request::ListMarkdown { pane } => {
                 let names = reactor.list_markdown(pane as usize);
                 self.notice(&Notice::Markdown {
@@ -482,6 +493,7 @@ impl Session {
                     listed,
                     since,
                     started,
+                    profile: reactor.profile(pane),
                     message: &state.message,
                 };
                 // A window of 15 hears the naming panes only, in its own layout.

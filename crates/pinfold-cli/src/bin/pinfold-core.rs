@@ -276,7 +276,7 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                 None => family.spawn_command(reactor, own, of, way, Some(&cwd), command)?,
             };
             // The profile's place in the config's, which the core read when it started; past 255
-            // profiles the index names none, and nothing reads it yet but the webhook will.
+            // profiles the index names none.
             let profile = agents.keys().position(|name| *name == launch.profile);
             let profile = profile
                 .and_then(|at| u8::try_from(at).ok())
@@ -1032,6 +1032,10 @@ fn daemon(
     if let Some(patterns) = config.api.protect.clone() {
         reactor.set_patterns(patterns);
     }
+    // By index, as `agent.launch` keeps a pane's profile, for the inbox's answers (ADR-0051).
+    reactor.set_profiles(
+        (config.agents.iter()).map(|(name, agent)| (name.as_str(), agent.approve.as_deref())),
+    );
     // Panes get the core's own environment, so one check covers both (ADR-0047).
     let names = std::env::vars_os().map(|(name, _)| name);
     reactor.set_exposed(sandbox::exposed(config.strip_secrets, names));
