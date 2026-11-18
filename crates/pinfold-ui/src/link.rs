@@ -294,11 +294,7 @@ impl State {
                 sender,
                 failed,
             } => {
-                // The core's URL rules allow no more; kept to them, whatever a core sends.
-                let host = host
-                    .chars()
-                    .filter(|c| c.is_ascii_alphanumeric() || ".-:[]".contains(*c));
-                self.webhook = Some((host.take(64).collect(), sender, failed));
+                self.webhook = Some((shown_host(host), sender, failed));
             }
             Notice::Colours {
                 pane,
@@ -974,6 +970,23 @@ impl Link {
     }
 }
 
+/// Most characters of a webhook's host the window shows, so its notice fits 80 columns.
+const SHOWN_HOST: usize = 40;
+
+/// A webhook's host as the window shows it: only the URL rules' characters, whatever a core
+/// sends, and a long one cut from the start, so the registrable domain at its end stays seen.
+fn shown_host(host: &str) -> String {
+    let host: Vec<char> = (host.chars())
+        .filter(|c| c.is_ascii_alphanumeric() || ".-:[]".contains(*c))
+        .collect();
+    match host.len().checked_sub(SHOWN_HOST) {
+        Some(cut @ 1..) => std::iter::once('…')
+            .chain(host[cut + 1..].iter().copied())
+            .collect(),
+        _ => host.into_iter().collect(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::thread;
@@ -985,6 +998,21 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn a_webhook_host_keeps_its_end_and_only_url_characters() {
+        assert_eq!(shown_host("ntfy.sh"), "ntfy.sh");
+        assert_eq!(shown_host("[::1]"), "[::1]");
+        assert_eq!(shown_host("a\u{202e}b\x1b[2Jc /d"), "ab[2Jcd");
+        let spoof = format!("ntfy.sh.{}.evil.com", "a".repeat(60));
+        let shown = shown_host(&spoof);
+        assert_eq!(shown.chars().count(), SHOWN_HOST);
+        assert!(
+            shown.starts_with('…') && shown.ends_with(".evil.com"),
+            "{shown}"
+        );
+        assert_eq!(shown_host(&"h".repeat(SHOWN_HOST)), "h".repeat(SHOWN_HOST));
+    }
 
     const PANE: u32 = 3;
     const PATIENCE: Duration = Duration::from_secs(10);
