@@ -94,7 +94,7 @@ fn a_take_makes_a_private_store_and_records_its_checkpoint() {
         "no checkpoint names a parent"
     );
 
-    let again = take(&state, "r100-0", 1, "done", &work, 170).expect_err("exists");
+    let again = settled(|| take(&state, "r100-0", 1, "done", &work, 170)).expect_err("exists");
     assert_eq!(again.kind(), io::ErrorKind::AlreadyExists);
     for (run, reason) in [("r100-0", "later"), ("100-0", "done"), ("r-0", "done")] {
         let bad = take(&state, run, 2, reason, &work, 170).expect_err("bad");
