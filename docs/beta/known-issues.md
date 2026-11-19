@@ -98,6 +98,30 @@ still welcome if it adds a case not listed here. Report bugs with the
   never their values; it cannot see one a shell exports after it starts
   ([ADR-0047](../adr/0047-macos-sandbox-reads-other-processes-environment.md)).
 
+## Rewind
+
+Rewind ([how to use it](../rewind/README.md), [#442](https://github.com/0xPiranhaCodes/pinfold.sh/issues/442))
+is on `main`, not yet in a beta.
+
+- **The core keeps about 1 MB after many agent launches, with rewind on or off.** After 64
+  launches it holds 1.0 to 1.3 MB more than with 8 agent panes alone, within its own 5 MB budget
+  until this is fixed. The run records are not the cause
+  ([#476](https://github.com/0xPiranhaCodes/pinfold.sh/issues/476)).
+- **The checkpoint time targets are not yet met on a measured quiet host.** On the Linux kernel
+  tree a first take should finish within 10 s and an unchanged one within 1 s. On a loaded host
+  `docs/spikes/rewind/measure.sh --real` measured medians of 10.51 s and 16.70 s for a first
+  take and 1.24 s and 1.31 s for an unchanged one, at background priority. Past `wait_s` the agent starts without a launch checkpoint and the strip says so
+  ([#465](https://github.com/0xPiranhaCodes/pinfold.sh/issues/465)).
+- **A viewer closed with its pane keeps its view checkpoint.** `q` deletes it; closing the pane
+  kills the viewer first, and the checkpoint stays until `keep_per_run` or `keep_days` prunes it.
+- **Nested repositories and submodules are not covered.** The viewer lists them, and a restore
+  leaves them as they are.
+- **The agent's commits and its writes outside the working directory are not undone.**
+- **Runs from before a core restart cannot be rewound.** Their checkpoints stay in the store
+  until pruned, but no command reaches them.
+- **An unsandboxed agent can change its own checkpoints**, as it runs as you. Rewind is a
+  convenience, not a backup.
+
 ## Not yet checked on an installed build
 
 The Dock menu ([#170](https://github.com/0xPiranhaCodes/pinfold.sh/pull/170)), Open Link and Copy

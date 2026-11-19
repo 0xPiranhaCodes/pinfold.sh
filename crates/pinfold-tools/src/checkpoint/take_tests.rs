@@ -51,6 +51,22 @@ fn mode(path: &Path) -> u32 {
 }
 
 #[test]
+fn a_run_in_home_never_walks_the_state_directory_that_holds_its_store() {
+    let (_, work, _) = scratch("home");
+    // As `~/Library/Application Support/PinFold` or `~/.local/state/pinfold` is to a run in `~`.
+    let state = work.join("state");
+    for (n, time) in [(0, 100), (1, 160)] {
+        let taken = settled(|| take(&state, "r100-0", n, "launch", &work, time)).expect("take");
+        assert_eq!(taken.files, 2, "take {n}");
+        let taken = message(
+            &store_of(&state, &work),
+            &format!("refs/pinfold/r100-0/{n}"),
+        );
+        assert_eq!(taken["skipped"], serde_json::json!([["state", "pinfold"]]));
+    }
+}
+
+#[test]
 fn a_take_makes_a_private_store_and_records_its_checkpoint() {
     let (state, work, dir) = scratch("store");
     let taken = take(&state, "r100-0", 0, "launch", &work, 100).expect("take");
