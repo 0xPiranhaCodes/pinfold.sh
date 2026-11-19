@@ -263,13 +263,21 @@ impl Log {
         };
         self.tail = hash;
         self.next_seq = self.next_seq.saturating_add(1);
-        self.bytes += cost;
-        self.entries.push_back(entry);
-        while self.bytes > RING_BYTES {
+        while self.bytes + cost > RING_BYTES {
             if let Some(oldest) = self.entries.pop_front() {
                 self.bytes -= oldest.cost;
             }
         }
+        // A full deque doubles, which past 1,024 entries is 432 KiB of slots for a 256 KiB ring
+        // (#502), so it grows no further than the most entries the ring can hold.
+        if self.entries.len() == self.entries.capacity() {
+            let most = RING_BYTES / size_of::<Entry>();
+            let len = self.entries.len();
+            self.entries
+                .reserve_exact(len.max(4).min(most.saturating_sub(len)));
+        }
+        self.bytes += cost;
+        self.entries.push_back(entry);
         if let Some(disk) = &mut self.disk {
             let entry = self.entries.back().ok_or(Error::Malformed { line: 0 })?;
             if let Err(error) = write_entry(disk, entry) {
@@ -899,6 +907,20 @@ mod tests {
         let each = size_of::<Entry>() + 4096 + "children".len() + "sent 12 bytes".len();
         assert_eq!(log.bytes, each * log.iter().count());
         assert!(log.bytes <= RING_BYTES);
+        log.verify()?;
+        Ok(())
+    }
+
+    /// #502: past 1,024 entries a doubled deque held 432 KiB of slots for the 256 KiB ring.
+    #[test]
+    fn the_ring_never_holds_more_slots_than_it_can_fill() -> Result<(), Error> {
+        let most = RING_BYTES / size_of::<Entry>();
+        let mut log = Log::new();
+        for seq in 0..3_000 {
+            log.append(record(seq))?;
+            assert!(log.entries.capacity() <= most, "{}", log.entries.capacity());
+        }
+        assert!(log.iter().count() > 1_024);
         log.verify()?;
         Ok(())
     }

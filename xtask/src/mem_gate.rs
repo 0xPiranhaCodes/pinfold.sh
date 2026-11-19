@@ -460,6 +460,99 @@ pub fn run_peek(program: &Path, home: &Path, dir: &Path) -> bool {
     bytes <= PEEK_LIMIT
 }
 
+/// Waits for `path`, which a pane's script makes, while `core` runs.
+fn wait_for(path: &Path, core: &mut std::process::Child) -> io::Result<()> {
+    for _ in 0..1200 {
+        if path.exists() {
+            return Ok(());
+        }
+        if core.try_wait()?.is_some() {
+            return Err(io::Error::other("the core exited during the calls"));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    Err(io::Error::other(format!(
+        "{} never appeared",
+        path.display()
+    )))
+}
+
+/// One core over `agents`, whose script starts round `n` of 1,000 calls at `go<n>` and makes
+/// `done<n>` at its end: the core idle, after round 1 and after round 2.
+fn api_calls_once(core: &Path, agents: &Path) -> io::Result<[u64; 3]> {
+    for name in ["lock", "go1", "done1", "go2", "done2"] {
+        let _ = std::fs::remove_dir(agents.join(name));
+        let _ = std::fs::remove_file(agents.join(name));
+    }
+    let runtime = std::env::temp_dir().join(format!("pinfold-gate-{}", std::process::id()));
+    std::fs::create_dir_all(&runtime)?;
+    let mut child = Command::new(core)
+        .args(["--idle", "8"])
+        .env("XDG_CONFIG_HOME", agents)
+        .env("SHELL", agents.join("agent.sh"))
+        .env("XDG_RUNTIME_DIR", runtime)
+        .stdout(Stdio::null())
+        .spawn()?;
+    let mut readings = [0; 3];
+    let mut measured = || -> io::Result<()> {
+        thread::sleep(TOOL_SETTLE);
+        readings[0] = pinfold_sys::footprint(child.id())?;
+        for (round, reading) in readings.iter_mut().enumerate().skip(1) {
+            std::fs::write(agents.join(format!("go{round}")), "")?;
+            wait_for(&agents.join(format!("done{round}")), &mut child)?;
+            // Linux trims the heap a second after the burst (#492).
+            thread::sleep(TOOL_SETTLE);
+            *reading = pinfold_sys::footprint(child.id())?;
+        }
+        Ok(())
+    };
+    let result = measured();
+    let _ = child.kill();
+    let _ = child.wait();
+    result.map(|()| readings)
+}
+
+/// #502: the core with 8 idle panes, then after one of them makes 1,000 `pinfold ctl list`
+/// calls, and after 1,000 more, which shows whether the calls leave a high-water mark or grow
+/// with each call. The median of [`RUNS`] for each; only the first 1,000 are gated.
+pub fn run_api_calls(core: &Path, agents: &Path) -> bool {
+    let metrics = [
+        ("Core, 8 idle panes, before the API calls", INFORMATION),
+        ("Core after 1,000 API calls", CORE_LIMIT),
+        ("Core after another 1,000 API calls", INFORMATION),
+    ];
+    let mut runs = Vec::new();
+    for _ in 0..RUNS {
+        match api_calls_once(core, agents) {
+            Ok(readings) => runs.push(readings),
+            Err(error) => {
+                for (metric, _) in metrics {
+                    println!("| {metric} | error: {error} | | **FAIL** |");
+                }
+                return false;
+            }
+        }
+    }
+    let mut passed = true;
+    for (column, (metric, limit)) in metrics.into_iter().enumerate() {
+        let mut readings: Vec<u64> = runs.iter().map(|run| run[column]).collect();
+        readings.sort_unstable();
+        let bytes = readings[RUNS / 2];
+        let mb = megabytes(bytes);
+        if limit == INFORMATION {
+            println!("| {metric} | {mb:.2} | | information only |");
+        } else {
+            let result = if bytes <= limit { "pass" } else { "**FAIL**" };
+            println!(
+                "| {metric} | {mb:.2} | {:.2} | {result} |",
+                megabytes(limit)
+            );
+            passed &= bytes <= limit;
+        }
+    }
+    passed
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
