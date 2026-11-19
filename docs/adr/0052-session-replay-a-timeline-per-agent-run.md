@@ -7,6 +7,8 @@
 - **Amended 2026-11-19 again**, decided by the coordinator for the maintainer: how slice 2 joins
   a timeline to its ADR-0050 run, records restores and approvals, and what its mem-gate rows
   hold; see "Amendment 2026-11-19: slice 2" at the end.
+- **Amended 2026-11-19 a third time**, decided by the coordinator for the maintainer: how
+  `run.timeline` numbers, pages and scopes its entries; see "Amendment 2026-11-19: slice 3".
 
 ## Context
 
@@ -466,3 +468,19 @@ Decided by the coordinator for the maintainer while building slice 2.
   a polling agent over #476's 5.00 MB ceiling. The three slice-1 rows therefore stay as they
   were, and two information rows beside them run the same agents, each then calling
   `pinfold ctl list` 1,000 times, with `[timeline]` on and off. Those 8,000 calls write no entry.
+
+## Amendment 2026-11-19: slice 3, `run.timeline` as built
+
+Decided by the coordinator for the maintainer while building slice 3.
+
+- **`seq`.** An entry's `seq` is how many entries its run wrote before it: the dropped count
+  plus its place in the ring. It holds as older entries drop and when the run closes, so
+  `before` pages on it. An `api` entry's audit `seq` is the field `audit_seq`.
+- **`run` and times.** `run` is ADR-0050's run id, `r<core start>-<n>`, of the run in the
+  pane, joined by pane as slice 2 does, or `null` with `[rewind]` off. `started_ms` and
+  `ended_ms` count from the core's start, the clock the summary keeps; a timeline never outlives
+  its core, which empties them when it starts. `ended_ms` is `null` while the run is live.
+- **Scope.** A caller in a pane reaches a run as `pane.read` reaches a pane: its own, or a
+  child's while that is open (`Family::reach`). A terminal outside every pane reads any run,
+  not asked. A caller with no terminal, and any other pane, is refused. Every answer and
+  refusal is audited with the scope `self`, `children`, `other` or `outside`.

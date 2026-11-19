@@ -33,7 +33,7 @@ const LIVE: u32 = u32::MAX;
 /// The audit log's method names, which an `api` entry holds as an index, and whether each
 /// writes or acts. Only those that do are recorded when they succeed (decision 3), so a polling
 /// agent cannot flush the ring. New methods are appended, so a stored index keeps its meaning.
-pub const METHODS: [(&str, bool); 23] = [
+pub const METHODS: [(&str, bool); 24] = [
     ("hello", false),
     ("window.open", true),
     ("pane.list", false),
@@ -57,6 +57,7 @@ pub const METHODS: [(&str, bool); 23] = [
     ("grants.revoke", true),
     ("workspace.trust_state", false),
     ("workspace.ask_trust", true),
+    ("run.timeline", false),
 ];
 /// Why a checkpoint was taken, as ADR-0050 names it; a `checkpoint` entry holds the index.
 pub const REASONS: [&str; 6] = ["launch", "done", "exit", "api", "view", "restore"];
@@ -763,9 +764,28 @@ impl Timelines {
     ///
     /// # Errors
     ///
-    /// Returns an error if the file cannot be read, or a closed run's file is a link or not a
-    /// private file of ours.
+    /// As [`Timelines::page`].
     pub fn entries(&self, pane: usize) -> io::Result<Vec<Entry>> {
+        let page = self.page(pane, None, usize::MAX, |_| true)?;
+        Ok(page.into_iter().map(|(_, entry)| entry).collect())
+    }
+
+    /// For `run.timeline` (ADR-0052 section 7): the newest `count` entries of the newest run in
+    /// `pane` whose `seq` is below `before` and that `keep` takes, oldest first, each with its
+    /// `seq`, the count of entries the run wrote before it, which holds as older ones drop. One
+    /// record is read at a time from the file, which is untrusted: a record that is short or
+    /// does not decode is skipped, so a garbled file gives what still reads.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a closed run's file is gone, a link or not a private file of ours.
+    pub fn page(
+        &self,
+        pane: usize,
+        before: Option<u64>,
+        count: usize,
+        keep: impl Fn(&Entry) -> bool,
+    ) -> io::Result<Vec<(u64, Entry)>> {
         let Some(run) = self.newest(pane) else {
             return Ok(Vec::new());
         };
@@ -781,24 +801,28 @@ impl Timelines {
                 &reopened
             }
         };
-        let count = run.count(slots);
-        let mut bytes = vec![0; usize::from(slots) * SIZE];
-        let mut read = 0;
-        while read < bytes.len() {
-            match file.read_at(&mut bytes[read..], HEADER + read as u64) {
-                Ok(0) => break,
-                Ok(more) => read += more,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-                Err(error) => return Err(error),
+        let first = u64::from(run.dropped);
+        let held = u64::from(run.count(slots));
+        let end = before.map_or(held, |before| before.saturating_sub(first).min(held));
+        let mut page = Vec::new();
+        let mut bytes = [0; SIZE];
+        for index in (0..end).rev() {
+            if page.len() == count {
+                break;
+            }
+            let slot = run.slot(slots, u16::try_from(index).unwrap_or(u16::MAX));
+            if file
+                .read_exact_at(&mut bytes, HEADER + slot * SIZE as u64)
+                .is_err()
+            {
+                continue;
+            }
+            if let Some(entry) = Entry::decode(&bytes).filter(&keep) {
+                page.push((first + index, entry));
             }
         }
-        let held = &bytes[..read];
-        Ok((0..count)
-            .filter_map(|index| {
-                let at = usize::try_from(run.slot(slots, index)).ok()? * SIZE;
-                Entry::decode(held.get(at..at + SIZE)?.try_into().ok()?)
-            })
-            .collect())
+        page.reverse();
+        Ok(page)
     }
 }
 

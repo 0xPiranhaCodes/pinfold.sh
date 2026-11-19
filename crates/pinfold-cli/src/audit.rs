@@ -125,6 +125,17 @@ fn record(
         // No path is ever recorded, only the run's pane.
         Method::CheckpointTake { pane } => ("checkpoint.take", Some(*pane), scope(*pane)),
         Method::CheckpointList { pane } => ("checkpoint.list", Some(*pane), scope(*pane)),
+        // Another pane's is refused, so a pane's answered read is its own or a child's.
+        Method::RunTimeline { pane, .. } => (
+            "run.timeline",
+            Some(*pane),
+            match (own, result) {
+                (None, _) => "outside",
+                (Some(own), _) if own == *pane => "self",
+                (_, Ok(_)) => "children",
+                (_, Err(_)) => "other",
+            },
+        ),
         Method::CheckpointRestore { pane, .. } => (
             "checkpoint.restore",
             Some(*pane),
