@@ -237,6 +237,9 @@ impl Default for Keys {
 /// assert_eq!(pinfold_config::parse(b"")?.alerts.desktop, [Alert::NeedsYou, Alert::Error]);
 /// let config = pinfold_config::parse(b"[alerts]\ndesktop = [\"error\"]")?;
 /// assert_eq!(config.alerts.desktop, [Alert::Error]);
+/// assert!(!config.alerts.program_notifications);
+/// let config = pinfold_config::parse(b"[alerts]\nprogram_notifications = true")?;
+/// assert!(config.alerts.program_notifications);
 /// # Ok::<(), pinfold_config::Error>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -251,6 +254,9 @@ pub struct Alerts {
     pub webhook_states: Vec<Alert>,
     /// How a post's body is written. Read when the core starts.
     pub webhook_format: WebhookFormat,
+    /// Whether programs' OSC 9, 99 and 777 notifications show as toasts. Off by default, when
+    /// the core keeps none of their text. Read by the window, which tells the core.
+    pub program_notifications: bool,
 }
 
 impl Default for Alerts {
@@ -260,6 +266,7 @@ impl Default for Alerts {
             webhook: String::new(),
             webhook_states: vec![Alert::NeedsYou, Alert::Error],
             webhook_format: WebhookFormat::Json,
+            program_notifications: false,
         }
     }
 }

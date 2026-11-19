@@ -1,7 +1,9 @@
 //! Desktop notifications that an agent pane needs you or hit an error (ADR-0046, ADR-0051). The
 //! text is PinFold's, "`<tab>` needs you" or "`<tab>` error", never what a program printed, and
 //! they are rate-limited per pane and across all of them. macOS bounces the Dock and shows a
-//! banner; Linux runs `notify-send` when there is one.
+//! banner; Linux runs `notify-send` when there is one. With `[alerts] program_notifications` on,
+//! a program's own notification comes this way too, as "`<tab>` says: `<text>`", under the same
+//! limits (ADR-0051 §9).
 
 #[cfg(any(test, not(target_os = "macos")))]
 use std::ffi::OsStr;
@@ -90,16 +92,41 @@ impl Notifier {
         (tab, label): (Option<usize>, Option<&str>),
         now: Instant,
     ) {
-        if !self.limit.allow(pane, now) {
-            return;
+        if self.limit.allow(pane, now) {
+            self.show(pane, &text(state, tab, label), now);
         }
-        let text = text(state, tab, label);
+    }
+
+    /// Shows a program notification for `pane`, which the person cannot see, as
+    /// "`<label>` says: `<said>`", unless the limits alerts share hold it back. `said` is the
+    /// core's cleaned and cut text; `label` is already safe to draw.
+    pub fn toast(
+        &mut self,
+        pane: u32,
+        (tab, label): (Option<usize>, Option<&str>),
+        said: &str,
+        now: Instant,
+    ) {
+        if self.limit.allow(pane, now) {
+            self.show(pane, &format!("{} {said}", saying(tab, label)), now);
+        }
+    }
+
+    /// Raises `text` through the platform. macOS reports clicks by `pane`; Linux runs one
+    /// `notify-send` at a time from `now`.
+    fn show(&mut self, pane: u32, text: &str, now: Instant) {
         #[cfg(target_os = "macos")]
-        if let Some(system) = &self.system {
-            system.notify(&text, pane as usize);
+        {
+            let _ = now;
+            if let Some(system) = &self.system {
+                system.notify(text, pane as usize);
+            }
         }
         #[cfg(not(target_os = "macos"))]
-        self.system.send(&text, now);
+        {
+            let _ = pane;
+            self.system.send(text, now);
+        }
     }
 
     /// Returns how many panes notified within the last minute.
@@ -223,6 +250,15 @@ fn command(program: &Path, text: &str) -> Command {
 fn stop(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// Who a toast is from, "`<label>` says:", by the tab's label or else its number (ADR-0051 §9).
+pub(crate) fn saying(tab: Option<usize>, label: Option<&str>) -> String {
+    match (label.filter(|label| !label.is_empty()), tab) {
+        (Some(label), _) => format!("{label} says:"),
+        (None, Some(tab)) => format!("Tab {} says:", tab + 1),
+        (None, None) => "A program says:".to_owned(),
+    }
 }
 
 /// A notification's text: the tab's label, or its number without one, and the state's word.

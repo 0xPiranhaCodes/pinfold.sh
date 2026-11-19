@@ -99,9 +99,13 @@ impl Request {
                 link.send(proto::Request::OpenMarkdown { pane, name: &name })
             }
             Self::OpenTabIn(dir) => link.send(proto::Request::OpenTabIn { dir: &dir }),
-            // The link holds a palette that would overtake the hello.
+            // The link holds a palette, and toasts, that would overtake the hello.
             Self::Core(proto::Request::Palette(palette)) => {
                 link.theme(palette);
+                true
+            }
+            Self::Core(proto::Request::Toasts { on }) => {
+                link.toasts(on);
                 true
             }
             Self::Core(request) => link.send(request),

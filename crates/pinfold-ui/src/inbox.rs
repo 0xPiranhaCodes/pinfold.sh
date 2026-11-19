@@ -811,7 +811,7 @@ fn put(
 
 /// Writes `text` in row `row` from `column`, stopping before `end`, and returns the column
 /// after it. Zero-width characters are dropped, and a wide one takes two cells.
-fn write(
+pub(crate) fn write(
     frame: &mut Frame,
     row: u16,
     mut column: usize,
