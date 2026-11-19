@@ -13,6 +13,10 @@ pub const TALL: u32 = 1 << 26;
 /// default background, which the renderer then draws as it draws the theme's: translucent
 /// under `background_opacity` (ADR-0049, section 4). The core never sends it.
 pub const GLASS: u32 = 1 << 27;
+/// In [`Cell::background`] on the top bar's row of tabs, set by the window: the cell's colour
+/// is a thin bar under it, a tab's progress, and the cell itself takes its pill's colour
+/// (ADR-0051 §9). The core never sends it.
+pub const BAR: u32 = 1 << 28;
 /// Graphite Grid's background: the colour of a cell no program has coloured, and of the
 /// window around the grid, until a theme says otherwise.
 pub const DEFAULT_BACKGROUND: u32 = 0x0012_1212;

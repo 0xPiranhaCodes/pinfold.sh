@@ -39,7 +39,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode, Palette};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 25;
+pub const VERSION: u16 = 26;
 
 /// The oldest version this side still speaks, one before [`VERSION`] (ADR-0043).
 pub const OLDEST: u16 = VERSION - 1;
@@ -104,6 +104,60 @@ pub const OSC_9: u8 = 0;
 pub const OSC_99: u8 = 1;
 /// [`Notice::Toast`]'s `kind` for OSC 777 `notify`.
 pub const OSC_777: u8 = 2;
+
+/// The first version with [`Notice::Progress`] (ADR-0051 §9, slice 12).
+pub const PROGRESS: u16 = 26;
+
+/// OSC 9;4 states, in ConEmu's numbering, which [`progress`] keeps in a progress byte's top
+/// three bits: no progress.
+pub const HIDDEN: u8 = 0;
+/// A percent done.
+pub const NORMAL: u8 = 1;
+/// Failed, at a percent.
+pub const FAILED: u8 = 2;
+/// Busy with no percent.
+pub const INDETERMINATE: u8 = 3;
+/// Paused, at a percent.
+pub const PAUSED: u8 = 4;
+
+/// A progress byte, as the core keeps it and [`Notice::Progress`] carries it (ADR-0051 §9,
+/// amendment of slice 12): `state` in the top three bits and `percent`, clamped to 100, in the
+/// low five, in steps of 100/31. Hidden is always 0 and indeterminate has no percent, so a byte
+/// changes only when what it shows does.
+///
+/// ```
+/// use pinfold_proto::link::{FAILED, HIDDEN, NORMAL, progress, progress_parts};
+///
+/// assert_eq!(progress_parts(progress(NORMAL, 100)), (NORMAL, 100));
+/// assert_eq!(progress_parts(progress(FAILED, 250)), (FAILED, 100));
+/// assert_eq!(progress(HIDDEN, 40), 0);
+/// ```
+#[must_use]
+pub fn progress(state: u8, percent: u8) -> u8 {
+    match state {
+        NORMAL | FAILED | PAUSED => {
+            // Round to nearest, so 0 and 100 come back exact.
+            let steps = (u16::from(percent.min(100)) * 31 + 50) / 100;
+            state << 5 | steps as u8
+        }
+        INDETERMINATE => INDETERMINATE << 5,
+        _ => 0,
+    }
+}
+
+/// A progress byte's state and percent. A state above [`PAUSED`] is never sent, and reads as
+/// hidden.
+#[must_use]
+pub fn progress_parts(byte: u8) -> (u8, u8) {
+    match byte >> 5 {
+        state @ (NORMAL | FAILED | PAUSED) => {
+            let percent = (u16::from(byte & 31) * 100 + 15) / 31;
+            (state, percent as u8)
+        }
+        INDETERMINATE => (INDETERMINATE, 0),
+        _ => (HIDDEN, 0),
+    }
+}
 
 /// The most agents outside PinFold an open inbox lists (ADR-0051 §8).
 pub const MAX_OUTSIDE: u8 = 16;
@@ -281,6 +335,7 @@ const OUTSIDE_KIND: u8 = 19;
 const CHECKPOINT: u8 = 20;
 const RESTORED: u8 = 21;
 const TOAST_KIND: u8 = 22;
+const PROGRESS_KIND: u8 = 23;
 /// [`Notice::InboxExtra`]'s `ctx` byte when it has none.
 const NO_CTX: u8 = 255;
 
@@ -968,6 +1023,14 @@ pub enum Notice<'a> {
         /// The text, never empty, at most [`MAX_TOAST`] bytes.
         text: &'a str,
     },
+    /// A pane's OSC 9;4 progress changed, at most once a second (ADR-0051 §9). A pane whose
+    /// program exits sends 0. Since version 26.
+    Progress {
+        /// The pane.
+        pane: u32,
+        /// A byte from [`progress`]; [`progress_parts`] reads it.
+        progress: u8,
+    },
     /// What an open inbox's row shows beside the pane's status, read when it opens and every
     /// 5 s while open, and kept by neither side once it closes (ADR-0051 §7). Since version 20.
     InboxExtra {
@@ -1582,6 +1645,7 @@ impl Notice<'_> {
             Self::Webhook { .. } => WEBHOOK_SINCE,
             Self::InboxExtra { .. } => INBOX_EXTRA,
             Self::Toast { .. } => TOAST,
+            Self::Progress { .. } => PROGRESS,
             Self::Outside { .. }
             | Self::Refused {
                 reason: Refusal::Folder,
@@ -1743,6 +1807,10 @@ impl Notice<'_> {
                 put!(out; *pane, *kind);
                 out.extend_from_slice(text.as_bytes());
                 TOAST_KIND
+            }
+            Self::Progress { pane, progress } => {
+                put!(out; *pane, *progress);
+                PROGRESS_KIND
             }
             Self::Outside {
                 index,
@@ -1938,6 +2006,10 @@ impl Notice<'_> {
                 }
                 Notice::Toast { pane, kind, text }
             }
+            PROGRESS_KIND => Notice::Progress {
+                pane: body.u32()?,
+                progress: body.u8()?,
+            },
             OUTSIDE_KIND => {
                 let (index, count, secs) = (body.u8()?, body.u8()?, body.u32()?);
                 let dir = body.text()?;
@@ -2782,7 +2854,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 25, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 26, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -3024,7 +3096,7 @@ mod tests {
             secs: 3,
             dir: "/work",
         };
-        // 24, the oldest spoken, has outside rows and their refusal.
+        // The oldest spoken has outside rows and their refusal.
         assert_eq!(at_oldest(outside), Ok(true));
         let folder = Notice::Refused {
             reason: Refusal::Folder,
@@ -3035,11 +3107,21 @@ mod tests {
             kind: OSC_9,
             text: "Build done",
         };
-        let newer = Error::Newer {
-            kind: TOAST_KIND,
-            since: TOAST,
+        // 25, the oldest spoken, has toasts.
+        assert_eq!(at_oldest(toast), Ok(true));
+        let progress = Notice::Progress {
+            pane: 1,
+            progress: progress(NORMAL, 40),
         };
-        assert_eq!(at_oldest(toast), Err(newer), "a window of 24 never gets it");
+        let newer = Error::Newer {
+            kind: PROGRESS_KIND,
+            since: PROGRESS,
+        };
+        assert_eq!(
+            at_oldest(progress),
+            Err(newer),
+            "a window of 25 never gets it"
+        );
         assert_eq!(at_oldest(COLOURS_SEED), Ok(true));
         let secrets = Notice::Secrets {
             count: 1,
@@ -3923,6 +4005,42 @@ mod tests {
         }
     }
 
+    /// ADR-0051 §9, amendment of slice 12: every state and percent fits one byte, 0 and 100 come
+    /// back exact, a percent past 100 is clamped, and a byte no core sends reads as hidden.
+    #[test]
+    fn a_progress_byte_keeps_every_state_and_its_percent_to_a_step() {
+        for state in [NORMAL, FAILED, PAUSED] {
+            for percent in 0..=u8::MAX {
+                let (back, shown) = progress_parts(progress(state, percent));
+                assert_eq!(back, state);
+                let percent = percent.min(100);
+                assert!(shown.abs_diff(percent) <= 2, "{percent} came back {shown}");
+            }
+            for step in 0..=31 {
+                let byte = state << 5 | step;
+                assert_eq!(progress(state, progress_parts(byte).1), byte, "stable");
+            }
+            assert_eq!(progress_parts(progress(state, 0)), (state, 0));
+            assert_eq!(progress_parts(progress(state, 100)), (state, 100));
+        }
+        for percent in [0, 50, 100, 255] {
+            assert_eq!(progress(HIDDEN, percent), 0);
+            assert_eq!(progress(INDETERMINATE, percent), INDETERMINATE << 5);
+            assert_eq!(progress(9, percent), 0, "an unknown state is no progress");
+        }
+        assert_eq!(progress_parts(INDETERMINATE << 5 | 7), (INDETERMINATE, 0));
+        for byte in 5u8 << 5..=u8::MAX {
+            assert_eq!(progress_parts(byte), (HIDDEN, 0));
+        }
+        let mut wire = Vec::new();
+        let sent = Notice::Progress {
+            pane: 7,
+            progress: progress(FAILED, 64),
+        };
+        sent.encode(&mut wire).unwrap();
+        assert_eq!(wire, raw(PROGRESS_KIND, &[7, 0, 0, 0, FAILED << 5 | 20]));
+    }
+
     /// ADR-0051 §9: the window draws a toast's text as chrome, so the decoder takes only a known
     /// kind and plain text within the cap, whatever a core sent.
     #[test]
@@ -4490,6 +4608,12 @@ mod tests {
             let notice = Notice::Toast { pane, kind, text: &text };
             prop_assert!(notice_survives(&notice, chunk), "changed on the link");
             prop_assert!(request_survives(Request::Toasts { on }, chunk), "changed on the link");
+        }
+
+        #[test]
+        fn progress_round_trips(pane in any::<u32>(), progress in any::<u8>(), chunk in chunks()) {
+            let notice = Notice::Progress { pane, progress };
+            prop_assert!(notice_survives(&notice, chunk), "changed on the link");
         }
 
         #[test]

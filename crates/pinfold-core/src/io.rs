@@ -1025,6 +1025,15 @@ impl Reactor {
         self.pane(pane).map(pane_status)
     }
 
+    /// A pane's OSC 9;4 progress byte, 0 for none, an unknown pane or one whose program exited
+    /// (ADR-0051 §9).
+    #[must_use]
+    pub fn osc_progress(&self, pane: usize) -> u8 {
+        self.pane(pane)
+            .filter(|pane| !pane.closed)
+            .map_or(0, |pane| pane.engine.progress())
+    }
+
     /// Whether a pane belongs in the inbox: an agent profile's, or one that reported a status.
     /// A tool pane never does (ADR-0045, ADR-0051).
     #[must_use]
@@ -1540,6 +1549,28 @@ mod tests {
 
         reactor.typed(agent, Instant::now());
         assert_eq!(reactor.status(agent), Some((Status::Idle, false, "")));
+    }
+
+    /// ADR-0051 §9 and ADR-0046: OSC 9;4 in an agent profile's pane is progress, never needs
+    /// you, in every state; it raises no alert and queues no post. A plain OSC 9 still does.
+    #[test]
+    fn progress_in_an_agent_pane_never_says_needs_you() {
+        let mut reactor = Reactor::new().unwrap();
+        reactor.post_states([Status::NeedsYou, Status::Error]);
+        let script = "for s in '0;0' '1;50' '2;10' '3' '4;20' '1;250' '1;x'; do \
+                      printf '\\033]9;4;%s\\007' \"$s\"; done; echo end; read line; \
+                      printf '\\033]9;Approve?\\007'; echo asked; sleep 30";
+        let agent = reactor.spawn(shell(script), 24, 80).unwrap();
+        reactor.read_agent_signals(agent, 0);
+        assert!(turn_until(&mut reactor, |r| on_screen(r, agent, "end")));
+        assert_eq!(reactor.status(agent), Some((Status::Idle, false, "")));
+        assert!(!reactor.take_alert(agent));
+        assert_eq!(reactor.take_post(), None);
+        let (state, _) = pinfold_proto::link::progress_parts(reactor.osc_progress(agent));
+        assert_eq!(state, pinfold_proto::link::NORMAL, "the last one, clamped");
+        reactor.write(agent, b"\n");
+        assert!(turn_until(&mut reactor, |r| on_screen(r, agent, "asked")));
+        assert_eq!(reactor.status(agent).map(|s| s.0), Some(Status::NeedsYou));
     }
 
     /// ADR-0052 slice 1: an agent pane's marks make command entries, its CLI's signal and a

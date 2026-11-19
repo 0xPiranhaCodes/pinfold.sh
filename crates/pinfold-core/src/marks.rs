@@ -1,11 +1,12 @@
-//! OSC 133 command marks, the OSC 7 working directory, an agent CLI's OSC 7501 states and
-//! OSC 9 notifications, and with toasts on the text of OSC 9, 99 and 777 notifications, all of
+//! OSC 133 command marks, the OSC 7 working directory, an agent CLI's OSC 7501 states, OSC 9
+//! notifications and OSC 9;4 progress, and with toasts on the text of OSC 9, 99 and 777 notifications, all of
 //! which the parser drops.
 //!
 //! Program output writes all of this, so any program can fake it (T4 in the threat model).
 //! It is a hint to show as reported by output, and it never reaches a reply.
 //!
-//! A pane holds one string being read, at most `MAX_SEQUENCE` bytes, the latest state, and with
+//! A pane holds one string being read, at most `MAX_SEQUENCE` bytes, the latest state, one byte
+//! of progress, and with
 //! toasts on one notification's text of at most 120 cells until it is sent. Other strings are
 //! let go at their first bytes, and malformed ones change nothing.
 
@@ -13,7 +14,7 @@ use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 
 use base64::Engine as _;
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
-use pinfold_proto::link::{MAX_TOAST, OSC_9, OSC_99, OSC_777};
+use pinfold_proto::link::{self, FAILED, MAX_TOAST, OSC_9, OSC_99, OSC_777, PAUSED};
 use unicode_width::UnicodeWidthChar as _;
 
 use crate::status::drawable;
@@ -145,6 +146,29 @@ fn exit_status(field: &[u8]) -> Option<u8> {
         return None;
     }
     std::str::from_utf8(field).ok()?.parse().ok()
+}
+
+/// Reads the text after `9;4;`, ConEmu's `state;percent`, as a [`link::progress`] byte, given
+/// the byte before it. A state other than 0 to 4 changes nothing. A percent is read from its
+/// leading digits, so a malformed one is clamped: past 100 is 100, none or a sign is 0. Error
+/// and paused without a percent keep the one shown, as Windows Terminal does.
+fn progress(text: &[u8], before: u8) -> Option<u8> {
+    let mut fields = text.splitn(2, |&byte| byte == b';');
+    let state = match fields.next()? {
+        [digit @ b'0'..=b'4'] => digit - b'0',
+        _ => return None,
+    };
+    let percent = match fields.next().filter(|field| !field.is_empty()) {
+        Some(field) => field
+            .iter()
+            .take_while(|byte| byte.is_ascii_digit())
+            .fold(0u8, |sum, digit| {
+                sum.saturating_mul(10).saturating_add(digit - b'0')
+            }),
+        None if matches!(state, FAILED | PAUSED) => link::progress_parts(before).1,
+        None => 0,
+    };
+    Some(link::progress(state, percent))
 }
 
 /// A program notification's text, cleaned and cut when its string ends, kept only until the
@@ -315,6 +339,8 @@ pub(crate) struct Marks {
     pub(crate) shell: ShellMarks,
     pub(crate) cwd: Option<WorkingDirectory>,
     pub(crate) agent: AgentMarks,
+    /// The latest OSC 9;4 progress, as a [`link::progress`] byte (ADR-0051 §9).
+    pub(crate) progress: u8,
     /// Whether `[alerts] program_notifications` is on, so notification text is kept.
     pub(crate) toasts: bool,
     /// The latest notification's text, until the link takes it. Boxed, so an idle pane pays a
@@ -404,6 +430,13 @@ impl Marks {
         }
         if let Some(signal) = self.text.strip_prefix(b"7501;").and_then(agent_state) {
             self.agent.signal(signal);
+        }
+        if let Some(progress) = self
+            .text
+            .strip_prefix(b"9;4;")
+            .and_then(|text| progress(text, self.progress))
+        {
+            self.progress = progress;
         }
         // ConEmu's `9;4;...` progress and other numbered OSC 9 commands are not notifications.
         if let Some(body) = self.text.strip_prefix(b"9;")
@@ -499,6 +532,39 @@ mod tests {
             finished(&mut marks, format!("99;i=1:p={kind};x").as_bytes());
             assert_eq!(marks.take_toast(), None, "{kind}");
         }
+    }
+
+    /// ADR-0051 §9: each OSC 9;4 state is one byte; a malformed percent is clamped, an unknown
+    /// state changes nothing, and none of it is a notification.
+    #[test]
+    fn every_progress_state_is_one_byte_and_a_bad_percent_is_clamped() {
+        use pinfold_proto::link::{HIDDEN, INDETERMINATE, NORMAL, progress_parts};
+        let mut marks = Marks::default();
+        let cases: [(&[u8], (u8, u8)); 16] = [
+            (b"9;4;1;50", (NORMAL, 52)),
+            (b"9;4;1;100", (NORMAL, 100)),
+            (b"9;4;2;64", (FAILED, 65)),
+            (b"9;4;2", (FAILED, 65)),
+            (b"9;4;4", (PAUSED, 65)),
+            (b"9;4;3;80", (INDETERMINATE, 0)),
+            (b"9;4;4;10", (PAUSED, 10)),
+            (b"9;4;0;0", (HIDDEN, 0)),
+            (b"9;4;1;250", (NORMAL, 100)),
+            (b"9;4;1;99999999999999", (NORMAL, 100)),
+            (b"9;4;1;-5", (NORMAL, 0)),
+            (b"9;4;1;12abc", (NORMAL, 13)),
+            (b"9;4;1", (NORMAL, 0)),
+            (b"9;4;7;50", (NORMAL, 0)),
+            (b"9;4;;50", (NORMAL, 0)),
+            (b"9;4;10;50", (NORMAL, 0)),
+        ];
+        for (string, want) in cases {
+            finished(&mut marks, string);
+            let got = progress_parts(marks.progress);
+            assert_eq!(got, want, "{:?}", String::from_utf8_lossy(string));
+        }
+        assert_eq!(marks.agent.signals, 0, "progress is never a notification");
+        assert_eq!(marks.toast, None);
     }
 
     #[test]

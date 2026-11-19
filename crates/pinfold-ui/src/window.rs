@@ -192,6 +192,7 @@ fn publish(link: &mut Link, shown: &mut Shown) -> bool {
             ours.cwd.clone_from(&tab.cwd);
             ours.status = tab.status;
             ours.message.clone_from(&tab.message);
+            ours.progress = tab.progress;
         }
         shown.active = link.active();
         shown.activity = link.activity();
@@ -491,6 +492,8 @@ struct App {
     activity: u32,
     /// Each tab's state, as its pill shows it.
     states: Vec<u8>,
+    /// Each tab's OSC 9;4 progress byte, whatever `[alerts] progress` says (ADR-0051 §9).
+    progress: Vec<u8>,
     /// The active tab's state, whether its agent reported it, and its message.
     status: Option<(u8, bool, String)>,
     /// Set for the session once the core says it lacks the hardened runtime: whether it could
@@ -571,6 +574,9 @@ struct App {
     menu_bar: menu_bar::Bar,
     #[cfg(target_os = "macos")]
     dock: dock_menu::Dock,
+    /// The Dock tile's progress bar, which only the main thread's app draws.
+    #[cfg(target_os = "macos")]
+    tile: dock_menu::Tile,
     notifier: notify::Notifier,
     /// Points added to the config's font size by Bigger and Smaller, until the next save.
     font_step: f32,
@@ -635,6 +641,7 @@ impl App {
             active: 0,
             activity: 0,
             states: Vec::new(),
+            progress: Vec::new(),
             status: None,
             over_tab: None,
             has_focus: true,
@@ -682,6 +689,8 @@ impl App {
             menu_bar,
             #[cfg(target_os = "macos")]
             dock,
+            #[cfg(target_os = "macos")]
+            tile: dock_menu::Tile::default(),
             notifier,
             font_step: 0.0,
             result: Ok(()),
@@ -850,6 +859,10 @@ impl App {
                 self.toast = None;
             }
         }
+        if self.config.alerts.progress != old.alerts.progress {
+            self.show_progress();
+            self.redraw_soon();
+        }
         let Some(open) = &mut self.open else { return };
         #[cfg(target_os = "macos")]
         open.window.set_option_as_alt(option_as_alt(&self.config));
@@ -864,6 +877,21 @@ impl App {
         }
         let scale = open.window.scale_factor();
         self.scale_changed(scale);
+    }
+
+    /// Shows on the Dock tile the active tab's progress, or else the furthest-along tab's, and
+    /// nothing with `[alerts] progress` off. The tile draws only on a change.
+    fn show_progress(&mut self) {
+        #[cfg(target_os = "macos")]
+        {
+            let active = self.progress.get(self.active).copied().unwrap_or(0);
+            let shown = link::progress_of(active, self.progress.iter().copied());
+            self.tile.show(if self.config.alerts.progress {
+                shown
+            } else {
+                0
+            });
+        }
     }
 
     /// Applies a new shape: the panes shown, the tabs and the focus.
@@ -887,6 +915,10 @@ impl App {
         self.activity = shown.activity | top_bar::marked(&self.states);
         #[cfg(target_os = "macos")]
         self.dock.update(&self.labels, &self.states);
+        self.progress.clear();
+        self.progress
+            .extend(shown.tabs.iter().map(|tab| tab.progress));
+        self.show_progress();
         let active = shown.tabs.get(shown.active);
         self.status =
             active.and_then(|tab| Some((tab.status?.0, tab.status?.1, tab.message.clone())));
@@ -1104,6 +1136,11 @@ impl App {
                 time,
                 inset,
                 unhardened: self.unhardened,
+                progress: if self.config.alerts.progress {
+                    &self.progress
+                } else {
+                    &[]
+                },
                 theme,
             };
             top_bar::draw(&mut self.composed, &bar);
@@ -2459,6 +2496,10 @@ pub fn run(link: OwnedFd, size: Option<(u32, u32)>) -> Result<(), Error> {
         notifier,
     );
     app.appearance = appearance;
+    #[cfg(target_os = "macos")]
+    {
+        app.tile = dock_menu::Tile::new();
+    }
     event_loop.run_app(&mut app)?;
     app.result
 }
@@ -2938,6 +2979,28 @@ mod tests {
             1,
             "shown, but the window is in the background"
         );
+    }
+
+    /// ADR-0051 §9: the Dock tile shows the active tab's progress, or else the furthest-along
+    /// tab's, and nothing with `[alerts] progress` off, which a save turns off and on at once.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_dock_tile_shows_the_active_tabs_progress_or_the_furthest() {
+        use pinfold_proto::link::{NORMAL, progress};
+        let (mut app, _inbox, _poll) = app();
+        let (low, high) = (progress(NORMAL, 20), progress(NORMAL, 80));
+        app.progress = vec![0, low, high];
+        let shown = |app: &mut App, active| {
+            app.active = active;
+            app.show_progress();
+            app.tile.shown
+        };
+        assert_eq!(shown(&mut app, 0), high, "none here, so the furthest");
+        assert_eq!(shown(&mut app, 1), low);
+        app.configure(pinfold_config::parse(b"[alerts]\nprogress = false").unwrap());
+        assert_eq!(app.tile.shown, 0, "off at once");
+        app.configure(Config::default());
+        assert_eq!(app.tile.shown, low);
     }
 
     /// ADR-0051 §9: off, a toast is dropped and nothing is kept or raised; on, a seen pane draws
