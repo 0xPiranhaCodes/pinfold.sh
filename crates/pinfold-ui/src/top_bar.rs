@@ -16,7 +16,8 @@ use std::ffi::OsStr;
 use std::path::Path;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use pinfold_proto::{BOLD, Cell, Frame, LEFT_CAP, RIGHT_CAP, TALL};
+use pinfold_proto::link::{FAILED, HIDDEN, INDETERMINATE, progress_parts};
+use pinfold_proto::{BAR, BOLD, Cell, Frame, LEFT_CAP, RIGHT_CAP, TALL};
 use pinfold_render::padding::Padding;
 use pinfold_sys::LocalTime;
 use unicode_width::UnicodeWidthChar;
@@ -174,6 +175,9 @@ pub struct Bar<'a, L> {
     pub inset: usize,
     /// Set when the core lacks the hardened runtime: whether it could tell.
     pub unhardened: Option<bool>,
+    /// Each tab's OSC 9;4 progress byte, drawn as a bar under its label; empty with
+    /// `[alerts] progress` off (ADR-0051 §9).
+    pub progress: &'a [u8],
     /// The window's theme, which every colour here but the unhardened mark's is read from.
     pub theme: &'a Theme,
 }
@@ -415,7 +419,11 @@ fn strip(frame: &mut Frame, bar: &Bar<'_, impl AsRef<str>>, row: usize) {
             put(frame, row, at, mark, tint, fill);
             at += ACTIVITY;
         }
-        write(frame, row, at, &fit(label, room), text);
+        let label = fit(label, room);
+        write(frame, row, at, &label, text);
+        if let Some(&progress) = bar.progress.get(span.index) {
+            progress_bar(frame, bar.theme, row, at..at + width(&label), progress);
+        }
         if span.index < KEYED {
             let left = span.end - key_cells(span.index);
             pill(frame, row, left..span.end - 1, ground, fill);
@@ -431,6 +439,39 @@ fn strip(frame: &mut Frame, bar: &Bar<'_, impl AsRef<str>>, row: usize) {
         ground,
     );
     write(frame, row, button + 1, "+", chrome.tab_text);
+}
+
+/// Marks cells of a tab's label, which spans `label` of the row starting at cell `row`, as its
+/// progress bar ([`BAR`]): as many as its percent of the label, every other one with no percent,
+/// in `states.running` blue, or `states.error` red on error (ADR-0051 §9). 0 marks none and 100
+/// all.
+fn progress_bar(
+    frame: &mut Frame,
+    theme: &Theme,
+    row: usize,
+    label: std::ops::Range<usize>,
+    progress: u8,
+) {
+    let (state, percent) = progress_parts(progress);
+    let colour = match state {
+        HIDDEN => return,
+        FAILED => theme.states.error,
+        _ => theme.states.running,
+    };
+    let filled = (label.len() * usize::from(percent) + 50) / 100;
+    for (offset, column) in label.enumerate() {
+        let on = if state == INDETERMINATE {
+            offset % 2 == 0
+        } else {
+            offset < filled
+        };
+        if on
+            && column < usize::from(frame.columns)
+            && let Some(cell) = frame.cells.get_mut(row + column)
+        {
+            cell.background = colour | BAR;
+        }
+    }
 }
 
 /// Draws a pill over a span of the tabs' row, on `outside`. `inside` can carry [`TALL`].
@@ -689,8 +730,53 @@ mod tests {
             time: None,
             inset: 1,
             unhardened: None,
+            progress: &[],
             theme: &GRAPHITE,
         }
+    }
+
+    /// ADR-0051 §9: progress marks only cells of its tab's label, 0 and a state no core sends
+    /// mark none, 100 marks the whole label, and no bytes, as with `[alerts] progress` off,
+    /// draw the bar as before.
+    #[test]
+    fn progress_marks_only_its_tabs_label() {
+        use pinfold_proto::link::{NORMAL, progress};
+        let names = ["work", "logs"];
+        let barred = |progress: &[u8]| -> Vec<usize> {
+            let mut frame = pane(1, 50);
+            draw(
+                &mut frame,
+                &Bar {
+                    progress,
+                    ..shown(&names, 0)
+                },
+            );
+            let cells = strip_of(&frame).iter().enumerate();
+            cells
+                .filter(|(_, cell)| cell.background & BAR != 0)
+                .map(|(column, _)| column)
+                .collect()
+        };
+        let (start, _) = tab_of(&names, 1, 50);
+        let label = start + LEADING..start + LEADING + 4;
+        assert_eq!(barred(&[0, progress(NORMAL, 100)]), Vec::from_iter(label));
+        assert!(barred(&[0, progress(NORMAL, 0)]).is_empty());
+        assert!(
+            barred(&[7 << 5 | 31, 0xff]).is_empty(),
+            "never sent, so hidden"
+        );
+        assert!(barred(&[]).is_empty());
+        let mut off = pane(1, 50);
+        draw(&mut off, &shown(&names, 0));
+        let mut none = pane(1, 50);
+        draw(
+            &mut none,
+            &Bar {
+                progress: &[0, 0],
+                ..shown(&names, 0)
+            },
+        );
+        assert_eq!(off, none);
     }
 
     #[test]

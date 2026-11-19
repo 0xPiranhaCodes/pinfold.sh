@@ -21,6 +21,7 @@ variable is unset. Saving the file applies it to the running window within about
 | `alerts.webhook_states` | list | `["needs-you", "error"]` | States that are posted, as `alerts.desktop` |
 | `alerts.webhook_format` | string | `"json"` | `"json"`, or `"text"` for ntfy-style relays |
 | `alerts.program_notifications` | bool | `false` | Show [programs' notifications](#program-notifications) (OSC 9, 99 and 777) as toasts |
+| `alerts.progress` | bool | `true` | Show [programs' progress](#progress) (OSC 9;4) on the tabs and the Dock tile |
 | `api.audit_log`       | bool   | `false` | Also write the API audit log to disk                     |
 | `api.protect`         | list   | below   | Command-line text that protects a pane from API sends    |
 | `agents.<name>`       | table  | none    | An [agent profile](#agent-profiles)                      |
@@ -228,6 +229,21 @@ profile's pane still says it needs you. The setting applies at once on a save.
 ```toml
 [alerts]
 program_notifications = true
+```
+
+### Progress
+
+A program that reports progress with OSC 9;4, as `cargo`, `winget` and others do, shows it as a
+thin bar under its tab's label: blue while normal, busy with no percent (dashed) or paused, red
+on error. A tab shows its focused pane's progress, or the furthest along of its other panes. On
+macOS the Dock tile shows a bar too, for the focused tab or, when it has none, the furthest-along
+tab; Linux shows the tabs only. A pane whose program exits clears it. The bar moves in steps of
+about 3 % and at most once a second. Off, nothing is drawn; the core keeps one byte a pane either
+way. The setting applies at once on a save.
+
+```toml
+[alerts]
+progress = false
 ```
 
 ```toml

@@ -2,7 +2,7 @@
 
 use std::sync::LazyLock;
 
-use pinfold_proto::{Cell, DEFAULT_BACKGROUND, LEFT_CAP, RIGHT_CAP, TALL};
+use pinfold_proto::{BAR, Cell, DEFAULT_BACKGROUND, LEFT_CAP, RIGHT_CAP, TALL};
 
 use crate::font::{Font, Fonts};
 use crate::glyphs::{CACHE_LIMIT, GlyphCache, Metrics, clamp_size};
@@ -93,16 +93,20 @@ fn blend(background: u32, foreground: u32, alpha: u8) -> u32 {
     mix(16) | mix(8) | mix(0)
 }
 
-/// Returns the colour above and below each cell of the row of tabs: its own background, except
-/// that a tab's number sits in a smaller pill inside the tab, which goes on around it.
-pub(crate) fn bleeds(cells: &[Cell], ground: u32) -> impl Iterator<Item = u32> + '_ {
+/// Returns the colour of each cell of the row of tabs and above it, and the colour below it: its
+/// own background, except that a tab's number sits in a smaller pill inside the tab, which goes
+/// on around it, and a [`BAR`] cell takes the pill's colour with its own as a bar below.
+pub(crate) fn bleeds(cells: &[Cell], ground: u32) -> impl Iterator<Item = (u32, u32)> + '_ {
     let mut around = ground;
     cells.iter().map(move |cell| {
+        if cell.background & BAR != 0 {
+            return (around, cell.background & 0x00ff_ffff);
+        }
         let inside = cell.background == ground && cell.character != ' ' && cell.style() & TALL == 0;
         if !inside {
             around = cell.background;
         }
-        around
+        (around, around)
     })
 }
 
@@ -194,11 +198,14 @@ impl Painter {
             );
         }
         if tabs {
-            for (column, colour) in bleeds(cells, self.background).enumerate() {
+            for (column, (colour, below)) in bleeds(cells, self.background).enumerate() {
                 let left = column.saturating_mul(cell_width) + canvas.padding.left;
                 let right = left.saturating_add(cell_width);
+                if colour != below {
+                    canvas.fill(left, top, right, bottom, colour);
+                }
                 canvas.fill(left, top.saturating_sub(bleed), right, top, colour);
-                canvas.fill(left, bottom, right, bottom + bleed, colour);
+                canvas.fill(left, bottom, right, bottom + bleed, below);
             }
         }
         let pen_y = i32::try_from(top)
@@ -326,8 +333,14 @@ mod tests {
             cell(RIGHT_CAP, FILL | TALL, clear),
             cell(' ', 0, clear),
         ];
-        let colours: Vec<_> = bleeds(&row, clear).collect();
+        let colours: Vec<_> = bleeds(&row, clear).map(|(colour, _)| colour).collect();
         assert_eq!(colours, [clear, FILL, FILL, FILL, FILL, clear, clear]);
+        // ADR-0051 §9: a bar's cell is its pill's colour, with its own below it only.
+        const BLUE: u32 = 0x007a_a7ff;
+        let barred = [row[0], row[1], cell('b', 0, BLUE | BAR), row[5]];
+        let colours: Vec<_> = bleeds(&barred, clear).collect();
+        let want = [(clear, clear), (FILL, FILL), (FILL, BLUE), (clear, clear)];
+        assert_eq!(colours, want);
     }
 
     #[test]
@@ -355,6 +368,43 @@ mod tests {
         };
         assert_eq!(ink(1), cell_height + 2 * bleed);
         assert_eq!(ink(0), cell_height);
+    }
+
+    /// ADR-0051 §9: a tab's progress is a thin bar in the bleed under its cell, in the cell's
+    /// colour, while the cell and the bleed above take the pill's.
+    #[test]
+    fn a_bar_cell_is_drawn_below_its_row_in_its_colour() {
+        let mut painter = painter();
+        let (cell_width, cell_height) = painter.cell_size();
+        let bleed = painter.cache().metrics().bleed();
+        let (width, height) = (2 * cell_width, 3 * cell_height);
+        let padding = Padding {
+            tab_row: Some(1),
+            ..Padding::default()
+        };
+        let mut buffer = vec![0; width * height];
+        let mut canvas = Canvas::new(&mut buffer, width, height)
+            .unwrap()
+            .inset(padding);
+        let (fill, blue) = (0x0012_3456, 0x007a_a7ff);
+        let at = |background| Cell {
+            character: ' ',
+            foreground: 0,
+            background,
+        };
+        painter.draw_row(&mut canvas, 1, &[at(fill), at(blue | BAR)]);
+        let top = padding.row_top(1, cell_height);
+        let column = |x: usize| -> Vec<u32> {
+            (top - bleed..top + cell_height + bleed)
+                .map(|y| buffer[y * width + x])
+                .collect()
+        };
+        let mut want = vec![fill; cell_height + bleed];
+        want.extend(vec![fill; bleed]);
+        assert_eq!(column(0), want);
+        want.truncate(cell_height + bleed);
+        want.extend(vec![blue; bleed]);
+        assert_eq!(column(cell_width), want);
     }
 
     #[test]

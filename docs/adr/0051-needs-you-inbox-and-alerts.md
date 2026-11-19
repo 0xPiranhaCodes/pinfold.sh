@@ -655,3 +655,18 @@ Decided by the coordinator for the maintainer while building slice 12.
   Each pane's link state gains the byte last told, 1 byte.
 - **Exit.** A pane whose program has exited reads as 0, so the window hears 0 if the pane stays,
   and drops its progress with the pane if it goes.
+- **The tab's bar is drawn in the tab row's lower bleed.** The row of tabs is one cell row, so
+  "under the label" is the strip of the pill that reaches below it. A cell of the label carries
+  the bar's colour in its background with a new `BAR` bit (`pinfold_proto::BAR`, in the
+  background's top byte beside `GLASS`); the CPU and Metal renderers draw that colour only below
+  the cell and give the cell its pill's colour. So the frame, and its snapshot, still holds
+  every colour drawn, and the renderer learns no theme colour. The bar covers as many cells of
+  the label as its percent, every other cell with no percent, in `states.running` or
+  `states.error`. A tab shows its focused pane's progress, or else the furthest along of its
+  panes, one with no percent before none; the Dock tile uses the same rule over tabs.
+- **The Dock tile** is an `NSImageView` of the app's icon with an `NSProgressIndicator` bar at
+  its foot, built when progress first shows and dropped, with the tile's content view, when it
+  goes, and drawn with `NSDockTile::display` only when the byte shown changes. AppKit's bar has
+  no red, so an error shows as its percent; with no percent it is AppKit's indeterminate bar,
+  still, as nothing animates the tile. The calls are all safe in `objc2-app-kit`, so
+  `pinfold-sys/src/dock_tile.rs` has no `unsafe` block.

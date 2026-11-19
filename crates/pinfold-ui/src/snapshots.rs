@@ -6,7 +6,8 @@ use std::fmt::Write as _;
 use std::time::Instant;
 
 use pinfold_proto::link::{ApprovalAction, Rect};
-use pinfold_proto::{BOLD, Cell, Frame, ITALIC, TALL};
+use pinfold_proto::link::{FAILED, INDETERMINATE, NORMAL, PAUSED, progress};
+use pinfold_proto::{BAR, BOLD, Cell, Frame, ITALIC, TALL};
 use pinfold_sys::LocalTime;
 
 use crate::approval::Queue;
@@ -42,11 +43,14 @@ fn cells(frame: &Frame) -> String {
 
 fn describe(cell: Cell) -> String {
     let colour = cell.foreground & 0x00ff_ffff;
-    let mut text = format!("fg {colour:06x} bg {:06x}", cell.background);
+    let mut text = format!("fg {colour:06x} bg {:06x}", cell.background & !BAR);
     for (bit, name) in [(BOLD, " bold"), (ITALIC, " italic"), (TALL, " tall")] {
         if cell.style() & bit != 0 {
             text.push_str(name);
         }
+    }
+    if cell.background & BAR != 0 {
+        text.push_str(" bar");
     }
     text
 }
@@ -115,6 +119,7 @@ pub(crate) fn bar() -> Frame {
         time: Some(time),
         inset: 1,
         unhardened: None,
+        progress: &[],
     };
     top_bar::draw(&mut frame, &bar);
     frame
@@ -127,6 +132,50 @@ fn the_bar_shows_tabs_states_and_the_status_line() {
     insta::with_settings!({snapshot_suffix => std::env::consts::OS}, {
         insta::assert_snapshot!(cells(&frame));
     });
+}
+
+/// ADR-0051 §9: a tab's label and its progress bar in each state, a row each: none, normal at
+/// 50 % and at 100 %, error, no percent and paused. Only the tab's end and label, which every
+/// system draws alike.
+pub(crate) fn progress_tabs() -> Frame {
+    const CELLS: u16 = 11;
+    let bytes = [
+        0,
+        progress(NORMAL, 50),
+        progress(NORMAL, 100),
+        progress(FAILED, 50),
+        progress(INDETERMINATE, 0),
+        progress(PAUSED, 25),
+    ];
+    let mut rows = pane(' ', 0, CELLS);
+    for byte in bytes {
+        let mut frame = pane(' ', 1, 40);
+        let bar = Bar {
+            theme: &GRAPHITE,
+            tabs: &["building"],
+            active: 0,
+            activity: 0,
+            states: &[],
+            status: None,
+            hovered: None,
+            focused: true,
+            title: false,
+            time: None,
+            inset: 1,
+            unhardened: None,
+            progress: &[byte],
+        };
+        top_bar::draw(&mut frame, &bar);
+        rows.cells
+            .extend_from_slice(&frame.cells[..usize::from(CELLS)]);
+        rows.rows += 1;
+    }
+    rows
+}
+
+#[test]
+fn a_tabs_progress_is_a_bar_under_its_label_in_each_state() {
+    insta::assert_snapshot!(cells(&progress_tabs()));
 }
 
 /// A tool pane's tab, active beside a running one: its title, and no agent state, as the core
@@ -151,6 +200,7 @@ fn tool_bar() -> Frame {
         time: None,
         inset: 1,
         unhardened: None,
+        progress: &[],
     };
     top_bar::draw(&mut frame, &bar);
     frame
@@ -193,6 +243,7 @@ pub(crate) fn unhardened() -> Frame {
         time: None,
         inset: 1,
         unhardened: Some(true),
+        progress: &[],
     };
     top_bar::draw(&mut frame, &bar);
     frame
@@ -388,6 +439,7 @@ fn a_light_theme_colours_every_piece_of_chrome() {
             }),
             inset: 1,
             unhardened: None,
+            progress: &[],
             theme: &theme,
         };
         let mut frame = screen(1, 90);
