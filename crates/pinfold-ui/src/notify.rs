@@ -330,7 +330,6 @@ mod tests {
     /// A stub `notify-send` in `dir` that appends each run's arguments, one `[arg]` a line, and
     /// whether it got `HOME`, to `dir/runs`, then runs `then`.
     fn stub(dir: &Path, then: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let program = dir.join("notify-send");
         let runs = dir.join("runs");
         let script = format!(
@@ -338,8 +337,7 @@ mod tests {
              printf 'HOME=%s\\n' \"${{HOME-unset}}\" >> '{runs}'\n{then}\n",
             runs = runs.display()
         );
-        std::fs::write(&program, script).unwrap();
-        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        pinfold_testkit::program(&program, script, 0o755).unwrap();
         program
     }
 

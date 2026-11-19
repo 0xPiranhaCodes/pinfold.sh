@@ -39,7 +39,8 @@ const RECENT: Duration = Duration::from_secs(10 * 60);
 pub const MAX_OUTSIDE: usize = 16;
 
 /// Read by `pinfold agents peek` only when `cargo xtask mem-gate` measures it: a last line then
-/// gives `ms`, the peek's wall time, and `peak`, its own peak footprint in bytes.
+/// gives `ms`, the peek's wall time, `peak`, its own peak footprint in bytes, and `now`, its
+/// footprint as it ends: PSS on Linux, which keeps no peak PSS.
 const MEASURE: &str = "PINFOLD_MEASURE";
 
 /// What an inbox row's second line shows for one pane.
@@ -336,7 +337,8 @@ pub fn command(home: Option<&Path>, args: &[OsString]) -> bool {
     if std::env::var_os(MEASURE).is_some() {
         let ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
         let peak = pinfold_sys::peak_footprint().unwrap_or(0);
-        let line = serde_json::json!({ "ms": ms, "peak": peak });
+        let now = pinfold_sys::footprint(std::process::id()).unwrap_or(0);
+        let line = serde_json::json!({ "ms": ms, "peak": peak, "now": now });
         return writeln!(out, "{line}").is_ok();
     }
     true
