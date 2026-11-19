@@ -251,6 +251,9 @@ struct State {
     alerting: Vec<(u32, u8)>,
     /// Whether a go to the next pane that needs you found none.
     none_waiting: bool,
+    /// The latest program notification, pane and text, until the window takes it: one at a
+    /// time, at most 480 bytes (ADR-0051 §9).
+    toast: Option<(u32, String)>,
     /// Each run's pane whose strip changed and why it has no checkpoint, until the window takes
     /// it, at most [`MAX_PANES`] (ADR-0050).
     checkpoints: Vec<(u32, u8)>,
@@ -427,6 +430,7 @@ impl State {
                 }
             }
             Notice::Refused { reason } => self.refused = Some(reason),
+            Notice::Toast { pane, text, .. } => self.toast = Some((pane, text.to_owned())),
             Notice::Checkpoint { pane, missing } => {
                 self.checkpoints.retain(|(other, _)| *other != pane);
                 if self.checkpoints.len() < MAX_PANES {
@@ -577,6 +581,8 @@ pub struct Link {
     greeting: bool,
     /// The theme's palette, until it has followed the hello.
     palette: Option<Palette>,
+    /// `[alerts] program_notifications`, until it has followed the hello.
+    toasts: Option<bool>,
     /// Whether the hello has gone, so a palette no longer waits for it.
     answered: bool,
     ended: Option<Disconnect>,
@@ -623,6 +629,7 @@ impl Link {
             partial: false,
             greeting: false,
             palette: None,
+            toasts: None,
             answered: false,
             ended: None,
             state,
@@ -649,8 +656,18 @@ impl Link {
         }
     }
 
-    /// Puts the hello, and the palette after it, ahead of any request queued while it waited
-    /// for the core's.
+    /// Says whether `[alerts] program_notifications` is on, or keeps it to send right after the
+    /// hello, as a palette is. A core too old for it is sent none and keeps them off.
+    pub fn toasts(&mut self, on: bool) {
+        if self.answered {
+            self.send(Request::Toasts { on });
+        } else {
+            self.toasts = Some(on);
+        }
+    }
+
+    /// Puts the hello, and the palette and toasts after it, ahead of any request queued while it
+    /// waited for the core's.
     fn answer(&mut self) {
         if let (true, Some(version)) = (self.greeting, self.decoder.version()) {
             let mut hello = Vec::new();
@@ -661,6 +678,10 @@ impl Link {
                 } else {
                     self.state.unthemed = true;
                 }
+            }
+            let toasts = self.toasts.take().map(|on| Request::Toasts { on });
+            if let Some(toasts) = toasts.filter(|toasts| toasts.since() <= version) {
+                encoded = encoded.and_then(|()| toasts.encode(&mut hello));
             }
             if encoded.is_ok() {
                 self.state.out.splice(..0, hello);
@@ -961,6 +982,13 @@ impl Link {
         let alerting = &mut self.state.alerting;
         let (pane, state) = (!alerting.is_empty()).then(|| alerting.remove(0))?;
         Some((pane, state, self.tab_of(pane)))
+    }
+
+    /// Takes the latest program notification: the pane, its text and its tab's index, or no tab
+    /// if the session no longer holds it.
+    pub fn take_toast(&mut self) -> Option<(u32, String, Option<u8>)> {
+        let (pane, text) = self.state.toast.take()?;
+        Some((pane, text, self.tab_of(pane)))
     }
 
     /// Returns whether the window's inbox is open, as the last [`Request::Inbox`] said.
@@ -1912,6 +1940,45 @@ mod tests {
 
     /// ADR-0051: a listed pane alerts when it comes to ◆ or ✕, not again while it stays, and
     /// never for another state or a pane that is not listed.
+    /// ADR-0051 §9: whether toasts are on follows the hello as a palette does, and a core too old
+    /// for it is sent nothing and keeps them off. The window's side keeps one toast at a time.
+    #[test]
+    fn toasts_follow_the_hello_and_only_the_latest_is_kept() {
+        for theirs in [VERSION, OLDEST] {
+            let spoken = theirs >= Request::Toasts { on: true }.since();
+            let (mut link, mut peer) = linked().unwrap();
+            link.toasts(true);
+            assert!(link.send(Request::Quit));
+            peer.notices(&[Notice::Hello { version: theirs }]).unwrap();
+            assert!(turn_until(&mut link, |link| link.is_greeted()));
+            let mut sent = vec![shown(Request::Hello { version: theirs })];
+            if spoken {
+                sent.push(shown(Request::Toasts { on: true }));
+            }
+            sent.push(shown(Request::Quit));
+            assert_eq!(peer.requests(sent.len()), sent);
+            link.toasts(false);
+            assert!(link.send(Request::Quit));
+            let mut sent = vec![shown(Request::Quit)];
+            if spoken {
+                sent.insert(0, shown(Request::Toasts { on: false }));
+            }
+            assert_eq!(peer.requests(sent.len()), sent);
+        }
+        let (mut link, _peer) = linked().unwrap();
+        link.state.members = vec![(10, 1)];
+        for text in ["first", "second"] {
+            let toast = Notice::Toast {
+                pane: 10,
+                kind: pinfold_proto::link::OSC_9,
+                text,
+            };
+            link.state.apply(toast).unwrap();
+        }
+        assert_eq!(link.take_toast(), Some((10, "second".to_owned(), Some(1))));
+        assert_eq!(link.take_toast(), None);
+    }
+
     #[test]
     fn a_listed_pane_alerts_once_on_coming_to_needs_you_or_error() {
         let (mut link, _peer) = linked().unwrap();

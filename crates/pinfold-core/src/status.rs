@@ -183,23 +183,27 @@ impl Status {
 pub fn sanitize(message: &str) -> String {
     message
         .chars()
-        .filter(|&character| {
-            !matches!(
-                character,
-                '\u{200b}'..='\u{200f}'
-                    | '\u{202a}'..='\u{202e}'
-                    | '\u{2060}'..='\u{2069}'
-                    | '\u{061c}'
-                    | '\u{feff}'
-                    | '◆'
-                    | '●'
-                    | '✓'
-                    | '✕'
-                    | '○'
-            ) && !character.is_control()
-        })
+        .filter(|&c| drawable(c))
         .take(MAX_MESSAGE)
         .collect()
+}
+
+/// Whether `character` may reach Pinfold's chrome: not a control, bidi or zero-width character,
+/// nor a state glyph.
+pub(crate) fn drawable(character: char) -> bool {
+    !matches!(
+        character,
+        '\u{200b}'..='\u{200f}'
+            | '\u{202a}'..='\u{202e}'
+            | '\u{2060}'..='\u{2069}'
+            | '\u{061c}'
+            | '\u{feff}'
+            | '◆'
+            | '●'
+            | '✓'
+            | '✕'
+            | '○'
+    ) && !character.is_control()
 }
 
 /// A request for the notification layer to alert about a status transition.

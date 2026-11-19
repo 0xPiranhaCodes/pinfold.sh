@@ -39,7 +39,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode, Palette};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 24;
+pub const VERSION: u16 = 25;
 
 /// The oldest version this side still speaks, one before [`VERSION`] (ADR-0043).
 pub const OLDEST: u16 = VERSION - 1;
@@ -90,6 +90,20 @@ pub const MAX_RESTORE_ERROR: usize = 200;
 /// The first version with [`Notice::Outside`], [`Request::OpenTabIn`] and
 /// [`Refusal::Folder`] (ADR-0051, slice 10).
 pub const OUTSIDE: u16 = 22;
+
+/// The first version with [`Notice::Toast`] and [`Request::Toasts`] (ADR-0051 §9, slice 11).
+/// 23 and 24 are ADR-0050's.
+pub const TOAST: u16 = 25;
+
+/// The most bytes of a [`Notice::Toast`]'s text: 120 cells of four-byte characters.
+pub const MAX_TOAST: usize = 480;
+
+/// [`Notice::Toast`]'s `kind` for OSC 9 text.
+pub const OSC_9: u8 = 0;
+/// [`Notice::Toast`]'s `kind` for OSC 99, kitty's notifications.
+pub const OSC_99: u8 = 1;
+/// [`Notice::Toast`]'s `kind` for OSC 777 `notify`.
+pub const OSC_777: u8 = 2;
 
 /// The most agents outside PinFold an open inbox lists (ADR-0051 §8).
 pub const MAX_OUTSIDE: u8 = 16;
@@ -243,6 +257,7 @@ const PALETTE: u8 = 25;
 const INBOX_OPEN: u8 = 26;
 const ANSWER_KIND: u8 = 27;
 const OPEN_TAB_IN: u8 = 28;
+const TOASTS: u8 = 29;
 
 const FRAME: u8 = 1;
 const CWD: u8 = 2;
@@ -265,6 +280,7 @@ const INBOX_EXTRA_KIND: u8 = 18;
 const OUTSIDE_KIND: u8 = 19;
 const CHECKPOINT: u8 = 20;
 const RESTORED: u8 = 21;
+const TOAST_KIND: u8 = 22;
 /// [`Notice::InboxExtra`]'s `ctx` byte when it has none.
 const NO_CTX: u8 = 255;
 
@@ -765,6 +781,13 @@ pub enum Request<'a> {
         /// Whether it is open now.
         open: bool,
     },
+    /// Whether `[alerts] program_notifications` is on, sent after the hello and on each change.
+    /// The core starts with it off and turns it off when the window goes; off, it keeps and sends
+    /// no program notification text (ADR-0051 §9). Since version 25.
+    Toasts {
+        /// Whether it is on now.
+        on: bool,
+    },
     /// A person confirmed Approve or Interrupt on a ◆ pane of the inbox (ADR-0051). Only the
     /// window's confirmation key sends it; no API method does. Since version 19.
     Answer {
@@ -932,6 +955,18 @@ pub enum Notice<'a> {
         /// Its folder as the session file names it, a hint only: absolute, at most [`MAX_DIR`]
         /// bytes, with no control or bidi character.
         dir: &'a str,
+    },
+    /// A program's notification, OSC 9, 99 or 777, with `[alerts] program_notifications` on:
+    /// cleaned of control and bidi characters and cut to 120 cells by the core, which keeps
+    /// none of it once sent. At most one per pane per 10 s and one per 2 s in all. Never a state
+    /// (ADR-0051 §9). Since version 25.
+    Toast {
+        /// The pane that printed it.
+        pane: u32,
+        /// [`OSC_9`], [`OSC_99`] or [`OSC_777`].
+        kind: u8,
+        /// The text, never empty, at most [`MAX_TOAST`] bytes.
+        text: &'a str,
     },
     /// What an open inbox's row shows beside the pane's status, read when it opens and every
     /// 5 s while open, and kept by neither side once it closes (ADR-0051 §7). Since version 20.
@@ -1210,6 +1245,7 @@ impl Request<'_> {
             Self::Inbox { .. } => INBOX,
             Self::Answer { .. } => ANSWER,
             Self::OpenTabIn { .. } => OUTSIDE,
+            Self::Toasts { .. } => TOAST,
             _ => OLDEST,
         }
     }
@@ -1335,6 +1371,10 @@ impl Request<'_> {
             Self::Inbox { open } => {
                 out.push(u8::from(open));
                 INBOX_OPEN
+            }
+            Self::Toasts { on } => {
+                out.push(u8::from(on));
+                TOASTS
             }
             Self::OpenTabIn { dir } => {
                 if dir.len() > MAX_DIR {
@@ -1479,6 +1519,9 @@ impl Request<'_> {
             INBOX_OPEN => Request::Inbox {
                 open: body.tag("open", &[false, true])?,
             },
+            TOASTS => Request::Toasts {
+                on: body.tag("on", &[false, true])?,
+            },
             OPEN_TAB_IN => {
                 let dir = body.text()?;
                 if dir.len() > MAX_DIR {
@@ -1538,6 +1581,7 @@ impl Notice<'_> {
             Self::Secrets { .. } => 15,
             Self::Webhook { .. } => WEBHOOK_SINCE,
             Self::InboxExtra { .. } => INBOX_EXTRA,
+            Self::Toast { .. } => TOAST,
             Self::Outside { .. }
             | Self::Refused {
                 reason: Refusal::Folder,
@@ -1691,6 +1735,15 @@ impl Notice<'_> {
                 *pane,
                 branch.as_bytes(),
             )?,
+            Self::Toast { pane, kind, text } => {
+                if !toast(*kind, text) {
+                    out.truncate(start);
+                    return Err(Error::BadText);
+                }
+                put!(out; *pane, *kind);
+                out.extend_from_slice(text.as_bytes());
+                TOAST_KIND
+            }
             Self::Outside {
                 index,
                 count,
@@ -1876,6 +1929,15 @@ impl Notice<'_> {
                 failed: body.u32()?,
                 host: body.text()?,
             },
+            TOAST_KIND => {
+                let (pane, kind) = (body.u32()?, body.u8()?);
+                let text = body.text()?;
+                // The window draws it as chrome, so only text the core's cleaning lets through.
+                if !toast(kind, text) {
+                    return Err(Error::BadText);
+                }
+                Notice::Toast { pane, kind, text }
+            }
             OUTSIDE_KIND => {
                 let (index, count, secs) = (body.u8()?, body.u8()?, body.u32()?);
                 let dir = body.text()?;
@@ -2596,6 +2658,13 @@ fn outside_row(index: u8, count: u8, dir: &str) -> bool {
     index < count && count <= MAX_OUTSIDE && dir.starts_with('/') && dir.len() <= MAX_DIR && plain
 }
 
+/// Whether a [`Notice::Toast`] is well formed: a known kind and text that is not empty, at most
+/// [`MAX_TOAST`] bytes and free of control and bidi characters.
+fn toast(kind: u8, text: &str) -> bool {
+    let plain = text.chars().all(|c| !c.is_control() && !bidi(c));
+    kind <= OSC_777 && !text.is_empty() && text.len() <= MAX_TOAST && plain
+}
+
 /// Whether `character` reorders text: the bidi controls and marks.
 fn bidi(character: char) -> bool {
     matches!(
@@ -2713,7 +2782,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 24, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 25, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -2949,6 +3018,28 @@ mod tests {
         };
         // The oldest spoken has its context use and steps too.
         assert_eq!(at_oldest(extra), Ok(true));
+        let outside = Notice::Outside {
+            index: 0,
+            count: 1,
+            secs: 3,
+            dir: "/work",
+        };
+        // 24, the oldest spoken, has outside rows and their refusal.
+        assert_eq!(at_oldest(outside), Ok(true));
+        let folder = Notice::Refused {
+            reason: Refusal::Folder,
+        };
+        assert_eq!(at_oldest(folder), Ok(true));
+        let toast = Notice::Toast {
+            pane: 1,
+            kind: OSC_9,
+            text: "Build done",
+        };
+        let newer = Error::Newer {
+            kind: TOAST_KIND,
+            since: TOAST,
+        };
+        assert_eq!(at_oldest(toast), Err(newer), "a window of 24 never gets it");
         assert_eq!(at_oldest(COLOURS_SEED), Ok(true));
         let secrets = Notice::Secrets {
             count: 1,
@@ -2981,7 +3072,7 @@ mod tests {
         for notice in [rewind, strip, flash] {
             assert_eq!(at_oldest(notice), Ok(true));
         }
-        // But a core a version older is never asked to open the viewer on a run.
+        // 24, the oldest spoken, opens the viewer on a run too.
         let mut wire = raw(HELLO, &OLDEST.to_le_bytes());
         let open = Request::OpenTool {
             pane: 2,
@@ -2990,12 +3081,11 @@ mod tests {
         open.encode(&mut wire).unwrap();
         let (mut decoder, mut input) = (Decoder::default(), wire.as_slice());
         decoder.next_request(&mut input).unwrap();
-        let (kind, since) = (OPEN_TOOL, REWIND_VIEW);
         assert_eq!(
             decoder
                 .next_request(&mut input)
                 .map(|request| request.is_some()),
-            Err(Error::Newer { kind, since })
+            Ok(true)
         );
         // Nothing is new in 16 but a layout, so a stand-in `since` checks the gate.
         let mut wire = raw(HELLO, &OLDEST.to_le_bytes());
@@ -3833,6 +3923,44 @@ mod tests {
         }
     }
 
+    /// ADR-0051 §9: the window draws a toast's text as chrome, so the decoder takes only a known
+    /// kind and plain text within the cap, whatever a core sent.
+    #[test]
+    fn a_toast_is_plain_text_within_the_cap() {
+        let wire = |kind: u8, text: &[u8]| {
+            let mut body = 7u32.to_le_bytes().to_vec();
+            body.push(kind);
+            body.extend_from_slice(text);
+            raw(TOAST_KIND, &body)
+        };
+        assert_eq!(
+            notice_error(&wire(OSC_777, "Build 日本 done".as_bytes())),
+            Ok(())
+        );
+        assert_eq!(notice_error(&wire(OSC_9, &[b'a'; MAX_TOAST])), Ok(()));
+        let hostile: [(u8, &[u8]); 6] = [
+            (3, b"done"),
+            (OSC_9, b""),
+            (OSC_9, b"a\nb"),
+            (OSC_99, b"\x1b]0;x\x07"),
+            (OSC_99, "a\u{202e}b".as_bytes()),
+            (OSC_9, &[b'a'; MAX_TOAST + 1]),
+        ];
+        for (kind, text) in hostile {
+            let error = notice_error(&wire(kind, text));
+            assert_eq!(error, Err(Error::BadText), "{kind} {text:?}");
+        }
+        let long = "a".repeat(MAX_TOAST + 1);
+        let toast = Notice::Toast {
+            pane: 1,
+            kind: OSC_9,
+            text: &long,
+        };
+        let mut out = vec![1];
+        assert_eq!(toast.encode(&mut out), Err(Error::BadText));
+        assert_eq!(out, [1], "a refused toast leaves the queue as it was");
+    }
+
     /// ADR-0051 §8: the window draws an outside row's folder and offers it for a tab, so the
     /// decoder takes only a plain absolute path in a row of at most 16.
     #[test]
@@ -4348,6 +4476,20 @@ mod tests {
         fn webhook_round_trips(host in any::<String>(), sender in any::<bool>(), failed in any::<u32>(), chunk in chunks()) {
             let notice = Notice::Webhook { host: &host, sender, failed };
             prop_assert!(notice_survives(&notice, chunk), "changed on the link");
+        }
+
+        #[test]
+        fn toasts_round_trip(
+            pane in any::<u32>(),
+            kind in 0..=OSC_777,
+            text in "[^\\p{C}]{1,120}",
+            on in any::<bool>(),
+            chunk in chunks(),
+        ) {
+            prop_assume!(!text.chars().any(bidi) && text.len() <= MAX_TOAST);
+            let notice = Notice::Toast { pane, kind, text: &text };
+            prop_assert!(notice_survives(&notice, chunk), "changed on the link");
+            prop_assert!(request_survives(Request::Toasts { on }, chunk), "changed on the link");
         }
 
         #[test]

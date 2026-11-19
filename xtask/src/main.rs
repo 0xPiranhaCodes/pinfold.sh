@@ -339,6 +339,24 @@ fn write_tool_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
         ),
     )?;
     fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
+    // ADR-0051 §9's `toast: true` row: the heavy screen with program notifications on, whose
+    // program toasts 120 cells 5 s in, so the toast is drawn when the window is read at 7 s.
+    let toasts = dir.join("toasts");
+    fs::create_dir_all(toasts.join("pinfold"))?;
+    fs::write(
+        toasts.join("pinfold/pinfold.toml"),
+        "[alerts]\nprogram_notifications = true\n",
+    )?;
+    let script = toasts.join("agent.sh");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n(sleep 5; printf '\\033]9;%s\\007' '{}') &\nexec {}\n",
+            "Build finished ".repeat(8),
+            quote(&fs::canonicalize(HEAVY_SCREEN)?)
+        ),
+    )?;
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
     write_peek_session(&files, &fs::canonicalize(&repo)?)
 }
 
@@ -563,6 +581,7 @@ fn mem_gate_task() -> ExitCode {
     let listed_agents = inputs.join("agents");
     let agent_files = inputs.join("agent-files");
     let outside = inputs.join("outside");
+    let toasts = inputs.join("toasts");
     let replay_typical = ["--replay", typical.as_str()];
     let replay_hostile = ["--replay", hostile.as_str()];
     let replay_baseline: &[&str] = &["--replay", "/dev/null"];
@@ -887,6 +906,21 @@ fn mem_gate_task() -> ExitCode {
             rewind: true,
             inbox: None,
             agents: None,
+        });
+        budgets.push(mem_gate::Budget {
+            metric: "Window on macOS with a program's toast, 1512x1890",
+            limit: mem_gate::WINDOW_LIMIT_HALF_RETINA,
+            program: &core,
+            args: &["--window", "1", "1512x1890"],
+            per_pane_over: None,
+            settle: mem_gate::WINDOW_SETTLE,
+            wait_for_line: true,
+            screen: Some(Path::new(HEAVY_SCREEN)),
+            window: Some(Side::Window),
+            menu: false,
+            rewind: false,
+            inbox: None,
+            agents: Some(&toasts),
         });
         budgets.push(mem_gate::Budget {
             metric: "Window on macOS with the markdown reader, 1512x1890",

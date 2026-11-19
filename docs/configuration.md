@@ -20,6 +20,7 @@ variable is unset. Saving the file applies it to the running window within about
 | `alerts.webhook`      | string | `""`    | An `https://` URL, or `http://` to `127.0.0.1` or `[::1]`, to post [webhooks](#webhooks) to; empty for none |
 | `alerts.webhook_states` | list | `["needs-you", "error"]` | States that are posted, as `alerts.desktop` |
 | `alerts.webhook_format` | string | `"json"` | `"json"`, or `"text"` for ntfy-style relays |
+| `alerts.program_notifications` | bool | `false` | Show [programs' notifications](#program-notifications) (OSC 9, 99 and 777) as toasts |
 | `api.audit_log`       | bool   | `false` | Also write the API audit log to disk                     |
 | `api.protect`         | list   | below   | Command-line text that protects a pane from API sends    |
 | `agents.<name>`       | table  | none    | An [agent profile](#agent-profiles)                      |
@@ -211,6 +212,23 @@ time, a 429 or a 5xx is tried again after 5 s and then 30 s; anything else is gi
 the log names the host, the status and the try. Posts follow each agent pane's alerts, at most one
 a pane a minute and ten in any ten minutes in all, and wait in a queue of 16; past that the oldest
 is dropped and counted as given up ([ADR-0051](adr/0051-needs-you-inbox-and-alerts.md)).
+
+### Program notifications
+
+With `alerts.program_notifications = true`, a notification a program prints, OSC 9 text,
+kitty's OSC 99 (a title and body, base64 or not) or OSC 777 `notify`, shows for 5 s in the top
+right of its pane, as `<tab> says: <text>`, drawn by PinFold, never as pane text. If the window
+is not focused or the pane is in another tab, the same words go to the desktop notification,
+which shares the limits of alerts. The text is cut to 120 cells and loses control, bidi and
+zero-width characters and the state glyphs. Each pane toasts at most once in 10 s and all of them
+once in 2 s; the rest are dropped. A toast never sets a pane's state and never reaches a webhook,
+the API or a log. Off, as by default, the core keeps none of the text; OSC 9 in an agent
+profile's pane still says it needs you. The setting applies at once on a save.
+
+```toml
+[alerts]
+program_notifications = true
+```
 
 ```toml
 [agents.claude]

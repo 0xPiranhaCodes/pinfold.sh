@@ -379,6 +379,7 @@ name = "pinfold-core"
 version = "0.1.0-beta.4"
 dependencies = [
  "alacritty_terminal",
+ "base64",
  "lz4_flex",
  "mio",
  "pinfold-api",
@@ -388,6 +389,7 @@ dependencies = [
  "regex-lite",
  "serde",
  "serde_json",
+ "unicode-width",
 ]
 
 [[package]]

@@ -51,6 +51,7 @@ use crate::paste::Prompt;
 use crate::prefix::{self, Command, Prefix};
 use crate::search_bar::{Bar, Step};
 use crate::selection::Selecting;
+use crate::toast::Toast;
 use crate::top_bar::{Clicks, Hit};
 use crate::vi::{Step as ViStep, Vi, View};
 use crate::{
@@ -126,6 +127,9 @@ enum Notice {
     Alert(u32, u8, Option<u8>),
     /// The desktop notification for this pane was clicked.
     Clicked(u32),
+    /// A program's notification: the pane, its cleaned and cut text and its tab's index
+    /// (ADR-0051 §9).
+    Toast(u32, String, Option<u8>),
 }
 
 /// What the I/O thread has for the window. A screen marked dirty here is one the window has not
@@ -257,6 +261,7 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
         let refused = link.take_refused().map(Notice::Refused);
         let unthemed = link.take_unthemed().then_some(Notice::Unthemed);
         let none_waiting = link.take_none_waiting().then_some(Notice::NoneWaiting);
+        let toast = (link.take_toast()).map(|(pane, text, tab)| Notice::Toast(pane, text, tab));
         while let Some((pane, state, tab)) = link.take_alert() {
             if proxy.send_event(Notice::Alert(pane, state, tab)).is_err() {
                 return;
@@ -290,6 +295,7 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
             refused,
             unthemed,
             none_waiting,
+            toast,
         ]
         .into_iter()
         .flatten();
@@ -553,6 +559,8 @@ struct App {
     asking: Option<(u32, Position)>,
     prefix: Prefix,
     flash: Flash,
+    /// A program's notification drawn over its pane, one at a time (ADR-0051 §9).
+    toast: Option<Toast>,
     selecting: Selecting,
     /// The search bar, while open. Keys go to this before the program.
     bar: Option<Bar>,
@@ -664,6 +672,7 @@ impl App {
                 && std::env::var_os("PINFOLD_MEASURE_INBOX").is_some_and(|value| value == "answer"),
             asking: None,
             flash: Flash::default(),
+            toast: None,
             unhardened: None,
             webhook: None,
             selecting: Selecting::default(),
@@ -754,6 +763,11 @@ impl App {
         self.theme = config.map_or(GRAPHITE, |path| theme_at(path, dark));
         let palette = proto::Request::Palette(palette_of(&self.theme));
         self.outbox.send(Request::Core(palette));
+        // The core starts with them off.
+        if self.config.alerts.program_notifications {
+            let toasts = proto::Request::Toasts { on: true };
+            self.outbox.send(Request::Core(toasts));
+        }
         self.appear(appearance);
     }
 
@@ -828,6 +842,13 @@ impl App {
         let old = std::mem::replace(&mut self.config, config);
         if self.config.keys != old.keys {
             self.prefix = prefix(&self.config.keys);
+        }
+        let on = self.config.alerts.program_notifications;
+        if on != old.alerts.program_notifications {
+            self.core(proto::Request::Toasts { on });
+            if !on {
+                self.toast = None;
+            }
         }
         let Some(open) = &mut self.open else { return };
         #[cfg(target_os = "macos")]
@@ -952,6 +973,7 @@ impl App {
             self.flash.refused(proto::Refusal::Input, Instant::now());
         }
         self.flash.tick(Instant::now());
+        self.toast = (self.toast.take()).filter(|toast| Instant::now() < toast.until);
         let mut drawn = false;
         if let Some(open) = &mut self.open {
             let (rows, columns) = self.area;
@@ -962,6 +984,12 @@ impl App {
                 if let Some(ground) = pane.colours.1 {
                     panes::glaze(&mut self.composed, pane.rect, ground);
                 }
+            }
+            // Over its pane and under every overlay, which keys go to.
+            if let Some(toast) = &self.toast
+                && let Some(pane) = find(&self.panes, toast.pane)
+            {
+                toast.draw(&mut self.composed, pane.rect, theme);
             }
             let focused = find(&self.panes, self.focused);
             // The cursor is the focused pane's, so its OSC 12 colour draws it.
@@ -1280,6 +1308,27 @@ impl App {
         let tab = tab.map(usize::from);
         let label = tab.and_then(|tab| self.labels.get(tab)).map(String::as_str);
         (self.notifier).alert((pane, state), (tab, label), Instant::now());
+    }
+
+    /// Shows a program's notification over its pane, if the person can see it, and otherwise on
+    /// the desktop under the alerts' limits. Off, it is dropped, as one sent before a save
+    /// turned it off may still come (ADR-0051 §9). A measured window draws it, and never
+    /// notifies the desktop.
+    fn toast(&mut self, pane: u32, text: String, tab: Option<u8>) {
+        if !self.config.alerts.program_notifications {
+            return;
+        }
+        let tab = tab.map(usize::from);
+        let label = tab.and_then(|tab| self.labels.get(tab)).map(String::as_str);
+        let shown = find(&self.panes, pane).is_some();
+        let now = Instant::now();
+        if shown && (self.has_focus || self.size.is_some()) {
+            let saying = notify::saying(tab, label);
+            self.toast = Some(Toast::new(pane, saying, text, now));
+            self.redraw_soon();
+        } else if self.size.is_none() {
+            self.notifier.toast(pane, (tab, label), &text, now);
+        }
     }
 
     /// Closes the inbox, which frees its rows here and the I/O thread's copy.
@@ -2147,6 +2196,7 @@ impl ApplicationHandler<Notice> for App {
             Notice::Command(_) => {}
             Notice::NoneWaiting => self.none_waiting(),
             Notice::Alert(pane, state, tab) => self.alert(pane, state, tab),
+            Notice::Toast(pane, text, tab) => self.toast(pane, text, tab),
             Notice::Clicked(pane) => self.request(Request::GoTo(pane)),
         }
     }
@@ -2214,6 +2264,7 @@ impl ApplicationHandler<Notice> for App {
                     .flash
                     .until()
                     .map_or(self.minute, |flash| flash.min(self.minute));
+                let wake = (self.toast.as_ref()).map_or(wake, |toast| wake.min(toast.until));
                 // An open inbox wakes only when a shown time changes, at most once a minute, as
                 // each present keeps megabytes of Metal memory dirty for seconds (ADR-0051 §4).
                 let next = self
@@ -2887,6 +2938,50 @@ mod tests {
             1,
             "shown, but the window is in the background"
         );
+    }
+
+    /// ADR-0051 §9: off, a toast is dropped and nothing is kept or raised; on, a seen pane draws
+    /// it and any other goes to the desktop under the alerts' limits. A save turns them on or
+    /// off in the core, and off forgets the one shown.
+    #[test]
+    fn a_toast_shows_over_a_seen_pane_or_on_the_desktop_and_only_when_on() {
+        let (mut app, inbox, _poll) = app();
+        app.labels = vec!["api".to_owned(), "docs".to_owned()];
+        app.toast(1, "Build done".to_owned(), Some(0));
+        app.toast(2, "Build done".to_owned(), Some(1));
+        assert!(
+            app.toast.is_none() && app.notifier.raised() == 0,
+            "off by default"
+        );
+
+        let on = "[alerts]\nprogram_notifications = true";
+        app.configure(pinfold_config::parse(on.as_bytes()).unwrap());
+        let told = |inbox: &Inbox, on| {
+            let sent = inbox.take();
+            matches!(&sent[..], [Request::Core(proto::Request::Toasts { on: told })] if *told == on)
+        };
+        assert!(told(&inbox, true));
+        app.toast(1, "Build done".to_owned(), Some(0));
+        assert_eq!(app.toast.as_ref().map(|toast| toast.pane), Some(1));
+        assert_eq!(app.notifier.raised(), 0, "drawn, not on the desktop");
+        let mut frame = Frame::default();
+        panes::clear(&mut frame, 24, 80, 0);
+        app.toast
+            .as_ref()
+            .unwrap()
+            .draw(&mut frame, app.panes[0].rect, &GRAPHITE);
+        let row: String = frame.cells[..80]
+            .iter()
+            .map(|cell| cell.character)
+            .collect();
+        assert!(row.ends_with(" api says: Build done "), "{row}");
+        app.toast(2, "Tests failed".to_owned(), Some(1));
+        app.toast(2, "Tests failed again".to_owned(), Some(1));
+        assert_eq!(app.notifier.raised(), 1, "a hidden pane's, once a minute");
+
+        app.configure(Config::default());
+        assert!(told(&inbox, false));
+        assert!(app.toast.is_none(), "off forgets the one shown");
     }
 
     #[test]
