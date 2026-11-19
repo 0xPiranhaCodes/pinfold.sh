@@ -62,9 +62,13 @@ these arguments and no others:
 | `md`    | `pinfold md -- <path>`                 | the file's directory |
 | `files` | `pinfold files -- <path>`              | `path`               |
 | `diff`  | `pinfold diff [--staged] -- [<range>]` | `path`               |
+| `diff` with `checkpoint` | `pinfold diff --checkpoint -- <key> <checkpoint> <view> <pane>` | `path` |
 
 The `--` keeps a caller's value from being read as an option, so each subcommand must take
-what follows it as a value. `path`, `staged` and `range` are checked before any process starts.
+what follows it as a value. `path`, `staged`, `range` and `checkpoint` are checked before any
+process starts. With `checkpoint`, a run's `<run>/<n>`, the caller must reach the run as for
+`checkpoint.take`; the core takes the run's `view` checkpoint first, and the viewer reads both
+from the run's store, never from `path` ([ADR-0050](../adr/0050-rewind-an-agents-changes.md)).
 A tool pane takes keys from the window alone: `pane.send` to it is refused for every caller,
 including the one that opened it, before any approval prompt. A sandboxed caller cannot open one.
 

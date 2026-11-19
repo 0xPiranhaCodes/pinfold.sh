@@ -40,14 +40,15 @@
               "kind": { "const": "tool", "description": "Present only on a pane tool.open opened, which no caller can send to." },
               "tool": {
                 "type": "object",
-                "required": ["name", "path", "staged", "range"],
+                "required": ["name", "path", "staged", "range", "checkpoint"],
                 "additionalProperties": false,
                 "description": "Present only with kind: the tool and the arguments it was opened with.",
                 "properties": {
                   "name": { "enum": ["md", "files", "diff"] },
                   "path": { "type": "string" },
                   "staged": { "type": "boolean" },
-                  "range": { "type": ["string", "null"] }
+                  "range": { "type": ["string", "null"] },
+                  "checkpoint": { "type": ["string", "null"], "description": "The checkpoint a diff viewer opened with tool.open's checkpoint shows the changes since." }
                 }
               }
             }

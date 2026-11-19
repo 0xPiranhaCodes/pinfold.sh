@@ -226,8 +226,14 @@ fn takes_are_limited_lists_read_on_demand_and_a_full_queue_is_busy() {
         .take(run, 2, now + Duration::from_secs(29))
         .unwrap_err();
     assert!(why.contains("once in 30 s"), "{why}");
+    // An API caller's view shares that limit; the window's is not limited.
+    let (_, why) = rewind.view(run, 6, Some(now)).unwrap_err();
+    assert!(why.contains("once in 30 s"), "{why}");
+    rewind.view(run, 7, None).unwrap();
     rewind.list(run, 3).unwrap();
-    let ended = until(&mut rewind, &dir, |ended, _| ended.len() == 2);
+    let ended = until(&mut rewind, &dir, |ended, _| ended.len() == 3);
+    let viewed = ended.iter().find(|e| e.payload == 7).unwrap();
+    assert!(viewed.result.is_ok(), "{viewed:?}");
     let listed = ended.iter().find(|e| e.payload == 3).unwrap();
     assert_eq!(
         listed.result.as_ref().unwrap()["checkpoints"][0]["reason"],

@@ -159,6 +159,7 @@ impl Reactor {
             path,
             staged: false,
             range: None,
+            checkpoint: None,
         };
         self.start_tool(pane, run)
     }
@@ -213,6 +214,7 @@ impl Reactor {
             path,
             staged: false,
             range: None,
+            checkpoint: None,
         };
         self.start_tool(pane, run)
     }

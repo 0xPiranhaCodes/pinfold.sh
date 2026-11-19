@@ -563,11 +563,15 @@ impl Control {
                         | Method::SessionSave
                         | Method::GrantsRevoke { .. }
                         | Method::WorkspaceOpen(_) => APPROVAL_WAIT + OPEN_WAIT,
-                        // A launch waits for its checkpoint, at most `[rewind] wait_s` (60 s), and
-                        // a checkpoint call for a take or a list (ADR-0050).
+                        // A launch waits for its checkpoint, at most `[rewind] wait_s` (60 s), a
+                        // checkpoint call for a take or a list, and a viewer of a checkpoint for
+                        // its view checkpoint (ADR-0050).
                         Method::AgentLaunch(_)
                         | Method::CheckpointTake { .. }
                         | Method::CheckpointList { .. } => APPROVAL_WAIT + OPEN_WAIT,
+                        Method::ToolOpen(open) if open.run.checkpoint.is_some() => {
+                            APPROVAL_WAIT + OPEN_WAIT
+                        }
                         Method::CheckpointRestore { .. } => RESTORE_WAIT,
                         _ => OPEN_WAIT,
                     };

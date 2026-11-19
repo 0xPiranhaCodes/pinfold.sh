@@ -283,12 +283,14 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
 }
 
 /// A launch whose agent waits for its checkpoint, or a checkpoint call waiting on a worker: a
-/// take or list, a restore's plan, or the restore the window allowed.
+/// take or list, a restore's plan, the restore the window allowed, or a `tool.open` of a
+/// checkpoint waiting on its view checkpoint.
 enum Parked {
     Launch(Request, Box<Prepared>),
     Call(Request),
     Plan(Request),
     Restore(Request),
+    View(Request),
 }
 
 impl Parked {
@@ -297,7 +299,8 @@ impl Parked {
             Self::Launch(request, _)
             | Self::Call(request)
             | Self::Plan(request)
-            | Self::Restore(request) => request,
+            | Self::Restore(request)
+            | Self::View(request) => request,
         }
     }
 }
@@ -562,6 +565,84 @@ fn checkpoint_call(
     }
 }
 
+/// `tool.open` of a run's checkpoint (ADR-0050 section 6): checked as `checkpoint.take` reaches
+/// a run and as `tool.open` opens a pane, then the run's `view` checkpoint is queued, and the
+/// viewer starts once it is taken, in [`viewed`].
+fn view_call(
+    reactor: &Reactor,
+    family: &mut Family,
+    rewind: Option<&mut Rewind<Parked>>,
+    log: &mut Log,
+    request: Request,
+) {
+    let Method::ToolOpen(open) = request.method() else {
+        return;
+    };
+    let own = request.caller().and_then(|caller| reactor.pane_of(caller));
+    let checked = (|| {
+        let rewind = rewind.ok_or("checkpoints are off: [rewind] enabled = false")?;
+        let own = own.ok_or("tool.open needs a caller in a pane")?;
+        family.reach(reactor, Some(own), open.of.unwrap_or(own))?;
+        family.contain(reactor, own, None)?;
+        reactor.tools().ok_or("the tools' binary is not known")?;
+        if !Path::new(&open.run.path).is_dir() {
+            return Err("files and diff open an existing directory");
+        }
+        let id = open
+            .run
+            .checkpoint
+            .as_deref()
+            .and_then(|id| id.rsplit_once('/'));
+        let run = id
+            .and_then(|(id, _)| rewind.of_id(id))
+            .ok_or("no such run")?;
+        let record = rewind.run(run).ok_or("no such run")?;
+        let pane = record.pane().ok_or("the run's agent never started")?;
+        if own != pane
+            && own != record.launcher()
+            && family.reach(reactor, Some(own), pane).is_err()
+        {
+            return Err("the run is neither the caller's own nor one it launched");
+        }
+        Ok((rewind, run))
+    })();
+    let (rewind, run) = match checked {
+        Ok(checked) => checked,
+        Err(reason) => return audit::reply(log, reactor, request, Err(reason.to_owned())),
+    };
+    // No caller takes checkpoints faster this way than with checkpoint.take.
+    let queued = rewind.view(run, Parked::View(request), Some(Instant::now()));
+    if let Err((Parked::View(request), reason)) = queued {
+        audit::reply(log, reactor, request, Err(reason.to_owned()));
+    }
+}
+
+/// Opens the viewer of a `tool.open` whose view checkpoint `taken` ended, or says why not.
+fn viewed(
+    reactor: &mut Reactor,
+    family: &mut Family,
+    rewind: &Rewind<Parked>,
+    request: &Request,
+    run: usize,
+    taken: Result<Value, String>,
+) -> Result<Value, String> {
+    let Method::ToolOpen(open) = request.method() else {
+        return Err("not here".to_owned());
+    };
+    let shown = taken.map_err(answered_error)?;
+    let shown = shown["checkpoint"].as_str().ok_or("no view checkpoint")?;
+    let own = request.caller().and_then(|caller| reactor.pane_of(caller));
+    let own = own.ok_or("tool.open needs a caller in a pane")?;
+    let record = rewind.run(run).ok_or("the run has gone")?;
+    let pane = record.pane().ok_or("the run has gone")?;
+    let binary = reactor.tools().ok_or("the tools' binary is not known")?;
+    let command = tool::rewind(binary, &open.run, &record.key(), shown, pane)?;
+    let of = open.of.unwrap_or(own);
+    let opened = family.spawn_command(reactor, own, of, way(open.place), None, command)?;
+    reactor.set_tool(opened, open.run.clone());
+    Ok(json!({"pane": opened}))
+}
+
 /// Whether `request` is a `checkpoint.restore` from `caller`.
 fn restore_from(request: &Request, caller: Option<pinfold_sys::Terminal>) -> bool {
     matches!(request.method(), Method::CheckpointRestore { .. }) && request.caller() == caller
@@ -774,6 +855,10 @@ fn checkpoints_ended(
                 };
                 let parked = (request, *prepared);
                 launched(reactor, family, rewind, log, parked, ended.run, checkpoint);
+            }
+            Parked::View(request) => {
+                let answer = viewed(reactor, family, rewind, &request, ended.run, ended.result);
+                audit::reply(log, reactor, request, answer);
             }
             Parked::Call(request) => {
                 let answer = ended.result.map(|mut line| {
@@ -1626,6 +1711,10 @@ fn daemon(
                     let rewind = checkpoints.as_mut();
                     restore_call(&reactor, rewind, &grants, &mut log, request);
                 }
+                Method::ToolOpen(open) if open.run.checkpoint.is_some() => {
+                    let rewind = checkpoints.as_mut();
+                    view_call(&reactor, &mut family, rewind, &mut log, request);
+                }
                 _ => {
                     decide(
                         &mut reactor,
@@ -1808,7 +1897,13 @@ fn replay(file: &str) -> io::Result<()> {
 /// Opens `panes` tabs of the built-in tool `name` on `path`, as `tool.open` starts one, says the
 /// first one's pid on stdout, then idles until killed. With `close`, it closes them after a
 /// second and says the pid of a tool that is gone. `cargo xtask mem-gate` measures this.
-fn tool_panes(panes: usize, name: &str, path: &str, close: bool) -> io::Result<()> {
+fn tool_panes(
+    panes: usize,
+    name: &str,
+    path: &str,
+    rewind: Option<[&str; 3]>,
+    close: bool,
+) -> io::Result<()> {
     let tool = [Tool::Md, Tool::Files, Tool::Diff]
         .into_iter()
         .find(|tool| tool.name() == name)
@@ -1818,12 +1913,17 @@ fn tool_panes(panes: usize, name: &str, path: &str, close: bool) -> io::Result<(
         path: path.to_owned(),
         staged: false,
         range: None,
+        checkpoint: rewind.map(|[_, checkpoint, _]| checkpoint.to_owned()),
     };
     let binary = sibling("pinfold")?;
     let mut reactor = Reactor::new()?;
     let mut opened = Vec::new();
     for _ in 0..panes {
-        let command = tool::command(&binary, &run).map_err(io::Error::other)?;
+        let command = match rewind {
+            Some([key, _, shown]) => tool::rewind(&binary, &run, key, shown, 0),
+            None => tool::command(&binary, &run),
+        };
+        let command = command.map_err(io::Error::other)?;
         opened.push(
             reactor
                 .open_tab(command, ROWS, COLUMNS)
@@ -1863,12 +1963,24 @@ fn run(args: &[&str]) -> io::Result<()> {
             None,
         ),
         ["--replay", file] => replay(file),
-        ["--tool", panes, name, path] => {
-            tool_panes(panes.parse().map_err(io::Error::other)?, name, path, false)
-        }
-        ["--tool-closed", name, path] => tool_panes(1, name, path, true),
+        ["--tool", panes, name, path] => tool_panes(
+            panes.parse().map_err(io::Error::other)?,
+            name,
+            path,
+            None,
+            false,
+        ),
+        // The diff viewer on a run's checkpoint, in the store `key` (ADR-0050 slice 7).
+        ["--tool", panes, "rewind", path, key, checkpoint, shown] => tool_panes(
+            panes.parse().map_err(io::Error::other)?,
+            "diff",
+            path,
+            Some([key, checkpoint, shown]),
+            false,
+        ),
+        ["--tool-closed", name, path] => tool_panes(1, name, path, None, true),
         _ => Err(io::Error::other(
-            "usage: pinfold-core [--no-shell | --idle <panes> | --window <panes> <width>x<height> | --replay <file> | --tool <panes> <md|files|diff> <path> | --tool-closed <md|files|diff> <path>]",
+            "usage: pinfold-core [--no-shell | --idle <panes> | --window <panes> <width>x<height> | --replay <file> | --tool <panes> <md|files|diff> <path> | --tool <panes> rewind <dir> <key> <checkpoint> <shown> | --tool-closed <md|files|diff> <path>]",
         )),
     }
 }

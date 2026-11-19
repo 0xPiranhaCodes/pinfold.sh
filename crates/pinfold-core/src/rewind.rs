@@ -309,6 +309,12 @@ impl<T> Rewind<T> {
         self.runs.iter().position(|run| run.pane() == Some(pane))
     }
 
+    /// The run whose id is `id`, `r<start>-<n>`.
+    #[must_use]
+    pub fn of_id(&self, id: &str) -> Option<usize> {
+        self.runs.iter().position(|run| run.id() == id)
+    }
+
     /// Whether a queued or running call's payload is `parked`.
     pub fn any(&self, mut parked: impl FnMut(&T) -> bool) -> bool {
         self.queue.iter().any(|queued| parked(&queued.payload))
@@ -494,6 +500,37 @@ impl<T> Rewind<T> {
         self.enqueue(run, Work::Take("api"), payload, None)
             .map_err(|payload| (payload, BUSY))?;
         self.runs[run].api_at = second;
+        Ok(())
+    }
+
+    /// Queues the `view` checkpoint of `run` that a diff viewer of it shows (ADR-0050 section
+    /// 6). With `limited`, for an API caller, it shares `checkpoint.take`'s once in 30 s, so no
+    /// caller takes checkpoints faster through `tool.open`; the window's, the person's, is not.
+    ///
+    /// # Errors
+    ///
+    /// Gives `payload` back with why: the rate limit, or [`BUSY`].
+    pub fn view(
+        &mut self,
+        run: usize,
+        payload: T,
+        limited: Option<Instant>,
+    ) -> Result<(), (T, &'static str)> {
+        let second = limited.map(|now| self.second(now));
+        let Some(record) = self.runs.get(run) else {
+            return Err((payload, "no such run"));
+        };
+        if let Some(second) = second
+            && record.api_at != 0
+            && second - record.api_at < API_EVERY
+        {
+            return Err((payload, "checkpoint.take runs once in 30 s per run"));
+        }
+        self.enqueue(run, Work::Take("view"), payload, None)
+            .map_err(|payload| (payload, BUSY))?;
+        if let Some(second) = second {
+            self.runs[run].api_at = second;
+        }
         Ok(())
     }
 
