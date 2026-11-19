@@ -1,7 +1,8 @@
 //! `run.timeline` (ADR-0052 section 7): an agent run's record, read from its ring file when
 //! asked and dropped once answered, so the core keeps no entry. Numbers and fixed words only,
-//! never pane text (threat model T2). The reply is written as JSON text an entry at a time, one
-//! allocation rather than a tree of values a thousand entries long.
+//! never pane text (threat model T2). The entries are streamed from the file into the reply's
+//! JSON text, one at a time, so a read holds one allocation rather than a tree of values a
+//! thousand entries long.
 
 use std::fmt::Write;
 
@@ -57,8 +58,6 @@ pub fn read<T>(
     }
     let timelines = (reactor.timelines()).ok_or("timelines are off: [timeline] enabled = false")?;
     let run = timelines.newest(pane).ok_or("no agent run in that pane")?;
-    let page = timelines.page(pane, before, count, |entry| kinds & 1 << kind(entry) != 0);
-    let page = page.map_err(|_| "the run's timeline cannot be read".to_owned())?;
     let summary = run.summary();
     let started = u64::from(summary.started) * 1000;
     let head = json!({
@@ -77,13 +76,16 @@ pub fn read<T>(
     // About 130 bytes an entry. macOS keeps a freed allocation of under about 1 MiB dirty, so
     // the reply reserves 2 MiB: one mapping, of which only the pages written count, framed in
     // place and written out without a copy, and handed back whole when freed.
-    let mut json = String::with_capacity((head.len() + 64 + page.len() * 160).max(2 << 20));
+    let mut json = String::with_capacity((head.len() + 64 + count * 160).max(2 << 20));
     json.push_str(&head[..head.len() - 1]);
     json.push_str(r#","entries":["#);
-    for (at, (seq, entry)) in page.into_iter().enumerate() {
-        let comma = if at == 0 { "" } else { "," };
+    let mut comma = "";
+    let keep = |entry: &Entry| kinds & 1 << kind(entry) != 0;
+    let read = timelines.each(pane, before, count, keep, |seq, entry| {
         let _ = write!(json, "{comma}{}", fields(reactor, pane, seq, entry));
-    }
+        comma = ",";
+    });
+    read.map_err(|_| "the run's timeline cannot be read".to_owned())?;
     json.push_str("]}");
     Ok(json)
 }
