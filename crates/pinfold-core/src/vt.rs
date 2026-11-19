@@ -150,6 +150,10 @@ pub trait VtEngine {
     /// Returns the cursor colour and the default background the program set with OSC 12 and
     /// OSC 11, each nothing until set and again once reset.
     fn colours(&self) -> (Option<u32>, Option<u32>);
+
+    /// Returns whether the row a closed command's `B` mark was on is still shown or held,
+    /// neither evicted nor cleared (ADR-0052 section 4). A hint, as the marks are.
+    fn holds_row(&self, row: usize) -> bool;
 }
 
 /// The standard 256-colour table: the palette's 16 ANSI colours, a 6×6×6 cube and a grey ramp.
@@ -824,6 +828,10 @@ impl VtEngine for AlacrittyEngine {
             colours[CURSOR_SLOT].map(rgb),
             colours[BACKGROUND_SLOT].map(rgb),
         )
+    }
+
+    fn holds_row(&self, row: usize) -> bool {
+        (self.scrollback.lock()).is_ok_and(|store| store.holds(row))
     }
 }
 

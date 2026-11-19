@@ -28,6 +28,7 @@ Every connection starts with `hello`:
 | `checkpoint.take`  | Version 2, a run in reach   | [`checkpoint.take.schema.json`](checkpoint.take.schema.json) |
 | `checkpoint.list`  | Version 2, a run in reach   | [`checkpoint.list.schema.json`](checkpoint.list.schema.json) |
 | `checkpoint.restore` | Version 2, a tool pane or outside any pane, and the window's `y` | [`checkpoint.restore.schema.json`](checkpoint.restore.schema.json) |
+| `run.timeline`     | Version 2, a run in reach or outside any pane | [`run.timeline.schema.json`](run.timeline.schema.json) |
 | `events.subscribe` | Version 2 and a terminal    | [`events.subscribe.schema.json`](events.subscribe.schema.json) |
 | `pane.status`      | Version 2 and its own pane  | [`pane.status.schema.json`](pane.status.schema.json)         |
 | `audit.read`       | Version 2, outside any pane | [`audit.read.schema.json`](audit.read.schema.json)           |
@@ -147,6 +148,22 @@ The log is a 256 KiB ring in memory, which is the source of truth; `api.audit_lo
 the newest entries and whether the chain verifies. Only a terminal outside any pane may call it,
 so an agent in a pane cannot read what other agents did.
 
+`run.timeline` reads an agent run's record ([ADR-0052](../adr/0052-session-replay-a-timeline-per-agent-run.md)):
+the commands its shell's marks closed, with their exit status and run time, the calls that
+wrote or acted or were refused, approvals, reported states, checkpoints and how it ended, as
+numbers and fixed words, never a command's text, output, message, path or title. A caller in a
+pane reads its own run and its children's; a terminal outside every pane reads any run, and is
+not asked, as for `audit.read`; another pane's is refused, never asked, and audited. It returns
+the newest `count` entries, at most 1,000, oldest first, each with a `seq` that holds as older
+entries drop: pass the oldest `seq` as `before` for the page before it. The core reads them from
+the run's ring file when asked and keeps none, and a read adds no entry. `pane.list` gives each
+pane's `summary`, the same counters for its newest run, or `null` for a pane with none.
+
+`pinfold ctl timeline [pane]` prints the newest run in a pane, its own by default, a line per
+entry with its `seq`, the time since the run started, the kind and what happened; `--json`
+prints the result and `--all` also shows calls that succeeded. `pinfold ctl list` gains a `RUN`
+column with the same counters in words.
+
 `pinfold ctl log` prints `audit.read` a line per entry, `--json` its result, `-n <count>` the
 newest entries and `--pane <pane>` only calls by or to that pane. `pinfold ctl log --verify
 <file>` checks a written log and its rotated `.1`, and fails if the chain is broken. A chain
@@ -182,7 +199,7 @@ and never from the snapshot.
 this API. Its stdout carries only newline-delimited JSON-RPC, and a line over 1,000,000 bytes is
 refused. Its tools are `pane_list_v1`, `pane_read_v1`, `pane_last_output_v1`, `pane_send_v1`,
 `pane_spawn_v1`, `pane_close_v1`, `pane_wait_v1`, `tool_open_v1`, `checkpoint_take_v1`,
-`checkpoint_list_v1` and `checkpoint_restore_v1`, named with their version as ADR-0009 asks,
+`checkpoint_list_v1`, `checkpoint_restore_v1` and `run_timeline_v1`, named with their version as ADR-0009 asks,
 each taking its method's params and returning the method's result as JSON text.
 `events_next_v1` takes `events.subscribe`'s `events` and an optional `timeout_ms` (default
 30,000, at most 600,000), and returns the next such event, or `{"timeout": true}`. MCP

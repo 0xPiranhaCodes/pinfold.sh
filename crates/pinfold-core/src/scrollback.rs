@@ -673,6 +673,12 @@ impl Scrollback {
             .then(|| number.saturating_sub(self.oldest))
     }
 
+    /// Returns whether row `number` is held or not pushed yet: neither evicted nor cleared.
+    #[must_use]
+    pub fn holds(&self, number: usize) -> bool {
+        number >= self.oldest
+    }
+
     /// Returns the bytes held, which never exceed the cap once a row has been pushed.
     #[must_use]
     pub fn bytes(&self) -> usize {

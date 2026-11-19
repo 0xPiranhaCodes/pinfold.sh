@@ -19,6 +19,7 @@ use pinfold_api::trust::{self, State};
 use pinfold_api::{KEY_CONTEXT, redact, redact_last_lines};
 use pinfold_cli::audit;
 use pinfold_cli::output;
+use pinfold_cli::timeline;
 use pinfold_config::Agent;
 use pinfold_config::workspace as layout;
 use pinfold_core::family::{self, Family, SplitWay};
@@ -175,6 +176,7 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                     "checkpoint.take",
                     "checkpoint.list",
                     "checkpoint.restore",
+                    "run.timeline",
                 ],
                 (true, None) => &[
                     "window.open",
@@ -190,6 +192,7 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                     "checkpoint.take",
                     "checkpoint.list",
                     "checkpoint.restore",
+                    "run.timeline",
                 ],
                 (false, _) => &["window.open"],
             };
@@ -240,7 +243,8 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                 let mut listed = json!({"id": pane.id, "title": pane.title, "cwd": pane.cwd,
                        "command": pane.command, "status": pane.status.name(),
                        "source": source(pane.reported), "message": message,
-                       "focused": pane.focused, "since": pane.since, "started": pane.started});
+                       "focused": pane.focused, "since": pane.since, "started": pane.started,
+                       "summary": timeline::counters(reactor, pane.id)});
                 if let Some(run) = pane.tool {
                     listed["kind"] = json!("tool");
                     listed["tool"] = run.describe();
@@ -279,6 +283,7 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
         | Method::CheckpointTake { .. }
         | Method::CheckpointList { .. }
         | Method::CheckpointRestore { .. }
+        | Method::RunTimeline { .. }
         | Method::AuditRead { .. } => Err("not here".to_owned()),
     }
 }
@@ -1783,6 +1788,11 @@ fn daemon(
                 Method::AuditRead { .. } => {
                     let read = audit::read(&log, &reactor, &request);
                     audit::reply(&mut log, &reactor, request, read);
+                }
+                Method::RunTimeline { .. } => {
+                    let rewind = checkpoints.as_ref();
+                    let read = timeline::read(&reactor, &mut family, rewind, &request);
+                    audit::reply_json(&mut log, &reactor, request, read);
                 }
                 Method::WorkspaceAskTrust(..) => {
                     ask_trust(

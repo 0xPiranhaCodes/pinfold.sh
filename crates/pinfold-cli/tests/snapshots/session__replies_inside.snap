@@ -25,7 +25,8 @@ expression: said
           "tool.open",
           "checkpoint.take",
           "checkpoint.list",
-          "checkpoint.restore"
+          "checkpoint.restore",
+          "run.timeline"
         ],
         "pane": 0,
         "version": 2
@@ -57,6 +58,7 @@ expression: said
             "source": "marks",
             "started": "[started]",
             "status": "idle",
+            "summary": null,
             "title": null
           },
           {
@@ -69,6 +71,7 @@ expression: said
             "source": "marks",
             "started": "[started]",
             "status": "done",
+            "summary": null,
             "title": null
           }
         ]

@@ -2080,6 +2080,7 @@ fn mcp_lists_tools_calls_the_core_as_its_pane_and_reports_a_refusal_as_a_tool_er
             "checkpoint_take_v1",
             "checkpoint_list_v1",
             "checkpoint_restore_v1",
+            "run_timeline_v1",
             "events_next_v1",
         ]
     );
@@ -3514,6 +3515,391 @@ fn an_agent_run_takes_and_lists_checkpoints_only_for_callers_in_reach() {
         "{peer:?}"
     );
     assert!(!peer[1].0, "an agent lists its own run: {peer:?}");
+}
+
+/// Whether `value` fits `schema`, in the parts of JSON Schema `docs/api` uses: type, enum,
+/// const, required, properties, additionalProperties false, items, minimum, maximum, minItems,
+/// maxItems. Says where it does not. It does not check `$ref`, `oneOf`, `pattern`, formats,
+/// string lengths, or `additionalProperties` given as a schema; no API schema uses them.
+fn fits(
+    schema: &serde_json::Value,
+    value: &serde_json::Value,
+    at: &str,
+) -> std::result::Result<(), String> {
+    use serde_json::Value;
+    let wrong = |why: &str| Err(format!("{at}: {why}: {value}"));
+    let types: Vec<&str> = match &schema["type"] {
+        Value::String(one) => vec![one.as_str()],
+        Value::Array(many) => many.iter().filter_map(Value::as_str).collect(),
+        _ => vec![],
+    };
+    let typed = |name: &str| match name {
+        "object" => value.is_object(),
+        "array" => value.is_array(),
+        "string" => value.is_string(),
+        "integer" => value.is_u64() || value.is_i64(),
+        "boolean" => value.is_boolean(),
+        "null" => value.is_null(),
+        _ => false,
+    };
+    if !types.is_empty() && !types.into_iter().any(typed) {
+        return wrong("type");
+    }
+    if schema["enum"]
+        .as_array()
+        .is_some_and(|words| !words.contains(value))
+        || schema.get("const").is_some_and(|word| word != value)
+    {
+        return wrong("not one of its words");
+    }
+    if let Some(number) = value.as_f64() {
+        let low = schema["minimum"].as_f64().is_some_and(|low| number < low);
+        if low || schema["maximum"].as_f64().is_some_and(|high| number > high) {
+            return wrong("out of range");
+        }
+    }
+    if let Some(items) = value.as_array() {
+        let few = schema["minItems"]
+            .as_u64()
+            .is_some_and(|n| (items.len() as u64) < n);
+        if few
+            || schema["maxItems"]
+                .as_u64()
+                .is_some_and(|n| items.len() as u64 > n)
+        {
+            return wrong("item count");
+        }
+        for (index, item) in items.iter().enumerate() {
+            fits(&schema["items"], item, &format!("{at}[{index}]"))?;
+        }
+    }
+    if let Some(object) = value.as_object() {
+        let required = schema["required"].as_array().map_or(&[][..], Vec::as_slice);
+        if let Some(name) = required
+            .iter()
+            .find(|name| name.as_str().is_some_and(|name| !object.contains_key(name)))
+        {
+            return wrong(&format!("no {name}"));
+        }
+        for (name, field) in object {
+            match schema["properties"].get(name) {
+                Some(property) => fits(property, field, &format!("{at}.{name}"))?,
+                None if schema["additionalProperties"] == false => {
+                    return wrong(&format!("{name} is not in the schema"));
+                }
+                None => {}
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The `run.timeline` result in an MCP tool call's text, checked against its schema.
+fn timeline_result(text: &str) -> Result<serde_json::Value> {
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../../docs/api/run.timeline.schema.json"))?;
+    let result: serde_json::Value = serde_json::from_str(text)?;
+    fits(&schema["properties"]["result"], &result, "result")?;
+    Ok(result)
+}
+
+#[test]
+fn run_timeline_answers_self_children_and_outside_and_refuses_another_pane() {
+    let session = Session::new("tr", None).unwrap();
+    fs::create_dir_all(session.directory.join("config/pinfold")).unwrap();
+    let mcp = format!("'{}' mcp", session.directory.join("pinfold").display());
+    let client = "\"$PINFOLD_TEST_CLIENT\"";
+    let of = |pane: u32| mcp_lines(&[("run_timeline_v1", serde_json::json!({"pane": pane}))]);
+    // The peer, pane 2, launched beside the first agent, reads its own run and its sibling's.
+    let peer = format!(
+        "{{ {} }} | {mcp} > {client}/p; mv {client}/p {client}/peer; exec sleep 30\n",
+        mcp_lines(&[
+            ("run_timeline_v1", serde_json::json!({"pane": 2})),
+            ("run_timeline_v1", serde_json::json!({"pane": 1})),
+        ])
+    );
+    fs::write(session.directory.join("peer.sh"), peer).unwrap();
+    let toml = format!(
+        "[rewind]\nenabled = false\n[agents.sleepy]\ncommand = [\"sleep\", \"30\"]\n\
+         [agents.peer]\ncommand = [\"/bin/sh\", \"{}\"]\n",
+        session.directory.join("peer.sh").display()
+    );
+    fs::write(session.directory.join("config/pinfold/pinfold.toml"), toml).unwrap();
+    let pinfold = format!("'{}'", session.directory.join("pinfold").display());
+    let shell = format!(
+        "{pinfold} agent sleepy 2> {client}/e; {pinfold} agent peer 2>> {client}/e; \
+         {{ {} }} | {mcp} > {client}/o; mv {client}/o {client}/out; exec sleep 30",
+        of(1)
+    );
+    let mut core = session.start_core(&["--idle", "1"], &shell).unwrap();
+    let ended = session.wait_beside("out", Some(&mut core)) && session.wait_for("peer");
+    assert!(ended, "{} {}", session.read("e"), session.read_log());
+
+    let outside = |name: &str| {
+        let calls = format!("{{ {} }} | {mcp}", of(1));
+        let log = format!("{pinfold} ctl log --json");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                &format!(
+                    "{}; {}",
+                    into(&calls, name),
+                    into(&log, &format!("{name}-log"))
+                ),
+            ])
+            .env("XDG_RUNTIME_DIR", session.directory.join("run"))
+            .env(CLIENT, &session.directory);
+        command
+    };
+    let _terminal = pinfold_sys::pty::Pty::spawn(outside("outside"), 24, 80).unwrap();
+    assert!(session.wait_beside("outside-log", Some(&mut core)));
+    let detached = pinfold_sys::spawn_detached(outside("none"), Stdio::null());
+    detached.unwrap().wait().unwrap();
+    core.kill().unwrap();
+    core.wait().unwrap();
+
+    // The shell reads its child's run, the peer its own; neither is asked.
+    let child = mcp_results(&session.read("out"));
+    assert!(!child[0].0, "{child:?} {}", session.read_log());
+    let child = timeline_result(&child[0].1).unwrap();
+    assert_eq!(
+        (&child["pane"], &child["run"]),
+        (&1.into(), &serde_json::Value::Null)
+    );
+    let peer = mcp_results(&session.read("peer"));
+    assert!(!peer[0].0, "an agent reads its own run: {peer:?}");
+    assert_eq!(timeline_result(&peer[0].1).unwrap()["pane"], 2);
+    assert!(
+        peer[1].0 && peer[1].1.contains("own run and its children's only"),
+        "{peer:?}"
+    );
+    // A terminal outside every pane reads any run; one with no terminal is refused.
+    let outside = mcp_results(&session.read("outside"));
+    assert!(!outside[0].0, "{outside:?}");
+    assert_eq!(timeline_result(&outside[0].1).unwrap()["pane"], 1);
+    let none = mcp_results(&session.read("none"));
+    assert!(
+        none[0].0 && none[0].1.contains("needs a caller in a terminal"),
+        "{none:?}"
+    );
+    // Each answer and the refusal are audited, with the run's pane and the caller's scope.
+    let log: serde_json::Value = serde_json::from_str(&session.read("outside-log")).unwrap();
+    let reads: Vec<_> = log["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|entry| entry["method"] == "run.timeline")
+        .map(|entry| {
+            (
+                entry["caller"].clone(),
+                entry["scope"].clone(),
+                entry["outcome"].clone(),
+            )
+        })
+        .collect();
+    let read = |caller: Option<u64>, scope: &str, outcome: &str| {
+        (
+            serde_json::json!(caller),
+            serde_json::json!(scope),
+            serde_json::json!(outcome),
+        )
+    };
+    for expected in [
+        read(Some(0), "children", "ok"),
+        read(Some(2), "self", "ok"),
+        read(Some(2), "other", "refused"),
+        read(None, "outside", "ok"),
+    ] {
+        assert!(reads.contains(&expected), "{expected:?} in {reads:?}");
+    }
+}
+
+/// T2 (ADR-0052): a run's record holds no text the pane printed, ran or reported, whatever it
+/// was, and a read adds no entry.
+#[test]
+fn a_timeline_holds_no_pane_text_whatever_the_pane_printed() {
+    let session = Session::new("tt", None).unwrap();
+    fs::create_dir_all(session.directory.join("config/pinfold")).unwrap();
+    let secret = "sk-live-T2SECRET";
+    let pinfold = format!("'{}'", session.directory.join("pinfold").display());
+    let mcp = format!("{pinfold} mcp");
+    let client = "\"$PINFOLD_TEST_CLIENT\"";
+    let of = |pane: u32| mcp_lines(&[("run_timeline_v1", serde_json::json!({"pane": pane}))]);
+    // A command line and its output holding a token, a title, and a secret-looking report.
+    let hostile = format!(
+        "printf '\\033]133;A\\007$ \\033]133;B\\007echo {secret}\\r\\n\\033]133;C\\007{secret} \
+         \\033]0;{secret}\\007\\033]7;file://h/{secret}\\007\\r\\n\\033]133;D;1\\007'\n\
+         printf '\\033]133;A\\007$ \\033]133;B\\007true\\r\\n\\033]133;C\\007\\033]133;D;0\\007'\n\
+         {pinfold} ctl status needs-you 'paste {secret} here'\n\
+         {{ {} }} | {mcp} > {client}/s; mv {client}/s {client}/self\nexec sleep 30\n",
+        of(1)
+    );
+    fs::write(session.directory.join("hostile.sh"), hostile).unwrap();
+    let toml = format!(
+        "[agents.hostile]\ncommand = [\"/bin/sh\", \"{}\"]\n",
+        session.directory.join("hostile.sh").display()
+    );
+    fs::write(session.directory.join("config/pinfold/pinfold.toml"), toml).unwrap();
+    let shell = format!(
+        "mkdir -p -m 700 \"$HOME/work\"; cd \"$HOME/work\"; echo a > a.txt; \
+         {pinfold} agent hostile 2> {client}/e; until [ -e {client}/self ]; do sleep 0.05; done; \
+         {{ {} }} | {mcp} > {client}/o; mv {client}/o {client}/out; exec sleep 30",
+        of(1)
+    );
+    let mut core = session.start_core(&["--idle", "1"], &shell).unwrap();
+    let ended = session.wait_beside("out", Some(&mut core));
+    assert!(ended, "{} {}", session.read("e"), session.read_log());
+    core.kill().unwrap();
+    core.wait().unwrap();
+
+    let own = mcp_results(&session.read("self"));
+    let child = mcp_results(&session.read("out"));
+    assert!(
+        !own[0].0 && !child[0].0,
+        "{own:?} {child:?} {}",
+        session.read_log()
+    );
+    let words: Vec<&str> = [
+        &[
+            "marks",
+            "command",
+            "api",
+            "approval",
+            "state",
+            "checkpoint",
+            "exit",
+        ][..],
+        &pinfold_core::timeline::METHODS.map(|(name, _)| name),
+        &[
+            "ok", "refused", "error", "read", "send", "trust", "owner", "rewind",
+        ],
+        &[
+            "once",
+            "thirty_minutes",
+            "denied",
+            "expired",
+            "code",
+            "signal",
+            "closed",
+        ],
+        &pinfold_api::control::STATES,
+        &pinfold_core::timeline::REASONS,
+    ]
+    .concat();
+    for (text, result) in
+        [&own[0].1, &child[0].1].map(|text| (text, timeline_result(text).unwrap()))
+    {
+        assert!(
+            !text.contains("T2SECRET") && !text.contains("echo"),
+            "{text}"
+        );
+        // Every string is a fixed word or the run's id, r<start>-<n>.
+        let mut strings = vec![];
+        let mut values = vec![&result];
+        while let Some(value) = values.pop() {
+            match value {
+                serde_json::Value::String(word) => strings.push(word.as_str()),
+                serde_json::Value::Array(items) => values.extend(items),
+                serde_json::Value::Object(fields) => values.extend(fields.values()),
+                _ => {}
+            }
+        }
+        let run_id = |word: &str| {
+            let digits = |part: &str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+            (word.strip_prefix('r').and_then(|rest| rest.split_once('-')))
+                .is_some_and(|(start, n)| digits(start) && digits(n))
+        };
+        let stray: Vec<_> = (strings.iter())
+            .filter(|word| !words.contains(word) && !run_id(word))
+            .collect();
+        assert!(stray.is_empty(), "{stray:?} in {text}");
+        let entries = result["entries"].as_array().unwrap();
+        let failed = entries
+            .iter()
+            .find(|entry| entry["kind"] == "command")
+            .unwrap();
+        assert_eq!(
+            (&failed["exit"], &failed["source"]),
+            (&1.into(), &"marks".into())
+        );
+        assert!(entries.iter().any(|entry| entry["kind"] == "state"
+            && entry["status"] == "needs-you"
+            && entry["reported"] == true));
+        assert_eq!(result["summary"]["failed"], 1, "{text}");
+    }
+    // The parent's later read finds the agent's entries as they were, and neither read is one:
+    // a read adds none. A `done` checkpoint may land between them.
+    let entries = |text: &str| timeline_result(text).unwrap()["entries"].clone();
+    let (own, child) = (entries(&own[0].1), entries(&child[0].1));
+    let (own, child) = (own.as_array().unwrap(), child.as_array().unwrap());
+    assert_eq!(own[..], child[..own.len()], "{child:?}");
+    let read = |entry: &serde_json::Value| entry["method"] == "run.timeline";
+    assert!(!child.iter().any(read), "{child:?}");
+}
+
+#[test]
+fn ctl_timeline_prints_a_child_run_and_pane_list_counts_it() {
+    let session = Session::new("tc", None).unwrap();
+    fs::create_dir_all(session.directory.join("config/pinfold")).unwrap();
+    let client = "\"$PINFOLD_TEST_CLIENT\"";
+    let marks =
+        "printf '\\033]133;A\\007$ \\033]133;B\\007false\\r\\n\\033]133;C\\007\\033]133;D;1\\007'";
+    fs::write(
+        session.directory.join("marks.sh"),
+        format!("{marks}\ntouch {client}/marked; exec sleep 30\n"),
+    )
+    .unwrap();
+    let toml = format!(
+        "[rewind]\nenabled = false\n[agents.marks]\ncommand = [\"/bin/sh\", \"{}\"]\n",
+        session.directory.join("marks.sh").display()
+    );
+    fs::write(session.directory.join("config/pinfold/pinfold.toml"), toml).unwrap();
+    let pinfold = format!("'{}'", session.directory.join("pinfold").display());
+    let shell = format!(
+        "{pinfold} agent marks 2> {client}/e; until [ -e {client}/marked ]; do sleep 0.05; done; \
+         {pinfold} ctl timeline 2> {client}/own; {}; {}; exec sleep 30",
+        into(&format!("{pinfold} ctl timeline 1"), "table"),
+        into(&format!("{pinfold} ctl list --json"), "list")
+    );
+    let mut core = session.start_core(&["--idle", "1"], &shell).unwrap();
+    let ended = session.wait_beside("list", Some(&mut core));
+    assert!(ended, "{} {}", session.read("e"), session.read_log());
+    core.kill().unwrap();
+    core.wait().unwrap();
+
+    // The shell's own pane has no run.
+    assert!(
+        session.read("own").contains("no agent run"),
+        "{}",
+        session.read("own")
+    );
+    let table = session.read("table");
+    let lines: Vec<&str> = table.lines().collect();
+    assert!(
+        lines[0].starts_with("pane 1 · 1 command · 1 failed · 1 error"),
+        "{table}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("command    failed, exit 1")),
+        "{table}"
+    );
+    assert!(!table.contains("false"), "the command's text: {table}");
+    let list: serde_json::Value = serde_json::from_str(&session.read("list")).unwrap();
+    let summary = |id: u64| {
+        let panes = list["panes"].as_array().unwrap();
+        let pane = panes.iter().find(|pane| pane["id"] == id).unwrap();
+        pane["summary"].clone()
+    };
+    assert_eq!(summary(0), serde_json::Value::Null);
+    let counted = summary(1);
+    assert_eq!(
+        (&counted["commands"], &counted["failed"]),
+        (&1.into(), &1.into()),
+        "{list}"
+    );
 }
 
 #[test]
