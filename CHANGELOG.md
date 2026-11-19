@@ -57,6 +57,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Changed
 
+- The README and the site point at v0.1.0-beta.5: the download button, the release links and the banner. The site gains a `new` section for rewind, the inbox and the session timeline, each linked to its docs. Themes keep their "in v0.1.0-beta.4" note.
 - Prefix `t` opens the timeline (ADR-0052), so a config whose `keys.inbox` or `keys.next_waiting` is `t` is now refused; its message says so.
 - Link version 23 for rewind ([#442](https://github.com/0xPiranhaCodes/pinfold.sh/issues/442), [ADR-0050](docs/adr/0050-rewind-an-agents-changes.md), slice 6): `ApprovalAction::Rewind`, `Notice::Checkpoint { pane, missing }`, whose reason is an index into a fixed list, and `Notice::Restored { undid, skipped, error }`, the error at most 200 bytes. A window of 22 gets none of them and `checkpoint.restore` is refused for it ([ADR-0043](docs/adr/0043-window-serves-the-previous-link-version.md)).
 - Link version 21 for agent steps ([#447](https://github.com/0xPiranhaCodes/pinfold.sh/issues/447), [ADR-0051](docs/adr/0051-needs-you-inbox-and-alerts.md), slice 9): `Notice::InboxExtra` also carries the agent's context use (255 for none) and up to three steps joined by newlines, at most 1 KiB, which the decoder refuses if they hold a control or bidi character. A window of 20 gets the branch only, and no peek runs for it ([ADR-0043](docs/adr/0043-window-serves-the-previous-link-version.md)).
