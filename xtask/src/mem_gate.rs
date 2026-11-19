@@ -58,7 +58,8 @@ pub const WEBHOOK_SETTLE: Duration = Duration::from_secs(105);
 pub const REWIND_SETTLE: Duration = Duration::from_secs(90);
 /// 8 launches, each printing 1,100 commands (ADR-0052).
 pub const TIMELINE_SETTLE: Duration = Duration::from_secs(5);
-/// The same, then 8,000 `pinfold ctl list` calls, which take about 12 s on an M1 (ADR-0052).
+/// The same, then 8,000 `pinfold ctl list` calls, which take about 12 s on an M1, or 800
+/// `pinfold ctl timeline` reads of 1,000 entries (ADR-0052).
 pub const POLLING_SETTLE: Duration = Duration::from_secs(40);
 /// Long enough for a process to finish starting.
 pub const SETTLE: Duration = Duration::from_secs(1);

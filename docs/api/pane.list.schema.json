@@ -37,6 +37,22 @@
                 "description": "The reported message, cleaned of control and bidi characters, for the caller's own pane only; null for other panes and when source is marks. Events never carry it."
               },
               "focused": { "type": "integer", "minimum": 0, "description": "An ordering hint, not a timestamp: larger means the pane took its tab's focus in the active tab more recently, and 0 means never. pinfold files' @ sends to the agent pane with the largest." },
+              "summary": {
+                "type": ["object", "null"],
+                "required": ["commands", "failed", "approvals", "denied", "calls", "changed", "errors", "needs_you"],
+                "additionalProperties": false,
+                "description": "The counters of the newest agent run in the pane, as run.timeline's summary, never text; null for a pane with no run or with [timeline] off (ADR-0052).",
+                "properties": {
+                  "commands": { "type": "integer", "minimum": 0 },
+                  "failed": { "type": "integer", "minimum": 0 },
+                  "approvals": { "type": "integer", "minimum": 0 },
+                  "denied": { "type": "integer", "minimum": 0 },
+                  "calls": { "type": "integer", "minimum": 0 },
+                  "changed": { "type": "integer", "minimum": 0 },
+                  "errors": { "type": "integer", "minimum": 0 },
+                  "needs_you": { "type": "integer", "minimum": 0 }
+                }
+              },
               "kind": { "const": "tool", "description": "Present only on a pane tool.open opened, which no caller can send to." },
               "tool": {
                 "type": "object",

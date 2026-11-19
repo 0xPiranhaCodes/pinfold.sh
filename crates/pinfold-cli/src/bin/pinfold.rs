@@ -157,6 +157,7 @@ Commands:
   status        Set the state the pane it runs in shows, from an agent's hook
   grants        List or revoke lasting cross-pane grants
   log           Print or verify the audit log of API calls
+  timeline      Print what an agent run did: commands, calls, approvals, states
   session save  Save the session now and print the snapshot's path
 
 Run 'pinfold ctl <command> --help' for a command's arguments.
@@ -171,7 +172,8 @@ pinfold ctl list: list the session's panes.
 
 Usage: pinfold ctl list [--json]
 
-Prints a line per pane: ID, STATUS, TITLE, COMMAND and CWD, with * by the pane it runs in.
+Prints a line per pane: ID, STATUS, TITLE, COMMAND, RUN and CWD, with * by the pane it runs
+in. RUN counts what the pane's agent run did, as 'pinfold ctl timeline' shows it.
 Programs set their title, directory and status, so read them as hints.
 
 Options:
@@ -180,6 +182,28 @@ Options:
 Examples:
   pinfold ctl list
   pinfold ctl list --json
+";
+
+const TIMELINE: &str = "\
+pinfold ctl timeline: print what an agent run did.
+
+Usage: pinfold ctl timeline [pane] [--json] [--all]
+
+Prints the newest run in <pane>, or in the pane it runs in: a line per command its shell's
+marks closed, call that wrote or was refused, approval, reported state, checkpoint and exit,
+oldest first, at most 1,000. Numbers and fixed words only, never what the pane printed. In a
+pane it reads its own run and those of panes it opened; outside every pane, any run.
+
+Arguments:
+  [pane]  The pane's ID, from 'pinfold ctl list'
+
+Options:
+  --json  Print the API's run.timeline result as JSON
+  --all   Show calls that succeeded too, not only refused ones
+
+Examples:
+  pinfold ctl timeline
+  pinfold ctl timeline 3 --all
 ";
 
 const SEND: &str = "\
@@ -377,6 +401,7 @@ fn help(topic: &[&str]) -> Option<&'static str> {
         ["ctl", "status"] => STATUS,
         ["ctl", "grants"] => GRANTS,
         ["ctl", "log"] => LOG,
+        ["ctl", "timeline"] => TIMELINE,
         ["ctl", "session"] | ["ctl", "session", "save"] => SESSION,
         ["mcp"] => MCP,
         ["md"] => MD,
@@ -804,6 +829,159 @@ fn status(state: &str, message: Option<&str>) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// `pinfold ctl timeline [pane] [--json] [--all]`: prints the newest run in `pane`, or the
+/// caller's own, through `run.timeline` (ADR-0052 section 7). It starts no core.
+fn timeline(args: &[&str]) -> Result<(), Box<dyn Error>> {
+    let (mut pane, mut json, mut all) = (None, false, false);
+    for &arg in args {
+        match arg {
+            "--json" => json = true,
+            "--all" => all = true,
+            _ if pane.is_none() && !arg.starts_with('-') => {
+                let number = arg.parse::<u64>();
+                pane = Some(number.map_err(|_| misuse("the pane must be a number"))?);
+            }
+            _ => return Err(misuse(format!("unknown option '{arg}' for 'ctl timeline'"))),
+        }
+    }
+    let pane = match pane {
+        Some(pane) => pane,
+        None => {
+            let (hello, _) = control::list_panes(&running()?)?;
+            let own = hello["pane"].as_u64();
+            own.ok_or("outside a pane, name one: pinfold ctl timeline <pane>")?
+        }
+    };
+    let params = json!({"pane": pane, "count": control::MAX_TIMELINE_READ});
+    let (_, read) = control::ask(&running()?, "run.timeline", &params)?;
+    let text = if json {
+        format!("{read}\n")
+    } else {
+        timeline_table(&read, all)
+    };
+    std::io::stdout().write_all(text.as_bytes())?;
+    Ok(())
+}
+
+/// A run's summary in words, a zero count left out: `12 commands · 1 failed`, or `-`.
+fn summary_line(summary: &Value) -> String {
+    let words = [
+        ("commands", "command", "commands"),
+        ("failed", "failed", "failed"),
+        ("approvals", "approval", "approvals"),
+        ("denied", "denied", "denied"),
+        ("changed", "file changed", "files changed"),
+        ("errors", "error", "errors"),
+    ];
+    let counts: Vec<String> = (words.iter())
+        .filter_map(|(field, one, many)| {
+            let count = summary[field].as_u64().filter(|count| *count > 0)?;
+            Some(format!("{count} {}", if count == 1 { one } else { many }))
+        })
+        .collect();
+    if counts.is_empty() {
+        "-".to_owned()
+    } else {
+        counts.join(" · ")
+    }
+}
+
+/// `run.timeline`'s result as text: the summary, then a line per entry, oldest first. Calls
+/// that succeeded are left out unless `all`. Every field is a number or a fixed word, and
+/// still goes through [`printable`].
+fn timeline_table(read: &Value, all: bool) -> String {
+    let field = |entry: &Value, name: &str| printable(entry[name].as_str().unwrap_or("-"));
+    let number = |entry: &Value, name: &str| entry[name].as_u64().unwrap_or_default();
+    let pane = |entry: &Value, name: &str| match entry[name].as_u64() {
+        Some(pane) => format!(" → pane {pane}"),
+        None => String::new(),
+    };
+    let mut text = format!(
+        "pane {} · {}",
+        number(read, "pane"),
+        summary_line(&read["summary"])
+    );
+    if read["ended_ms"].is_u64() {
+        text += " · ended";
+    }
+    match number(read, "dropped") {
+        0 => text += "\n",
+        dropped => text += &format!(" · {dropped} older dropped\n"),
+    }
+    text += &format!("{:<7} {:<10} {:<10} WHAT\n", "SEQ", "AT", "KIND");
+    let entries = read["entries"].as_array().map_or(&[][..], Vec::as_slice);
+    for entry in entries {
+        let what = match entry["kind"].as_str().unwrap_or_default() {
+            "command" => {
+                let (exit, seconds) = (&entry["exit"], number(entry, "ms") as f64 / 1000.0);
+                let ended = match exit.as_u64() {
+                    Some(0) => "exit 0".to_owned(),
+                    Some(code) => format!("failed, exit {code}"),
+                    None => "no exit status".to_owned(),
+                };
+                let held = if entry["held"] == true {
+                    ""
+                } else {
+                    " · evicted"
+                };
+                format!("{ended} · {seconds:.1} s{held}")
+            }
+            "api" if !all && entry["outcome"] == "ok" => continue,
+            "api" => format!(
+                "{} {}{}",
+                field(entry, "method"),
+                field(entry, "outcome"),
+                pane(entry, "target")
+            ),
+            "approval" => format!(
+                "{}{} · {}",
+                field(entry, "action"),
+                pane(entry, "other"),
+                field(entry, "answer").replace('_', " ")
+            ),
+            "state" => {
+                let glyph = match entry["status"].as_str() {
+                    Some("needs-you") => "◆",
+                    Some("running") => "●",
+                    Some("done") => "✓",
+                    Some("error") => "✕",
+                    _ => "○",
+                };
+                let from = if entry["reported"] == true {
+                    "reported"
+                } else {
+                    "from output"
+                };
+                format!("{glyph} {} · {from}", field(entry, "status"))
+            }
+            "checkpoint" => {
+                let incomplete = if entry["complete"] == true {
+                    ""
+                } else {
+                    " · incomplete"
+                };
+                format!(
+                    "checkpoint {} · {} changed · {}{incomplete}",
+                    number(entry, "n"),
+                    number(entry, "changed"),
+                    field(entry, "reason")
+                )
+            }
+            "exit" => match entry["ended"].as_str() {
+                Some("code") => format!("status {}", number(entry, "exit")),
+                Some("signal") => format!("signal {}", number(entry, "exit")),
+                _ => "pane closed".to_owned(),
+            },
+            _ => continue,
+        };
+        let at = number(entry, "at_ms") / 1000;
+        let at = format!("+{}:{:02}:{:02}", at / 3600, at / 60 % 60, at % 60);
+        let kind = field(entry, "kind");
+        text += &format!("{:<7} {at:<10} {kind:<10} {what}\n", number(entry, "seq"));
+    }
+    text + "Commands and exit codes come from the shell's marks, which output can print.\n"
+}
+
 /// `pinfold agent <name> [--right | --down | --tab]`: opens a pane beside the caller's running
 /// the config's `[agents.<name>]` profile. It starts no core, as it needs a caller in a pane.
 fn agent(name: &str, place: &str) -> Result<(), Box<dyn Error>> {
@@ -1092,8 +1270,8 @@ fn running() -> Result<UnixStream, Box<dyn Error>> {
 /// command and directory, so each field goes through [`printable`] before it reaches a terminal.
 fn table(hello: &Value, list: &Value) -> String {
     let mut text = format!(
-        "{:<5} {:<8} {:<16} {:<24} CWD\n",
-        "ID", "STATUS", "TITLE", "COMMAND"
+        "{:<5} {:<8} {:<16} {:<24} {:<24} CWD\n",
+        "ID", "STATUS", "TITLE", "COMMAND", "RUN"
     );
     let panes = list["panes"].as_array().map_or(&[][..], Vec::as_slice);
     for pane in panes {
@@ -1102,7 +1280,8 @@ fn table(hello: &Value, list: &Value) -> String {
         let id = format!("{}{own}", pane["id"]);
         let (status, title) = (field("status"), field("title"));
         let (command, cwd) = (field("command"), field("cwd"));
-        text += &format!("{id:<5} {status:<8} {title:<16} {command:<24} {cwd}\n");
+        let run = summary_line(&pane["summary"]);
+        text += &format!("{id:<5} {status:<8} {title:<16} {command:<24} {run:<24} {cwd}\n");
     }
     text
 }
@@ -1216,6 +1395,7 @@ fn main() -> ExitCode {
         }
         ["ctl", "session", "save"] => save(),
         ["ctl", "log", ref rest @ ..] => log(rest),
+        ["ctl", "timeline", ref rest @ ..] => timeline(rest),
         ["mcp"] => {
             let socket = control::socket_path(&control::runtime_dir());
             pinfold_cli::mcp::serve(std::io::stdin().lock(), std::io::stdout().lock(), &socket)
@@ -1360,15 +1540,54 @@ mod tests {
     }
 
     #[test]
-    fn a_table_marks_the_callers_pane_and_dashes_what_is_unknown() {
-        let list = json!({"panes": [
-            {"id": 0, "title": "work", "cwd": "/tmp/work", "command": "/bin/zsh", "status": "running"},
-            {"id": 3, "title": null, "cwd": null, "command": "/bin/sh", "status": "idle"},
+    fn a_timeline_prints_a_line_an_entry_and_hides_calls_that_succeeded_unless_all() {
+        let read = json!({"run": null, "pane": 2, "started_ms": 0, "ended_ms": 9000, "dropped": 3,
+        "summary": {"commands": 2, "failed": 1, "calls": 2, "errors": 1},
+        "entries": [
+            {"seq": 3, "at_ms": 1500, "kind": "command", "row": 4, "ms": 2300, "exit": 1,
+             "source": "marks", "held": false},
+            {"seq": 4, "at_ms": 61_000, "kind": "api", "method": "pane.send", "outcome": "ok",
+             "target": 3, "audit_seq": 9},
+            {"seq": 5, "at_ms": 62_000, "kind": "api", "method": "pane.read",
+             "outcome": "refused", "target": 1, "audit_seq": 10},
+            {"seq": 6, "at_ms": 63_000, "kind": "approval", "action": "send", "other": 3,
+             "answer": "thirty_minutes", "grant": 4},
+            {"seq": 7, "at_ms": 64_000, "kind": "state", "status": "needs-you",
+             "reported": true},
+            {"seq": 8, "at_ms": 65_000, "kind": "checkpoint", "n": 2, "reason": "done",
+             "complete": false, "changed": 8},
+            {"seq": 9, "at_ms": 3_700_000, "kind": "exit", "ended": "signal", "exit": 9},
         ]});
         let expected = "\
-ID    STATUS   TITLE            COMMAND                  CWD
-0     running  work             /bin/zsh                 /tmp/work
-3*    idle     -                /bin/sh                  -
+pane 2 · 2 commands · 1 failed · 1 error · ended · 3 older dropped
+SEQ     AT         KIND       WHAT
+3       +0:00:01   command    failed, exit 1 · 2.3 s · evicted
+5       +0:01:02   api        pane.read refused → pane 1
+6       +0:01:03   approval   send → pane 3 · thirty minutes
+7       +0:01:04   state      ◆ needs-you · reported
+8       +0:01:05   checkpoint checkpoint 2 · 8 changed · done · incomplete
+9       +1:01:40   exit       signal 9
+Commands and exit codes come from the shell's marks, which output can print.
+";
+        assert_eq!(timeline_table(&read, false), expected);
+        let all = timeline_table(&read, true);
+        assert!(
+            all.contains("4       +0:01:01   api        pane.send ok → pane 3\n"),
+            "{all}"
+        );
+    }
+
+    #[test]
+    fn a_table_marks_the_callers_pane_and_dashes_what_is_unknown() {
+        let list = json!({"panes": [
+            {"id": 0, "title": "work", "cwd": "/tmp/work", "command": "/bin/zsh", "status": "running",
+             "summary": {"commands": 12, "failed": 1, "approvals": 0, "changed": 0}},
+            {"id": 3, "title": null, "cwd": null, "command": "/bin/sh", "status": "idle", "summary": null},
+        ]});
+        let expected = "\
+ID    STATUS   TITLE            COMMAND                  RUN                      CWD
+0     running  work             /bin/zsh                 12 commands · 1 failed   /tmp/work
+3*    idle     -                /bin/sh                  -                        -
 ";
         assert_eq!(table(&json!({"pane": 3}), &list), expected);
         // Outside a pane none is the caller's.

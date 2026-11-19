@@ -156,7 +156,13 @@ pane reads its own run and its children's; a terminal outside every pane reads a
 not asked, as for `audit.read`; another pane's is refused, never asked, and audited. It returns
 the newest `count` entries, at most 1,000, oldest first, each with a `seq` that holds as older
 entries drop: pass the oldest `seq` as `before` for the page before it. The core reads them from
-the run's ring file when asked and keeps none, and a read adds no entry.
+the run's ring file when asked and keeps none, and a read adds no entry. `pane.list` gives each
+pane's `summary`, the same counters for its newest run, or `null` for a pane with none.
+
+`pinfold ctl timeline [pane]` prints the newest run in a pane, its own by default, a line per
+entry with its `seq`, the time since the run started, the kind and what happened; `--json`
+prints the result and `--all` also shows calls that succeeded. `pinfold ctl list` gains a `RUN`
+column with the same counters in words.
 
 `pinfold ctl log` prints `audit.read` a line per entry, `--json` its result, `-n <count>` the
 newest entries and `--pane <pane>` only calls by or to that pane. `pinfold ctl log --verify

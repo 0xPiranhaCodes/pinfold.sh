@@ -243,7 +243,8 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                 let mut listed = json!({"id": pane.id, "title": pane.title, "cwd": pane.cwd,
                        "command": pane.command, "status": pane.status.name(),
                        "source": source(pane.reported), "message": message,
-                       "focused": pane.focused, "since": pane.since, "started": pane.started});
+                       "focused": pane.focused, "since": pane.since, "started": pane.started,
+                       "summary": timeline::counters(reactor, pane.id)});
                 if let Some(run) = pane.tool {
                     listed["kind"] = json!("tool");
                     listed["tool"] = run.describe();

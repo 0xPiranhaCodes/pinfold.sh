@@ -58,6 +58,7 @@ pub fn read<T>(
     let page = page.map_err(|_| "the run's timeline cannot be read".to_owned())?;
     let summary = run.summary();
     let started = u64::from(summary.started) * 1000;
+    let counters = counters(reactor, pane);
     let entries: Vec<Value> = page
         .into_iter()
         .map(|(seq, entry)| fields(reactor, pane, seq, entry))
@@ -67,14 +68,35 @@ pub fn read<T>(
         "pane": pane,
         "started_ms": started,
         "ended_ms": (!run.is_live()).then(|| started + u64::from(summary.ended)),
-        "summary": {
-            "commands": summary.commands, "failed": summary.failed,
-            "approvals": summary.approvals, "denied": summary.denied, "calls": summary.calls,
-            "changed": summary.changed, "errors": summary.errors, "needs_you": summary.needs_you,
-        },
+        "summary": counters,
         "dropped": run.dropped(),
         "entries": entries,
     }))
+}
+
+/// The counters of the newest run in `pane`, for `run.timeline` and `pane.list`, or null for a
+/// pane with none or with `[timeline]` off.
+///
+/// ```
+/// # fn listed(reactor: &pinfold_core::io::Reactor) {
+/// let summary = pinfold_cli::timeline::counters(reactor, 0);
+/// assert!(summary.is_null() || summary["commands"].is_u64());
+/// # }
+/// ```
+#[must_use]
+pub fn counters(reactor: &Reactor, pane: usize) -> Value {
+    let Some(run) = reactor
+        .timelines()
+        .and_then(|timelines| timelines.newest(pane))
+    else {
+        return Value::Null;
+    };
+    let summary = run.summary();
+    json!({
+        "commands": summary.commands, "failed": summary.failed,
+        "approvals": summary.approvals, "denied": summary.denied, "calls": summary.calls,
+        "changed": summary.changed, "errors": summary.errors, "needs_you": summary.needs_you,
+    })
 }
 
 /// The entry's place in `pinfold_api::control::TIMELINE_KINDS`.
