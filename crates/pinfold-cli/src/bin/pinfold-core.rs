@@ -857,6 +857,15 @@ fn answered_error(why: String) -> String {
     }
 }
 
+/// Writes what the last turn answered into the agent runs' timelines (ADR-0052 slice 2): the
+/// calls the audit log recorded, each joined to its run by its pane.
+fn record_timelines(reactor: &mut Reactor, log: &Log) {
+    let Some(timelines) = reactor.timelines_mut() else {
+        return;
+    };
+    timelines.calls(log, Instant::now());
+}
+
 /// Answers each launch and call whose checkpoint work ended.
 fn checkpoints_ended(
     reactor: &mut Reactor,
@@ -1663,6 +1672,8 @@ fn daemon(
             .chain((!started).then(|| empty_until.saturating_duration_since(now)))
             .chain(unready.map(|(_, by)| by.saturating_duration_since(now)));
         output::tap(&mut reactor, &waits, &subscribers);
+        // Before the turn, which may drop a pane whose run then ends.
+        record_timelines(&mut reactor, &log);
         reactor.turn(Some(wait.min().unwrap_or(IDLE)))?;
         if let Some(sender) = webhook.as_mut() {
             post(&mut reactor, sender);

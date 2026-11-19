@@ -1,4 +1,4 @@
-//! Session replay's records (ADR-0052 sections 2 and 3, slice 1).
+//! Session replay's records (ADR-0052 sections 2 and 3, slices 1 and 2).
 //!
 //! Each agent run keeps a ring file of 16-byte [`Entry`] records, `<state>/timeline/r<pane>-<n>`,
 //! and the core keeps only a 56-byte [`Timeline`]: the [`Summary`], the ring's head and dropped
@@ -15,6 +15,8 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::Instant;
 
+use pinfold_api::Log;
+
 use crate::status::{self, Status};
 use crate::vt::Closed;
 
@@ -27,6 +29,34 @@ pub const CLOSED: u16 = 128;
 pub const MAX_RUNS: usize = crate::rewind::MAX_RUNS;
 /// [`Summary::ended`] while the run is live.
 const LIVE: u32 = u32::MAX;
+/// The audit log's method names, which an `api` entry holds as an index, and whether each
+/// writes or acts. Only those that do are recorded when they succeed (decision 3), so a polling
+/// agent cannot flush the ring. New methods are appended, so a stored index keeps its meaning.
+pub const METHODS: [(&str, bool); 23] = [
+    ("hello", false),
+    ("window.open", true),
+    ("pane.list", false),
+    ("events.subscribe", false),
+    ("pane.read", false),
+    ("pane.last_output", false),
+    ("pane.send", true),
+    ("pane.wait", false),
+    ("pane.spawn", true),
+    ("agent.launch", true),
+    ("tool.open", true),
+    ("pane.close", true),
+    ("checkpoint.take", true),
+    ("checkpoint.list", false),
+    ("checkpoint.restore", true),
+    ("pane.status", true),
+    ("audit.read", false),
+    ("session.save", true),
+    ("workspace.open", true),
+    ("grants.list", false),
+    ("grants.revoke", true),
+    ("workspace.trust_state", false),
+    ("workspace.ask_trust", true),
+];
 const STATUSES: [Status; 5] = [
     Status::NeedsYou,
     Status::Running,
@@ -46,6 +76,18 @@ pub enum Ended {
     Closed,
 }
 
+/// How the audit log recorded a call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Outcome {
+    /// It succeeded.
+    Ok,
+    /// Policy refused it.
+    Refused,
+    /// It failed while being performed.
+    Error,
+}
+
 /// What an entry records: a fixed set of numbers and enums, never text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum What {
@@ -58,6 +100,17 @@ pub enum What {
         ms: u32,
         /// As the mark gave it.
         exit: Option<u8>,
+    },
+    /// A call by or about the run's pane that wrote or acted, or was refused or failed.
+    Api {
+        /// The audit entry's `seq`, its low 32 bits.
+        seq: u32,
+        /// An index into [`METHODS`].
+        method: u8,
+        /// As the audit log recorded it.
+        outcome: Outcome,
+        /// The pane it named.
+        target: Option<u16>,
     },
     /// The shown status changed through a report or an agent CLI's signal, never marks.
     State {
@@ -97,6 +150,18 @@ impl Entry {
             What::Command { row, ms, exit } => {
                 (1, exit.unwrap_or(0), u16::from(exit.is_some()), row, ms)
             }
+            What::Api {
+                seq,
+                method,
+                outcome,
+                target,
+            } => (
+                2,
+                method,
+                outcome as u16,
+                seq,
+                target.map_or(u32::MAX, u32::from),
+            ),
             What::State { status, reported } => (4, status as u8, u16::from(reported), 0, 0),
             What::Exit(Ended::Code(code)) => (6, code, 0, 0, 0),
             What::Exit(Ended::Signal(signal)) => (6, signal, 1, 0, 0),
@@ -120,11 +185,21 @@ impl Entry {
         };
         let (small, flag) = (bytes[1], u16::from_le_bytes([bytes[2], bytes[3]]));
         let (one, two) = (word(8), word(12));
+        let pane = |word: u32| match word {
+            u32::MAX => Some(None),
+            word => u16::try_from(word).ok().map(Some),
+        };
         let what = match (bytes[0], flag) {
             (1, 0 | 1) if flag == 1 || small == 0 => What::Command {
                 row: one,
                 ms: two,
                 exit: (flag == 1).then_some(small),
+            },
+            (2, 0..=2) if usize::from(small) < METHODS.len() => What::Api {
+                seq: one,
+                method: small,
+                outcome: [Outcome::Ok, Outcome::Refused, Outcome::Error][usize::from(flag)],
+                target: pane(two)?,
             },
             (4, 0 | 1) if one == 0 && two == 0 => What::State {
                 status: *STATUSES.get(usize::from(small))?,
@@ -155,7 +230,7 @@ pub struct Summary {
     pub approvals: u32,
     /// See `approvals`.
     pub denied: u32,
-    /// Calls that wrote or acted, were refused or failed (slice 2).
+    /// Calls that wrote or acted, were refused or failed.
     pub calls: u32,
     /// Paths the newest checkpoint changed since launch (slice 2).
     pub changed: u32,
@@ -310,6 +385,8 @@ pub struct Timelines {
     /// Entries a live run keeps, `[timeline] entries`.
     slots: u16,
     next: u32,
+    /// The audit `seq` after the newest call looked at.
+    seen: u64,
     runs: Vec<Timeline>,
 }
 
@@ -336,6 +413,7 @@ impl Timelines {
             dir,
             slots: u16::try_from(entries.clamp(64, 4096)).unwrap_or(4096),
             next: 0,
+            seen: 0,
             runs: Vec::new(),
         })
     }
@@ -446,6 +524,56 @@ impl Timelines {
             .needs_you
             .saturating_add(u32::from(status == Status::NeedsYou));
         run.push(What::State { status, reported }, slots, now);
+    }
+
+    /// Records each call `log` answered since the last look whose caller or target pane has a
+    /// live run, if it wrote or acted, or was refused or failed. Reads that succeed, such as
+    /// `pane.list` and `pane.wait`, are never recorded (decision 3). A refused or failed call
+    /// from a pane goes only into the caller's run, so no pane can flush another's ring with
+    /// calls that do nothing; a refused prompt shows in the target's as its approval.
+    pub fn calls(&mut self, log: &Log, now: Instant) {
+        let seen = self.seen;
+        let new = (log.iter().rev())
+            .take_while(|entry| entry.record.seq >= seen)
+            .count();
+        for entry in log.iter().skip(log.iter().len() - new) {
+            let record = &entry.record;
+            self.seen = record.seq.saturating_add(1);
+            let Some((method, (_, acts))) =
+                (METHODS.iter().enumerate()).find(|(_, (name, _))| *name == record.method)
+            else {
+                continue;
+            };
+            let outcome = match record.outcome {
+                pinfold_api::Outcome::Ok(_) if !acts => continue,
+                pinfold_api::Outcome::Ok(_) => Outcome::Ok,
+                pinfold_api::Outcome::Refused(_) => Outcome::Refused,
+                pinfold_api::Outcome::Error(_) => Outcome::Error,
+            };
+            let what = What::Api {
+                seq: u32::try_from(record.seq & u64::from(u32::MAX)).unwrap_or(0),
+                method: u8::try_from(method).unwrap_or(u8::MAX),
+                outcome,
+                target: record.target.and_then(|pane| u16::try_from(pane).ok()),
+            };
+            let pane = |pane: Option<u64>| pane.and_then(|pane| usize::try_from(pane).ok());
+            let (caller, target) = (pane(record.caller), pane(record.target));
+            let into_target = outcome == Outcome::Ok || caller.is_none();
+            let target = target.filter(|target| into_target && caller != Some(*target));
+            for pane in [caller, target].into_iter().flatten() {
+                self.live_push(pane, what, now, |summary| {
+                    summary.calls = summary.calls.saturating_add(1);
+                });
+            }
+        }
+    }
+
+    fn live_push(&mut self, pane: usize, what: What, now: Instant, count: impl Fn(&mut Summary)) {
+        let slots = self.slots;
+        if let Some(run) = self.live(pane) {
+            count(&mut run.summary);
+            run.push(what, slots, now);
+        }
     }
 
     /// Records how `pane`'s program ended, `None` if it still ran as its pane closed, and
