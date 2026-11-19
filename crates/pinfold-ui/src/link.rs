@@ -197,6 +197,15 @@ pub enum Timeline {
         /// The entries, as the core sent them.
         entries: Vec<[u8; ENTRY]>,
     },
+    /// An entry the watched run wrote.
+    Entry {
+        /// The run's pane.
+        pane: u32,
+        /// Its `seq`.
+        seq: u32,
+        /// The entry, as the core sent it.
+        entry: [u8; ENTRY],
+    },
     /// A command's label, cleaned and cut as the overlay holds it.
     Label {
         /// The pane.
@@ -615,13 +624,13 @@ impl State {
                 held,
                 text: crate::timeline::hold(text),
             }),
-            // Live entries come only to a watched overlay, which this window does not ask for
-            // yet.
+            Notice::TimelineEntry { pane, seq, entry } => {
+                self.timeline.push(Timeline::Entry { pane, seq, entry });
+            }
             Notice::Copied { .. }
             | Notice::WasRunning { .. }
             | Notice::InboxExtra { .. }
-            | Notice::Outside { .. }
-            | Notice::TimelineEntry { .. } => {}
+            | Notice::Outside { .. } => {}
         }
         Ok(())
     }

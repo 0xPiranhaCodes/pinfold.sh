@@ -1357,6 +1357,14 @@ impl App {
         self.core(request);
     }
 
+    /// Whether the palette offers "Timeline": the core speaks link 27, timelines are on, and
+    /// the focused pane has a run (ADR-0052 §5).
+    fn offers_timeline(&self) -> bool {
+        self.timeline_spoken
+            && self.config.timeline.enabled
+            && self.run.is_some_and(|(pane, _)| pane == self.focused)
+    }
+
     /// Whether the palette offers "Rewind Agent Changes": the core speaks it and an agent
     /// reported in the focused pane.
     fn offers_rewind(&self) -> bool {
@@ -1503,6 +1511,7 @@ impl App {
                 total,
                 entries,
             } => timeline.page(pane, started, (dropped, total), &entries),
+            link::Timeline::Entry { pane, seq, entry } => timeline.entry(pane, seq, &entry),
             link::Timeline::Label {
                 pane,
                 row,
@@ -1522,9 +1531,10 @@ impl App {
         match step {
             timeline::Step::Stay => {}
             timeline::Step::Close => return self.close_timeline(),
+            // Watched while open, so new entries come; closing stops it.
             timeline::Step::Page(before) => self.core(proto::Request::Timeline {
                 pane,
-                watch: false,
+                watch: true,
                 before,
                 count: proto::MAX_PAGE,
             }),
@@ -1713,7 +1723,10 @@ impl App {
         let key = &event.logical_key;
         if input::is_palette(key, self.modifiers) {
             self.menu = None;
-            self.palette = Some(Palette::commands(self.offers_rewind()));
+            self.palette = Some(Palette::commands(
+                self.offers_rewind(),
+                self.offers_timeline(),
+            ));
             self.picking = None;
             self.redraw_soon();
             return true;
@@ -1776,7 +1789,10 @@ impl App {
             palette::Step::Chose(index) => {
                 let palette = self.palette.take()?;
                 let Some(pane) = self.picking.take() else {
-                    return palette::COMMANDS.get(index).map(|&(_, command)| command);
+                    // The offered commands are a subset, so the label says which was chosen.
+                    let label = palette.label(index)?;
+                    let chosen = palette::COMMANDS.iter().find(|(name, _)| *name == label);
+                    return chosen.map(|&(_, command)| command);
                 };
                 let name = palette.label(index)?.to_owned();
                 self.request(Request::OpenMarkdown(pane, name));
@@ -2123,10 +2139,15 @@ impl App {
             _ => return None,
         };
         let down = state == ElementState::Pressed;
-        // shortcut: a press anywhere closes the timeline, as Esc does, until clicks select.
-        if self.timeline.is_some() {
+        if let Some(timeline) = &mut self.timeline {
             if down {
-                self.close_timeline();
+                let (rows, columns) = self.area;
+                let step = if self.on_bar {
+                    timeline::Step::Close
+                } else {
+                    timeline.click(rows, columns, self.pointer)
+                };
+                self.timeline_step(step);
             }
             return None;
         }
@@ -2253,6 +2274,11 @@ impl App {
         };
         let lines = self.wheel.trunc();
         self.wheel -= lines;
+        // The open timeline takes the wheel, as it takes every key.
+        if let Some(timeline) = &mut self.timeline {
+            let step = timeline.wheel(lines as i32);
+            return self.timeline_step(step);
+        }
         let Some(screen) = self.hovered() else { return };
         let (pane, frame) = (screen.pane, &screen.frame);
         let key = Key::Named(if lines > 0.0 {
@@ -3327,7 +3353,7 @@ mod tests {
         let text = |text: &str| Key::Character(text.into());
         let enter = Key::Named(NamedKey::Enter);
         for (query, tool) in [("files", proto::Tool::Files), ("diff", proto::Tool::Diff)] {
-            app.palette = Some(Palette::commands(false));
+            app.palette = Some(Palette::commands(false, false));
             assert_eq!(app.palette_key(&text(query), Some(query)), None);
             let command = app.palette_key(&enter, None).unwrap();
             assert!(app.palette.is_none());
@@ -3341,7 +3367,7 @@ mod tests {
                 "{query}"
             );
         }
-        app.palette = Some(Palette::commands(false));
+        app.palette = Some(Palette::commands(false, false));
         app.palette_key(&text("split d"), Some("split d"));
         let command = app.palette_key(&enter, None).unwrap();
         app.run(command);
@@ -3354,19 +3380,19 @@ mod tests {
             })]
         ));
         // Ctrl+Shift+P again closes it, and nothing reaches the pane.
-        app.palette = Some(Palette::commands(false));
+        app.palette = Some(Palette::commands(false, false));
         app.modifiers = ModifiersState::CONTROL | ModifiersState::SHIFT;
         assert_eq!(app.palette_key(&text("P"), Some("\u{10}")), None);
         assert!(app.palette.is_none());
         assert!(inbox.take().is_empty());
     }
 
-    /// The timeline's page request, and the close that frees it.
+    /// The timeline's page request, watched, and the close that frees it and stops the watch.
     fn asked(sent: &[Request], wanted: Option<u32>, wanted_count: u8) -> bool {
         matches!(
             sent,
-            [Request::Core(proto::Request::Timeline { pane: 1, watch: false, before, count })]
-                if *before == wanted && *count == wanted_count
+            [Request::Core(proto::Request::Timeline { pane: 1, watch, before, count })]
+                if *before == wanted && *count == wanted_count && *watch == (wanted_count > 0)
         )
     }
 
@@ -3521,7 +3547,7 @@ mod tests {
     #[test]
     fn the_palette_offers_rewind_only_on_a_core_that_speaks_it_with_an_agent_focused() {
         let (mut app, inbox, _poll) = app();
-        let rewind = palette::COMMANDS.len() - 1;
+        let rewind = palette::COMMANDS.len() - 2;
         let offered = |app: &App| app.offers_rewind();
         assert!(!offered(&app));
         app.rewind_spoken = true;
@@ -3533,7 +3559,7 @@ mod tests {
         app.rewind_spoken = false;
         assert!(!offered(&app));
         assert_eq!(palette::COMMANDS[rewind].1, Command::Rewind);
-        assert_eq!(Palette::commands(false).label(rewind), None);
+        assert_eq!(Palette::commands(false, false).label(rewind), None);
         app.run(Command::Rewind);
         let sent = inbox.take();
         assert!(matches!(
@@ -3547,6 +3573,33 @@ mod tests {
     }
 
     #[test]
+    fn the_palette_offers_the_timeline_only_on_a_core_of_27_with_a_run_focused() {
+        let (mut app, inbox, _poll) = app();
+        let offered = |app: &App| app.offers_timeline();
+        assert!(!offered(&app));
+        app.timeline_spoken = true;
+        assert!(!offered(&app), "no run");
+        app.run = Some((2, RunSummary::default()));
+        assert!(!offered(&app), "another pane's run");
+        app.run = Some((1, RunSummary::default()));
+        assert!(offered(&app));
+        app.config.timeline.enabled = false;
+        assert!(!offered(&app));
+        app.config.timeline.enabled = true;
+        let has = |palette: &Palette| (0..24).any(|index| palette.label(index) == Some("Timeline"));
+        assert!(!has(&Palette::commands(true, false)));
+        // Chosen by its label, whichever entries are left out before it.
+        app.palette = Some(Palette::commands(false, true));
+        assert!(has(app.palette.as_ref().unwrap()));
+        let text = |text: &str| Key::Character(text.into());
+        assert_eq!(app.palette_key(&text("Timeline"), Some("Timeline")), None);
+        let chosen = app.palette_key(&Key::Named(NamedKey::Enter), None);
+        assert_eq!(chosen, Some(Command::Timeline));
+        app.run(Command::Timeline);
+        assert!(app.timeline.is_some() && asked(&inbox.take(), None, proto::MAX_PAGE));
+    }
+
+    #[test]
     fn prefix_m_and_open_markdown_list_then_the_pick_goes_back_by_its_listed_name() {
         let (mut app, inbox, _poll) = app();
         let text = |text: &str| Key::Character(text.into());
@@ -3556,7 +3609,7 @@ mod tests {
         app.modifiers = ModifiersState::empty();
         let command = app.pane_key(&text("m"), None, false).unwrap();
         app.run(command);
-        app.palette = Some(Palette::commands(false));
+        app.palette = Some(Palette::commands(false, false));
         app.palette_key(&text("markdown"), Some("markdown"));
         let command = app.palette_key(&enter, None).unwrap();
         app.run(command);
