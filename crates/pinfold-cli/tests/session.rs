@@ -3835,7 +3835,7 @@ fn a_timeline_holds_no_pane_text_whatever_the_pane_printed() {
 }
 
 #[test]
-fn ctl_timeline_prints_a_childs_run_and_pane_list_counts_it() {
+fn ctl_timeline_prints_a_child_run_and_pane_list_counts_it() {
     let session = Session::new("tc", None).unwrap();
     fs::create_dir_all(session.directory.join("config/pinfold")).unwrap();
     let client = "\"$PINFOLD_TEST_CLIENT\"";
