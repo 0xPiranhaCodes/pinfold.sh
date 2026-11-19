@@ -351,6 +351,7 @@ mod tests {
         let open = |tool| link::Request::OpenTool {
             pane: shell as u32,
             tool,
+            checkpoint: None,
         };
         // With no tools' binary nothing starts.
         assert_eq!(

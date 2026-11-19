@@ -9,6 +9,9 @@
   hold; see "Amendment 2026-11-19: slice 2" at the end.
 - **Amended 2026-11-19 a third time**, decided by the coordinator for the maintainer: how
   `run.timeline` numbers, pages and scopes its entries; see "Amendment 2026-11-19: slice 3".
+- **Amended 2026-11-19 a fourth time**, decided by the coordinator for the maintainer: the link
+  is version 27, labels ride on the page, and the window's diff at a checkpoint reuses
+  `Tool::Rewind`; see "Amendment 2026-11-19: slice 4".
 
 ## Context
 
@@ -484,3 +487,49 @@ Decided by the coordinator for the maintainer while building slice 3.
   child's while that is open (`Family::reach`). A terminal outside every pane reads any run,
   not asked. A caller with no terminal, and any other pane, is refused. Every answer and
   refusal is audited with the scope `self`, `children`, `other` or `outside`.
+
+## Amendment 2026-11-19: slice 4, the link as built
+
+Decided by the coordinator for the maintainer while building slice 4.
+
+- **Version 27, not 18.** ADR-0050 and ADR-0051 took 18 to 26 between them, so section 6's
+  messages carry `since` 27 (`link::TIMELINE`) and ADR-0043 gains the row for 27. A window of
+  26 never gets `Notice::Summary`, a page, an entry, a label or `Refusal::Evicted`, and never
+  sends `Request::Timeline`, `Request::RevealStored` or a checkpoint on `Request::OpenTool`; its
+  decoder refuses each as newer.
+- **Labels ride on the page.** `Request::TimelineLabels` and its list notice are not built.
+  Each `command` entry the core sends, in a page or live, is followed by one
+  `Notice::TimelineLabel { pane, row, held, text }`, so the labels are always those of the
+  page on screen, at most 64 by the page cap, read when sent and kept by neither process's
+  core. One request type and a list-of-numbers wire type fewer.
+- **A label starts at column 0.** Slice 1's `command` entry keeps the `B` mark's row and not
+  its column, so the label is that row's text from its first cell, the prompt included. It is
+  the pane's own text, which the window already shows. The core drops what `status::drawable`
+  refuses (control, bidi and zero-width characters and the state glyphs) and cuts at 80 cells
+  by `unicode-width` and at 320 bytes (`link::MAX_LABEL`); the decoder refuses a label with a
+  control or bidi character, past the cap, or with text for a row no longer held.
+- **The stored row.** Slice 1 records `Scrollback::end()` plus the cursor's line, the row
+  numbering `Request::Reveal` already scrolls by. So `Request::RevealStored` checks
+  `holds_row` and scrolls as `Reveal` does; a row evicted or cleared is refused with the new
+  `Refusal::Evicted`, "Output evicted: scrollback is capped at 2 MB".
+- **`OpenTool.checkpoint` reuses `Tool::Rewind`.** ADR-0050 slice 7's `Tool::Rewind`
+  (`REWIND_VIEW`) already opens the run's diff viewer through its view checkpoint, since the
+  launch checkpoint, and `tool.open` already takes `checkpoint` for the API. No tool is added:
+  `Request::OpenTool` gains `checkpoint: Option<u32>`, taken only with `Tool::Rewind`, and the
+  viewer starts from that checkpoint of the pane's run instead of 0. It is a trailing `u32`
+  sent only when some, so a checkpointless open is the same bytes at 26.
+- **Pages.** `Request::Timeline { pane, watch, before, count }` asks for at most 64 entries;
+  the decoder refuses 65 and a `before` not flagged. `count` 0 asks for no page, so `watch`
+  false with it closes the overlay. The page is `Notice::Timeline { pane, run, started,
+  dropped, total, entries }`, `run` this core's count of the run's launch, entries as section 2
+  lays them out, each of kind 1 to 6, else refused. A pane with no run gets no answer; the
+  window knows it has no run from having no summary.
+- **Live entries.** `Notice::TimelineEntry` also carries the entry's `seq`, so the window can
+  tell a gap. Only the pane whose overlay is open is watched, one per link; a pass sends its new
+  entries at most every 100 ms and at most 64, and a held-back pass sets the only deadline the
+  overlay keeps. A new run in the pane ends the watch.
+- **Summary.** Sent when a counter changes, through `Notice::Progress`'s once-a-second gate,
+  so no timer while idle. The link keeps a two-byte mark of the summary it last sent in each
+  pane's record, which fits its padding: `PaneLink` stays 152 bytes.
+- **Split.** Three PRs: the wire format (`pinfold-proto`), the core's side, and the window's
+  decoding; the overlay that sends the requests is slice 5.
