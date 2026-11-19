@@ -772,13 +772,11 @@ impl Timelines {
 
     /// For `run.timeline` (ADR-0052 section 7): the newest `count` entries of the newest run in
     /// `pane` whose `seq` is below `before` and that `keep` takes, oldest first, each with its
-    /// `seq`, the count of entries the run wrote before it, which holds as older ones drop. One
-    /// record is read at a time from the file, which is untrusted: a record that is short or
-    /// does not decode is skipped, so a garbled file gives what still reads.
+    /// `seq`, the count of entries the run wrote before it, which holds as older ones drop.
     ///
     /// # Errors
     ///
-    /// Returns an error if a closed run's file is gone, a link or not a private file of ours.
+    /// As [`Timelines::each`].
     pub fn page(
         &self,
         pane: usize,
@@ -786,8 +784,31 @@ impl Timelines {
         count: usize,
         keep: impl Fn(&Entry) -> bool,
     ) -> io::Result<Vec<(u64, Entry)>> {
+        let mut page = Vec::new();
+        self.each(pane, before, count, keep, |seq, entry| {
+            page.push((seq, entry))
+        })?;
+        Ok(page)
+    }
+
+    /// Hands the entries [`Timelines::page`] would return to `each`, oldest first, holding none:
+    /// it reads the file twice, a record at a time, back to where the page starts and then
+    /// forward. The file is untrusted: a record that is short or does not decode is skipped, so
+    /// a garbled file gives what still reads.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a closed run's file is gone, a link or not a private file of ours.
+    pub fn each(
+        &self,
+        pane: usize,
+        before: Option<u64>,
+        count: usize,
+        keep: impl Fn(&Entry) -> bool,
+        mut each: impl FnMut(u64, Entry),
+    ) -> io::Result<()> {
         let Some(run) = self.newest(pane) else {
-            return Ok(Vec::new());
+            return Ok(());
         };
         let (slots, reopened);
         let file = match &run.file {
@@ -804,25 +825,28 @@ impl Timelines {
         let first = u64::from(run.dropped);
         let held = u64::from(run.count(slots));
         let end = before.map_or(held, |before| before.saturating_sub(first).min(held));
-        let mut page = Vec::new();
-        let mut bytes = [0; SIZE];
-        for index in (0..end).rev() {
-            if page.len() == count {
-                break;
-            }
+        let read = |index: u64| {
             let slot = run.slot(slots, u16::try_from(index).unwrap_or(u16::MAX));
-            if file
-                .read_exact_at(&mut bytes, HEADER + slot * SIZE as u64)
-                .is_err()
-            {
-                continue;
-            }
-            if let Some(entry) = Entry::decode(&bytes).filter(&keep) {
-                page.push((first + index, entry));
-            }
+            let mut bytes = [0; SIZE];
+            let at = HEADER + slot * SIZE as u64;
+            file.read_exact_at(&mut bytes, at).ok()?;
+            Entry::decode(&bytes).filter(&keep)
+        };
+        let (mut start, mut found) = (end, 0);
+        while start > 0 && found < count {
+            start -= 1;
+            found += usize::from(read(start).is_some());
         }
-        page.reverse();
-        Ok(page)
+        // The file may change under it, so the second pass is held to what the first found.
+        let (mut index, mut given) = (start, 0);
+        while index < end && given < found {
+            if let Some(entry) = read(index) {
+                each(first + index, entry);
+                given += 1;
+            }
+            index += 1;
+        }
+        Ok(())
     }
 }
 
