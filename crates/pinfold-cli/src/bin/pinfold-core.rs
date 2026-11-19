@@ -1792,7 +1792,7 @@ fn daemon(
                 Method::RunTimeline { .. } => {
                     let rewind = checkpoints.as_ref();
                     let read = timeline::read(&reactor, &mut family, rewind, &request);
-                    audit::reply(&mut log, &reactor, request, read);
+                    audit::reply_json(&mut log, &reactor, request, read);
                 }
                 Method::WorkspaceAskTrust(..) => {
                     ask_trust(

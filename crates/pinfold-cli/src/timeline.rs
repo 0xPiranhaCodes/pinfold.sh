@@ -1,6 +1,9 @@
 //! `run.timeline` (ADR-0052 section 7): an agent run's record, read from its ring file when
 //! asked and dropped once answered, so the core keeps no entry. Numbers and fixed words only,
-//! never pane text (threat model T2).
+//! never pane text (threat model T2). The reply is written as JSON text an entry at a time, one
+//! allocation rather than a tree of values a thousand entries long.
+
+use std::fmt::Write;
 
 use pinfold_api::control::{Method, Request};
 use pinfold_core::family::Family;
@@ -20,7 +23,7 @@ use serde_json::{Value, json};
 /// #     rewind: Option<&pinfold_core::rewind::Rewind<T>>,
 /// #     request: pinfold_api::control::Request) {
 /// let read = pinfold_cli::timeline::read(reactor, family, rewind, &request);
-/// pinfold_cli::audit::reply(log, reactor, request, read);
+/// pinfold_cli::audit::reply_json(log, reactor, request, read);
 /// # }
 /// ```
 ///
@@ -33,7 +36,7 @@ pub fn read<T>(
     family: &mut Family,
     rewind: Option<&Rewind<T>>,
     request: &Request,
-) -> Result<Value, String> {
+) -> Result<String, String> {
     let &Method::RunTimeline {
         pane,
         count,
@@ -59,19 +62,25 @@ pub fn read<T>(
     let summary = run.summary();
     let started = u64::from(summary.started) * 1000;
     let counters = counters(reactor, pane);
-    let entries: Vec<Value> = page
-        .into_iter()
-        .map(|(seq, entry)| fields(reactor, pane, seq, entry))
-        .collect();
-    Ok(json!({
+    let head = json!({
         "run": rewind.and_then(|rewind| Some(rewind.run(rewind.of_pane(pane)?)?.id())),
         "pane": pane,
         "started_ms": started,
         "ended_ms": (!run.is_live()).then(|| started + u64::from(summary.ended)),
         "summary": counters,
         "dropped": run.dropped(),
-        "entries": entries,
-    }))
+    })
+    .to_string();
+    // About 130 bytes an entry; the head's `}` gives way to the entries.
+    let mut json = String::with_capacity(head.len() + 16 + page.len() * 160);
+    json.push_str(&head[..head.len() - 1]);
+    json.push_str(r#","entries":["#);
+    for (at, (seq, entry)) in page.into_iter().enumerate() {
+        let comma = if at == 0 { "" } else { "," };
+        let _ = write!(json, "{comma}{}", fields(reactor, pane, seq, entry));
+    }
+    json.push_str("]}");
+    Ok(json)
 }
 
 /// The counters of the newest run in `pane`, for `run.timeline` and `pane.list`, or null for a

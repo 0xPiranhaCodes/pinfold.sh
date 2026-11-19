@@ -688,6 +688,16 @@ impl Request {
     /// Answers the caller with the method's result, or a short reason, which must carry no
     /// pane contents, tokens or environment. A caller that has gone hears nothing.
     pub fn answer(self, result: Result<Value, String>) {
+        self.reply(result.map(Reply::Value));
+    }
+
+    /// Answers the caller with a result already written as one JSON value, which goes out as
+    /// it is: for a long result, such as `run.timeline`'s, that would be a large tree of values.
+    pub fn answer_json(self, json: String) {
+        self.reply(Ok(Reply::Json(json)));
+    }
+
+    fn reply(self, result: Result<Reply, String>) {
         // Never full while its ticket lives, and it never blocks the reactor.
         if self
             .answers
@@ -795,7 +805,14 @@ fn gone(alive: &Weak<AtomicBool>) -> bool {
 }
 
 /// An answer for the peer in a slot, of a generation, with its request's ticket.
-type Answer = ((usize, u64), Result<Value, String>, Arc<()>);
+type Answer = ((usize, u64), Result<Reply, String>, Arc<()>);
+
+/// A method's result: a value, or one already written as JSON text, so a long result is one
+/// allocation rather than a tree of them.
+enum Reply {
+    Value(Value),
+    Json(String),
+}
 /// An event for the peer in a slot, of a generation.
 /// An event for the peer in a slot, of a generation, with its subscriber's count of queued events.
 type Event = ((usize, u64), Value, Arc<AtomicUsize>);
@@ -1093,13 +1110,21 @@ impl Peer {
     }
 
     /// Hands the waiting request its answer.
-    fn answered(&mut self, result: Result<Value, String>) {
+    fn answered(&mut self, result: Result<Reply, String>) {
         let Some((id, asked, _)) = self.asked.take() else {
             return;
         };
         // A refusal from the reactor keeps the connection, unlike a malformed request.
         let reply = match (result, asked) {
-            (Ok(result), _) => {
+            (Ok(Reply::Json(result)), _) => {
+                // As `done` writes it, keys in order, without a tree of the result.
+                let line = format!(r#"{{"id":{id},"jsonrpc":"2.0","result":{result}}}"#);
+                drop(result);
+                self.queue_line(&line);
+                self.until = Instant::now() + self.idle;
+                return;
+            }
+            (Ok(Reply::Value(result)), _) => {
                 self.subscribed |= asked == Asked::Subscribe;
                 done(&id, &result)
             }
@@ -1132,10 +1157,12 @@ impl Peer {
     }
 
     fn queue(&mut self, reply: &Value) {
-        if reply.is_null() {
-            return;
+        if !reply.is_null() {
+            self.queue_line(&reply.to_string());
         }
-        let line = reply.to_string();
+    }
+
+    fn queue_line(&mut self, line: &str) {
         if self.output.len() + line.len() >= MAX_OUTPUT {
             // A peer that will not read is closed rather than buffered for.
             (self.output, self.gone) = (Vec::new(), true);
@@ -2209,6 +2236,21 @@ mod tests {
                 .unwrap();
         });
         assert!(matches!(list_panes(&old), Err(Error::Old)));
+    }
+
+    #[test]
+    fn a_result_written_as_json_reaches_the_caller_as_a_value_would() {
+        let directory = fresh();
+        let control = Control::bind(&directory).unwrap();
+        thread::spawn(move || {
+            control.serve(|request| match request.method() {
+                Method::Hello => request.answer(Ok(json!({"pane": null}))),
+                _ => request.answer_json(r#"{"panes":[{"id":3}]}"#.to_owned()),
+            })
+        });
+        let stream = UnixStream::connect(socket_path(&directory)).unwrap();
+        let (_, list) = list_panes(&stream).unwrap();
+        assert_eq!(list, json!({"panes": [{"id": 3}]}));
     }
 
     #[test]
