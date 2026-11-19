@@ -693,6 +693,8 @@ impl Request {
 
     /// Answers the caller with a result already written as one JSON value, which goes out as
     /// it is: for a long result, such as `run.timeline`'s, that would be a large tree of values.
+    /// It is framed in place and becomes the connection's output, so with room for the frame
+    /// it is never copied.
     pub fn answer_json(self, json: String) {
         self.reply(Ok(Reply::Json(json)));
     }
@@ -1116,11 +1118,16 @@ impl Peer {
         };
         // A refusal from the reactor keeps the connection, unlike a malformed request.
         let reply = match (result, asked) {
-            (Ok(Reply::Json(result)), _) => {
-                // As `done` writes it, keys in order, without a tree of the result.
-                let line = format!(r#"{{"id":{id},"jsonrpc":"2.0","result":{result}}}"#);
-                drop(result);
-                self.queue_line(&line);
+            (Ok(Reply::Json(mut line)), _) => {
+                // As `done` writes it, keys in order, framed in the result's own buffer.
+                line.insert_str(0, &format!(r#"{{"id":{id},"jsonrpc":"2.0","result":"#));
+                line.push('}');
+                if self.output.is_empty() && self.output.len() + line.len() < MAX_OUTPUT {
+                    self.output = line.into_bytes();
+                    self.output.push(b'\n');
+                } else {
+                    self.queue_line(&line);
+                }
                 self.until = Instant::now() + self.idle;
                 return;
             }
