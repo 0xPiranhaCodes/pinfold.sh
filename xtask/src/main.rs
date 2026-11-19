@@ -740,8 +740,9 @@ fn mem_gate_task() -> ExitCode {
         ..webhook
     };
     // ADR-0052 slice 1: 8 agent runs whose rings each wrapped, live and after their programs
-    // exited, under the core budget. Off is the same output with no timeline, shown beside them:
-    // 56 B a run is far under a sample's noise, so the type sizes are asserted in the code.
+    // exited, under #476's launch ceiling, as the run-record row: main without timelines reads
+    // 4.38 MB here. Off is the same output with no timeline, shown beside them: 56 B a run is far
+    // under a sample's noise, so the type sizes are asserted in the code.
     let timeline_inputs = inputs.join("timeline");
     let (timeline_on, timeline_exited, timeline_off) = (
         timeline_inputs.join("on"),
@@ -750,6 +751,7 @@ fn mem_gate_task() -> ExitCode {
     );
     let timelines = mem_gate::Budget {
         metric: "Core, 8 agent panes with full timelines",
+        limit: mem_gate::LAUNCH_LIMIT,
         settle: mem_gate::TIMELINE_SETTLE,
         agents: Some(&timeline_on),
         ..webhook

@@ -423,3 +423,7 @@ Decided by the coordinator for the maintainer while building slice 1.
   be reaped is recorded as its pane closing.
 - **Mem-gate.** `--idle 8` with an agent profile whose program prints 1,100 OSC 133 command
   pairs, live and after it exits, and the same output with `[timeline]` off shown beside them.
+  The two rows are held to #476's 5.00 MB launch ceiling, as ADR-0050's run-record row is: main,
+  with no timeline code, already reads 4.38 MB there, from the agent launches and their output.
+  The 56 B a run is far below a sample's noise, so it is held by the asserted type sizes, and
+  the off row shows the difference.
