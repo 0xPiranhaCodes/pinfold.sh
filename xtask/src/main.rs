@@ -357,6 +357,19 @@ fn write_tool_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
         ),
     )?;
     fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
+    // ADR-0051 §9's progress row: every tab's program reports OSC 9;4 progress, then draws the
+    // heavy screen, with the default config, so each tab draws its bar and the Dock tile one.
+    let progress = dir.join("progress");
+    fs::create_dir_all(&progress)?;
+    let script = progress.join("agent.sh");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nprintf '\\033]9;4;1;40\\007'\nexec {}\n",
+            quote(&fs::canonicalize(HEAVY_SCREEN)?)
+        ),
+    )?;
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755))?;
     write_peek_session(&files, &fs::canonicalize(&repo)?)
 }
 
@@ -631,6 +644,7 @@ fn mem_gate_task() -> ExitCode {
     let agent_files = inputs.join("agent-files");
     let outside = inputs.join("outside");
     let toasts = inputs.join("toasts");
+    let progress = inputs.join("progress");
     let replay_typical = ["--replay", typical.as_str()];
     let replay_hostile = ["--replay", hostile.as_str()];
     let replay_baseline: &[&str] = &["--replay", "/dev/null"];
@@ -1045,6 +1059,13 @@ fn mem_gate_task() -> ExitCode {
         budgets.push(mem_gate::Budget {
             metric: "Window on macOS with an answer prompt over the inbox, 8 agents, 1512x1890",
             inbox: Some("answer"),
+            ..agents
+        });
+        // ADR-0051 §9: eight tabs each drawing a progress bar, and the Dock tile its bar.
+        budgets.push(mem_gate::Budget {
+            metric: "Window on macOS with progress on 8 tabs, 1512x1890",
+            screen: None,
+            agents: Some(&progress),
             ..agents
         });
         // ADR-0051 §8: the same inbox with 16 agents outside PinFold after its own rows.

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use pinfold_proto::{Cell, DEFAULT_BACKGROUND, Frame};
+use pinfold_proto::{BAR, Cell, DEFAULT_BACKGROUND, Frame};
 use pinfold_sys::metal::{Gpu, Instance};
 use raw_window_handle::HasWindowHandle;
 use swash::scale::ScaleContext;
@@ -93,7 +93,7 @@ fn instances(
     let bleed = metrics.bleed() as f32;
     // Backgrounds go first, so a wide glyph is not covered by the cell after it.
     for (index, cell) in cells.iter().enumerate() {
-        if cell.background != clear {
+        if cell.background != clear && !(tabs.contains(&index) && cell.background & BAR != 0) {
             let (x, y) = position(index);
             out.push(Instance {
                 position: [x, y],
@@ -104,13 +104,20 @@ fn instances(
             });
         }
     }
-    for (offset, colour) in bleeds(&cells[tabs.clone()], clear).enumerate() {
-        if colour != clear {
-            let (x, y) = position(tabs.start + offset);
-            for top in [y - bleed, y + height] {
+    for (offset, (colour, below)) in bleeds(&cells[tabs.clone()], clear).enumerate() {
+        let (x, y) = position(tabs.start + offset);
+        // A bar's cell was left out above, and takes its pill's colour.
+        let bar = colour != below;
+        let quads = [
+            (y - bleed, bleed, colour),
+            (y + height, bleed, below),
+            (y, if bar { height } else { 0.0 }, colour),
+        ];
+        for (top, tall, colour) in quads {
+            if colour != clear && tall > 0.0 {
                 out.push(Instance {
                     position: [x, top],
-                    size: [width, bleed],
+                    size: [width, tall],
                     atlas: [0.0, 0.0],
                     colour,
                     textured: 0,
@@ -380,6 +387,32 @@ mod tests {
         let tops: Vec<_> = glyphs.iter().map(|quad| quad.position[1]).collect();
         let baseline = METRICS.baseline as f32;
         assert_eq!(tops, [20.0 + baseline + 2.0, 40.0 + baseline]);
+    }
+
+    /// ADR-0051 §9: a bar's cell takes its pill's colour, its bleed above too, and only the bleed
+    /// below takes the bar's, with no quad in the bar's colour on the cell itself.
+    #[test]
+    fn a_bar_cell_is_its_pill_with_its_colour_below() {
+        let padding = Padding {
+            tab_row: Some(0),
+            ..Padding::default()
+        };
+        let (fill, blue) = (0x0012_3456, 0x007a_a7ff);
+        let cells = [cell(' ', fill), cell(' ', blue | BAR)];
+        let mut out = Vec::new();
+        instances(&cells, 2, METRICS, padding, PAPER, |_, _| None, &mut out);
+        let bar: Vec<_> = (out.iter().filter(|quad| quad.position[0] == 10.0))
+            .map(|quad| (quad.position[1], quad.size[1], quad.colour))
+            .collect();
+        let bleed = METRICS.bleed() as f32;
+        assert_eq!(
+            bar,
+            [
+                (-bleed, bleed, fill),
+                (20.0, bleed, blue),
+                (0.0, 20.0, fill)
+            ]
+        );
     }
 
     #[test]
