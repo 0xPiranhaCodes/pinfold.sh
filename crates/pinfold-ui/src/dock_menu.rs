@@ -1,11 +1,15 @@
 //! The macOS Dock menu (ADR-0033): New Tab, Split Right, Split Down, Detach, then one item per
 //! tab that goes to it, with the tab's agent state as glyph and word. AppKit asks for it each
 //! time the Dock icon is right-clicked, so it is built from the tabs as of the last layout.
+//!
+//! The Dock tile's progress bar (ADR-0051 §9) is here too, drawn on a change only.
 
 use std::cell::RefCell;
 use std::io::{self, Write};
 use std::rc::Rc;
 
+use pinfold_proto::link::{HIDDEN, INDETERMINATE, progress_parts};
+use pinfold_sys::dock_tile::{DockTile, Progress};
 use pinfold_sys::menu::Action;
 
 use crate::prefix::Command;
@@ -78,9 +82,54 @@ impl Dock {
     }
 }
 
+/// The Dock tile's progress bar, and the byte it last drew.
+#[derive(Default)]
+pub struct Tile {
+    pub(crate) shown: u8,
+    tile: Option<DockTile>,
+}
+
+impl Tile {
+    /// The app's tile, on the main thread.
+    pub fn new() -> Self {
+        Self {
+            shown: 0,
+            tile: DockTile::new(),
+        }
+    }
+
+    /// Shows a progress byte, drawing the tile only when it changed, and returns whether it did.
+    /// 0 drops the bar's views.
+    pub fn show(&mut self, progress: u8) -> bool {
+        if progress == self.shown {
+            return false;
+        }
+        self.shown = progress;
+        let shown = match progress_parts(progress) {
+            (HIDDEN, _) => Progress::Hidden,
+            (INDETERMINATE, _) => Progress::Indeterminate,
+            (_, percent) => Progress::Percent(percent),
+        };
+        if let Some(tile) = &mut self.tile {
+            tile.show(shown);
+        }
+        true
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR-0051 §9: the tile is drawn on a change only, never for a repeat.
+    #[test]
+    fn the_tile_is_drawn_only_when_its_progress_changes() {
+        let mut tile = Tile::default();
+        assert!(!tile.show(0), "nothing to draw while none shows");
+        assert!(tile.show(40));
+        assert!(!tile.show(40));
+        assert!(tile.show(0));
+    }
 
     #[test]
     fn tabs_follow_the_fixed_items_with_glyph_and_word() {
