@@ -364,9 +364,9 @@ fn checkpoint_peak(
     if !done(&line) {
         return Err(io::Error::other(format!("did not do it all: {line}")));
     }
-    // A peek may exit before the first sample, so it reports its own peak on Linux too (#505).
-    let peak = if cfg!(target_os = "linux") && args.first() == Some(&"checkpoint") {
-        Some(sampled)
+    // A peek may exit before the first sample, so on Linux it also gives its PSS as it ends (#505).
+    let peak = if cfg!(target_os = "linux") {
+        Some(sampled.max(line["now"].as_u64().unwrap_or(0)))
     } else {
         line["peak"].as_u64()
     };
@@ -434,10 +434,10 @@ pub fn run_takes(program: &Path, tree: &Path, state: &Path) -> bool {
 }
 
 /// ADR-0051 §11: `pinfold agents peek` over a 64 MiB Claude Code session, the median of
-/// [`RUNS`] peaks, against [`PEEK_LIMIT`]. `home` holds the session for `dir`. Each peak is the
-/// peek's own, as on macOS: on Linux its `VmHWM`, which counts shared libraries whole, as a
-/// peek can exit before a PSS sample. Prints its row under [`run`]'s table and returns false if
-/// it is over or cannot be measured.
+/// [`RUNS`] peaks, against [`PEEK_LIMIT`]. `home` holds the session for `dir`. On Linux each is
+/// the most of the PSS samples and the PSS the peek gives as it ends, as a peek can exit before
+/// the first sample. Prints its row under [`run`]'s table and returns false if it is over or
+/// cannot be measured.
 pub fn run_peek(program: &Path, home: &Path, dir: &Path) -> bool {
     let metric = "`pinfold agents peek`, a 64 MiB session file";
     let limit = megabytes(PEEK_LIMIT);
