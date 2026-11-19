@@ -629,3 +629,44 @@ Decided by the coordinator for the maintainer while building slice 11.
   `<label> says: <text>`, go to the desktop notification, under the existing limits that alerts
   share: one per pane per 60 s and one per 10 s in all. Only `program_notifications` gates
   toasts, not the `[alerts] desktop` list.
+
+## Amendment 2026-11-19: slice 12, progress as built
+
+Decided by the coordinator for the maintainer while building slice 12.
+
+- **One byte cannot hold the state in its high bits and a percent of 0 to 100.** Five states
+  need 3 bits and 0 to 100 needs 7. So the byte keeps the state in its top 3 bits, in ConEmu's
+  numbering (0 hidden, 1 normal, 2 error, 3 indeterminate, 4 paused), and the percent in the low
+  5, as `round(p × 31 / 100)`, drawn back as `round(q × 100 / 31)`: steps of about 3 %, exact at
+  0 and 100, so 100 always draws full and 0 always empty. Hidden is always 0 and indeterminate
+  keeps no percent, so the byte changes only when what it shows does. States 5 to 7 are never
+  sent and read as hidden. `pinfold_proto::link::progress` and `progress_parts` are the only
+  encoder and decoder. No second field.
+- **Parsing.** `ESC ] 9 ; 4 ; <state> ; <percent>`. A state other than one digit 0 to 4 changes
+  nothing. The percent is read from its leading digits, saturating, then clamped to 100, so
+  `250` is 100 and `-5`, `x` or none is 0. Error and paused without a percent keep the one
+  shown, as Windows Terminal does. OSC 9;4 never counts toward ADR-0046's needs you.
+- **Link version 26** adds `Notice::Progress { pane, progress }` (24 and 25 are taken). A
+  window of 25 never receives it.
+- **Coalescing keeps no time per pane.** The session keeps when a pass last sent progress. A
+  pass at most once a second sends every pane whose byte differs from the one the window last
+  heard; a change inside the second sets one session deadline, so the latest value goes when
+  it is up. The deadline exists only while a change waits, so an idle core wakes for nothing.
+  Each pane's link state gains the byte last told, 1 byte.
+- **Exit.** A pane whose program has exited reads as 0, so the window hears 0 if the pane stays,
+  and drops its progress with the pane if it goes.
+- **The tab's bar is drawn in the tab row's lower bleed.** The row of tabs is one cell row, so
+  "under the label" is the strip of the pill that reaches below it. A cell of the label carries
+  the bar's colour in its background with a new `BAR` bit (`pinfold_proto::BAR`, in the
+  background's top byte beside `GLASS`); the CPU and Metal renderers draw that colour only below
+  the cell and give the cell its pill's colour. So the frame, and its snapshot, still holds
+  every colour drawn, and the renderer learns no theme colour. The bar covers as many cells of
+  the label as its percent, every other cell with no percent, in `states.running` or
+  `states.error`. A tab shows its focused pane's progress, or else the furthest along of its
+  panes, one with no percent before none; the Dock tile uses the same rule over tabs.
+- **The Dock tile** is an `NSImageView` of the app's icon with an `NSProgressIndicator` bar at
+  its foot, built when progress first shows and dropped, with the tile's content view, when it
+  goes, and drawn with `NSDockTile::display` only when the byte shown changes. AppKit's bar has
+  no red, so an error shows as its percent; with no percent it is AppKit's indeterminate bar,
+  still, as nothing animates the tile. The calls are all safe in `objc2-app-kit`, so
+  `pinfold-sys/src/dock_tile.rs` has no `unsafe` block.

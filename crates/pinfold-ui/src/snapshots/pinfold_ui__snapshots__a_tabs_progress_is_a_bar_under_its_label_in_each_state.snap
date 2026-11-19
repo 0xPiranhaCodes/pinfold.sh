@@ -1,0 +1,44 @@
+---
+source: crates/pinfold-ui/src/snapshots.rs
+expression: cells(&progress_tabs())
+---
+| building |
+| building |
+| building |
+| building |
+| building |
+| building |
+0:0..1 fg 253c3b bg 121212 tall
+0:1..2 fg e2e5ea bg 253c3b
+0:2..10 fg 5cd6cb bg 253c3b bold
+0:10..11 fg e2e5ea bg 253c3b
+1:0..1 fg 253c3b bg 121212 tall
+1:1..2 fg e2e5ea bg 253c3b
+1:2..6 fg 5cd6cb bg 7aa7ff bold bar
+1:6..10 fg 5cd6cb bg 253c3b bold
+1:10..11 fg e2e5ea bg 253c3b
+2:0..1 fg 253c3b bg 121212 tall
+2:1..2 fg e2e5ea bg 253c3b
+2:2..10 fg 5cd6cb bg 7aa7ff bold bar
+2:10..11 fg e2e5ea bg 253c3b
+3:0..1 fg 253c3b bg 121212 tall
+3:1..2 fg e2e5ea bg 253c3b
+3:2..6 fg 5cd6cb bg ff8a8a bold bar
+3:6..10 fg 5cd6cb bg 253c3b bold
+3:10..11 fg e2e5ea bg 253c3b
+4:0..1 fg 253c3b bg 121212 tall
+4:1..2 fg e2e5ea bg 253c3b
+4:2..3 fg 5cd6cb bg 7aa7ff bold bar
+4:3..4 fg 5cd6cb bg 253c3b bold
+4:4..5 fg 5cd6cb bg 7aa7ff bold bar
+4:5..6 fg 5cd6cb bg 253c3b bold
+4:6..7 fg 5cd6cb bg 7aa7ff bold bar
+4:7..8 fg 5cd6cb bg 253c3b bold
+4:8..9 fg 5cd6cb bg 7aa7ff bold bar
+4:9..10 fg 5cd6cb bg 253c3b bold
+4:10..11 fg e2e5ea bg 253c3b
+5:0..1 fg 253c3b bg 121212 tall
+5:1..2 fg e2e5ea bg 253c3b
+5:2..4 fg 5cd6cb bg 7aa7ff bold bar
+5:4..10 fg 5cd6cb bg 253c3b bold
+5:10..11 fg e2e5ea bg 253c3b

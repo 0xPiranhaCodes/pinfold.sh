@@ -35,7 +35,7 @@ use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
 use pinfold_proto::link::{
     ApprovalAction, Decoder, Error, Layout, MAX_DIMENSION, MAX_PANES, MAX_REQUEST, Notice, OLDEST,
-    Position, Rect, Refusal, Request, Selection, VERSION,
+    Position, Rect, Refusal, Request, Selection, VERSION, progress_parts,
 };
 use pinfold_proto::{Frame, Palette};
 
@@ -125,6 +125,29 @@ pub struct Tab {
     pub status: Option<(u8, bool)>,
     /// The message its agent reported, cleaned by the core. Empty if none.
     pub message: String,
+    /// Its OSC 9;4 progress byte: its focused pane's, or else the furthest along of its panes,
+    /// 0 for none (ADR-0051 §9).
+    pub progress: u8,
+}
+
+/// The progress byte to show for a group, as a tab shows its panes' and the Dock tile its tabs':
+/// the focused one's, or else the furthest along, one with no percent before none (ADR-0051 §9).
+///
+/// ```
+/// use pinfold_proto::link::{NORMAL, progress};
+/// use pinfold_ui::link::progress_of;
+///
+/// let (low, high) = (progress(NORMAL, 20), progress(NORMAL, 80));
+/// assert_eq!(progress_of(low, [low, high].into_iter()), low);
+/// assert_eq!(progress_of(0, [low, high, 0].into_iter()), high);
+/// ```
+#[must_use]
+pub fn progress_of(focused: u8, all: impl Iterator<Item = u8>) -> u8 {
+    if focused != 0 {
+        return focused;
+    }
+    let rank = |progress: &u8| (*progress != 0, progress_parts(*progress).1);
+    all.max_by_key(rank).unwrap_or(0)
 }
 
 /// A pane in the inbox (ADR-0051), as its last [`Notice::Status`] said.
@@ -257,6 +280,9 @@ struct State {
     /// Each run's pane whose strip changed and why it has no checkpoint, until the window takes
     /// it, at most [`MAX_PANES`] (ADR-0050).
     checkpoints: Vec<(u32, u8)>,
+    /// Each pane with OSC 9;4 progress and its byte, never 0, at most [`MAX_PANES`] (ADR-0051
+    /// §9). Empty while no pane has any.
+    progress: Vec<(u32, u8)>,
     /// How the last restore the window allowed ended, until the window takes it.
     restored: Option<(u32, u32, String)>,
 }
@@ -431,6 +457,13 @@ impl State {
             }
             Notice::Refused { reason } => self.refused = Some(reason),
             Notice::Toast { pane, text, .. } => self.toast = Some((pane, text.to_owned())),
+            Notice::Progress { pane, progress } => {
+                self.progress.retain(|(other, _)| *other != pane);
+                if progress != 0 && self.progress.len() < MAX_PANES {
+                    self.progress.push((pane, progress));
+                }
+                self.retab_progress();
+            }
             Notice::Checkpoint { pane, missing } => {
                 self.checkpoints.retain(|(other, _)| *other != pane);
                 if self.checkpoints.len() < MAX_PANES {
@@ -561,6 +594,30 @@ impl State {
                 std::mem::take,
             )
         }));
+        // A pane that went takes its progress with it.
+        self.progress
+            .retain(|(pane, _)| members.iter().any(|(other, _)| other == pane));
+        self.retab_progress();
+    }
+
+    /// Sets each tab's progress: its focused pane's, or else the furthest along of its panes'.
+    /// A change is news for the tab strip.
+    fn retab_progress(&mut self) {
+        let of = |pane: u32| {
+            let found = self.progress.iter().find(|(other, _)| *other == pane);
+            found.map_or(0, |(_, progress)| *progress)
+        };
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            let panes = self
+                .members
+                .iter()
+                .filter(|(_, at)| usize::from(*at) == index);
+            let progress = progress_of(of(tab.pane), panes.map(|(pane, _)| of(*pane)));
+            if tab.progress != progress {
+                tab.progress = progress;
+                self.laid = true;
+            }
+        }
     }
 }
 
@@ -1977,6 +2034,53 @@ mod tests {
         }
         assert_eq!(link.take_toast(), Some((10, "second".to_owned(), Some(1))));
         assert_eq!(link.take_toast(), None);
+    }
+
+    /// ADR-0051 §9: a tab shows its focused pane's progress, or else the furthest along of its
+    /// panes, one with no percent before none; 0 forgets a pane, and a pane that leaves the
+    /// layout takes its progress with it. Each change is news for the strip.
+    #[test]
+    fn a_tab_shows_its_focused_panes_progress_or_its_furthest() {
+        use pinfold_proto::link::{INDETERMINATE, NORMAL, progress};
+        let (mut link, mut peer) = linked().unwrap();
+        link.state.members = vec![(10, 0), (11, 0), (12, 1)];
+        link.state.tabs = [10, 12]
+            .map(|pane| Tab {
+                pane,
+                ..Tab::default()
+            })
+            .into();
+        let mut set = |pane, progress| {
+            link.state.laid = false;
+            link.state
+                .apply(Notice::Progress { pane, progress })
+                .unwrap();
+            let shown = link.state.tabs.iter().map(|tab| tab.progress);
+            (shown.collect::<Vec<_>>(), link.state.laid)
+        };
+        let (low, high, busy) = (
+            progress(NORMAL, 20),
+            progress(NORMAL, 80),
+            progress(INDETERMINATE, 0),
+        );
+        assert_eq!(set(11, busy), (vec![busy, 0], true), "busy beats none");
+        assert_eq!(set(12, high), (vec![busy, high], true));
+        assert_eq!(set(12, high), (vec![busy, high], false), "no news");
+        assert_eq!(
+            set(11, low),
+            (vec![low, high], true),
+            "a percent beats busy"
+        );
+        assert_eq!(set(10, high), (vec![high, high], true), "focused wins");
+        assert_eq!(set(10, 0), (vec![low, high], true));
+        assert_eq!(link.state.progress.len(), 2, "0 is not kept");
+        peer.notices(&[Notice::Hello { version: VERSION }]).unwrap();
+        peer.no_tabs().unwrap();
+        assert!(turn_until(&mut link, |link| link.tabs().is_empty()));
+        assert!(
+            link.state.progress.is_empty(),
+            "panes that left take theirs"
+        );
     }
 
     #[test]
