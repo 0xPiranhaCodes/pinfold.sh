@@ -1,6 +1,6 @@
 # Known issues in the macOS beta
 
-What testers of `0.1.0-beta.4` should know before reporting a bug. A report about any of these is
+What testers of `0.1.0-beta.5` should know before reporting a bug. A report about any of these is
 still welcome if it adds a case not listed here. Report bugs with the
 [beta bug form](https://github.com/0xPiranhaCodes/pinfold.sh/issues/new?template=beta-bug.yml).
 
@@ -53,6 +53,12 @@ still welcome if it adds a case not listed here. Report bugs with the
   5 MB spread ([#169](https://github.com/0xPiranhaCodes/pinfold.sh/pull/169),
   [ADR-0030](../adr/0030-macos-window-fixed-part.md)).
 - **The Dock menu's memory is not measured**, as no script can right-click the Dock (#169).
+- **On some runs the window reads about 59 to 61 MB**, over its 55.86 MB budget, on `main` and
+  branches alike. Which of two Metal pool layouts a run gets decides it
+  ([#454](https://github.com/0xPiranhaCodes/pinfold.sh/issues/454)).
+- **The core keeps about 0.5 MB after a burst of API calls.** After 1,000 calls it reads about
+  3.5 MB against 2.8 MB idle, and further calls add nothing. The audit ring holds most of it by
+  design, and its redesign is [#506](https://github.com/0xPiranhaCodes/pinfold.sh/issues/506).
 
 ## Panes and sessions
 
@@ -101,7 +107,7 @@ still welcome if it adds a case not listed here. Report bugs with the
 ## Rewind
 
 Rewind ([how to use it](../rewind/README.md), [#442](https://github.com/0xPiranhaCodes/pinfold.sh/issues/442))
-is on `main`, not yet in a beta.
+is new in this beta.
 
 - **The core keeps about 1 MB after many agent launches, with rewind on or off.** After 64
   launches it holds 1.0 to 1.3 MB more than with 8 agent panes alone, within its own 5 MB budget
@@ -121,6 +127,17 @@ is on `main`, not yet in a beta.
   until pruned, but no command reaches them.
 - **An unsandboxed agent can change its own checkpoints**, as it runs as you. Rewind is a
   convenience, not a backup.
+
+## Session timeline
+
+The timeline ([#450](https://github.com/0xPiranhaCodes/pinfold.sh/issues/450)) is new in this
+beta, with five of its six parts. The inbox summary line, the snapshot's run summary and the
+Agents board come in the next beta.
+
+- **The overlay shows no live "running" row or timer.** The link does not carry a command's start
+  time yet, so a running command appears once it ends.
+- **Prefix `t` is now taken.** A config that set `keys.inbox` or `keys.next_waiting` to `t` is
+  refused when read, with a message naming the key. Choose another key.
 
 ## Not yet checked on an installed build
 

@@ -352,7 +352,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
 name = "pinfold-api"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "libc",
  "mio",
@@ -364,7 +364,7 @@ dependencies = [
 
 [[package]]
 name = "pinfold-config"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "libc",
  "pinfold-proto",
@@ -376,7 +376,7 @@ dependencies = [
 
 [[package]]
 name = "pinfold-core"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "alacritty_terminal",
  "base64",
@@ -407,7 +407,7 @@ dependencies = [
 
 [[package]]
 name = "pinfold-mux"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "pinfold-proto",
  "thiserror",
@@ -415,14 +415,14 @@ dependencies = [
 
 [[package]]
 name = "pinfold-proto"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "pinfold-sys"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "libc",
  "signal-hook",
@@ -431,7 +431,7 @@ dependencies = [
 
 [[package]]
 name = "pinfold-tools"
-version = "0.1.0-beta.4"
+version = "0.1.0-beta.5"
 dependencies = [
  "pinfold-api",
  "pinfold-sys",

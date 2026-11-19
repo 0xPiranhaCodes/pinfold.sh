@@ -16,10 +16,10 @@ base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
 # The safe features make the crate forbid unsafe code. Off by default: its frame format.
 lz4_flex = { version = "=0.14.0", default-features = false, features = ["alloc", "checked-decode", "safe-decode", "safe-encode"] }
 mio = { version = "1.2.4", features = ["os-ext", "os-poll"] }
-pinfold-api = { path = "../pinfold-api", version = "0.1.0-beta.4" }
-pinfold-mux = { path = "../pinfold-mux", version = "0.1.0-beta.4" }
-pinfold-proto = { path = "../pinfold-proto", version = "0.1.0-beta.4" }
-pinfold-sys = { path = "../pinfold-sys", version = "0.1.0-beta.4" }
+pinfold-api = { path = "../pinfold-api", version = "0.1.0-beta.5" }
+pinfold-mux = { path = "../pinfold-mux", version = "0.1.0-beta.5" }
+pinfold-proto = { path = "../pinfold-proto", version = "0.1.0-beta.5" }
+pinfold-sys = { path = "../pinfold-sys", version = "0.1.0-beta.5" }
 # Linear-time matching for `pane.wait` patterns. Not `regex`, whose engines and Unicode tables
 # add about 0.6 MB to the core's resident size on Linux; the cost is ASCII-only classes.
 regex-lite = "0.1.9"
@@ -32,8 +32,8 @@ unicode-width = "0.2.3"
 # Off by default: coloured diffs, which pull in `console`.
 insta = { version = "1.49.0", default-features = false }
 # The credential stores the sandbox hides, for its tests.
-pinfold-config = { path = "../pinfold-config", version = "0.1.0-beta.4" }
-pinfold-testkit = { path = "../pinfold-testkit", version = "0.1.0-beta.4" }
+pinfold-config = { path = "../pinfold-config", version = "0.1.0-beta.5" }
+pinfold-testkit = { path = "../pinfold-testkit", version = "0.1.0-beta.5" }
 proptest = "1.12.0"
 tempfile = "3.27.0"
 

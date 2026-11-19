@@ -10,8 +10,8 @@ homepage.workspace = true
 publish.workspace = true
 
 [dependencies]
-pinfold-api = { path = "../pinfold-api", version = "0.1.0-beta.4" }
-pinfold-sys = { path = "../pinfold-sys", version = "0.1.0-beta.4" }
+pinfold-api = { path = "../pinfold-api", version = "0.1.0-beta.5" }
+pinfold-sys = { path = "../pinfold-sys", version = "0.1.0-beta.5" }
 pulldown-cmark = { version = "0.13.6", default-features = false }
 serde_json = "1.0.154"
 # Git's blob ids, so a checkpoint's readers name blobs without asking git (ADR-0050).
@@ -24,4 +24,4 @@ workspace = true
 
 [dev-dependencies]
 insta = { version = "1.49.0", default-features = false }
-pinfold-testkit = { path = "../pinfold-testkit", version = "0.1.0-beta.4" }
+pinfold-testkit = { path = "../pinfold-testkit", version = "0.1.0-beta.5" }
