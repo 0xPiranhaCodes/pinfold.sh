@@ -3824,11 +3824,14 @@ fn a_timeline_holds_no_pane_text_whatever_the_pane_printed() {
             && entry["reported"] == true));
         assert_eq!(result["summary"]["failed"], 1, "{text}");
     }
-    // The agent's read and its parent's later one find the same entries: a read adds none.
-    assert_eq!(
-        timeline_result(&own[0].1).unwrap()["entries"],
-        timeline_result(&child[0].1).unwrap()["entries"]
-    );
+    // The parent's later read finds the agent's entries as they were, and neither read is one:
+    // a read adds none. A `done` checkpoint may land between them.
+    let entries = |text: &str| timeline_result(text).unwrap()["entries"].clone();
+    let (own, child) = (entries(&own[0].1), entries(&child[0].1));
+    let (own, child) = (own.as_array().unwrap(), child.as_array().unwrap());
+    assert_eq!(own[..], child[..own.len()], "{child:?}");
+    let read = |entry: &serde_json::Value| entry["method"] == "run.timeline";
+    assert!(!child.iter().any(read), "{child:?}");
 }
 
 #[test]
