@@ -27,6 +27,7 @@ use pinfold_core::io::{Reactor, Waker};
 use pinfold_core::rewind::{self, Missing, Rewind, Settings};
 use pinfold_core::snapshot::{self, Saver, Snapshot};
 use pinfold_core::status::Status;
+use pinfold_core::timeline::Timelines;
 use pinfold_core::wait::{Outcome, Waits};
 use pinfold_core::workspace::Workspaces;
 use pinfold_core::{sandbox, shell, tool, webhook};
@@ -1573,6 +1574,18 @@ fn daemon(
     }
     reactor.watch_signals()?;
     let state = pinfold_config::state_dir();
+    // Emptied before any run, as a run's timeline ends with the core (ADR-0052).
+    if let Some(state) = state.as_ref().filter(|_| config.timeline.enabled) {
+        match Timelines::new(state.join("timeline"), config.timeline.entries) {
+            Ok(timelines) => reactor.keep_timelines(timelines),
+            Err(error) => {
+                let _ = writeln!(
+                    io::stderr(),
+                    "pinfold-core: warn timeline=off: {error}; agent runs keep no timeline"
+                );
+            }
+        }
+    }
     let mut saver = state
         .clone()
         .map(|state| Saver::new(state, control::SESSION, Some(reactor.waker())));

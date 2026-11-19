@@ -495,6 +495,54 @@ fn write_rewind_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Writes `on`, `exited` and `off` under `dir` for ADR-0052's rows: each a config with
+/// `[timeline]` on or off, `[rewind]` off so no checkpoint is taken, an agent profile `fill`
+/// whose program prints 1,100 OSC 133 command pairs, so every ring of 1,024 fills and wraps,
+/// and then waits or, in `exited`, exits; a `state` folder for the ring files; and `agent.sh`,
+/// every pane's shell, which launches one `fill` in a tab and waits. 8 panes make 8 runs.
+fn write_timeline_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let quote = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', r"'\''"));
+    for (row, enabled, end) in [
+        ("on", true, "exec /bin/sleep 86400"),
+        ("exited", true, "exit 0"),
+        ("off", false, "exec /bin/sleep 86400"),
+    ] {
+        let folder = dir.join(row);
+        for sub in ["pinfold", "state"] {
+            fs::create_dir_all(folder.join(sub))?;
+        }
+        let fill = folder.join("fill.sh");
+        fs::write(
+            &fill,
+            format!(
+                "#!/bin/sh\ni=0; while [ $i -lt 1100 ]; do\n\
+                 \x20 printf '\\033]133;A\\007$ \\033]133;B\\007true\\r\\n\\033]133;C\\007\\033]133;D;0\\007'\n\
+                 \x20 i=$((i + 1))\ndone\n{end}\n"
+            ),
+        )?;
+        fs::set_permissions(&fill, fs::Permissions::from_mode(0o755))?;
+        fs::write(
+            folder.join("pinfold/pinfold.toml"),
+            format!(
+                "[timeline]\nenabled = {enabled}\n[rewind]\nenabled = false\n\
+                 [agents.fill]\ncommand = [{:?}]\n",
+                fill.display().to_string()
+            ),
+        )?;
+        let script = folder.join("agent.sh");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n{} agent fill --tab\nexec /bin/sleep 86400\n",
+                quote(tools)
+            ),
+        )?;
+        fs::set_permissions(script, fs::Permissions::from_mode(0o755))?;
+    }
+    Ok(())
+}
+
 /// Takes webhook posts on loopback and answers each 204 at once, for the burst row. Returns its
 /// port. Std only: it reads a request's headers and the body they announce, and nothing else.
 fn answer_posts() -> io::Result<u16> {
@@ -550,7 +598,8 @@ fn mem_gate_task() -> ExitCode {
                     ("burst", &burst, "needs-you"),
                 ],
             )?;
-            write_rewind_inputs(&inputs.join("rewind"), &tools)
+            write_rewind_inputs(&inputs.join("rewind"), &tools)?;
+            write_timeline_inputs(&inputs.join("timeline"), &tools)
         })
     {
         eprintln!("mem-gate: {error}");
@@ -690,6 +739,23 @@ fn mem_gate_task() -> ExitCode {
         agents: Some(&rewind_on),
         ..webhook
     };
+    // ADR-0052 slice 1: 8 agent runs whose rings each wrapped, live and after their programs
+    // exited, under #476's launch ceiling, as the run-record row: main without timelines reads
+    // 4.38 MB here. Off is the same output with no timeline, shown beside them: 56 B a run is far
+    // under a sample's noise, so the type sizes are asserted in the code.
+    let timeline_inputs = inputs.join("timeline");
+    let (timeline_on, timeline_exited, timeline_off) = (
+        timeline_inputs.join("on"),
+        timeline_inputs.join("exited"),
+        timeline_inputs.join("off"),
+    );
+    let timelines = mem_gate::Budget {
+        metric: "Core, 8 agent panes with full timelines",
+        limit: mem_gate::LAUNCH_LIMIT,
+        settle: mem_gate::TIMELINE_SETTLE,
+        agents: Some(&timeline_on),
+        ..webhook
+    };
     budgets.extend([
         mem_gate::Budget {
             metric: "Core, 8 agent panes listed, a webhook after one alert",
@@ -719,6 +785,20 @@ fn mem_gate_task() -> ExitCode {
             ..records
         },
         records,
+    ]);
+    budgets.extend([
+        mem_gate::Budget {
+            metric: "Core, 8 agent panes, the same output, [timeline] off",
+            limit: mem_gate::INFORMATION,
+            agents: Some(&timeline_off),
+            ..timelines
+        },
+        mem_gate::Budget {
+            metric: "Core, 8 agent panes with full timelines, their programs exited",
+            agents: Some(&timeline_exited),
+            ..timelines
+        },
+        timelines,
     ]);
     // ADR-0045 section 5. Each tool runs in a pane of a core, which prints the tool's pid.
     let idle_tool = ["--tool", "1", "files", empty.as_str()];
@@ -1363,6 +1443,36 @@ mod tests {
             let config = fs::read_to_string(dir.join(row).join("pinfold/pinfold.toml"));
             assert!(config.expect("config").contains("[agents.quick7]"));
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_timeline_rows_fill_every_ring_and_only_off_turns_it_off() {
+        let dir = std::env::temp_dir().join(format!("xtask-timeline-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        write_timeline_inputs(&dir, Path::new("/opt/it's/pinfold")).expect("inputs");
+        for (row, enabled) in [("on", true), ("exited", true), ("off", false)] {
+            let folder = dir.join(row);
+            let checked = Command::new("sh")
+                .arg("-n")
+                .arg(folder.join("agent.sh"))
+                .status();
+            assert!(checked.expect("sh").success(), "{row}");
+            let config = fs::read_to_string(folder.join("pinfold/pinfold.toml")).expect("config");
+            let want = format!("[timeline]\nenabled = {enabled}\n[rewind]\nenabled = false\n");
+            assert!(
+                config.starts_with(&want) && config.contains("[agents.fill]"),
+                "{config}"
+            );
+        }
+        let fill = dir.join("exited/fill.sh");
+        let output = Command::new(&fill).output().expect("fill");
+        let ends = output
+            .stdout
+            .windows(9)
+            .filter(|w| w == b"\x1b]133;D;0")
+            .count();
+        assert_eq!(ends, 1100);
         let _ = fs::remove_dir_all(&dir);
     }
 
