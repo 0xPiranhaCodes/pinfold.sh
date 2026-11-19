@@ -1,0 +1,211 @@
+//! `run.timeline` (ADR-0052 section 7): an agent run's record, read from its ring file when
+//! asked and dropped once answered, so the core keeps no entry. Numbers and fixed words only,
+//! never pane text (threat model T2). The entries are streamed from the file into the reply's
+//! JSON text, one at a time, so a read holds one allocation rather than a tree of values a
+//! thousand entries long.
+
+use std::fmt::Write;
+
+use pinfold_api::control::{Method, Request};
+use pinfold_core::family::Family;
+use pinfold_core::io::Reactor;
+use pinfold_core::rewind::Rewind;
+use pinfold_core::timeline::{Answer, Ended, Entry, METHODS, Outcome, REASONS, What};
+use pinfold_proto::link::ApprovalAction;
+use serde_json::json;
+
+/// Answers `run.timeline` for the run in `pane`: the caller's own, a child's it reaches, or any
+/// from a terminal outside every pane, which is not asked, as `audit.read` is not: it returns
+/// metadata and no way to run anything (ADR-0042). Another pane's is refused, never asked.
+///
+/// ```
+/// # fn answer<T>(log: &mut pinfold_api::Log, reactor: &pinfold_core::io::Reactor,
+/// #     family: &mut pinfold_core::family::Family,
+/// #     rewind: Option<&pinfold_core::rewind::Rewind<T>>,
+/// #     request: pinfold_api::control::Request) {
+/// let read = pinfold_cli::timeline::read(reactor, family, rewind, &request);
+/// pinfold_cli::audit::reply_json(log, reactor, request, read);
+/// # }
+/// ```
+///
+/// # Errors
+///
+/// A short reason for a caller with no terminal, another pane's run, a pane with none,
+/// `[timeline]` off, a file that cannot be read, or a request that is not `run.timeline`.
+pub fn read<T>(
+    reactor: &Reactor,
+    family: &mut Family,
+    rewind: Option<&Rewind<T>>,
+    request: &Request,
+) -> Result<String, String> {
+    let &Method::RunTimeline {
+        pane,
+        count,
+        before,
+        kinds,
+    } = request.method()
+    else {
+        return Err("not run.timeline".to_owned());
+    };
+    if request.caller().is_none() {
+        return Err("run.timeline needs a caller in a terminal".to_owned());
+    }
+    let own = request.caller().and_then(|caller| reactor.pane_of(caller));
+    if let Some(own) = own
+        && family.reach(reactor, Some(own), pane).is_err()
+    {
+        return Err("run.timeline reads the caller's own run and its children's only".to_owned());
+    }
+    let timelines = (reactor.timelines()).ok_or("timelines are off: [timeline] enabled = false")?;
+    let run = timelines.newest(pane).ok_or("no agent run in that pane")?;
+    let summary = run.summary();
+    let started = u64::from(summary.started) * 1000;
+    let head = json!({
+        "run": rewind.and_then(|rewind| Some(rewind.run(rewind.of_pane(pane)?)?.id())),
+        "pane": pane,
+        "started_ms": started,
+        "ended_ms": (!run.is_live()).then(|| started + u64::from(summary.ended)),
+        "summary": {
+            "commands": summary.commands, "failed": summary.failed,
+            "approvals": summary.approvals, "denied": summary.denied, "calls": summary.calls,
+            "changed": summary.changed, "errors": summary.errors, "needs_you": summary.needs_you,
+        },
+        "dropped": run.dropped(),
+    })
+    .to_string();
+    // About 130 bytes an entry. macOS keeps a freed allocation of under about 1 MiB dirty, so
+    // the reply reserves 2 MiB: one mapping, of which only the pages written count, framed in
+    // place and written out without a copy, and handed back whole when freed.
+    let mut json = String::with_capacity((head.len() + 64 + count * 160).max(2 << 20));
+    json.push_str(&head[..head.len() - 1]);
+    json.push_str(r#","entries":["#);
+    let mut comma = "";
+    let keep = |entry: &Entry| kinds & 1 << kind(entry) != 0;
+    let read = timelines.each(pane, before, count, keep, |seq, entry| {
+        json.push_str(comma);
+        write_entry(&mut json, reactor, pane, seq, entry);
+        comma = ",";
+    });
+    read.map_err(|_| "the run's timeline cannot be read".to_owned())?;
+    json.push_str("]}");
+    Ok(json)
+}
+
+/// The entry's place in `pinfold_api::control::TIMELINE_KINDS`.
+fn kind(entry: &Entry) -> u8 {
+    match entry.what {
+        What::Command { .. } => 0,
+        What::Api { .. } => 1,
+        What::Approval { .. } => 2,
+        What::State { .. } => 3,
+        What::Checkpoint { .. } => 4,
+        What::Exit(_) => 5,
+    }
+}
+
+/// A number, or `null`, as JSON.
+struct Or<T>(Option<T>);
+
+impl<T: std::fmt::Display> std::fmt::Display for Or<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Some(value) => value.fmt(formatter),
+            None => formatter.write_str("null"),
+        }
+    }
+}
+
+/// Writes one entry as a JSON object of numbers and fixed words, which need no escaping, with
+/// no allocation of its own.
+fn write_entry(json: &mut String, reactor: &Reactor, pane: usize, seq: u64, entry: Entry) {
+    let kind = pinfold_api::control::TIMELINE_KINDS[usize::from(kind(&entry))];
+    let _ = write!(
+        json,
+        r#"{{"seq":{seq},"at_ms":{},"kind":"{kind}","#,
+        entry.at
+    );
+    let _ = match entry.what {
+        What::Command { row, ms, exit } => {
+            let row = (row != u32::MAX).then_some(row);
+            let held = row.is_some_and(|row| {
+                (reactor.engine(pane)).is_some_and(|engine| engine.holds_row(row as usize))
+            });
+            write!(
+                json,
+                r#""row":{},"ms":{ms},"exit":{},"source":"marks","held":{held}}}"#,
+                Or(row),
+                Or(exit)
+            )
+        }
+        What::Api {
+            seq,
+            method,
+            outcome,
+            target,
+        } => {
+            let method = METHODS
+                .get(usize::from(method))
+                .map_or("hello", |(name, _)| name);
+            let outcome = match outcome {
+                Outcome::Ok => "ok",
+                Outcome::Refused => "refused",
+                Outcome::Error => "error",
+            };
+            write!(
+                json,
+                r#""audit_seq":{seq},"method":"{method}","outcome":"{outcome}","target":{}}}"#,
+                Or(target)
+            )
+        }
+        What::Approval {
+            action,
+            answer,
+            other,
+            grant,
+        } => {
+            let action = match action {
+                ApprovalAction::Read => "read",
+                ApprovalAction::Send => "send",
+                ApprovalAction::Trust => "trust",
+                ApprovalAction::Owner => "owner",
+                ApprovalAction::Rewind => "rewind",
+            };
+            let answer = match answer {
+                Answer::Once => "once",
+                Answer::ThirtyMinutes => "thirty_minutes",
+                Answer::Denied => "denied",
+                Answer::Expired => "expired",
+            };
+            write!(
+                json,
+                r#""action":"{action}","answer":"{answer}","other":{},"grant":{grant}}}"#,
+                Or(other)
+            )
+        }
+        What::State { status, reported } => write!(
+            json,
+            r#""status":"{}","reported":{reported}}}"#,
+            status.name()
+        ),
+        What::Checkpoint {
+            n,
+            reason,
+            complete,
+            changed,
+        } => {
+            let reason = REASONS.get(usize::from(reason)).unwrap_or(&"api");
+            write!(
+                json,
+                r#""n":{n},"reason":"{reason}","complete":{complete},"changed":{changed}}}"#
+            )
+        }
+        What::Exit(ended) => {
+            let (ended, exit) = match ended {
+                Ended::Code(code) => ("code", Some(code)),
+                Ended::Signal(signal) => ("signal", Some(signal)),
+                Ended::Closed => ("closed", None),
+            };
+            write!(json, r#""ended":"{ended}","exit":{}}}"#, Or(exit))
+        }
+    };
+}

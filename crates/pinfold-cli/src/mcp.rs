@@ -50,7 +50,7 @@ const EVENTS_NEXT: &str = r#"{
 }"#;
 
 /// Each tool, the API method it calls, and that method's schema.
-const TOOLS: [(&str, &str, &str); 12] = [
+const TOOLS: [(&str, &str, &str); 13] = [
     (
         "pane_list_v1",
         "pane.list",
@@ -105,6 +105,11 @@ const TOOLS: [(&str, &str, &str); 12] = [
         "checkpoint_restore_v1",
         "checkpoint.restore",
         include_str!("../../../docs/api/checkpoint.restore.schema.json"),
+    ),
+    (
+        "run_timeline_v1",
+        "run.timeline",
+        include_str!("../../../docs/api/run.timeline.schema.json"),
     ),
     ("events_next_v1", "events.subscribe", EVENTS_NEXT),
 ];
@@ -325,6 +330,7 @@ mod tests {
             "checkpoint_take_v1",
             "checkpoint_list_v1",
             "checkpoint_restore_v1",
+            "run_timeline_v1",
             "events_next_v1",
         ];
         assert_eq!(names, expected);
@@ -346,7 +352,8 @@ mod tests {
             tools[10]["inputSchema"]["required"],
             json!(["pane", "checkpoint", "shown"])
         );
-        assert_eq!(tools[11]["inputSchema"]["required"], json!(["events"]));
+        assert_eq!(tools[11]["inputSchema"]["required"], json!(["pane"]));
+        assert_eq!(tools[12]["inputSchema"]["required"], json!(["events"]));
     }
 
     #[test]

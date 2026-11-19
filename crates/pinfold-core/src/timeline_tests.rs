@@ -120,6 +120,47 @@ fn a_ring_wraps_at_16_kib_keeping_the_newest_and_counting_the_dropped() {
 }
 
 #[test]
+fn a_page_is_the_newest_count_before_a_seq_that_holds_as_the_ring_wraps() {
+    let (_state, mut timelines) = timelines(1024);
+    let now = Instant::now();
+    timelines.open(2, now);
+    for row in 0..10_000 {
+        let exit = Some(u8::from(row % 10 == 0));
+        let closed = Closed {
+            row: Some(row),
+            ms: 1,
+            exit,
+        };
+        timelines.command(2, closed, now);
+    }
+    let all = |_: &Entry| true;
+    let seqs = |page: Vec<(u64, Entry)>| page.into_iter().map(|(seq, _)| seq).collect::<Vec<_>>();
+    // A seq is the count of entries the run wrote before it: the row, here.
+    let newest = timelines.page(2, None, 1000, all).unwrap();
+    assert!(newest.iter().all(|(seq, entry)| matches!(entry.what,
+        What::Command { row, .. } if u64::from(row) == *seq)));
+    assert_eq!(seqs(newest), (9000..10_000).collect::<Vec<_>>());
+    let older = timelines.page(2, Some(9000), 1000, all).unwrap();
+    assert_eq!(seqs(older), (10_000 - 1024..9000).collect::<Vec<_>>());
+    assert!(
+        timelines
+            .page(2, Some(10_000 - 1024), 1000, all)
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        seqs(timelines.page(2, Some(u64::MAX), 2, all).unwrap()),
+        [9998, 9999]
+    );
+    let failed = |entry: &Entry| matches!(entry.what, What::Command { exit: Some(1), .. });
+    let page = timelines.page(2, Some(9990), 3, failed).unwrap();
+    assert_eq!(seqs(page), [9960, 9970, 9980]);
+    // Reading changes nothing: no entry, no counter.
+    assert_eq!(timelines.of_pane(2).unwrap().summary().commands, 10_000);
+    assert!(timelines.page(3, None, 1000, all).unwrap().is_empty());
+}
+
+#[test]
 fn a_non_zero_exit_counts_once_in_failed_and_errors() {
     let (_state, mut timelines) = timelines(64);
     let now = Instant::now();
@@ -246,6 +287,8 @@ proptest! {
     fn garbled_bytes_are_skipped_on_read_never_a_panic(
         garbage in proptest::collection::vec(any::<u8>(), 0..2100),
         live in any::<bool>(),
+        before in proptest::option::of(0..200_u64),
+        count in 1..200_usize,
     ) {
         let (state, mut timelines) = timelines(64);
         let now = Instant::now();
@@ -261,6 +304,10 @@ proptest! {
         let file = OpenOptions::new().write(true).open(&path).unwrap();
         file.set_len(0).unwrap();
         file.write_all_at(&garbage, 0).unwrap();
+        let page = timelines.page(0, before, count, |entry| entry.at % 2 == 0).unwrap();
+        prop_assert!(page.len() <= count);
+        prop_assert!(page.windows(2).all(|pair| pair[0].0 < pair[1].0));
+        prop_assert!(page.iter().all(|(seq, _)| before.is_none_or(|before| *seq < before)));
         let entries = timelines.entries(0).unwrap();
         prop_assert!(entries.len() <= 128);
         for entry in entries {

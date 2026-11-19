@@ -74,6 +74,10 @@ pub const MAX_STATUS_MESSAGE: usize = 200;
 pub const STATES: [&str; 5] = ["needs-you", "running", "done", "error", "idle"];
 /// Most entries one `audit.read` returns.
 pub const MAX_AUDIT_READ: usize = 1000;
+/// Most entries one `run.timeline` returns (ADR-0052 section 7).
+pub const MAX_TIMELINE_READ: usize = 1000;
+/// The kinds of a timeline entry, which `run.timeline`'s `kinds` names, a bit each in order.
+pub const TIMELINE_KINDS: [&str; 6] = ["command", "api", "approval", "state", "checkpoint", "exit"];
 /// Longest `pane.wait` a caller may ask for.
 pub const MAX_WAIT: Duration = Duration::from_secs(600);
 /// Longest a peer may take to send its first request after it connects, and to end any line
@@ -186,6 +190,18 @@ pub enum Method {
     CheckpointList {
         /// The run's agent pane.
         pane: usize,
+    },
+    /// `run.timeline`: the newest `count` entries of the run in `pane` whose `seq` is below
+    /// `before`, of `kinds`, metadata only (ADR-0052 section 7).
+    RunTimeline {
+        /// The run's agent pane.
+        pane: usize,
+        /// 1 to [`MAX_TIMELINE_READ`].
+        count: usize,
+        /// The `seq` of the oldest entry of the page before, or the newest page if none.
+        before: Option<u64>,
+        /// A bit per [`TIMELINE_KINDS`], never 0.
+        kinds: u8,
     },
     /// `checkpoint.restore`: undo the run in `pane`'s changes since `checkpoint`, as the view
     /// checkpoint `shown` showed them, once the window allows it (ADR-0050 section 6).
@@ -672,6 +688,18 @@ impl Request {
     /// Answers the caller with the method's result, or a short reason, which must carry no
     /// pane contents, tokens or environment. A caller that has gone hears nothing.
     pub fn answer(self, result: Result<Value, String>) {
+        self.reply(result.map(Reply::Value));
+    }
+
+    /// Answers the caller with a result already written as one JSON value, which goes out as
+    /// it is: for a long result, such as `run.timeline`'s, that would be a large tree of values.
+    /// It is framed in place and becomes the connection's output, so with room for the frame
+    /// it is never copied.
+    pub fn answer_json(self, json: String) {
+        self.reply(Ok(Reply::Json(json)));
+    }
+
+    fn reply(self, result: Result<Reply, String>) {
         // Never full while its ticket lives, and it never blocks the reactor.
         if self
             .answers
@@ -779,7 +807,14 @@ fn gone(alive: &Weak<AtomicBool>) -> bool {
 }
 
 /// An answer for the peer in a slot, of a generation, with its request's ticket.
-type Answer = ((usize, u64), Result<Value, String>, Arc<()>);
+type Answer = ((usize, u64), Result<Reply, String>, Arc<()>);
+
+/// A method's result: a value, or one already written as JSON text, so a long result is one
+/// allocation rather than a tree of them.
+enum Reply {
+    Value(Value),
+    Json(String),
+}
 /// An event for the peer in a slot, of a generation.
 /// An event for the peer in a slot, of a generation, with its subscriber's count of queued events.
 type Event = ((usize, u64), Value, Arc<AtomicUsize>);
@@ -1077,13 +1112,26 @@ impl Peer {
     }
 
     /// Hands the waiting request its answer.
-    fn answered(&mut self, result: Result<Value, String>) {
+    fn answered(&mut self, result: Result<Reply, String>) {
         let Some((id, asked, _)) = self.asked.take() else {
             return;
         };
         // A refusal from the reactor keeps the connection, unlike a malformed request.
         let reply = match (result, asked) {
-            (Ok(result), _) => {
+            (Ok(Reply::Json(mut line)), _) => {
+                // As `done` writes it, keys in order, framed in the result's own buffer.
+                line.insert_str(0, &format!(r#"{{"id":{id},"jsonrpc":"2.0","result":"#));
+                line.push('}');
+                if self.output.is_empty() && self.output.len() + line.len() < MAX_OUTPUT {
+                    self.output = line.into_bytes();
+                    self.output.push(b'\n');
+                } else {
+                    self.queue_line(&line);
+                }
+                self.until = Instant::now() + self.idle;
+                return;
+            }
+            (Ok(Reply::Value(result)), _) => {
                 self.subscribed |= asked == Asked::Subscribe;
                 done(&id, &result)
             }
@@ -1116,10 +1164,12 @@ impl Peer {
     }
 
     fn queue(&mut self, reply: &Value) {
-        if reply.is_null() {
-            return;
+        if !reply.is_null() {
+            self.queue_line(&reply.to_string());
         }
-        let line = reply.to_string();
+    }
+
+    fn queue_line(&mut self, line: &str) {
         if self.output.len() + line.len() >= MAX_OUTPUT {
             // A peer that will not read is closed rather than buffered for.
             (self.output, self.gone) = (Vec::new(), true);
@@ -1234,7 +1284,8 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
             | "tool.open"
             | "checkpoint.take"
             | "checkpoint.list"
-            | "checkpoint.restore"),
+            | "checkpoint.restore"
+            | "run.timeline"),
         ) if *greeted < VERSION => refuse(
             Some(id),
             NO_METHOD,
@@ -1269,6 +1320,14 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
                 Some(id),
                 BAD_PARAMS,
                 "audit.read takes count up to 1000 and pane",
+            ),
+        },
+        Some("run.timeline") => match run_timeline(request.get("params")) {
+            Some(method) => Step::Ask(id.clone(), method),
+            None => refuse(
+                Some(id),
+                BAD_PARAMS,
+                "run.timeline takes pane, count 1 to 1000, before and known kinds",
             ),
         },
         Some("pane.spawn") => match crate::spawn::params(request.get("params")) {
@@ -1378,6 +1437,39 @@ fn audit_read(params: Option<&Value>) -> Option<Method> {
         None => None,
     };
     (count <= MAX_AUDIT_READ).then_some(Method::AuditRead { count, pane })
+}
+
+/// Reads `run.timeline`'s parameters: `pane`, and optional `count`, 200 by default and 1 to
+/// [`MAX_TIMELINE_READ`], `before`, and `kinds`, a non-empty list of [`TIMELINE_KINDS`], all by
+/// default.
+fn run_timeline(params: Option<&Value>) -> Option<Method> {
+    let field = |name| {
+        params
+            .and_then(|params| params.get(name))
+            .filter(|v| !v.is_null())
+    };
+    let pane = usize::try_from(field("pane")?.as_u64()?).ok()?;
+    let count = field("count").map_or(Some(200), Value::as_u64)?;
+    let before = match field("before") {
+        Some(before) => Some(before.as_u64()?),
+        None => None,
+    };
+    let kinds = match field("kinds") {
+        Some(kinds) => kinds.as_array()?.iter().try_fold(0, |kinds, kind| {
+            let at = TIMELINE_KINDS
+                .iter()
+                .position(|name| kind.as_str() == Some(name))?;
+            Some(kinds | 1 << at)
+        })?,
+        None => 0b11_1111,
+    };
+    let count = usize::try_from(count).ok()?;
+    ((1..=MAX_TIMELINE_READ).contains(&count) && kinds != 0).then_some(Method::RunTimeline {
+        pane,
+        count,
+        before,
+        kinds,
+    })
 }
 
 /// Checks the shape of a pane method's `params`. Scope is the reactor's to check.
@@ -1643,6 +1735,49 @@ mod tests {
     /// A request for a pane method with these params.
     fn pane_request(method: &str, params: &Value) -> String {
         json!({"jsonrpc": "2.0", "id": 2, "method": method, "params": params}).to_string()
+    }
+
+    #[test]
+    fn run_timeline_pages_at_most_1000_of_known_kinds() {
+        let (reply, _) = replied(
+            pane_request("run.timeline", &json!({"pane": 1})).as_bytes(),
+            &mut OLDEST.clone(),
+        );
+        assert_eq!(code(&reply), Some(NO_METHOD));
+        let asked = |params| {
+            answer(
+                pane_request("run.timeline", &params).as_bytes(),
+                &mut VERSION.clone(),
+            )
+        };
+        let timeline = |count, before, kinds| {
+            Step::Ask(
+                json!(2),
+                Method::RunTimeline {
+                    pane: 1,
+                    count,
+                    before,
+                    kinds,
+                },
+            )
+        };
+        assert_eq!(asked(json!({"pane": 1})), timeline(200, None, 0b11_1111));
+        let paged = json!({"pane": 1, "count": 1000, "before": 7, "kinds": ["api", "exit"]});
+        assert_eq!(asked(paged), timeline(1000, Some(7), 0b10_0010));
+        for bad in [
+            json!({}),
+            json!({"pane": "self"}),
+            json!({"pane": 1, "count": 0}),
+            json!({"pane": 1, "count": 1001}),
+            json!({"pane": 1, "before": -1}),
+            json!({"pane": 1, "kinds": []}),
+            json!({"pane": 1, "kinds": ["output"]}),
+        ] {
+            let Step::Reply(reply, _) = asked(bad.clone()) else {
+                panic!("{bad}");
+            };
+            assert_eq!(code(&reply), Some(BAD_PARAMS), "{bad}");
+        }
     }
 
     /// ADR-0051 §6: Approve and Interrupt come only from a person's key in the window, so no
@@ -2108,6 +2243,21 @@ mod tests {
                 .unwrap();
         });
         assert!(matches!(list_panes(&old), Err(Error::Old)));
+    }
+
+    #[test]
+    fn a_result_written_as_json_reaches_the_caller_as_a_value_would() {
+        let directory = fresh();
+        let control = Control::bind(&directory).unwrap();
+        thread::spawn(move || {
+            control.serve(|request| match request.method() {
+                Method::Hello => request.answer(Ok(json!({"pane": null}))),
+                _ => request.answer_json(r#"{"panes":[{"id":3}]}"#.to_owned()),
+            })
+        });
+        let stream = UnixStream::connect(socket_path(&directory)).unwrap();
+        let (_, list) = list_panes(&stream).unwrap();
+        assert_eq!(list, json!({"panes": [{"id": 3}]}));
     }
 
     #[test]

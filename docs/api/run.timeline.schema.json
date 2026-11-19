@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "run.timeline",
+  "description": "Reads the record of the agent run in a pane, oldest first: the commands its shell's marks closed, the calls that wrote or acted or were refused, approvals, reported states, checkpoints and its exit (ADR-0052). Numbers and fixed words only, never a command's text, output, message, path or title. Read from the run's ring file on demand; the core keeps nothing after the reply, and a read adds no entry. A caller in a pane reads its own run and its children's; a terminal outside every pane reads any run, not asked; another pane's is refused and never asked. Needs hello version 2.",
+  "type": "object",
+  "properties": {
+    "params": {
+      "type": "object",
+      "required": ["pane"],
+      "properties": {
+        "pane": { "type": "integer", "minimum": 0, "description": "The run's pane: the one agent.launch opened, or one whose agent reported pane.status. The newest run there, live or ended." },
+        "count": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "How many of the newest entries, 200 if not given." },
+        "before": { "type": "integer", "minimum": 0, "description": "Only entries whose seq is below this: the oldest seq of the page before, for the next page back." },
+        "kinds": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "enum": ["command", "api", "approval", "state", "checkpoint", "exit"] },
+          "description": "Only these kinds, all if not given."
+        }
+      }
+    },
+    "result": {
+      "type": "object",
+      "required": ["run", "pane", "started_ms", "ended_ms", "summary", "dropped", "entries"],
+      "additionalProperties": false,
+      "properties": {
+        "run": { "type": ["string", "null"], "description": "ADR-0050's run id, r<core start>-<n>, or null with [rewind] off." },
+        "pane": { "type": "integer", "minimum": 0 },
+        "started_ms": { "type": "integer", "minimum": 0, "description": "When the run started, in ms since the core did, a whole second. A run's timeline never outlives its core, which empties them all when it starts, so this clock is enough." },
+        "ended_ms": { "type": ["integer", "null"], "minimum": 0, "description": "When its program exited or its pane closed, on the same clock; null while it runs." },
+        "summary": {
+          "type": "object",
+          "required": ["commands", "failed", "approvals", "denied", "calls", "changed", "errors", "needs_you"],
+          "additionalProperties": false,
+          "description": "Counters that dropping entries never lowers.",
+          "properties": {
+            "commands": { "type": "integer", "minimum": 0 },
+            "failed": { "type": "integer", "minimum": 0, "description": "Commands with a non-zero exit." },
+            "approvals": { "type": "integer", "minimum": 0 },
+            "denied": { "type": "integer", "minimum": 0 },
+            "calls": { "type": "integer", "minimum": 0 },
+            "changed": { "type": "integer", "minimum": 0, "description": "Paths the newest checkpoint changed since launch." },
+            "errors": { "type": "integer", "minimum": 0, "description": "failed plus error states." },
+            "needs_you": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "dropped": { "type": "integer", "minimum": 0, "description": "Older entries the ring dropped; the oldest held has this seq." },
+        "entries": {
+          "type": "array",
+          "maxItems": 1000,
+          "items": {
+            "type": "object",
+            "required": ["seq", "at_ms", "kind"],
+            "additionalProperties": false,
+            "properties": {
+              "seq": { "type": "integer", "minimum": 0, "description": "How many entries the run wrote before this one. It holds as older entries drop." },
+              "at_ms": { "type": "integer", "minimum": 0, "description": "Since started_ms." },
+              "kind": { "enum": ["command", "api", "approval", "state", "checkpoint", "exit"] },
+              "row": { "type": ["integer", "null"], "minimum": 0, "description": "command: the stored row its shell's B mark was on, null without one." },
+              "ms": { "type": "integer", "minimum": 0, "description": "command: from its C mark to its D mark." },
+              "exit": { "type": ["integer", "null"], "minimum": 0, "maximum": 255, "description": "command: as the D mark gave it. exit: the program's exit status or the signal that ended it, null when its pane closed while it ran." },
+              "source": { "const": "marks", "description": "command: from OSC 133 marks, which output can print." },
+              "held": { "type": "boolean", "description": "command: whether the pane still shows or holds its row." },
+              "audit_seq": { "type": "integer", "minimum": 0, "description": "api: the audit entry's seq, its low 32 bits." },
+              "method": {
+                "enum": ["hello", "window.open", "pane.list", "events.subscribe", "pane.read", "pane.last_output", "pane.send", "pane.wait", "pane.spawn", "agent.launch", "tool.open", "pane.close", "checkpoint.take", "checkpoint.list", "checkpoint.restore", "pane.status", "audit.read", "session.save", "workspace.open", "grants.list", "grants.revoke", "workspace.trust_state", "workspace.ask_trust", "run.timeline"]
+              },
+              "outcome": { "enum": ["ok", "refused", "error"] },
+              "target": { "type": ["integer", "null"], "minimum": 0, "description": "api: the pane the call named." },
+              "action": { "enum": ["read", "send", "trust", "owner", "rewind"] },
+              "answer": { "enum": ["once", "thirty_minutes", "denied", "expired"] },
+              "other": { "type": ["integer", "null"], "minimum": 0, "description": "approval: the other pane it was about." },
+              "grant": { "type": "integer", "minimum": 0 },
+              "status": { "enum": ["needs-you", "running", "done", "error", "idle"], "description": "state: the new status." },
+              "reported": { "type": "boolean", "description": "state: from pane.status rather than an agent CLI's output." },
+              "n": { "type": "integer", "minimum": 0, "description": "checkpoint: its number in the run." },
+              "reason": { "enum": ["launch", "done", "exit", "api", "view", "restore"] },
+              "complete": { "type": "boolean" },
+              "changed": { "type": "integer", "minimum": 0, "description": "checkpoint: paths changed since launch; for a restore's, the paths it undid." },
+              "ended": { "enum": ["code", "signal", "closed"], "description": "exit: how the program ended." }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -5,6 +5,7 @@ use std::io::{self, Write};
 pub mod audit;
 pub mod mcp;
 pub mod output;
+pub mod timeline;
 
 /// Reads the config file once, as the window does. A bad file means the defaults, which the
 /// log hears about.

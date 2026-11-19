@@ -23,7 +23,8 @@ expression: said
           "workspace.ask_trust",
           "checkpoint.take",
           "checkpoint.list",
-          "checkpoint.restore"
+          "checkpoint.restore",
+          "run.timeline"
         ],
         "pane": null,
         "version": 2
