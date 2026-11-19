@@ -215,6 +215,46 @@ impl Timeline {
         self.settle(index);
     }
 
+    /// Takes an entry the watched run wrote. While the newest page is held it is appended, the
+    /// oldest held entry and its label dropped past [`MAX_PAGE`], and a selection on the newest
+    /// row follows it; otherwise only the count moves, for the next page down.
+    pub fn entry(&mut self, pane: u32, seq: u32, entry: &[u8; ENTRY]) {
+        if pane != self.pane || seq < self.total {
+            return;
+        }
+        let end = self.first + self.entries.len() as u32;
+        let newest = end == self.total && self.asked.is_none();
+        let followed = self
+            .visible()
+            .last()
+            .is_none_or(|last| last == self.selected);
+        self.total = seq + 1;
+        if !newest || seq != end {
+            return;
+        }
+        if self.entries.len() == usize::from(MAX_PAGE) {
+            if self.entries[0][0] == 1 && self.labelled() > 0 {
+                let byte = self.labels[0];
+                let length = if byte == EVICTED {
+                    0
+                } else {
+                    usize::from(byte)
+                };
+                self.labels.drain(..1 + length);
+            }
+            self.entries.remove(0);
+            self.first += 1;
+            self.selected = self.selected.saturating_sub(1);
+        }
+        self.entries.push(*entry);
+        let index = if followed {
+            self.entries.len() - 1
+        } else {
+            self.selected
+        };
+        self.settle(index);
+    }
+
     /// Takes the label of the next command in the page that has none, if it names that
     /// command's row: the core sends one after each, in order. `text` is as [`hold`] left it.
     pub fn label(&mut self, pane: u32, row: u32, held: bool, text: &str) {
@@ -394,6 +434,42 @@ impl Timeline {
         self.entries.capacity() * ENTRY + self.labels.capacity()
     }
 
+    /// Takes a press at a cell of the panes' grid, `rows` by `columns`: a row is selected, and
+    /// a second press on it acts as Enter does; outside the overlay it closes.
+    pub fn click(&mut self, rows: u16, columns: u16, (row, column): (u16, u16)) -> Step {
+        let shown: Vec<usize> = self.visible().collect();
+        let Some((top, left, width, lines)) = self.area(rows, columns, shown.len()) else {
+            return Step::Close;
+        };
+        if !(left..left + width).contains(&column) || !(top..=top + lines + 5).contains(&row) {
+            return Step::Close;
+        }
+        let line = usize::from(row.wrapping_sub(top + 2));
+        let first = self.first_shown(&shown, lines);
+        match shown
+            .get(first + line)
+            .filter(|_| line < usize::from(lines))
+        {
+            Some(&index) if index == self.selected => self.act(),
+            Some(&index) => {
+                self.selected = index;
+                Step::Stay
+            }
+            None => Step::Stay,
+        }
+    }
+
+    /// Moves the selection by wheel lines, up for positive.
+    pub fn wheel(&mut self, lines: i32) -> Step {
+        self.step(-i64::from(lines))
+    }
+
+    /// The first of the `shown` rows drawn, so that the selection is in view.
+    fn first_shown(&self, shown: &[usize], lines: u16) -> usize {
+        (shown.iter().position(|&index| index == self.selected))
+            .map_or(0, |at| at.saturating_sub(usize::from(lines) - 1))
+    }
+
     /// Where it goes in a grid of `rows` by `columns`: top, left, width and rows of entries.
     fn area(&self, rows: u16, columns: u16, shown: usize) -> Option<(u16, u16, u16, u16)> {
         let width = columns
@@ -476,8 +552,7 @@ impl Timeline {
         self.draw_summary(frame, theme, (top + 1, start, end - 1), head.run);
 
         let inner = usize::from(width) - 2;
-        let first = (shown.iter().position(|&index| index == self.selected))
-            .map_or(0, |at| at.saturating_sub(usize::from(lines) - 1));
+        let first = self.first_shown(&shown, lines);
         for (line, &index) in shown.iter().skip(first).take(lines.into()).enumerate() {
             self.draw_row(
                 frame,
@@ -998,5 +1073,71 @@ pub(crate) mod tests {
             timeline.key(&Key::Named(NamedKey::Home)),
             Step::Page(Some(64))
         );
+    }
+
+    #[test]
+    fn live_entries_append_on_the_newest_page_and_the_selection_follows_the_newest() {
+        let (mut timeline, _) = run();
+        assert_eq!(
+            (timeline.first, timeline.entries.len(), timeline.selected),
+            (25, 15, 14)
+        );
+        timeline.entry(7, 40, &command(0, 40, 5, 0));
+        assert_eq!(
+            (timeline.entries.len(), timeline.selected, timeline.total),
+            (16, 15, 41)
+        );
+        timeline.label(7, 40, true, "$ ls");
+        assert_eq!(timeline.label_of(15), Some((true, "$ ls")));
+        // Off the newest row the selection stays; a repeat, another pane and a gap add nothing.
+        timeline.selected = 4;
+        timeline.entry(7, 41, &command(0, 41, 5, 0));
+        timeline.entry(7, 41, &command(0, 41, 5, 0));
+        timeline.entry(8, 42, &command(0, 42, 5, 0));
+        assert_eq!((timeline.entries.len(), timeline.selected), (17, 4));
+        timeline.entry(7, 50, &command(0, 50, 5, 0));
+        assert_eq!((timeline.entries.len(), timeline.total), (17, 51));
+        // Not the newest page now, so the next comes with a page down, and nothing appends.
+        timeline.entry(7, 51, &command(0, 51, 5, 0));
+        assert_eq!(timeline.entries.len(), 17);
+
+        // A full page drops its oldest entry and that entry's label, and grows nothing.
+        let full: Vec<_> = (0..64).map(|row| command(0, row, 5, 0)).collect();
+        timeline.asked = Some((None, Want::Newest));
+        timeline.page(7, 0, (0, 64), &full);
+        for row in 0..64 {
+            timeline.label(7, row, true, &hold(&"𠀀".repeat(64)));
+        }
+        let held = timeline.held_bytes();
+        timeline.entry(7, 64, &command(0, 64, 5, 0));
+        timeline.label(7, 64, true, "$ new");
+        assert_eq!(
+            (timeline.first, timeline.entries.len(), timeline.selected),
+            (1, 64, 63)
+        );
+        assert_eq!(timeline.labelled(), 64);
+        assert_eq!(
+            timeline.label_of(0).map(|(_, text)| text.len()),
+            Some(76 + 3)
+        );
+        assert_eq!(timeline.label_of(63), Some((true, "$ new")));
+        assert_eq!(timeline.held_bytes(), held);
+    }
+
+    #[test]
+    fn a_click_selects_a_row_a_second_acts_and_the_wheel_moves() {
+        let (mut timeline, _) = run();
+        let shown: Vec<usize> = timeline.visible().collect();
+        let (top, left, _, _) = timeline.area(30, 120, shown.len()).unwrap();
+        // The fifth row shown is the failed command.
+        let at = (top + 2 + 4, left + 10);
+        assert_eq!(timeline.click(30, 120, at), Step::Stay);
+        assert_eq!(timeline.selected, 5);
+        assert_eq!(timeline.click(30, 120, at), Step::Reveal(20));
+        assert_eq!(timeline.click(30, 120, (0, 0)), Step::Close);
+        assert_eq!(timeline.wheel(1), Step::Stay);
+        assert_eq!(timeline.selected, 4);
+        assert_eq!(timeline.wheel(-2), Step::Stay);
+        assert_eq!(timeline.selected, 6);
     }
 }
