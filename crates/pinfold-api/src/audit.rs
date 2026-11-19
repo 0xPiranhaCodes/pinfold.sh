@@ -290,7 +290,7 @@ impl Log {
     }
 
     /// Iterates over retained entries from oldest to newest.
-    pub fn iter(&self) -> impl Iterator<Item = &Entry> {
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &Entry> + ExactSizeIterator {
         self.entries.iter()
     }
 

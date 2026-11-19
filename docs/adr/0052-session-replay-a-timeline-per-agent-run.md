@@ -4,6 +4,9 @@
 - **Date:** 2026-11-14
 - **Amended 2026-11-19**, decided by the coordinator for the maintainer: where slice 1 keeps the
   timeline and how its file is named; see "Amendment 2026-11-19" at the end.
+- **Amended 2026-11-19 again**, decided by the coordinator for the maintainer: how slice 2 joins
+  a timeline to its ADR-0050 run, records restores and approvals, and what its mem-gate rows
+  hold; see "Amendment 2026-11-19: slice 2" at the end.
 
 ## Context
 
@@ -407,8 +410,9 @@ Decided by the coordinator for the maintainer while building slice 1.
   closed one is deleted with its file, and with all 64 live a new run gets none. Slice 2's
   reporting panes and the join to ADR-0050's run id come with `run.rs`.
 - **Name.** `<state>/timeline/r<pane>-<n>`, `n` this core's count of launches, so a pane that
-  starts another run gets a new file and the old ring is closed first. It has the shape of
-  ADR-0050's run ids, so the later join renames nothing.
+  starts another run gets a new file and the old ring is closed first. (Corrected by slice 2:
+  ADR-0050's run ids are `r<core start>-<n>` with their own count, so the names share a shape,
+  not a key; the join is by pane.)
 - **Header.** Written when the file is made and when the run closes. Each entry is exactly one
   `pwrite`; while a run is live the core's own head is the truth, and a read decodes only the
   slots the core counts. A record that does not decode, or is short, is skipped.
@@ -427,3 +431,38 @@ Decided by the coordinator for the maintainer while building slice 1.
   with no timeline code, already reads 4.38 MB there, from the agent launches and their output.
   The 56 B a run is far below a sample's noise, so it is held by the asserted type sizes, and
   the off row shows the difference.
+
+## Amendment 2026-11-19: slice 2, calls, approvals and checkpoints as built
+
+Decided by the coordinator for the maintainer while building slice 2.
+
+- **Join.** A timeline is joined to its ADR-0050 run by pane: the `Run`'s pane and the
+  newest timeline of that pane. Pane numbers are never reused within a core and each
+  `agent.launch` opens its own pane, so no field is added to `Run`, which stays 48 bytes.
+- **Calls.** The core reads the audit log once a turn, before the reactor's turn, from the
+  `seq` after the last one it read, and writes an `api` entry into the live run of the
+  caller's pane and, for a call that succeeded or came from outside every pane, of the
+  target's: a refused or failed call from a pane is the caller's alone, so no pane can flush
+  another's ring with calls that do nothing, and a refused prompt shows in the target's run as
+  its `approval` entry. The method is an index into `timeline::METHODS`, the
+  audit's 23 names, to which new methods are appended. A call that succeeds is recorded only
+  if that table marks it as writing or acting; `hello`, `pane.list`, `events.subscribe`,
+  `pane.read`, `pane.last_output`, `pane.wait`, `checkpoint.list`, `audit.read`,
+  `grants.list` and `workspace.trust_state` are not. The audit log records `ok` and `refused`
+  today, so `error` is kept for when it records failures.
+- **Approvals.** An entry is written only when a prompt ends, never when it is asked: allowed
+  once, allowed 30 minutes, denied, or expired, and a prompt released because its window
+  closed counts as expired. A prompt the core denies because no window can show it is
+  recorded as denied. A read or send prompt is written into the caller's run and the
+  target's, a `Rewind` prompt into its run alone, and a trust or owner prompt into none.
+- **Checkpoints and restores.** There is no seventh kind. Every take ADR-0050 answers, launch,
+  done, exit, API and view, writes a `checkpoint` entry with its line's `changed`, which
+  becomes the summary's. A restore writes a `checkpoint` entry with reason `restore`, `n`
+  from its `restore_checkpoint`, and the count it undid, restored plus deleted, in the field
+  `changed` holds elsewhere; the summary's `changed` stays as it was. An exit take lands after
+  its run closed, so the closed file is reopened, checked as a read is, for that one record.
+- **Mem-gate.** Serving API calls keeps about 1.7 MB in the core on main, with timelines on or
+  off ([#502](https://github.com/0xPiranhaCodes/pinfold.sh/issues/502)), which puts any row with
+  a polling agent over #476's 5.00 MB ceiling. The three slice-1 rows therefore stay as they
+  were, and two information rows beside them run the same agents, each then calling
+  `pinfold ctl list` 1,000 times, with `[timeline]` on and off. Those 8,000 calls write no entry.

@@ -1,4 +1,4 @@
-//! Session replay's records (ADR-0052 sections 2 and 3, slice 1).
+//! Session replay's records (ADR-0052 sections 2 and 3, slices 1 and 2).
 //!
 //! Each agent run keeps a ring file of 16-byte [`Entry`] records, `<state>/timeline/r<pane>-<n>`,
 //! and the core keeps only a 56-byte [`Timeline`]: the [`Summary`], the ring's head and dropped
@@ -15,6 +15,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::time::Instant;
 
+use pinfold_api::Log;
+use pinfold_proto::link::ApprovalAction;
+
 use crate::status::{self, Status};
 use crate::vt::Closed;
 
@@ -27,6 +30,43 @@ pub const CLOSED: u16 = 128;
 pub const MAX_RUNS: usize = crate::rewind::MAX_RUNS;
 /// [`Summary::ended`] while the run is live.
 const LIVE: u32 = u32::MAX;
+/// The audit log's method names, which an `api` entry holds as an index, and whether each
+/// writes or acts. Only those that do are recorded when they succeed (decision 3), so a polling
+/// agent cannot flush the ring. New methods are appended, so a stored index keeps its meaning.
+pub const METHODS: [(&str, bool); 23] = [
+    ("hello", false),
+    ("window.open", true),
+    ("pane.list", false),
+    ("events.subscribe", false),
+    ("pane.read", false),
+    ("pane.last_output", false),
+    ("pane.send", true),
+    ("pane.wait", false),
+    ("pane.spawn", true),
+    ("agent.launch", true),
+    ("tool.open", true),
+    ("pane.close", true),
+    ("checkpoint.take", true),
+    ("checkpoint.list", false),
+    ("checkpoint.restore", true),
+    ("pane.status", true),
+    ("audit.read", false),
+    ("session.save", true),
+    ("workspace.open", true),
+    ("grants.list", false),
+    ("grants.revoke", true),
+    ("workspace.trust_state", false),
+    ("workspace.ask_trust", true),
+];
+/// Why a checkpoint was taken, as ADR-0050 names it; a `checkpoint` entry holds the index.
+pub const REASONS: [&str; 6] = ["launch", "done", "exit", "api", "view", "restore"];
+const ACTIONS: [ApprovalAction; 5] = [
+    ApprovalAction::Read,
+    ApprovalAction::Send,
+    ApprovalAction::Trust,
+    ApprovalAction::Owner,
+    ApprovalAction::Rewind,
+];
 const STATUSES: [Status; 5] = [
     Status::NeedsYou,
     Status::Running,
@@ -46,6 +86,32 @@ pub enum Ended {
     Closed,
 }
 
+/// How the audit log recorded a call.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Outcome {
+    /// It succeeded.
+    Ok,
+    /// Policy refused it.
+    Refused,
+    /// It failed while being performed.
+    Error,
+}
+
+/// How a window prompt ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum Answer {
+    /// Allowed once.
+    Once,
+    /// Allowed for thirty minutes.
+    ThirtyMinutes,
+    /// Denied.
+    Denied,
+    /// Nobody answered it in time, or the window closed.
+    Expired,
+}
+
 /// What an entry records: a fixed set of numbers and enums, never text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum What {
@@ -59,12 +125,46 @@ pub enum What {
         /// As the mark gave it.
         exit: Option<u8>,
     },
+    /// A call by or about the run's pane that wrote or acted, or was refused or failed.
+    Api {
+        /// The audit entry's `seq`, its low 32 bits.
+        seq: u32,
+        /// An index into [`METHODS`].
+        method: u8,
+        /// As the audit log recorded it.
+        outcome: Outcome,
+        /// The pane it named.
+        target: Option<u16>,
+    },
+    /// A window prompt about the run's pane was answered or expired.
+    Approval {
+        /// What was asked.
+        action: ApprovalAction,
+        /// How it ended.
+        answer: Answer,
+        /// The other pane, the caller's or the target's, if it was one.
+        other: Option<u16>,
+        /// The prompt's id, which a lasting grant keeps.
+        grant: u32,
+    },
     /// The shown status changed through a report or an agent CLI's signal, never marks.
     State {
         /// The new status.
         status: Status,
         /// From `pane.status` rather than output.
         reported: bool,
+    },
+    /// ADR-0050 took checkpoint `n`. `changed` counts the paths that differ from the launch
+    /// checkpoint; for a restore's, the paths the restore put back or deleted.
+    Checkpoint {
+        /// The checkpoint's number in its run.
+        n: u16,
+        /// An index into [`REASONS`].
+        reason: u8,
+        /// Whether it covered every file.
+        complete: bool,
+        /// See above.
+        changed: u32,
     },
     /// The run's program exited or its pane closed.
     Exit(Ended),
@@ -97,7 +197,37 @@ impl Entry {
             What::Command { row, ms, exit } => {
                 (1, exit.unwrap_or(0), u16::from(exit.is_some()), row, ms)
             }
+            What::Api {
+                seq,
+                method,
+                outcome,
+                target,
+            } => (
+                2,
+                method,
+                outcome as u16,
+                seq,
+                target.map_or(u32::MAX, u32::from),
+            ),
+            What::Approval {
+                action,
+                answer,
+                other,
+                grant,
+            } => (
+                3,
+                action as u8,
+                answer as u16,
+                grant,
+                other.map_or(u32::MAX, u32::from),
+            ),
             What::State { status, reported } => (4, status as u8, u16::from(reported), 0, 0),
+            What::Checkpoint {
+                n,
+                reason,
+                complete,
+                changed,
+            } => (5, reason, n, changed, u32::from(complete)),
             What::Exit(Ended::Code(code)) => (6, code, 0, 0, 0),
             What::Exit(Ended::Signal(signal)) => (6, signal, 1, 0, 0),
             What::Exit(Ended::Closed) => (6, 0, 2, 0, 0),
@@ -120,11 +250,38 @@ impl Entry {
         };
         let (small, flag) = (bytes[1], u16::from_le_bytes([bytes[2], bytes[3]]));
         let (one, two) = (word(8), word(12));
+        let pane = |word: u32| match word {
+            u32::MAX => Some(None),
+            word => u16::try_from(word).ok().map(Some),
+        };
         let what = match (bytes[0], flag) {
             (1, 0 | 1) if flag == 1 || small == 0 => What::Command {
                 row: one,
                 ms: two,
                 exit: (flag == 1).then_some(small),
+            },
+            (2, 0..=2) if usize::from(small) < METHODS.len() => What::Api {
+                seq: one,
+                method: small,
+                outcome: [Outcome::Ok, Outcome::Refused, Outcome::Error][usize::from(flag)],
+                target: pane(two)?,
+            },
+            (3, 0..=3) => What::Approval {
+                action: *ACTIONS.get(usize::from(small))?,
+                answer: [
+                    Answer::Once,
+                    Answer::ThirtyMinutes,
+                    Answer::Denied,
+                    Answer::Expired,
+                ][usize::from(flag)],
+                other: pane(two)?,
+                grant: one,
+            },
+            (5, _) if usize::from(small) < REASONS.len() && two <= 1 => What::Checkpoint {
+                n: flag,
+                reason: small,
+                complete: two == 1,
+                changed: one,
             },
             (4, 0 | 1) if one == 0 && two == 0 => What::State {
                 status: *STATUSES.get(usize::from(small))?,
@@ -151,13 +308,13 @@ pub struct Summary {
     pub commands: u32,
     /// Of those, with a non-zero exit.
     pub failed: u32,
-    /// Approvals answered, and of those denied (slice 2).
+    /// Approvals answered, and of those denied.
     pub approvals: u32,
     /// See `approvals`.
     pub denied: u32,
-    /// Calls that wrote or acted, were refused or failed (slice 2).
+    /// Calls that wrote or acted, were refused or failed.
     pub calls: u32,
-    /// Paths the newest checkpoint changed since launch (slice 2).
+    /// Paths the newest checkpoint changed since launch.
     pub changed: u32,
     /// `failed` plus ✕ error states.
     pub errors: u32,
@@ -288,14 +445,14 @@ fn refused(why: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidInput, format!("timeline file {why}"))
 }
 
-/// Opens an existing ring file to read without following a link: the path's own entry must be
-/// a private file of ours, and the opened file the same one.
-fn open_checked(path: &Path) -> io::Result<File> {
+/// Opens an existing ring file, to read and with `write` to write, without following a link:
+/// the path's own entry must be a private file of ours, and the opened file the same one.
+fn open_checked(path: &Path, write: bool) -> io::Result<File> {
     let found = fs::symlink_metadata(path)?;
     if !ours(&found, pinfold_sys::effective_uid()) {
         return Err(refused("is a link or not a private file of ours"));
     }
-    let file = File::open(path)?;
+    let file = OpenOptions::new().read(true).write(write).open(path)?;
     let opened = file.metadata()?;
     if (opened.dev(), opened.ino()) != (found.dev(), found.ino()) {
         return Err(refused("was swapped while it was opened"));
@@ -310,6 +467,8 @@ pub struct Timelines {
     /// Entries a live run keeps, `[timeline] entries`.
     slots: u16,
     next: u32,
+    /// The audit `seq` after the newest call looked at.
+    seen: u64,
     runs: Vec<Timeline>,
 }
 
@@ -336,6 +495,7 @@ impl Timelines {
             dir,
             slots: u16::try_from(entries.clamp(64, 4096)).unwrap_or(4096),
             next: 0,
+            seen: 0,
             runs: Vec::new(),
         })
     }
@@ -448,6 +608,139 @@ impl Timelines {
         run.push(What::State { status, reported }, slots, now);
     }
 
+    /// Records each call `log` answered since the last look whose caller or target pane has a
+    /// live run, if it wrote or acted, or was refused or failed. Reads that succeed, such as
+    /// `pane.list` and `pane.wait`, are never recorded (decision 3). A refused or failed call
+    /// from a pane goes only into the caller's run, so no pane can flush another's ring with
+    /// calls that do nothing; a refused prompt shows in the target's as its approval.
+    pub fn calls(&mut self, log: &Log, now: Instant) {
+        let seen = self.seen;
+        let new = (log.iter().rev())
+            .take_while(|entry| entry.record.seq >= seen)
+            .count();
+        for entry in log.iter().skip(log.iter().len() - new) {
+            let record = &entry.record;
+            self.seen = record.seq.saturating_add(1);
+            let Some((method, (_, acts))) =
+                (METHODS.iter().enumerate()).find(|(_, (name, _))| *name == record.method)
+            else {
+                continue;
+            };
+            let outcome = match record.outcome {
+                pinfold_api::Outcome::Ok(_) if !acts => continue,
+                pinfold_api::Outcome::Ok(_) => Outcome::Ok,
+                pinfold_api::Outcome::Refused(_) => Outcome::Refused,
+                pinfold_api::Outcome::Error(_) => Outcome::Error,
+            };
+            let what = What::Api {
+                seq: u32::try_from(record.seq & u64::from(u32::MAX)).unwrap_or(0),
+                method: u8::try_from(method).unwrap_or(u8::MAX),
+                outcome,
+                target: record.target.and_then(|pane| u16::try_from(pane).ok()),
+            };
+            let pane = |pane: Option<u64>| pane.and_then(|pane| usize::try_from(pane).ok());
+            let (caller, target) = (pane(record.caller), pane(record.target));
+            let into_target = outcome == Outcome::Ok || caller.is_none();
+            let target = target.filter(|target| into_target && caller != Some(*target));
+            for pane in [caller, target].into_iter().flatten() {
+                self.live_push(pane, what, now, |summary| {
+                    summary.calls = summary.calls.saturating_add(1);
+                });
+            }
+        }
+    }
+
+    /// Records how the window prompt `grant` ended in the runs of the panes it was about: the
+    /// caller and target of a read or a send, the run of a rewind. A trust or owner prompt is
+    /// about no pane.
+    pub fn approval(
+        &mut self,
+        caller: usize,
+        target: usize,
+        action: ApprovalAction,
+        answer: Answer,
+        grant: u64,
+        now: Instant,
+    ) {
+        let panes = match action {
+            ApprovalAction::Read | ApprovalAction::Send => [Some(caller), Some(target)],
+            ApprovalAction::Rewind => [None, Some(target)],
+            ApprovalAction::Trust | ApprovalAction::Owner => return,
+        };
+        for (pane, other) in panes.into_iter().zip([target, caller]) {
+            let Some(pane) = pane else { continue };
+            let what = What::Approval {
+                action,
+                answer,
+                other: (action != ApprovalAction::Rewind)
+                    .then(|| u16::try_from(other).ok())
+                    .flatten(),
+                grant: u32::try_from(grant).unwrap_or(u32::MAX),
+            };
+            self.live_push(pane, what, now, |summary| {
+                summary.approvals = summary.approvals.saturating_add(1);
+                summary.denied = summary
+                    .denied
+                    .saturating_add(u32::from(answer == Answer::Denied));
+            });
+        }
+    }
+
+    /// Records checkpoint `n` of the newest run in `pane`, live or closed, as an exit take
+    /// lands after its run closed. `changed` becomes the summary's, except a restore's, which
+    /// counts what the restore undid.
+    pub fn checkpoint(
+        &mut self,
+        pane: usize,
+        n: u32,
+        reason: &str,
+        complete: bool,
+        changed: u32,
+        now: Instant,
+    ) {
+        let Some(reason) = REASONS.iter().position(|word| *word == reason) else {
+            return;
+        };
+        let what = What::Checkpoint {
+            n: u16::try_from(n).unwrap_or(u16::MAX),
+            reason: u8::try_from(reason).unwrap_or(u8::MAX),
+            complete,
+            changed,
+        };
+        let Some(at) = (0..self.runs.len())
+            .filter(|at| usize::from(self.runs[*at].pane) == pane)
+            .max_by_key(|at| self.runs[*at].n)
+        else {
+            return;
+        };
+        let (path, slots) = (self.dir.join(self.runs[at].name()), self.slots);
+        let run = &mut self.runs[at];
+        if REASONS[reason] != "restore" {
+            run.summary.changed = changed;
+        }
+        if run.is_live() {
+            return run.push(what, slots, now);
+        }
+        // A closed run's file is reopened for this one record and its header kept true.
+        let Ok(file) = open_checked(&path, true) else {
+            return;
+        };
+        run.file = Some(file);
+        run.push(what, CLOSED, now);
+        if let Some(file) = run.file.take() {
+            let head = header(run.head, run.count(CLOSED), run.dropped, CLOSED);
+            let _ = file.write_all_at(&head, 0);
+        }
+    }
+
+    fn live_push(&mut self, pane: usize, what: What, now: Instant, count: impl Fn(&mut Summary)) {
+        let slots = self.slots;
+        if let Some(run) = self.live(pane) {
+            count(&mut run.summary);
+            run.push(what, slots, now);
+        }
+    }
+
     /// Records how `pane`'s program ended, `None` if it still ran as its pane closed, and
     /// closes its run, whose file keeps its newest [`CLOSED`] entries.
     pub fn exit(&mut self, pane: usize, status: Option<ExitStatus>, now: Instant) {
@@ -484,7 +777,7 @@ impl Timelines {
             }
             None => {
                 slots = CLOSED;
-                reopened = open_checked(&self.dir.join(run.name()))?;
+                reopened = open_checked(&self.dir.join(run.name()), false)?;
                 &reopened
             }
         };

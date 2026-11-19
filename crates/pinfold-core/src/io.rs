@@ -711,6 +711,11 @@ impl Reactor {
         self.timelines.as_ref()
     }
 
+    /// The same, to record calls, approvals and checkpoints into (ADR-0052 slice 2).
+    pub fn timelines_mut(&mut self) -> Option<&mut Timelines> {
+        self.timelines.as_mut()
+    }
+
     /// Tells a pane's status that the person typed into it, which clears a "needs you" its
     /// output said.
     pub fn typed(&mut self, pane: usize, now: Instant) {

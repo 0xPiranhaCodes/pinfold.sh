@@ -27,7 +27,7 @@ use pinfold_core::io::{Reactor, Waker};
 use pinfold_core::rewind::{self, Missing, Rewind, Settings};
 use pinfold_core::snapshot::{self, Saver, Snapshot};
 use pinfold_core::status::Status;
-use pinfold_core::timeline::Timelines;
+use pinfold_core::timeline::{Answer, Timelines};
 use pinfold_core::wait::{Outcome, Waits};
 use pinfold_core::workspace::Workspaces;
 use pinfold_core::{sandbox, shell, tool, webhook};
@@ -857,6 +857,45 @@ fn answered_error(why: String) -> String {
     }
 }
 
+/// Writes what the last turn answered into the agent runs' timelines (ADR-0052 slice 2): the
+/// calls the audit log recorded, the prompts that ended and the checkpoints taken, each joined
+/// to its run by its pane.
+fn record_timelines(
+    reactor: &mut Reactor,
+    log: &Log,
+    grants: &mut Grants<Request>,
+    rewind: Option<&mut Rewind<Parked>>,
+) {
+    let answered = grants.answered();
+    let taken = rewind.map(|rewind| {
+        let taken = rewind.taken().into_iter();
+        let pane = |run| rewind.run(run).and_then(rewind::Run::pane);
+        taken
+            .filter_map(|taken| Some((pane(taken.run)?, taken)))
+            .collect::<Vec<_>>()
+    });
+    let Some(timelines) = reactor.timelines_mut() else {
+        return;
+    };
+    let now = Instant::now();
+    // A prompt is answered before the calls it releases are.
+    for prompt in answered {
+        let answer = match prompt.answer {
+            Some(ApprovalAnswer::AllowOnce) => Answer::Once,
+            Some(ApprovalAnswer::AllowForThirtyMinutes) => Answer::ThirtyMinutes,
+            Some(ApprovalAnswer::Deny) => Answer::Denied,
+            None => Answer::Expired,
+        };
+        let (caller, target) = (prompt.caller, prompt.target);
+        timelines.approval(caller, target, prompt.action, answer, prompt.id, now);
+    }
+    timelines.calls(log, now);
+    for (pane, taken) in taken.into_iter().flatten() {
+        let (n, reason, complete) = (taken.n, taken.reason, taken.complete);
+        timelines.checkpoint(pane, n, reason, complete, taken.changed, now);
+    }
+}
+
 /// Answers each launch and call whose checkpoint work ended.
 fn checkpoints_ended(
     reactor: &mut Reactor,
@@ -1663,6 +1702,8 @@ fn daemon(
             .chain((!started).then(|| empty_until.saturating_duration_since(now)))
             .chain(unready.map(|(_, by)| by.saturating_duration_since(now)));
         output::tap(&mut reactor, &waits, &subscribers);
+        // Before the turn, which may drop a pane whose run then ends.
+        record_timelines(&mut reactor, &log, &mut grants, checkpoints.as_mut());
         reactor.turn(Some(wait.min().unwrap_or(IDLE)))?;
         if let Some(sender) = webhook.as_mut() {
             post(&mut reactor, sender);

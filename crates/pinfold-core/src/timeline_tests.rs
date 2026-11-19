@@ -3,6 +3,7 @@ use std::os::unix::fs::PermissionsExt;
 use proptest::prelude::*;
 
 use super::*;
+use pinfold_proto::link::ApprovalAction;
 
 fn timelines(entries: u64) -> (tempfile::TempDir, Timelines) {
     let state = tempfile::tempdir().unwrap();
@@ -50,6 +51,36 @@ fn the_entry_type_has_no_string_and_is_16_bytes() {
         What::Exit(Ended::Code(1)),
         What::Exit(Ended::Signal(9)),
         What::Exit(Ended::Closed),
+        What::Api {
+            seq: 7,
+            method: 6,
+            outcome: Outcome::Refused,
+            target: Some(3),
+        },
+        What::Api {
+            seq: u32::MAX,
+            method: 22,
+            outcome: Outcome::Error,
+            target: None,
+        },
+        What::Approval {
+            action: ApprovalAction::Send,
+            answer: Answer::ThirtyMinutes,
+            other: Some(1),
+            grant: 9,
+        },
+        What::Approval {
+            action: ApprovalAction::Rewind,
+            answer: Answer::Expired,
+            other: None,
+            grant: 0,
+        },
+        What::Checkpoint {
+            n: 2,
+            reason: 5,
+            complete: false,
+            changed: 8,
+        },
     ];
     for what in entries {
         let entry = Entry { at: 5, what };
@@ -236,4 +267,171 @@ proptest! {
             prop_assert_eq!(Entry::decode(&entry.encode()), Some(entry));
         }
     }
+}
+
+fn call(seq: u64, caller: u64, method: &str, target: Option<u64>, ok: bool) -> pinfold_api::Record {
+    pinfold_api::Record {
+        seq,
+        at_ms: 0,
+        caller: Some(caller),
+        terminal: true,
+        method: method.to_owned(),
+        target,
+        scope: "self".to_owned(),
+        outcome: if ok {
+            pinfold_api::Outcome::Ok("allowed".to_owned())
+        } else {
+            pinfold_api::Outcome::Refused("only the caller's own pane".to_owned())
+        },
+    }
+}
+
+/// Decision 3: reads that succeed never reach the ring, so a polling agent cannot flush it;
+/// a refused read is recorded in the caller's run alone, so it cannot flush the target's, and
+/// a call that acts in each run it touches.
+#[test]
+fn a_polling_agent_adds_no_entries_and_a_refused_call_adds_one() {
+    let (_state, mut timelines) = timelines(64);
+    let mut log = Log::new();
+    let now = Instant::now();
+    timelines.open(2, now);
+    timelines.open(3, now);
+    for seq in 0..1_000 {
+        log.append(call(seq, 2, "pane.list", None, true)).unwrap();
+        timelines.calls(&log, now);
+    }
+    log.append(call(0, 2, "pane.wait", Some(2), true)).unwrap();
+    log.append(call(0, 2, "pane.read", Some(2), true)).unwrap();
+    log.append(call(0, 2, "hello", None, true)).unwrap();
+    timelines.calls(&log, now);
+    assert!(timelines.entries(2).unwrap().is_empty());
+    assert_eq!(timelines.of_pane(2).unwrap().summary().calls, 0);
+
+    log.append(call(0, 2, "pane.read", Some(3), false)).unwrap();
+    log.append(call(0, 2, "pane.send", Some(2), true)).unwrap();
+    log.append(call(0, 2, "pane.close", Some(3), true)).unwrap();
+    timelines.calls(&log, now);
+    // Looking again records nothing twice.
+    timelines.calls(&log, now);
+    let entries: Vec<What> = timelines
+        .entries(2)
+        .unwrap()
+        .iter()
+        .map(|e| e.what)
+        .collect();
+    let api = |seq, method, outcome, target| What::Api {
+        seq,
+        method,
+        outcome,
+        target,
+    };
+    assert_eq!(
+        entries,
+        [
+            api(1_003, 4, Outcome::Refused, Some(3)),
+            api(1_004, 6, Outcome::Ok, Some(2)),
+            api(1_005, 11, Outcome::Ok, Some(3)),
+        ]
+    );
+    assert_eq!(METHODS[4].0, "pane.read");
+    assert_eq!(METHODS[6].0, "pane.send");
+    let target: Vec<What> = timelines
+        .entries(3)
+        .unwrap()
+        .iter()
+        .map(|e| e.what)
+        .collect();
+    assert_eq!(target, [api(1_005, 11, Outcome::Ok, Some(3))]);
+    assert_eq!(timelines.of_pane(2).unwrap().summary().calls, 3);
+    assert_eq!(timelines.of_pane(3).unwrap().summary().calls, 1);
+}
+
+#[test]
+fn approvals_are_recorded_in_the_runs_they_are_about_and_counted() {
+    let (_state, mut timelines) = timelines(64);
+    let now = Instant::now();
+    timelines.open(1, now);
+    timelines.open(2, now);
+    timelines.approval(1, 2, ApprovalAction::Send, Answer::Once, 5, now);
+    timelines.approval(1, 2, ApprovalAction::Read, Answer::Denied, 6, now);
+    timelines.approval(0, 2, ApprovalAction::Rewind, Answer::Expired, 7, now);
+    // A trust or owner prompt is about no pane, whatever its numbers.
+    timelines.approval(0, 1, ApprovalAction::Trust, Answer::Once, 8, now);
+    timelines.approval(0, 0, ApprovalAction::Owner, Answer::Denied, 9, now);
+    let approval = |action, answer, other, grant| What::Approval {
+        action,
+        answer,
+        other,
+        grant,
+    };
+    let kinds = |pane| -> Vec<What> {
+        timelines
+            .entries(pane)
+            .unwrap()
+            .iter()
+            .map(|e| e.what)
+            .collect()
+    };
+    assert_eq!(
+        kinds(1),
+        [
+            approval(ApprovalAction::Send, Answer::Once, Some(2), 5),
+            approval(ApprovalAction::Read, Answer::Denied, Some(2), 6),
+        ]
+    );
+    assert_eq!(
+        kinds(2),
+        [
+            approval(ApprovalAction::Send, Answer::Once, Some(1), 5),
+            approval(ApprovalAction::Read, Answer::Denied, Some(1), 6),
+            approval(ApprovalAction::Rewind, Answer::Expired, None, 7),
+        ]
+    );
+    let summary = |pane| {
+        let summary = timelines.of_pane(pane).unwrap().summary();
+        (summary.approvals, summary.denied)
+    };
+    assert_eq!((summary(1), summary(2)), ((2, 1), (3, 1)));
+}
+
+/// A checkpoint's `changed` becomes the summary's; a restore's counts what it undid and leaves
+/// it; an exit take that lands after its run closed is still kept, in the closed file.
+#[test]
+fn checkpoints_carry_their_changed_count_into_live_and_closed_runs() {
+    let (state, mut timelines) = timelines(64);
+    let now = Instant::now();
+    timelines.open(4, now);
+    timelines.checkpoint(4, 0, "launch", true, 0, now);
+    timelines.checkpoint(4, 1, "done", false, 8, now);
+    timelines.checkpoint(4, 2, "restore", true, 3, now);
+    timelines.checkpoint(4, 3, "unknown", true, 1, now);
+    timelines.checkpoint(5, 0, "launch", true, 1, now);
+    assert_eq!(timelines.of_pane(4).unwrap().summary().changed, 8);
+    timelines.exit(4, None, now);
+    timelines.checkpoint(4, 4, "exit", true, 9, now);
+    let checkpoint = |n, reason, complete, changed| What::Checkpoint {
+        n,
+        reason,
+        complete,
+        changed,
+    };
+    let kinds: Vec<What> = timelines
+        .entries(4)
+        .unwrap()
+        .iter()
+        .map(|e| e.what)
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            checkpoint(0, 0, true, 0),
+            checkpoint(1, 1, false, 8),
+            checkpoint(2, 5, true, 3),
+            What::Exit(Ended::Closed),
+            checkpoint(4, 2, true, 9),
+        ]
+    );
+    assert_eq!(timelines.newest(4).unwrap().summary().changed, 9);
+    assert_eq!(file_len(&state, "r4-0"), 16 + 5 * 16);
+    assert!(timelines.newest(5).is_none());
 }
