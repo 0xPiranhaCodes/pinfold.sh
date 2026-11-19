@@ -21,6 +21,7 @@
 //! | `m`                 | Pick markdown to read   | ADR-0045                   |
 //! | `!`                 | Open or close the inbox | ADR-0051, `keys.inbox`     |
 //! | `w`                 | Go to the next ◆ pane   | ADR-0051, `keys.next_waiting` |
+//! | `t`                 | Open or close the timeline | ADR-0052                |
 //!
 //! Alt+arrows matter on macOS, where the desktop takes Ctrl+arrows. `h` `j` `k` `l` stay free,
 //! because the design keeps `l` for the audit log, as it keeps `u` and `A`. `f`, `g` and `m` open a
@@ -107,6 +108,8 @@ pub enum Command {
     /// Open the diff viewer on the focused agent pane's run, since its launch checkpoint
     /// (ADR-0050).
     Rewind,
+    /// Open the focused pane's run's timeline, or close it (ADR-0052).
+    Timeline,
 }
 
 impl Command {
@@ -146,7 +149,8 @@ impl Command {
             | Self::OpenMarkdown
             | Self::Inbox
             | Self::NextWaiting
-            | Self::Rewind => "",
+            | Self::Rewind
+            | Self::Timeline => "",
         }
     }
 }
@@ -230,6 +234,7 @@ fn command(
             b"f" => Some(Command::OpenFiles),
             b"g" => Some(Command::OpenDiff),
             b"m" => Some(Command::OpenMarkdown),
+            b"t" => Some(Command::Timeline),
             _ if text.chars().eq([inbox]) => Some(Command::Inbox),
             _ if text.chars().eq([next_waiting]) => Some(Command::NextWaiting),
             _ => None,

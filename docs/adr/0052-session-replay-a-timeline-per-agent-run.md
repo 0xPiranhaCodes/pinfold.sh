@@ -12,6 +12,8 @@
 - **Amended 2026-11-19 a fourth time**, decided by the coordinator for the maintainer: the link
   is version 27, labels ride on the page, and the window's diff at a checkpoint reuses
   `Tool::Rewind`; see "Amendment 2026-11-19: slice 4".
+- **Amended 2026-11-19 a fifth time**, decided by the coordinator for the maintainer: what the
+  slice 5 overlay holds and draws; see "Amendment 2026-11-19: slice 5".
 
 ## Context
 
@@ -533,3 +535,32 @@ Decided by the coordinator for the maintainer while building slice 4.
   pane's record, which fits its padding: `PaneLink` stays 152 bytes.
 - **Split.** Three PRs: the wire format (`pinfold-proto`), the core's side, and the window's
   decoding; the overlay that sends the requests is slice 5.
+
+## Amendment 2026-11-19: slice 5, the overlay as built
+
+Decided by the coordinator for the maintainer while building slice 5.
+
+- **What it holds.** One page: at most 64 entries, made at that size when the overlay opens,
+  and its commands' labels in one buffer of 64 × 81 bytes, a length byte and at most 80 bytes
+  each, cut at a character with `…`. That is 6,208 bytes whatever the text, within section
+  "Memory"'s 6.2 KiB; CJK keeps about 26 wide characters, which fills a row. The core sends a
+  label after each command, in order, so a label is matched to the next command without one
+  and dropped unless it names that command's row. Closing drops it all. A label holds only
+  what `top_bar::safe` lets through, as a message does.
+- **Paging.** Moving past either end of the page asks for the next one before or after it, one
+  request at a time; Home and End ask for the oldest and the newest. Labels go with their page.
+- **Enter, `d` and evicted.** A command whose label said its row is gone flashes
+  `Refusal::Evicted`'s words and sends nothing; a held one sends `Request::RevealStored` and
+  closes, and a refusal in between flashes through the existing refused path. `d`, and Enter on
+  a checkpoint, open the viewer through `Request::OpenTool { Tool::Rewind, checkpoint }` at the
+  nearest checkpoint at or after the entry within the held page; none there flashes `no
+  checkpoint after this entry`.
+- **Not built: the live `running` row and the once-a-second tick.** The link carries no
+  command's start and no time in state outside the open inbox, so the header shows the tab's
+  state as glyph, colour and word without a time, and the summary line changes with
+  `Notice::Summary`, already once a second at most. If wanted, `since` rides on
+  `Notice::Summary` rather than a timer in the window. A known gap.
+- **Prefix `t`** joins the keys `[keys]` may not take, so a config whose `inbox` or
+  `next_waiting` is `t` is refused at upgrade, with a message that says why.
+- **Split.** Two PRs: the overlay with prefix `t`, its keys, Enter, `d` and the mem-gate rows;
+  then live append, the palette entry and the mouse.

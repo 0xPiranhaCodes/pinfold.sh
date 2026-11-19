@@ -458,6 +458,7 @@ Press the prefix, then one of these. The prefix pressed twice sends it to the pr
 | `m`                | Pick a `*.md` file, then open it in `pinfold md` right of the pane |
 | `!`                | Open or close the [inbox](#the-inbox), `keys.inbox`           |
 | `w`                | Go to the next pane that needs you, `keys.next_waiting`       |
+| `t`                | Open or close the focused agent run's timeline (ADR-0052)     |
 
 `f` and `g` open the tool in the directory the system says the focused pane's shell is in,
 never one a program's output reported, as a new tab or split does. Tmux binds neither key,

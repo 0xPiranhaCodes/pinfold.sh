@@ -345,7 +345,7 @@ pub enum Alert {
 }
 
 /// The keys the window already binds after the prefix, which `[keys]` cannot take.
-pub const PREFIX_KEYS: &str = "cxnp0123456789|%-\"zdfgm";
+pub const PREFIX_KEYS: &str = "cxnp0123456789|%-\"zdfgmt";
 
 impl Default for Config {
     fn default() -> Self {
@@ -423,7 +423,13 @@ fn after_prefix<'de, D: Deserializer<'de>>(deserializer: D) -> Result<char, D::E
         (Some(key), None) if key.is_ascii_graphic() && !PREFIX_KEYS.contains(key) => Ok(key),
         _ => Err(de::Error::custom(format!(
             "a key after the prefix must be one printable ASCII character not already bound \
-             ({PREFIX_KEYS}), not {text:?}"
+             ({PREFIX_KEYS}), not {text:?}{}",
+            // Free before the timeline took it (ADR-0052), so a config may still hold it.
+            if text == "t" {
+                "; t now opens the timeline"
+            } else {
+                ""
+            }
         ))),
     }
 }
@@ -1041,7 +1047,7 @@ mod tests {
         assert_eq!(parse(b"").unwrap().keys.next_waiting, 'w');
         let config = parse(b"[keys]\nnext_waiting = \"N\"\n").unwrap();
         assert_eq!(config.keys.next_waiting, 'N');
-        for value in ["\"c\"", "\"m\"", "\"0\"", "\"ww\"", "\"\""] {
+        for value in ["\"c\"", "\"m\"", "\"t\"", "\"0\"", "\"ww\"", "\"\""] {
             let text = message(format!("[keys]\nnext_waiting = {value}\n").as_bytes());
             assert!(text.contains("not already bound"), "{value}: {text}");
         }

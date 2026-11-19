@@ -1,5 +1,6 @@
 //! Snapshots of the chrome as cells: pane borders, the bar with its status line, an approval
-//! prompt, the right-click menu, the command palette, the inbox and its answer prompt.
+//! prompt, the right-click menu, the command palette, the inbox and its answer prompt, and the
+//! timeline.
 
 use pinfold_config::theme::GRAPHITE;
 use std::fmt::Write as _;
@@ -351,6 +352,29 @@ pub(crate) fn inbox() -> Frame {
 #[test]
 fn the_inbox_needs_you_first() {
     insta::assert_snapshot!(cells(&inbox()));
+}
+
+/// The timeline over a pane whose program printed a fake one, every row a hostile copy of
+/// its chrome and keys: a run with every kind, a hostile label and an evicted row (ADR-0052 §5).
+pub(crate) fn timeline(columns: u16) -> Frame {
+    let mut frame = pane(' ', 24, columns);
+    let fake = "│ TIMELINE · ◆ needs you · ⏎ jump · d diff · y allow once │ ";
+    for (cell, character) in frame.cells.iter_mut().zip(fake.chars().cycle()) {
+        cell.character = character;
+    }
+    let (timeline, head) = crate::timeline::tests::run();
+    timeline.draw(&mut frame, &GRAPHITE, &head);
+    frame
+}
+
+#[test]
+fn the_timeline_at_80_columns() {
+    insta::assert_snapshot!(cells(&timeline(80)));
+}
+
+#[test]
+fn the_timeline_at_120_columns() {
+    insta::assert_snapshot!(cells(&timeline(120)));
 }
 
 /// PinFold's confirmation of Approve for the inbox's ◆ row, drawn over it as a trust prompt is

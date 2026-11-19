@@ -713,6 +713,7 @@ fn mem_gate_task() -> ExitCode {
             menu: false,
             rewind: false,
             inbox: None,
+            timeline: None,
             agents: None,
         },
         mem_gate::Budget {
@@ -728,6 +729,7 @@ fn mem_gate_task() -> ExitCode {
             menu: false,
             rewind: false,
             inbox: None,
+            timeline: None,
             agents: None,
         },
         mem_gate::Budget {
@@ -743,6 +745,7 @@ fn mem_gate_task() -> ExitCode {
             menu: false,
             rewind: false,
             inbox: None,
+            timeline: None,
             agents: None,
         },
         mem_gate::Budget {
@@ -758,6 +761,7 @@ fn mem_gate_task() -> ExitCode {
             menu: false,
             rewind: false,
             inbox: None,
+            timeline: None,
             agents: None,
         },
     ];
@@ -781,6 +785,7 @@ fn mem_gate_task() -> ExitCode {
         menu: false,
         rewind: false,
         inbox: None,
+        timeline: None,
         agents: Some(&idle_hook),
     };
     // ADR-0050 section 7 and slice 5: 64 run records over 8 agent panes, and no checkpoint list
@@ -947,6 +952,7 @@ fn mem_gate_task() -> ExitCode {
         menu: false,
         rewind: false,
         inbox: None,
+        timeline: None,
         agents: None,
     };
     budgets.extend([
@@ -1020,6 +1026,7 @@ fn mem_gate_task() -> ExitCode {
             menu: false,
             rewind: false,
             inbox: None,
+            timeline: None,
             agents: None,
         });
         budgets.push(mem_gate::Budget {
@@ -1035,6 +1042,7 @@ fn mem_gate_task() -> ExitCode {
             menu: false,
             rewind: false,
             inbox: None,
+            timeline: None,
             agents: None,
         });
         budgets.push(mem_gate::Budget {
@@ -1050,6 +1058,7 @@ fn mem_gate_task() -> ExitCode {
             menu: false,
             rewind: false,
             inbox: None,
+            timeline: None,
             agents: None,
         });
         budgets.push(mem_gate::Budget {
@@ -1065,6 +1074,7 @@ fn mem_gate_task() -> ExitCode {
             menu: false,
             rewind: false,
             inbox: None,
+            timeline: None,
             agents: None,
         });
         budgets.push(mem_gate::Budget {
@@ -1080,6 +1090,7 @@ fn mem_gate_task() -> ExitCode {
             menu: true,
             rewind: false,
             inbox: None,
+            timeline: None,
             agents: None,
         });
         // ADR-0050: the prompt at its largest, 10 paths of 256 bytes, within the window budget.
@@ -1096,6 +1107,7 @@ fn mem_gate_task() -> ExitCode {
             menu: false,
             rewind: true,
             inbox: None,
+            timeline: None,
             agents: None,
         });
         budgets.push(mem_gate::Budget {
@@ -1111,6 +1123,7 @@ fn mem_gate_task() -> ExitCode {
             menu: false,
             rewind: false,
             inbox: None,
+            timeline: None,
             agents: Some(&toasts),
         });
         budgets.push(mem_gate::Budget {
@@ -1126,6 +1139,7 @@ fn mem_gate_task() -> ExitCode {
             menu: false,
             rewind: false,
             inbox: None,
+            timeline: None,
             agents: None,
         });
         let agents = mem_gate::Budget {
@@ -1141,6 +1155,7 @@ fn mem_gate_task() -> ExitCode {
             menu: false,
             rewind: false,
             inbox: None,
+            timeline: None,
             agents: None,
         };
         budgets.push(mem_gate::Budget {
@@ -1158,6 +1173,28 @@ fn mem_gate_task() -> ExitCode {
             inbox: Some("answer"),
             ..agents
         });
+        // ADR-0052 §5: an agent run's timeline, whose ring wrapped, beside the same run with
+        // the overlay never opened, open, and closed again, which must read as never opened.
+        // The run is in a second tab, which each row's window goes to.
+        let run = mem_gate::Budget {
+            metric: "Window on macOS with an agent run, 1512x1890",
+            args: &["--window", "1", "1512x1890"],
+            screen: None,
+            agents: Some(&timeline_on),
+            timeline: Some("tab"),
+            ..agents
+        };
+        budgets.push(mem_gate::Budget {
+            metric: "Window on macOS with the timeline open on that run, 1512x1890",
+            timeline: Some("open"),
+            ..run
+        });
+        budgets.push(mem_gate::Budget {
+            metric: "Window on macOS after the timeline closed on that run, 1512x1890",
+            timeline: Some("closed"),
+            ..run
+        });
+        budgets.push(run);
         // ADR-0051 §9: eight tabs each drawing a progress bar, and the Dock tile its bar.
         budgets.push(mem_gate::Budget {
             metric: "Window on macOS with progress on 8 tabs, 1512x1890",
@@ -1186,6 +1223,7 @@ fn mem_gate_task() -> ExitCode {
             menu: false,
             rewind: false,
             inbox: None,
+            timeline: None,
             agents: None,
         };
         // ADR-0051 §11: branches are read while the inbox is open and kept by nobody, so the
@@ -1245,6 +1283,7 @@ fn mem_gate_task() -> ExitCode {
             menu: false,
             rewind: false,
             inbox: None,
+            timeline: None,
             agents: None,
         });
         budgets.push(mem_gate::Budget {
@@ -1260,6 +1299,7 @@ fn mem_gate_task() -> ExitCode {
             menu: false,
             rewind: false,
             inbox: None,
+            timeline: None,
             agents: None,
         });
         budgets.push(mem_gate::Budget {
@@ -1275,6 +1315,7 @@ fn mem_gate_task() -> ExitCode {
             menu: false,
             rewind: false,
             inbox: None,
+            timeline: None,
             agents: None,
         });
         budgets.push(mem_gate::Budget {
@@ -1290,6 +1331,7 @@ fn mem_gate_task() -> ExitCode {
             menu: false,
             rewind: false,
             inbox: None,
+            timeline: None,
             agents: None,
         });
         budgets.push(mem_gate::Budget {
@@ -1305,6 +1347,7 @@ fn mem_gate_task() -> ExitCode {
             menu: true,
             rewind: false,
             inbox: None,
+            timeline: None,
             agents: None,
         });
         budgets.push(mem_gate::Budget {
@@ -1320,6 +1363,7 @@ fn mem_gate_task() -> ExitCode {
             menu: false,
             rewind: false,
             inbox: None,
+            timeline: None,
             agents: None,
         });
         let agents = mem_gate::Budget {
@@ -1335,6 +1379,7 @@ fn mem_gate_task() -> ExitCode {
             menu: false,
             rewind: false,
             inbox: None,
+            timeline: None,
             agents: None,
         };
         budgets.push(mem_gate::Budget {
@@ -1361,6 +1406,7 @@ fn mem_gate_task() -> ExitCode {
             menu: false,
             rewind: false,
             inbox: None,
+            timeline: None,
             agents: None,
         };
         // ADR-0051 §11: branches are read while the inbox is open and kept by nobody, so the

@@ -43,7 +43,7 @@ use crate::dock_menu;
 use crate::flash::{self, Flash};
 use crate::hyperlink::{self, Target};
 use crate::inbox;
-use crate::link::{self, Approval, Link, Listed, Screen, Tab};
+use crate::link::{self, Approval, Link, Listed, RunSummary, Screen, Tab};
 use crate::notify;
 use crate::outbox::{self, Inbox, Outbox, Request};
 use crate::palette::{self, Palette};
@@ -51,6 +51,7 @@ use crate::paste::Prompt;
 use crate::prefix::{self, Command, Prefix};
 use crate::search_bar::{Bar, Step};
 use crate::selection::Selecting;
+use crate::timeline::{self, Timeline};
 use crate::toast::Toast;
 use crate::top_bar::{Clicks, Hit};
 use crate::vi::{Step as ViStep, Vi, View};
@@ -130,6 +131,8 @@ enum Notice {
     /// A program's notification: the pane, its cleaned and cut text and its tab's index
     /// (ADR-0051 §9).
     Toast(u32, String, Option<u8>),
+    /// What the core sent the open timeline (ADR-0052).
+    Timeline(link::Timeline),
 }
 
 /// What the I/O thread has for the window. A screen marked dirty here is one the window has not
@@ -151,6 +154,9 @@ struct Shown {
     answer: bool,
     /// Whether it is new enough to open the viewer on an agent's run (ADR-0050).
     rewind: bool,
+    /// Whether it is new enough for the timeline, and the focused pane and its run (ADR-0052).
+    timeline: bool,
+    run: Option<(u32, RunSummary)>,
     /// The inbox's panes, every pane's tab and the agents outside PinFold, only while the
     /// inbox is open.
     listed: Vec<Listed>,
@@ -211,7 +217,19 @@ fn publish(link: &mut Link, shown: &mut Shown) -> bool {
             tool: proto::Tool::Rewind,
             checkpoint: None,
         });
+        shown.timeline = link.speaks(&proto::Request::Timeline {
+            pane: 0,
+            watch: false,
+            before: None,
+            count: 0,
+        });
         shown.laid = true;
+    }
+    let run = (link.listed().iter())
+        .find(|listed| listed.pane == link.focused())
+        .and_then(|listed| Some((listed.pane, listed.run?)));
+    if run != shown.run {
+        (shown.run, shown.laid, changed) = (run, true, true);
     }
     // Copied only while the inbox is open, and freed once it closes.
     if link.take_relisted() && link.inbox_open() {
@@ -266,6 +284,11 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
         let toast = (link.take_toast()).map(|(pane, text, tab)| Notice::Toast(pane, text, tab));
         while let Some((pane, state, tab)) = link.take_alert() {
             if proxy.send_event(Notice::Alert(pane, state, tab)).is_err() {
+                return;
+            }
+        }
+        for news in link.take_timeline() {
+            if proxy.send_event(Notice::Timeline(news)).is_err() {
                 return;
             }
         }
@@ -553,6 +576,14 @@ struct App {
     answer_spoken: bool,
     /// Whether the core is new enough to open the viewer on an agent's run.
     rewind_spoken: bool,
+    /// The timeline, while open (ADR-0052). Every key goes to it, and closing frees its page.
+    timeline: Option<Timeline>,
+    /// Whether the core is new enough for it, and the focused pane and its run, if it has one.
+    timeline_spoken: bool,
+    run: Option<(u32, RunSummary)>,
+    /// In a window `cargo xtask mem-gate` measures, `tab` goes to the agent's tab, `open` also
+    /// opens its run's timeline, and `closed` closes that once its page has come.
+    measuring_timeline: Option<String>,
     /// In a window `cargo xtask mem-gate` measures, whether to show a confirmation once the
     /// inbox it opens has drawn its rows.
     measuring_answer: bool,
@@ -673,6 +704,10 @@ impl App {
             opening: None,
             answer_spoken: false,
             rewind_spoken: false,
+            timeline: None,
+            timeline_spoken: false,
+            run: None,
+            measuring_timeline: size.and(std::env::var("PINFOLD_MEASURE_TIMELINE").ok()),
             measuring: size
                 .and(std::env::var_os("PINFOLD_MEASURE_INBOX"))
                 .map(|value| value == "closed"),
@@ -927,6 +962,9 @@ impl App {
         self.inbox_spoken = shown.inbox;
         self.answer_spoken = shown.answer;
         self.rewind_spoken = shown.rewind;
+        self.timeline_spoken = shown.timeline;
+        // The focus can move a frame before the run's pane is known as focused.
+        self.run = shown.run.filter(|(pane, _)| *pane == shown.focused);
         if self.measuring.is_some() && self.inbox.is_none() && self.inbox_spoken {
             self.toggle_inbox();
         }
@@ -937,6 +975,17 @@ impl App {
         if self.focused != shown.focused {
             let old = std::mem::replace(&mut self.focused, shown.focused);
             self.focus_moved(old);
+        }
+        // The agent opens its run in a second tab, which the measured window goes to.
+        match self.measuring_timeline.as_deref() {
+            Some(_) if self.run.is_none() && self.labels.len() > 1 && self.active == 0 => {
+                let index = self.labels.len() as u16 - 1;
+                self.core(proto::Request::SwitchTab { index });
+            }
+            Some("open" | "closed") if self.timeline.is_none() && self.run.is_some() => {
+                self.toggle_timeline();
+            }
+            _ => {}
         }
     }
 
@@ -1007,7 +1056,7 @@ impl App {
         }
         self.flash.tick(Instant::now());
         self.toast = (self.toast.take()).filter(|toast| Instant::now() < toast.until);
-        let mut drawn = false;
+        let (mut drawn, mut timeline_drawn) = (false, false);
         if let Some(open) = &mut self.open {
             let (rows, columns) = self.area;
             let theme = &self.theme;
@@ -1079,6 +1128,20 @@ impl App {
                 inbox.draw(&mut self.composed, theme, Instant::now(), self.webhook);
                 self.composed.cursor = None;
                 drawn = inbox.is_ready();
+            }
+            if let Some(timeline) = &self.timeline {
+                let head = timeline::Head {
+                    label: self.labels.get(self.active).map_or("", String::as_str),
+                    tab: self.active,
+                    status: self
+                        .status
+                        .as_ref()
+                        .map(|(state, reported, _)| (*state, *reported)),
+                    run: self.run.map(|(_, run)| run),
+                };
+                timeline.draw(&mut self.composed, theme, &head);
+                self.composed.cursor = None;
+                timeline_drawn = timeline.is_ready();
             }
 
             if self.ended {
@@ -1156,6 +1219,10 @@ impl App {
             smaller: size > MIN_FONT_SIZE,
             resized: self.font_step != 0.0,
         });
+        if timeline_drawn && self.measuring_timeline.as_deref() == Some("closed") {
+            self.measuring_timeline = None;
+            self.close_timeline();
+        }
         if drawn && self.measuring == Some(true) {
             self.measuring = None;
             self.close_inbox();
@@ -1185,8 +1252,8 @@ impl App {
     }
 
     fn paste(&mut self) {
-        // A paste never reaches the inbox, nor the pane under it.
-        if self.inbox.is_some() {
+        // A paste never reaches the inbox or the timeline, nor the pane under either.
+        if self.inbox.is_some() || self.timeline.is_some() {
             return;
         }
         // The limit bounds the read itself, so a huge clipboard costs the window nothing.
@@ -1278,6 +1345,7 @@ impl App {
             Command::OpenConfig => return open_config(),
             Command::OpenDocs => return launch(DOCS, false),
             Command::Inbox => return self.toggle_inbox(),
+            Command::Timeline => return self.toggle_timeline(),
             Command::NextWaiting => return self.next_waiting(),
             // The core picks the run and its launch checkpoint, and flashes if there is none.
             Command::Rewind => proto::Request::OpenTool {
@@ -1378,6 +1446,118 @@ impl App {
         if self.inbox.take().is_some() {
             self.core(proto::Request::Inbox { open: false });
             self.redraw_soon();
+        }
+    }
+
+    /// Opens the focused pane's run's timeline, or closes it if it is open (ADR-0052 §5). A core
+    /// too old for it, timelines turned off and a pane with no run each say so instead.
+    fn toggle_timeline(&mut self) {
+        if self.timeline.is_some() {
+            return self.close_timeline();
+        }
+        let said = if !self.timeline_spoken {
+            Some("timeline needs the core updated")
+        } else if !self.config.timeline.enabled {
+            Some("timelines are off in pinfold.toml")
+        } else if self.run.is_none_or(|(pane, _)| pane != self.focused) {
+            Some("No agent run in this pane")
+        } else {
+            None
+        };
+        if let Some(said) = said {
+            self.flash.note(said, Instant::now());
+            return self.redraw_soon();
+        }
+        (self.menu, self.palette, self.picking) = (None, None, None);
+        self.close_inbox();
+        let (timeline, step) = Timeline::open(self.focused);
+        self.timeline = Some(timeline);
+        self.timeline_step(step);
+    }
+
+    /// Closes the timeline, which frees its page, and tells the core.
+    fn close_timeline(&mut self) {
+        if let Some(timeline) = self.timeline.take() {
+            let pane = timeline.pane();
+            let (watch, before, count) = (false, None, 0);
+            self.core(proto::Request::Timeline {
+                pane,
+                watch,
+                before,
+                count,
+            });
+            self.redraw_soon();
+        }
+    }
+
+    /// Hands what the core sent to the open timeline; any other is late, and dropped.
+    fn timeline_news(&mut self, news: link::Timeline) {
+        let Some(timeline) = &mut self.timeline else {
+            return;
+        };
+        match news {
+            link::Timeline::Page {
+                pane,
+                started,
+                dropped,
+                total,
+                entries,
+            } => timeline.page(pane, started, (dropped, total), &entries),
+            link::Timeline::Label {
+                pane,
+                row,
+                held,
+                text,
+            } => timeline.label(pane, row, held, &text),
+        }
+        self.redraw_soon();
+    }
+
+    /// Carries out what a key did in the timeline.
+    fn timeline_step(&mut self, step: timeline::Step) {
+        let Some(pane) = self.timeline.as_ref().map(Timeline::pane) else {
+            return;
+        };
+        let now = Instant::now();
+        match step {
+            timeline::Step::Stay => {}
+            timeline::Step::Close => return self.close_timeline(),
+            timeline::Step::Page(before) => self.core(proto::Request::Timeline {
+                pane,
+                watch: false,
+                before,
+                count: proto::MAX_PAGE,
+            }),
+            timeline::Step::Reveal(number) => {
+                self.close_timeline();
+                self.core(proto::Request::RevealStored { pane, number });
+            }
+            timeline::Step::Evicted => self.flash.refused(proto::Refusal::Evicted, now),
+            timeline::Step::Diff(checkpoint) => {
+                self.close_timeline();
+                self.core(proto::Request::OpenTool {
+                    pane,
+                    tool: proto::Tool::Rewind,
+                    checkpoint: Some(checkpoint),
+                });
+            }
+            timeline::Step::NoCheckpoint => self.flash.note("no checkpoint after this entry", now),
+        }
+        self.redraw_soon();
+    }
+
+    /// Hands a key to the open timeline. The prefix still works, so its `t` closes it; any other
+    /// command waits until it is closed, as it holds the keyboard.
+    fn timeline_key(&mut self, key: &Key, repeat: bool) {
+        match self.prefix.key(key, self.modifiers, repeat) {
+            prefix::Step::Run(Command::Timeline) => self.close_timeline(),
+            prefix::Step::Pass => {
+                let step = self.timeline.as_mut().map(|timeline| timeline.key(key));
+                if let Some(step) = step {
+                    self.timeline_step(step);
+                }
+            }
+            prefix::Step::Run(_) | prefix::Step::Swallow => {}
         }
     }
 
@@ -1943,6 +2123,13 @@ impl App {
             _ => return None,
         };
         let down = state == ElementState::Pressed;
+        // shortcut: a press anywhere closes the timeline, as Esc does, until clicks select.
+        if self.timeline.is_some() {
+            if down {
+                self.close_timeline();
+            }
+            return None;
+        }
         if let Some(inbox) = &self.inbox {
             if down {
                 let (rows, columns) = self.area;
@@ -2103,8 +2290,10 @@ impl App {
             Ime::Commit(text) => {
                 self.preedit.0.clear();
                 // Like a click, text cannot answer a prompt and goes nowhere else while one is up.
-                let prompted =
-                    !self.approvals.is_empty() || self.prompt.is_some() || self.inbox.is_some();
+                let prompted = !self.approvals.is_empty()
+                    || self.prompt.is_some()
+                    || self.inbox.is_some()
+                    || self.timeline.is_some();
                 if !prompted && !self.type_in_bar(&text) && self.vi.is_none() {
                     self.request(Request::Input(self.focused, text.into_bytes()));
                 }
@@ -2202,6 +2391,7 @@ impl ApplicationHandler<Notice> for App {
                 self.menu = None;
                 self.palette = None;
                 self.close_inbox();
+                self.close_timeline();
                 self.redraw_soon();
             }
             Notice::Exited => event_loop.exit(),
@@ -2232,12 +2422,16 @@ impl ApplicationHandler<Notice> for App {
                 if !matches!(command, Command::Inbox | Command::Paste) {
                     self.close_inbox();
                 }
+                if !matches!(command, Command::Timeline | Command::Paste) {
+                    self.close_timeline();
+                }
                 self.command(event_loop, command);
             }
             Notice::Command(_) => {}
             Notice::NoneWaiting => self.none_waiting(),
             Notice::Alert(pane, state, tab) => self.alert(pane, state, tab),
             Notice::Toast(pane, text, tab) => self.toast(pane, text, tab),
+            Notice::Timeline(news) => self.timeline_news(news),
             Notice::Clicked(pane) => self.request(Request::GoTo(pane)),
         }
     }
@@ -2275,6 +2469,11 @@ impl ApplicationHandler<Notice> for App {
                 if let Some(menu) = self.menu.as_mut().filter(|_| event.state.is_pressed()) {
                     let step = menu.key(&event.logical_key);
                     self.menu_step(step, event_loop);
+                }
+            }
+            WindowEvent::KeyboardInput { event, .. } if self.timeline.is_some() => {
+                if event.state.is_pressed() {
+                    self.timeline_key(&event.logical_key, event.repeat);
                 }
             }
             WindowEvent::KeyboardInput { event, .. } if self.inbox.is_some() => {
@@ -3159,6 +3358,163 @@ mod tests {
         assert_eq!(app.palette_key(&text("P"), Some("\u{10}")), None);
         assert!(app.palette.is_none());
         assert!(inbox.take().is_empty());
+    }
+
+    /// The timeline's page request, and the close that frees it.
+    fn asked(sent: &[Request], wanted: Option<u32>, wanted_count: u8) -> bool {
+        matches!(
+            sent,
+            [Request::Core(proto::Request::Timeline { pane: 1, watch: false, before, count })]
+                if *before == wanted && *count == wanted_count
+        )
+    }
+
+    /// A page for pane 1: two commands, the newest evicted, then a checkpoint.
+    fn page(app: &mut App) {
+        use pinfold_core::timeline::{Entry, What};
+        let entries = [
+            What::Command {
+                row: 4,
+                ms: 10,
+                exit: Some(0),
+            },
+            What::Command {
+                row: 9,
+                ms: 10,
+                exit: Some(1),
+            },
+            What::Checkpoint {
+                n: 2,
+                reason: 1,
+                complete: true,
+                changed: 3,
+            },
+        ]
+        .map(|what| Entry { at: 0, what }.encode());
+        let (pane, started, dropped, total) = (1, 5, 0, 3);
+        let entries = entries.to_vec();
+        app.timeline_news(link::Timeline::Page {
+            pane,
+            started,
+            dropped,
+            total,
+            entries,
+        });
+        for (row, held, text) in [(4, true, "$ make"), (9, false, "")] {
+            let text = text.to_owned();
+            app.timeline_news(link::Timeline::Label {
+                pane,
+                row,
+                held,
+                text,
+            });
+        }
+    }
+
+    #[test]
+    fn prefix_t_opens_the_timeline_only_on_a_core_of_27_with_a_run() {
+        let (mut app, inbox, _poll) = app();
+        let key = |text: &str| Key::Character(text.into());
+        let opens = |app: &mut App| {
+            app.flash = Flash::default();
+            app.run(Command::Timeline);
+            (app.timeline.is_some(), app.flash.until().is_some())
+        };
+        assert_eq!(opens(&mut app), (false, true), "a core of 26 says so");
+        app.timeline_spoken = true;
+        assert_eq!(opens(&mut app), (false, true), "no run says so");
+        app.run = Some((1, RunSummary::default()));
+        app.config.timeline.enabled = false;
+        assert_eq!(opens(&mut app), (false, true), "off says so");
+        assert!(inbox.take().is_empty());
+        app.config.timeline.enabled = true;
+        assert_eq!(opens(&mut app), (true, false));
+        assert!(asked(&inbox.take(), None, proto::MAX_PAGE));
+        // The prefix's `t` closes it, and other prefix commands wait.
+        app.modifiers = ModifiersState::CONTROL;
+        app.timeline_key(&key("a"), false);
+        app.modifiers = ModifiersState::empty();
+        app.timeline_key(&key("c"), false);
+        assert!(app.timeline.is_some() && inbox.take().is_empty());
+        app.modifiers = ModifiersState::CONTROL;
+        app.timeline_key(&key("a"), false);
+        app.modifiers = ModifiersState::empty();
+        app.timeline_key(&key("t"), false);
+        assert!(app.timeline.is_none());
+        assert!(asked(&inbox.take(), None, 0), "closing tells the core");
+        // A page for a closed overlay is late, and dropped.
+        page(&mut app);
+        assert!(app.timeline.is_none());
+    }
+
+    /// ADR-0052's control: the overlay is drawn after the panes and takes every key, so a
+    /// program that prints one can neither fake nor answer it.
+    #[test]
+    fn output_that_prints_the_timeline_cannot_answer_it() {
+        let (mut app, inbox, _poll) = app();
+        (app.timeline_spoken, app.run) = (true, Some((1, RunSummary::default())));
+        app.run(Command::Timeline);
+        inbox.take();
+        page(&mut app);
+        // Keys and text that would answer a prompt in the pane go to the overlay, never in.
+        for text in ["y", "\r", "q"] {
+            app.timeline_key(&Key::Character(text.into()), false);
+        }
+        app.ime(winit::event::Ime::Commit("y\n".to_owned()));
+        app.run(Command::Paste);
+        assert!(inbox.take().is_empty() && app.timeline.is_some());
+        // Its cells are the same whatever the pane under it printed.
+        let (timeline, head) = crate::timeline::tests::run();
+        let mut blank = crate::snapshots::pane(' ', 24, 120);
+        timeline.draw(&mut blank, &GRAPHITE, &head);
+        let hostile = crate::snapshots::timeline(120);
+        let overlay = |frame: &Frame| -> Vec<char> {
+            let rows = frame.cells.chunks(120).skip(1).take(20);
+            rows.flat_map(|row| row[10..110].iter().map(|cell| cell.character))
+                .collect()
+        };
+        assert_eq!(overlay(&blank), overlay(&hostile));
+    }
+
+    #[test]
+    fn enter_jumps_or_flashes_evicted_and_d_opens_the_diff_at_a_checkpoint() {
+        let (mut app, inbox, _poll) = app();
+        (app.timeline_spoken, app.run) = (true, Some((1, RunSummary::default())));
+        let (up, enter) = (Key::Named(NamedKey::ArrowUp), Key::Named(NamedKey::Enter));
+        app.run(Command::Timeline);
+        inbox.take();
+        page(&mut app);
+        // The checkpoint, newest, opens the diff viewer at it and closes.
+        app.timeline_key(&Key::Character("d".into()), false);
+        let sent = inbox.take();
+        assert!(asked(&sent[..1], None, 0));
+        assert!(matches!(
+            sent[1..],
+            [Request::Core(proto::Request::OpenTool {
+                pane: 1,
+                tool: proto::Tool::Rewind,
+                checkpoint: Some(2)
+            })]
+        ));
+        // The evicted command flashes and stays; the held one jumps and closes.
+        app.run(Command::Timeline);
+        inbox.take();
+        page(&mut app);
+        app.timeline_key(&up, false);
+        app.timeline_key(&enter, false);
+        assert!(app.timeline.is_some() && app.flash.until().is_some());
+        assert!(inbox.take().is_empty());
+        app.timeline_key(&up, false);
+        app.timeline_key(&enter, false);
+        assert!(app.timeline.is_none());
+        let sent = inbox.take();
+        assert!(matches!(
+            sent[1..],
+            [Request::Core(proto::Request::RevealStored {
+                pane: 1,
+                number: 4
+            })]
+        ));
     }
 
     #[test]

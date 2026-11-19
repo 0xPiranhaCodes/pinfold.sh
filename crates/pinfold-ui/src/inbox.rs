@@ -771,7 +771,7 @@ fn cells(text: &str) -> usize {
 }
 
 /// Writes `text` in at most `width` cells from `column`, ending in `…` if it is cut.
-fn cut(
+pub(crate) fn cut(
     frame: &mut Frame,
     row: u16,
     column: usize,
@@ -788,7 +788,7 @@ fn cut(
     put(frame, row, at as u16, '…', colour, ground);
 }
 
-fn put(
+pub(crate) fn put(
     frame: &mut Frame,
     row: u16,
     column: u16,
