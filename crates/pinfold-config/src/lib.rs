@@ -61,6 +61,8 @@ pub struct Config {
     pub agents: BTreeMap<String, Agent>,
     /// The `[rewind]` table (ADR-0050). Read when the core starts.
     pub rewind: Rewind,
+    /// The `[timeline]` table (ADR-0052). Read when the core starts.
+    pub timeline: Timeline,
     /// Whether the launcher starts the core, and the core every program it starts, without the
     /// variables whose names look like secrets' (ADR-0047). Read when the core starts.
     pub strip_secrets: bool,
@@ -172,6 +174,33 @@ impl Default for Rewind {
             max_store_mib: 2048,
             keep_days: 14,
             keep_per_run: 20,
+        }
+    }
+}
+
+/// The `[timeline]` table (ADR-0052 section 8): a ring file of records for every agent run.
+///
+/// ```
+/// let config = pinfold_config::parse(b"[timeline]\nentries = 64")?;
+/// assert_eq!((config.timeline.enabled, config.timeline.entries), (true, 64));
+/// assert!(pinfold_config::parse(b"[timeline]\nentries = 63").is_err());
+/// # Ok::<(), pinfold_config::Error>(())
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Timeline {
+    /// Keep a timeline for every agent run: 56 bytes in memory, the rest on disk.
+    pub enabled: bool,
+    /// Entries a live run keeps on disk, 64 to 4096; a closed run keeps 128.
+    #[serde(deserialize_with = "bounded::<_, 64, 4096>")]
+    pub entries: u64,
+}
+
+impl Default for Timeline {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            entries: 1024,
         }
     }
 }
@@ -335,6 +364,7 @@ impl Default for Config {
             inbox: Inbox::default(),
             agents: BTreeMap::new(),
             rewind: Rewind::default(),
+            timeline: Timeline::default(),
             strip_secrets: false,
         }
     }

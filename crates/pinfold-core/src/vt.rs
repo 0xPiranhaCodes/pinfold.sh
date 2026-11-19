@@ -111,6 +111,18 @@ pub trait VtEngine {
     /// Returns what the shell last reported through OSC 133. Output can fake all of it.
     fn shell_marks(&self) -> ShellMarks;
 
+    /// Feeds as [`VtEngine::feed`] does, and calls `closed` for each command an OSC 133 `D`
+    /// mark closes, in order (ADR-0052).
+    fn feed_closing(
+        &mut self,
+        bytes: &[u8],
+        replies: &mut Vec<u8>,
+        closed: &mut dyn FnMut(Closed),
+    ) {
+        let _ = closed;
+        self.feed(bytes, replies);
+    }
+
     /// Returns what an agent CLI last signalled through OSC 7501 and OSC 9. Output can fake
     /// all of it, so only a pane launched from an agent profile reads it (ADR-0046).
     fn agent_marks(&self) -> AgentMarks;
@@ -262,7 +274,7 @@ impl Scan {
         &mut self,
         bytes: &[u8],
         marks: &mut Marks,
-        mut pass: impl FnMut(&[u8], Option<ShellPhase>),
+        mut pass: impl FnMut(&[u8], Option<ShellMarks>),
     ) {
         let ends = |byte: &u8| matches!(byte, 0x07 | 0x18 | 0x1a | 0x1b);
         let (mut start, mut index) = (0, 0);
@@ -314,7 +326,7 @@ impl Scan {
                     };
                     index += 1;
                     if marked {
-                        pass(&bytes[start..index], Some(marks.shell.phase));
+                        pass(&bytes[start..index], Some(marks.shell));
                         start = index;
                     }
                 }
@@ -322,6 +334,17 @@ impl Scan {
         }
         pass(&bytes[start..], None);
     }
+}
+
+/// A command an OSC 133 `D` mark closed (ADR-0052). Output can fake all of it (T4).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Closed {
+    /// The stored-row number the cursor was on at the command's `B` mark, if one came.
+    pub row: Option<usize>,
+    /// From its `C` mark to the `D`, in whole milliseconds, saturating; 0 without a `C`.
+    pub ms: u32,
+    /// The exit status the `D` mark gave.
+    pub exit: Option<u8>,
 }
 
 /// [`VtEngine`] over `alacritty_terminal`.
@@ -341,6 +364,9 @@ pub struct AlacrittyEngine {
     // shortcut: positions are rows at the width they were taken, so a resize between the marks
     // and a read moves the range by the rows reflow adds or removes. Reflow them if that matters.
     output: Option<(Position, Option<Position>)>,
+    /// The cursor's stored row at the last `B` mark, and when the last `C` came, until a `D`.
+    input: Option<usize>,
+    ran: Option<Instant>,
 }
 
 impl AlacrittyEngine {
@@ -374,6 +400,8 @@ impl AlacrittyEngine {
             palette,
             view: None,
             output: None,
+            input: None,
+            ran: None,
         }
     }
 
@@ -523,11 +551,22 @@ impl AlacrittyEngine {
 
 impl VtEngine for AlacrittyEngine {
     fn feed(&mut self, bytes: &[u8], replies: &mut Vec<u8>) {
+        self.feed_closing(bytes, replies, &mut |_| {});
+    }
+
+    fn feed_closing(
+        &mut self,
+        bytes: &[u8],
+        replies: &mut Vec<u8>,
+        closed: &mut dyn FnMut(Closed),
+    ) {
         let (parser, term, output) = (&mut self.parser, &mut self.term, &mut self.output);
+        let (input, ran) = (&mut self.input, &mut self.ran);
         let scrollback = &self.scrollback;
         self.scan.filter(bytes, &mut self.marks, |bytes, mark| {
             parser.advance(term, bytes);
-            let Some(phase) = mark else { return };
+            let Some(marks) = mark else { return };
+            let phase = marks.phase;
             let cursor = term.grid().cursor.point;
             let line = usize::try_from(cursor.line.0).unwrap_or(0);
             let at = Position {
@@ -538,6 +577,18 @@ impl VtEngine for AlacrittyEngine {
                 (ShellPhase::Running, _) => *output = Some((at, None)),
                 (ShellPhase::Finished, Some((_, end))) => *end = Some(at),
                 _ => {}
+            }
+            match phase {
+                ShellPhase::Input => *input = Some(at.row),
+                ShellPhase::Running => *ran = Some(Instant::now()),
+                ShellPhase::Finished => closed(Closed {
+                    row: input.take(),
+                    ms: ran.take().map_or(0, |ran| {
+                        u32::try_from(ran.elapsed().as_millis()).unwrap_or(u32::MAX)
+                    }),
+                    exit: marks.exit,
+                }),
+                ShellPhase::Prompt | ShellPhase::Unknown => {}
             }
         });
         if parser.sync_bytes_count() > MAX_HELD {
@@ -984,6 +1035,21 @@ mod tests {
             assert!(!is_fixed_format(reply), "{reply:?}");
         }
         assert!(!is_fixed_format(&format!("\x1b[{}R", "1".repeat(64))));
+    }
+
+    /// ADR-0052: each `D` closes one command, in order, with the row its `B` was on, even when
+    /// many arrive in one read; a `D` without a `B` or `C` has neither.
+    #[test]
+    fn every_d_mark_closes_a_command_with_its_b_row() {
+        let mut engine = AlacrittyEngine::new(4, 20);
+        let mut closed = Vec::new();
+        let bytes = b"\x1b]133;A\x07$ \x1b]133;B\x07ls\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07\
+                      \x1b]133;A\x07$ \x1b]133;B\x07false\r\n\x1b]133;C\x07\x1b]133;D;1\x07\
+                      \x1b]133;D\x07";
+        engine.feed_closing(bytes, &mut Vec::new(), &mut |command| closed.push(command));
+        let rows: Vec<_> = closed.iter().map(|c| (c.row, c.exit)).collect();
+        assert_eq!(rows, [(Some(0), Some(0)), (Some(2), Some(1)), (None, None)]);
+        assert_eq!(closed[2].ms, 0);
     }
 
     fn filtered(scan: &mut Scan, bytes: &[u8]) -> Vec<u8> {
