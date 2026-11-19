@@ -176,6 +176,28 @@ pub struct Listed {
     /// Its agent's last steps, oldest first, joined by newlines, each already clean. Empty
     /// while the inbox is closed, which frees them (ADR-0051 §7).
     pub steps: String,
+    /// Its agent run's counters from the core's last [`Notice::Summary`], none for a pane with
+    /// no run (ADR-0052 §6).
+    pub run: Option<RunSummary>,
+}
+
+/// An agent run's counters, as [`Notice::Summary`] told them: fixed numbers, never text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RunSummary {
+    /// Whether the run has ended.
+    pub ended: bool,
+    /// Commands closed.
+    pub commands: u32,
+    /// Of those, with a non-zero exit.
+    pub failed: u32,
+    /// Approvals answered.
+    pub approvals: u32,
+    /// Of those, denied.
+    pub denied: u32,
+    /// Paths the newest checkpoint changed since launch.
+    pub changed: u32,
+    /// Failed commands plus ✕ error states.
+    pub errors: u32,
 }
 
 /// An agent outside PinFold that the open inbox lists after its own rows (ADR-0051 §8).
@@ -505,13 +527,39 @@ impl State {
                     None => self.approvals.push(owned),
                 }
             }
-            // The timeline's notices come only when asked, and the overlay that asks is ADR-0052's
-            // slice 5.
+            // Kept on the pane's inbox row; the core lists every pane with a run first.
+            Notice::Summary {
+                pane,
+                ended,
+                commands,
+                failed,
+                approvals,
+                denied,
+                changed,
+                errors,
+                ..
+            } => {
+                let run = Some(RunSummary {
+                    ended,
+                    commands,
+                    failed,
+                    approvals,
+                    denied,
+                    changed,
+                    errors,
+                });
+                let listed = self.listed.iter_mut().find(|listed| listed.pane == pane);
+                if let Some(listed) = listed.filter(|listed| listed.run != run) {
+                    listed.run = run;
+                    self.relisted = true;
+                }
+            }
+            // The timeline's pages, entries and labels come only when asked, and the overlay
+            // that asks is ADR-0052's slice 5.
             Notice::Copied { .. }
             | Notice::WasRunning { .. }
             | Notice::InboxExtra { .. }
             | Notice::Outside { .. }
-            | Notice::Summary { .. }
             | Notice::Timeline { .. }
             | Notice::TimelineEntry { .. }
             | Notice::TimelineLabel { .. } => {}
@@ -552,6 +600,7 @@ impl State {
                     branch: String::new(),
                     ctx: None,
                     steps: String::new(),
+                    run: None,
                 });
                 self.listed.len() - 1
             }
@@ -1963,6 +2012,90 @@ mod tests {
             (None, 0),
             "not freed on close"
         );
+    }
+
+    /// ADR-0052 slice 4: a run's summary lands on its listed pane's row and an unknown pane's is
+    /// dropped; pages, entries and labels decode without ending the link; and a core of 26 is
+    /// never asked for a timeline, a reveal or a rewind at a checkpoint.
+    #[test]
+    fn a_summary_lands_on_its_row_and_an_older_core_is_never_asked() {
+        use pinfold_proto::link::{ENTRY, Tool};
+        let (mut link, mut peer) = answered().unwrap();
+        link.state.list(10, Some((1, true, (5, 600), "")));
+        let summary = |pane| Notice::Summary {
+            pane,
+            started: 600,
+            ended: false,
+            commands: 12,
+            failed: 1,
+            approvals: 3,
+            denied: 0,
+            changed: 8,
+            errors: 1,
+        };
+        let mut entry = [0; ENTRY];
+        entry[0] = 1;
+        peer.notices(&[
+            summary(10),
+            summary(11),
+            Notice::Timeline {
+                pane: 10,
+                run: 0,
+                started: 600,
+                dropped: 0,
+                total: 1,
+                entries: &entry,
+            },
+            Notice::TimelineEntry {
+                pane: 10,
+                seq: 1,
+                entry,
+            },
+            Notice::TimelineLabel {
+                pane: 10,
+                row: 4,
+                held: true,
+                text: "$ make",
+            },
+        ])
+        .unwrap();
+        assert!(turn_until(&mut link, |link| link.listed()[0].run.is_some()));
+        let run = RunSummary {
+            ended: false,
+            commands: 12,
+            failed: 1,
+            approvals: 3,
+            denied: 0,
+            changed: 8,
+            errors: 1,
+        };
+        assert_eq!(link.listed()[0].run, Some(run));
+        assert_eq!(
+            link.listed().len(),
+            1,
+            "an unknown pane's summary is dropped"
+        );
+        assert_eq!(link.disconnected(), None);
+
+        let (mut link, mut peer) = linked().unwrap();
+        peer.notices(&[Notice::Hello { version: OLDEST }]).unwrap();
+        assert!(turn_until(&mut link, |link| link.is_greeted()));
+        for request in [
+            Request::Timeline {
+                pane: 1,
+                watch: true,
+                before: None,
+                count: 64,
+            },
+            Request::RevealStored { pane: 1, number: 4 },
+            Request::OpenTool {
+                pane: 1,
+                tool: Tool::Rewind,
+                checkpoint: Some(2),
+            },
+        ] {
+            assert!(!link.speaks(&request));
+        }
     }
 
     /// ADR-0051 §8: outside rows are kept in order only while the inbox is open, a refresh with

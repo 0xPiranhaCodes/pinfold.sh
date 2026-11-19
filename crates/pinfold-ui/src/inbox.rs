@@ -855,6 +855,7 @@ pub(crate) mod tests {
             branch: String::new(),
             ctx: None,
             steps: String::new(),
+            run: None,
         }
     }
 
