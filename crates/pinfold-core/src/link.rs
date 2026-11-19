@@ -2273,6 +2273,10 @@ mod tests {
             pane,
             number: first,
         });
+        // Requests are applied in order, so the reply to this one means the reveal came first.
+        let at = link::Position { row: 0, column: 0 };
+        peer.send(Request::Link { pane, at });
+        serve(&mut reactor, &mut peer, |_, p| !p.linked.is_empty());
         reactor.write(agent, b"\n");
         serve(&mut reactor, &mut peer, |r, _| {
             on_screen(r, agent, "cleared")
