@@ -34,7 +34,9 @@ use crate::branch;
 use crate::grants::{MAX_PENDING as MAX_APPROVALS, Prompt};
 use crate::io::{READ_BUDGET, Reactor};
 use crate::search::{CopyStep, Copying};
-use crate::status::Status;
+use crate::status::{self, Status};
+use crate::timeline::{Entry, Summary, What};
+use unicode_width::UnicodeWidthChar as _;
 
 /// Beyond any pane number, like the waker's token.
 pub(crate) const LINK: Token = Token(usize::MAX - 1);
@@ -70,6 +72,10 @@ const ANY_TOAST: Duration = Duration::from_secs(2);
 /// The least time between two passes that send progress, so each pane's goes at most once a
 /// second (ADR-0051 §9).
 const PROGRESS_GAP: Duration = Duration::from_secs(1);
+/// The least time between two passes that send a watched run's new entries (ADR-0052 §6).
+const ENTRY_GAP: Duration = Duration::from_millis(100);
+/// The most cells of a timeline label (ADR-0052 decision 7).
+const LABEL_CELLS: usize = 80;
 
 /// What [`Reactor::spawn_window`] did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,6 +123,21 @@ struct PaneLink {
     toasted: Option<Instant>,
     /// The progress byte the window last heard of.
     progress: u8,
+    /// A mark of the run summary the window last heard of, 0 for none. Two bytes, which fit
+    /// where the flags above leave room, so a link keeps nothing more per pane (ADR-0052 §6).
+    summary: u16,
+}
+
+/// The run whose timeline overlay the window has open: no more than this, and nothing while
+/// it is closed (ADR-0052 §6).
+struct Watch {
+    pane: usize,
+    run: u32,
+    /// The `seq` of the first entry the window has not had.
+    next: u64,
+    /// When entries last went, and when ones held back by [`ENTRY_GAP`] go.
+    sent: Option<Instant>,
+    due: Option<Instant>,
 }
 
 /// A running `pinfold agents peek` and the listed panes it reads for, in the order of its
@@ -312,6 +333,8 @@ struct Session {
     progressed: Option<Instant>,
     progress_open: bool,
     progress_due: Option<Instant>,
+    /// The timeline overlay that is open, if one is.
+    watch: Option<Watch>,
     /// The version in the window's hello, which is never above the core's.
     version: u16,
 }
@@ -380,6 +403,21 @@ impl Session {
             }
             Request::Scroll { pane, lines } => reactor.scroll(pane as usize, lines),
             Request::Reveal { pane, row } => reveal(reactor, pane as usize, row),
+            // A hint, as the marks are; one whose row has gone is refused (ADR-0052 §4).
+            Request::RevealStored { pane, number } => {
+                let (pane, row) = (pane as usize, number as usize);
+                match reactor.engine(pane).map(|engine| engine.holds_row(row)) {
+                    Some(true) => reveal(reactor, pane, row),
+                    Some(false) => self.refused = Some(Refusal::Evicted),
+                    None => {}
+                }
+            }
+            Request::Timeline {
+                pane,
+                watch,
+                before,
+                count,
+            } => self.timeline(reactor, pane as usize, watch, before, count)?,
             Request::Search {
                 pane,
                 from,
@@ -461,6 +499,125 @@ impl Session {
             }
             Request::Quit => return Err(Ended),
             command => self.refused = reactor.command(command).err().or(self.refused),
+        }
+        Ok(())
+    }
+
+    /// Opens, pages or closes the timeline overlay on `pane`: a page of at most
+    /// [`link::MAX_PAGE`] entries read from the run's file, a label for each command in it, and
+    /// while `watch` the run's new entries as they come. A pane with no run gets nothing, which
+    /// the window knows from having no summary for it.
+    fn timeline(
+        &mut self,
+        reactor: &Reactor,
+        pane: usize,
+        watch: bool,
+        before: Option<u32>,
+        count: u8,
+    ) -> Result<(), Ended> {
+        self.watch = None;
+        let Some(timelines) = reactor.timelines() else {
+            return Ok(());
+        };
+        let (Some(run), Some(total)) = (timelines.newest(pane), timelines.total(pane)) else {
+            return Ok(());
+        };
+        self.watch = watch.then(|| Watch {
+            pane,
+            run: run.run(),
+            next: total,
+            sent: None,
+            due: None,
+        });
+        if count == 0 {
+            return Ok(());
+        }
+        let before = before.map(u64::from);
+        let page = (timelines.page(pane, before, usize::from(count), |_| true)).unwrap_or_default();
+        let mut entries = [0; link::ENTRY * link::MAX_PAGE as usize];
+        for ((_, entry), bytes) in page.iter().zip(entries.as_chunks_mut().0) {
+            *bytes = entry.encode();
+        }
+        self.notice(&Notice::Timeline {
+            pane: pane as u32,
+            run: run.run(),
+            started: ago(run.summary().started),
+            dropped: run.dropped(),
+            total: u32::try_from(total).unwrap_or(u32::MAX),
+            entries: &entries[..page.len() * link::ENTRY],
+        })?;
+        for (_, entry) in &page {
+            self.label(reactor, pane, entry)?;
+        }
+        Ok(())
+    }
+
+    /// Sends a command entry's label, read now from the pane's own rows and kept nowhere.
+    fn label(&mut self, reactor: &Reactor, pane: usize, entry: &Entry) -> Result<(), Ended> {
+        let What::Command { row, .. } = entry.what else {
+            return Ok(());
+        };
+        let Some(engine) = reactor.engine(pane).filter(|_| row != u32::MAX) else {
+            return Ok(());
+        };
+        let held = engine.holds_row(row as usize);
+        let mut text = String::new();
+        if held {
+            let at = |column| link::Position {
+                row: row as usize,
+                column,
+            };
+            let selection = link::Selection {
+                anchor: at(0),
+                focus: at(u16::MAX),
+            };
+            engine.selection_text(selection, &mut text);
+        }
+        self.notice(&Notice::TimelineLabel {
+            pane: pane as u32,
+            row,
+            held,
+            text: &label(&text),
+        })
+    }
+
+    /// Sends the watched run's new entries, at most [`link::MAX_PAGE`] a pass and a pass every
+    /// [`ENTRY_GAP`]; one held back sets the only timer the overlay keeps.
+    fn send_entries(&mut self, reactor: &Reactor) -> Result<(), Ended> {
+        let Some(watch) = self.watch.as_mut() else {
+            return Ok(());
+        };
+        let Some(timelines) = reactor.timelines() else {
+            return Ok(());
+        };
+        let (pane, now) = (watch.pane, Instant::now());
+        // A new run in the pane, or none, ends the watch; the window asks again on its summary.
+        if timelines.newest(pane).map(|run| run.run()) != Some(watch.run) {
+            self.watch = None;
+            return Ok(());
+        }
+        let total = timelines.total(pane).unwrap_or(0);
+        if total <= watch.next {
+            return Ok(());
+        }
+        if let Some(due) = watch
+            .sent
+            .map(|sent| sent + ENTRY_GAP)
+            .filter(|due| *due > now)
+        {
+            watch.due = Some(due);
+            return Ok(());
+        }
+        let count = (total - watch.next).min(u64::from(link::MAX_PAGE));
+        (watch.next, watch.sent, watch.due) = (total, Some(now), None);
+        let page = timelines.page(pane, None, count as usize, |_| true);
+        for (seq, entry) in page.unwrap_or_default() {
+            self.notice(&Notice::TimelineEntry {
+                pane: pane as u32,
+                seq: u32::try_from(seq).unwrap_or(u32::MAX),
+                entry: entry.encode(),
+            })?;
+            self.label(reactor, pane, &entry)?;
         }
         Ok(())
     }
@@ -861,6 +1018,35 @@ impl Session {
                 self.progress_due = self.progressed.map(|last| last + PROGRESS_GAP);
             }
         }
+        // On change only, through progress's gate, so at most once a second and no timer while
+        // idle. A window of 26 never hears it.
+        let run = reactor
+            .timelines()
+            .and_then(|timelines| timelines.newest(pane));
+        if let Some(run) = run.filter(|_| self.version >= link::TIMELINE) {
+            let summary = run.summary();
+            let mark = mark(&summary, run.run());
+            if mark != state.summary {
+                if self.progress_open {
+                    state.summary = mark;
+                    self.progressed = Some(Instant::now());
+                    let notice = Notice::Summary {
+                        pane: pane as u32,
+                        started: ago(summary.started),
+                        ended: !run.is_live(),
+                        commands: summary.commands,
+                        failed: summary.failed,
+                        approvals: summary.approvals,
+                        denied: summary.denied,
+                        changed: summary.changed,
+                        errors: summary.errors,
+                    };
+                    notice.encode(&mut self.out).map_err(|_| Ended)?;
+                } else {
+                    self.progress_due = self.progressed.map(|last| last + PROGRESS_GAP);
+                }
+            }
+        }
         let colours = reactor.engine(pane).map(|engine| engine.colours());
         if let Some((cursor, background)) = colours.filter(|colours| *colours != state.colours) {
             state.colours = (cursor, background);
@@ -908,6 +1094,47 @@ impl Session {
         }
         self.flush()
     }
+}
+
+/// Seconds since `started`, a second count since the core started, as [`Notice::Status`] says.
+fn ago(started: u32) -> u32 {
+    let now = Instant::now().saturating_duration_since(status::epoch());
+    u32::try_from(now.as_secs())
+        .unwrap_or(u32::MAX)
+        .saturating_sub(started)
+}
+
+/// A two-byte mark of a run's summary, never 0, that changes when any counter does, save one
+/// change in 65,535, which waits for the next.
+fn mark(summary: &Summary, run: u32) -> u16 {
+    let words = [
+        run,
+        summary.commands,
+        summary.failed,
+        summary.approvals,
+        summary.denied,
+        summary.changed,
+        summary.errors,
+        summary.ended,
+    ];
+    let hash = words.iter().fold(0x811c_9dc5_u32, |hash, word| {
+        (hash ^ word).wrapping_mul(0x0100_0193)
+    });
+    ((hash >> 16) as u16 ^ hash as u16).max(1)
+}
+
+/// A label as the window may draw it: no control, bidi, zero-width or state character, at most
+/// [`LABEL_CELLS`] cells and [`link::MAX_LABEL`] bytes (ADR-0052 §5).
+fn label(text: &str) -> String {
+    let (mut cells, mut label) = (0, String::new());
+    for character in text.chars().filter(|&c| status::drawable(c)) {
+        cells += character.width().unwrap_or(0);
+        if cells > LABEL_CELLS || label.len() + character.len_utf8() > link::MAX_LABEL {
+            break;
+        }
+        label.push(character);
+    }
+    label
 }
 
 /// Scrolls a pane's view just far enough to show `row`, which can be any number.
@@ -1011,6 +1238,7 @@ impl Window {
             }
             self.session.report(reactor)?;
             self.session.send_extras(reactor)?;
+            self.session.send_entries(reactor)?;
             self.session.send_panes(reactor)
         } else {
             self.session.flush()
@@ -1046,7 +1274,8 @@ impl Host {
         // While writes wait, the socket draining wakes the core, so a due time already past
         // never spins it.
         let progress = session.progress_due.filter(|_| session.pending() == 0);
-        refresh.into_iter().chain(progress).min()
+        let entries = session.watch.as_ref().and_then(|watch| watch.due);
+        refresh.into_iter().chain(progress).chain(entries).min()
     }
 
     /// Notes that the socket has news.
@@ -1271,6 +1500,7 @@ impl Reactor {
                 progressed: None,
                 progress_open: false,
                 progress_due: None,
+                watch: None,
                 version: 0,
             },
         };
@@ -1383,6 +1613,14 @@ mod tests {
         checkpoints: Vec<(u32, u8)>,
         /// Each restore's flash: undone, skipped and the error.
         restored: Vec<(u32, u32, String)>,
+        /// Each summary told: pane, commands, failed and whether the run ended.
+        summaries: Vec<(u32, u32, u32, bool)>,
+        /// Each page told: pane, dropped, total and its entries.
+        pages: Vec<(u32, u32, u32, Vec<u8>)>,
+        /// Each new entry told: pane, `seq` and the entry.
+        entries: Vec<(u32, u32, [u8; link::ENTRY])>,
+        /// Each label told: pane, row, whether held, and its text.
+        labels: Vec<(u32, u32, bool, String)>,
     }
 
     impl Peer {
@@ -1421,6 +1659,10 @@ mod tests {
                 webhooks: Vec::new(),
                 checkpoints: Vec::new(),
                 restored: Vec::new(),
+                summaries: Vec::new(),
+                pages: Vec::new(),
+                entries: Vec::new(),
+                labels: Vec::new(),
                 extras: Vec::new(),
                 peeked: Vec::new(),
                 outside: Vec::new(),
@@ -1553,11 +1795,30 @@ mod tests {
                             skipped,
                             error,
                         } => self.restored.push((undid, skipped, error.to_owned())),
+                        Notice::Summary {
+                            pane,
+                            commands,
+                            failed,
+                            ended,
+                            ..
+                        } => self.summaries.push((pane, commands, failed, ended)),
+                        Notice::Timeline {
+                            pane,
+                            dropped,
+                            total,
+                            entries,
+                            ..
+                        } => self.pages.push((pane, dropped, total, entries.to_vec())),
+                        Notice::TimelineEntry { pane, seq, entry } => {
+                            self.entries.push((pane, seq, entry));
+                        }
+                        Notice::TimelineLabel {
+                            pane,
+                            row,
+                            held,
+                            text,
+                        } => self.labels.push((pane, row, held, text.to_owned())),
                         Notice::Unhardened { checked } => self.unhardened.push(checked),
-                        Notice::Summary { .. }
-                        | Notice::Timeline { .. }
-                        | Notice::TimelineEntry { .. }
-                        | Notice::TimelineLabel { .. } => {}
                         Notice::Secrets { count, names } => {
                             self.secrets.push((count, names.to_owned()));
                         }
@@ -1893,6 +2154,177 @@ mod tests {
         assert_eq!(reactor.host.deadline(), None);
         reactor.host.window.as_mut().unwrap().session.out.clear();
         assert_eq!(reactor.host.deadline(), Some(past));
+    }
+
+    /// An agent pane with a timeline whose program runs `script`, with `m` printing a mark.
+    fn timed_agent(reactor: &mut Reactor, state: &Path, script: &str) -> usize {
+        let timelines = crate::timeline::Timelines::new(state.join("timeline"), 64).unwrap();
+        reactor.keep_timelines(timelines);
+        let script = format!("m() {{ printf '\\033]133;%s\\007' \"$1\"; }}\n{script}");
+        let agent = reactor.spawn(shell(&script), 24, 80).unwrap();
+        reactor.read_agent_signals(agent, 0);
+        agent
+    }
+
+    /// ADR-0052 slice 4: a summary reaches a window of 27 on change only, a pass at most once a
+    /// second, so 40 commands in under a second arrive as at most two notices ending in the
+    /// last; once sent no deadline is left, and nothing comes again without a change. A window of
+    /// 26 never hears one.
+    #[test]
+    fn a_summary_is_sent_on_change_once_a_second_and_never_to_a_window_of_26() {
+        let state = tempfile::tempdir().unwrap();
+        let mut reactor = Reactor::new().unwrap();
+        let flood = "i=0; while [ $i -lt 40 ]; do m B; m C; m \"D;$((i % 2))\"; i=$((i+1)); done
+            echo flooded; read line; exit";
+        let agent = timed_agent(&mut reactor, state.path(), flood);
+        let mut peer = Peer::greet(&mut reactor);
+        let last = (agent as u32, 40, 20, false);
+        serve(&mut reactor, &mut peer, |r, p| {
+            on_screen(r, agent, "flooded") && p.summaries.last() == Some(&last)
+        });
+        assert!(peer.summaries.len() <= 2, "{:?}", peer.summaries);
+        assert!(turn_until(&mut reactor, |r| r.host.deadline().is_none()));
+        let told = peer.summaries.len();
+        for _ in 0..3 {
+            reactor.turn(Some(Duration::from_millis(50))).unwrap();
+        }
+        peer.read();
+        assert_eq!(peer.summaries.len(), told, "nothing again without a change");
+        reactor.write(agent, b"\n");
+        serve(&mut reactor, &mut peer, |_, p| {
+            p.summaries.last().is_some_and(|summary| summary.3)
+        });
+        drop(peer);
+        assert!(turn_until(&mut reactor, |r| !r.has_window()));
+
+        let older = timed_agent(
+            &mut reactor,
+            state.path(),
+            "m B; m C; m 'D;0'; echo ran; sleep 30",
+        );
+        let mut peer = Peer::older(&mut reactor, OLDEST);
+        serve(&mut reactor, &mut peer, |r, _| on_screen(r, older, "ran"));
+        for _ in 0..3 {
+            reactor.turn(Some(Duration::from_millis(50))).unwrap();
+        }
+        peer.read();
+        assert!(peer.summaries.is_empty(), "a window of 26 never gets one");
+        assert_eq!(reactor.host.deadline(), None);
+    }
+
+    /// ADR-0052 slice 4: a page holds at most what was asked, entries as the file holds them,
+    /// each command's label read live, cleaned of bidi characters and cut at 80 cells; while
+    /// watched a new entry comes on its own with its label, and once closed none does. A held
+    /// row is revealed and a cleared one refused.
+    #[test]
+    fn a_timeline_is_paged_watched_and_labelled_cleaned_and_cut() {
+        let state = tempfile::tempdir().unwrap();
+        let mut reactor = Reactor::new().unwrap();
+        let long = "x".repeat(100);
+        let script = format!(
+            "m B; printf 'run \\342\\200\\256evil {long}\\n'; m C; m 'D;0'
+            m B; echo second; m C; m 'D;1'; echo listed; read line
+            m B; echo third; m C; m 'D;0'; echo watched; read line
+            i=0; while [ $i -lt 60 ]; do echo $i; i=$((i+1)); done; printf '\\033[3J'
+            echo cleared; read line; m B; echo fourth; m C; m 'D;0'; echo closed; sleep 30"
+        );
+        let agent = timed_agent(&mut reactor, state.path(), &script);
+        let pane = agent as u32;
+        let mut peer = Peer::greet(&mut reactor);
+        serve(&mut reactor, &mut peer, |r, _| {
+            on_screen(r, agent, "listed")
+        });
+        peer.send(Request::Timeline {
+            pane,
+            watch: true,
+            before: None,
+            count: 1,
+        });
+        serve(&mut reactor, &mut peer, |_, p| !p.labels.is_empty());
+        let (_, dropped, total, entries) = peer.pages[0].clone();
+        assert_eq!((dropped, total, entries.len()), (0, 2, link::ENTRY));
+        assert_eq!(entries[0], 1, "a command");
+        assert_eq!(peer.labels.len(), 1, "one label for the one command asked");
+        peer.send(Request::Timeline {
+            pane,
+            watch: true,
+            before: Some(1),
+            count: link::MAX_PAGE,
+        });
+        serve(&mut reactor, &mut peer, |_, p| p.labels.len() == 2);
+        let (_, _, held, text) = &peer.labels[1];
+        assert!(*held);
+        let cut: String = format!("run evil {long}").chars().take(80).collect();
+        assert_eq!(text, &cut, "the bidi override dropped and the label cut");
+        assert_eq!(
+            peer.pages[1].3.len(),
+            link::ENTRY,
+            "only the entry before seq 1"
+        );
+
+        reactor.write(agent, b"\n");
+        serve(&mut reactor, &mut peer, |_, p| p.labels.len() == 3);
+        assert_eq!(peer.entries.len(), 1);
+        assert_eq!((peer.entries[0].0, peer.entries[0].1), (pane, 2));
+        assert_eq!(peer.labels[2].3, "third");
+
+        let first = peer.labels[1].1;
+        peer.send(Request::RevealStored {
+            pane,
+            number: first,
+        });
+        reactor.write(agent, b"\n");
+        serve(&mut reactor, &mut peer, |r, _| {
+            on_screen(r, agent, "cleared")
+        });
+        assert!(peer.refused.is_empty(), "a held row is revealed");
+        peer.send(Request::RevealStored {
+            pane,
+            number: first,
+        });
+        serve(&mut reactor, &mut peer, |_, p| !p.refused.is_empty());
+        assert_eq!(peer.refused, [Refusal::Evicted]);
+
+        peer.send(Request::Timeline {
+            pane,
+            watch: false,
+            before: None,
+            count: 0,
+        });
+        reactor.write(agent, b"\n");
+        serve(&mut reactor, &mut peer, |r, _| {
+            on_screen(r, agent, "closed")
+        });
+        for _ in 0..3 {
+            reactor.turn(Some(Duration::from_millis(150))).unwrap();
+        }
+        peer.read();
+        assert_eq!(peer.entries.len(), 1, "a closed overlay hears no entry");
+        assert_eq!(peer.pages.len(), 2, "count 0 asks for no page");
+        let session = &reactor.host.window.as_ref().unwrap().session;
+        assert!(
+            session.watch.is_none(),
+            "closed, the overlay keeps no timer"
+        );
+        assert!(turn_until(&mut reactor, |r| r.host.deadline().is_none()));
+    }
+
+    /// ADR-0052 §5: a label loses control, bidi and zero-width characters and is cut at 80 cells
+    /// and at the link's cap in bytes.
+    #[test]
+    fn a_label_is_cleaned_and_cut() {
+        assert_eq!(label("rm \u{1b}[2J\u{202e}x\u{200b}y\u{7}"), "rm [2Jxy");
+        assert_eq!(
+            label(&"界".repeat(50)).chars().count(),
+            40,
+            "wide ones count two"
+        );
+        let marks = "e\u{301}".repeat(200);
+        assert!(
+            label(&marks).len() <= link::MAX_LABEL,
+            "zero-width marks still fit the cap"
+        );
+        assert_eq!(label(&"a".repeat(90)).len(), 80);
     }
 
     /// A stand-in for `pinfold` in `root` that runs `body`, after `$@` and its environment are

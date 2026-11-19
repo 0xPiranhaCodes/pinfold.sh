@@ -230,7 +230,8 @@ pub struct Reactor {
     /// Answers accepted only from the inherited window link.
     pub(crate) approval_answers: Vec<(u64, ApprovalAnswer)>,
     /// The pane whose run the window asked to rewind, the latest only (ADR-0050 slice 7).
-    pub(crate) rewind_asked: Option<usize>,
+    /// With the checkpoint its viewer starts from, which a timeline entry can name (ADR-0052).
+    pub(crate) rewind_asked: Option<(usize, u32)>,
     pub(crate) protect: Protect,
     /// Set when this core lacks the hardened runtime: whether it could tell (ADR-0044).
     pub(crate) unhardened: Option<bool>,

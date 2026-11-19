@@ -143,14 +143,14 @@ impl Reactor {
     }
 
     /// Opens `tool` right of `pane`, in the directory the system says `pane`'s shell is in, as
-    /// a split's shell starts there.
-    fn open_tool(&mut self, pane: usize, tool: link::Tool) -> Result<(), Refusal> {
+    /// a split's shell starts there. The rewind viewer starts from the run's checkpoint `from`.
+    fn open_tool(&mut self, pane: usize, tool: link::Tool, from: u32) -> Result<(), Refusal> {
         let tool = match tool {
             link::Tool::Files => Tool::Files,
             link::Tool::Diff => Tool::Diff,
             // The runs are the event loop's, which takes this with [`Reactor::take_rewind`].
             link::Tool::Rewind => {
-                self.rewind_asked = Some(pane);
+                self.rewind_asked = Some((pane, from));
                 return Ok(());
             }
         };
@@ -229,8 +229,9 @@ impl Reactor {
             .map_err(|_| Refusal::Spawn)
     }
 
-    /// The pane whose run the window last asked to rewind with [`link::Tool::Rewind`].
-    pub fn take_rewind(&mut self) -> Option<usize> {
+    /// The pane whose run the window last asked to rewind with [`link::Tool::Rewind`], and the
+    /// checkpoint the viewer starts from, 0 for the launch one.
+    pub fn take_rewind(&mut self) -> Option<(usize, u32)> {
         self.rewind_asked.take()
     }
 
@@ -303,9 +304,12 @@ impl Reactor {
                 self.split(pane as usize, command, way)?;
                 false
             }
-            // The checkpoint a timeline entry names is ADR-0052 slice 4's core side.
-            Request::OpenTool { pane, tool, .. } => {
-                self.open_tool(pane as usize, tool)?;
+            Request::OpenTool {
+                pane,
+                tool,
+                checkpoint,
+            } => {
+                self.open_tool(pane as usize, tool, checkpoint.unwrap_or(0))?;
                 false
             }
             Request::OpenMarkdown { pane, name } => {
