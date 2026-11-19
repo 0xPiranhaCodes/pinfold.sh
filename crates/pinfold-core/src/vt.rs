@@ -115,6 +115,10 @@ pub trait VtEngine {
     /// all of it, so only a pane launched from an agent profile reads it (ADR-0046).
     fn agent_marks(&self) -> AgentMarks;
 
+    /// Returns the latest OSC 9;4 progress as a [`pinfold_proto::link::progress`] byte, 0 for
+    /// none. Output sets it, so it is a hint like the marks (ADR-0051 §9).
+    fn progress(&self) -> u8;
+
     /// Turns the text of program notifications on or off, `[alerts] program_notifications`.
     /// Off, none is kept (ADR-0051 §9).
     fn set_toasts(&mut self, on: bool);
@@ -734,6 +738,10 @@ impl VtEngine for AlacrittyEngine {
 
     fn agent_marks(&self) -> AgentMarks {
         self.marks.agent
+    }
+
+    fn progress(&self) -> u8 {
+        self.marks.progress
     }
 
     fn cwd(&self) -> Option<&WorkingDirectory> {

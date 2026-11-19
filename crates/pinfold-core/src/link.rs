@@ -67,6 +67,9 @@ const READ_CHUNK: usize = 16 * 1024;
 const PANE_TOAST: Duration = Duration::from_secs(10);
 /// The least time between any two program notifications (ADR-0051 §9).
 const ANY_TOAST: Duration = Duration::from_secs(2);
+/// The least time between two passes that send progress, so each pane's goes at most once a
+/// second (ADR-0051 §9).
+const PROGRESS_GAP: Duration = Duration::from_secs(1);
 
 /// What [`Reactor::spawn_window`] did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +115,8 @@ struct PaneLink {
     colours: (Option<u32>, Option<u32>),
     /// When the window last got a program notification from this pane.
     toasted: Option<Instant>,
+    /// The progress byte the window last heard of.
+    progress: u8,
 }
 
 /// A running `pinfold agents peek` and the listed panes it reads for, in the order of its
@@ -302,6 +307,11 @@ struct Session {
     peek: Option<Peek>,
     /// When the window last got a program notification from any pane.
     toasted: Option<Instant>,
+    /// When a pass last sent progress, whether it may now, and when a change held back by it
+    /// goes. Session-wide, so coalescing keeps no time per pane and sets no timer while idle.
+    progressed: Option<Instant>,
+    progress_open: bool,
+    progress_due: Option<Instant>,
     /// The version in the window's hello, which is never above the core's.
     version: u16,
 }
@@ -734,6 +744,13 @@ impl Session {
             self.notice(&Notice::Refused { reason })?;
             self.flush()?;
         }
+        let now = Instant::now();
+        self.progress_open = self
+            .progressed
+            .is_none_or(|last| now.saturating_duration_since(last) >= PROGRESS_GAP);
+        if self.progress_open {
+            self.progress_due = None;
+        }
         let count = self.panes.len();
         for offset in 0..count {
             let index = (self.next + offset) % count;
@@ -826,6 +843,22 @@ impl Session {
             {
                 (state.toasted, self.toasted) = (Some(now), Some(now));
                 notice.encode(&mut self.out).map_err(|_| Ended)?;
+            }
+        }
+        // On change only, and a pass at most once a second sends any: one held back goes, as it
+        // then is, when the second is up (ADR-0051 §9). A window of 25 never hears it.
+        let progress = reactor.osc_progress(pane);
+        if progress != state.progress && self.version >= link::PROGRESS {
+            if self.progress_open {
+                state.progress = progress;
+                self.progressed = Some(Instant::now());
+                let notice = Notice::Progress {
+                    pane: pane as u32,
+                    progress,
+                };
+                notice.encode(&mut self.out).map_err(|_| Ended)?;
+            } else {
+                self.progress_due = self.progressed.map(|last| last + PROGRESS_GAP);
             }
         }
         let colours = reactor.engine(pane).map(|engine| engine.colours());
@@ -1002,14 +1035,18 @@ impl Host {
             .is_some_and(|window| window.readable || window.session.copying.is_some())
     }
 
-    /// When an open inbox's branches are next read, or a running peek next looked at, and
-    /// nothing while it is closed.
+    /// When an open inbox's branches are next read, a running peek next looked at, or progress
+    /// held back goes, and nothing while the inbox is closed and no progress waits.
     pub(crate) fn deadline(&self) -> Option<Instant> {
         let session = &self.window.as_ref()?.session;
-        match session.peek {
+        let refresh = match session.peek {
             Some(_) => Some(Instant::now() + PEEK_POLL),
             None => session.inbox,
-        }
+        };
+        // While writes wait, the socket draining wakes the core, so a due time already past
+        // never spins it.
+        let progress = session.progress_due.filter(|_| session.pending() == 0);
+        refresh.into_iter().chain(progress).min()
     }
 
     /// Notes that the socket has news.
@@ -1231,6 +1268,9 @@ impl Reactor {
                 inbox: None,
                 peek: None,
                 toasted: None,
+                progressed: None,
+                progress_open: false,
+                progress_due: None,
                 version: 0,
             },
         };
@@ -1337,6 +1377,8 @@ mod tests {
         colours: Vec<(u32, Option<u32>, Option<u32>)>,
         /// Each toast told: pane, kind and text.
         toasts: Vec<(u32, u8, String)>,
+        /// Each progress told: pane and byte.
+        progress: Vec<(u32, u8)>,
         /// Each strip told: the run's pane and why it has no checkpoint.
         checkpoints: Vec<(u32, u8)>,
         /// Each restore's flash: undone, skipped and the error.
@@ -1384,6 +1426,7 @@ mod tests {
                 outside: Vec::new(),
                 colours: Vec::new(),
                 toasts: Vec::new(),
+                progress: Vec::new(),
             }
         }
 
@@ -1496,6 +1539,9 @@ mod tests {
                             command,
                         } => self.was_running.push((pane, runnable, command.to_owned())),
                         Notice::Approval(_) => {}
+                        Notice::Progress { pane, progress } => {
+                            self.progress.push((pane, progress));
+                        }
                         Notice::Toast { pane, kind, text } => {
                             self.toasts.push((pane, kind, text.to_owned()));
                         }
@@ -1790,6 +1836,64 @@ mod tests {
         assert!(turn_until(&mut reactor, |r| !r.has_window()));
         reactor.write(other, b"\n");
         assert_eq!(reactor.take_toast(other), None, "no window, no text");
+    }
+
+    /// ADR-0051 §9: progress reaches the window on change only, a pass at most once a second, so
+    /// a flood of 40 changes in under a second arrives as at most two notices ending in the
+    /// last; the held one sets a deadline, and once sent none is left. An exit clears it. A
+    /// window of 25 never hears it and no deadline is set for it.
+    #[test]
+    fn progress_is_sent_on_change_once_a_second_and_an_exit_clears_it() {
+        let mut reactor = Reactor::new().unwrap();
+        let flood = "i=0; while [ $i -lt 40 ]; do printf '\\033]9;4;1;%d\\007' $i; i=$((i+1)); \
+                     done; echo flooded; read line; printf '\\033]9;4;2\\007'; read line; exit";
+        let pane = reactor.spawn(shell(flood), 24, 80).unwrap();
+        let mut peer = Peer::greet(&mut reactor);
+        let last = link::progress(link::NORMAL, 39);
+        serve(&mut reactor, &mut peer, |r, p| {
+            on_screen(r, pane, "flooded") && p.progress.last() == Some(&(pane as u32, last))
+        });
+        assert!(peer.progress.len() <= 2, "{:?}", peer.progress);
+        assert!(turn_until(&mut reactor, |r| r.host.deadline().is_none()));
+        let told = peer.progress.len();
+        for _ in 0..3 {
+            reactor.turn(Some(Duration::from_millis(50))).unwrap();
+        }
+        peer.read();
+        assert_eq!(peer.progress.len(), told, "nothing again without a change");
+
+        reactor.write(pane, b"\n");
+        let failed = link::progress(link::FAILED, 39);
+        serve(&mut reactor, &mut peer, |_, p| {
+            p.progress.last() == Some(&(pane as u32, failed))
+        });
+        reactor.write(pane, b"\n");
+        serve(&mut reactor, &mut peer, |r, p| {
+            r.is_closed(pane) && p.progress.last() == Some(&(pane as u32, 0))
+        });
+        assert_eq!(reactor.osc_progress(pane), 0);
+        drop(peer);
+        assert!(turn_until(&mut reactor, |r| !r.has_window()));
+
+        let script = "printf '\\033]9;4;1;50\\007'; echo set; sleep 30";
+        let older = reactor.spawn(shell(script), 24, 80).unwrap();
+        let mut peer = Peer::older(&mut reactor, OLDEST);
+        serve(&mut reactor, &mut peer, |r, _| on_screen(r, older, "set"));
+        for _ in 0..3 {
+            reactor.turn(Some(Duration::from_millis(50))).unwrap();
+        }
+        peer.read();
+        assert_ne!(reactor.osc_progress(older), 0);
+        assert!(peer.progress.is_empty(), "a window of 25 never gets it");
+        assert_eq!(reactor.host.deadline(), None);
+
+        // A due time already past waits for a stalled socket to drain, rather than spin.
+        let past = Instant::now() - PROGRESS_GAP;
+        let session = &mut reactor.host.window.as_mut().unwrap().session;
+        (session.progress_due, session.out) = (Some(past), vec![0; 8]);
+        assert_eq!(reactor.host.deadline(), None);
+        reactor.host.window.as_mut().unwrap().session.out.clear();
+        assert_eq!(reactor.host.deadline(), Some(past));
     }
 
     /// A stand-in for `pinfold` in `root` that runs `body`, after `$@` and its environment are
