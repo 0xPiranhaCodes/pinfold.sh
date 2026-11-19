@@ -187,6 +187,19 @@ pub enum Method {
         /// The run's agent pane.
         pane: usize,
     },
+    /// `checkpoint.restore`: undo the run in `pane`'s changes since `checkpoint`, as the view
+    /// checkpoint `shown` showed them, once the window allows it (ADR-0050 section 6).
+    CheckpointRestore {
+        /// The run's agent pane.
+        pane: usize,
+        /// The checkpoint to go back to, `<run>/<n>`.
+        checkpoint: String,
+        /// The view checkpoint the caller showed, `<run>/<n>` of the same run.
+        shown: String,
+        /// At most [`MAX_RESTORE_PATHS`] paths relative to the run's directory, or all if
+        /// none. Never empty.
+        paths: Option<Vec<String>>,
+    },
     /// `session.save`: write the session's snapshot now.
     SessionSave,
     /// `workspace.open`, its shape checked.
@@ -246,6 +259,13 @@ pub enum Until {
 
 /// Longest `pane.wait` pattern.
 pub const MAX_PATTERN: usize = 1024;
+
+/// Most paths a `checkpoint.restore` names (ADR-0050 section 7).
+pub const MAX_RESTORE_PATHS: usize = 1000;
+
+/// How long a `checkpoint.restore` may take: its plan (10 s), the window's prompt (60 s) and
+/// the restore (60 s), with [`OPEN_WAIT`] to spare.
+pub const RESTORE_WAIT: Duration = Duration::from_secs(10 + 60 + 60 + 2);
 
 /// The events a subscriber asked for.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -543,11 +563,16 @@ impl Control {
                         | Method::SessionSave
                         | Method::GrantsRevoke { .. }
                         | Method::WorkspaceOpen(_) => APPROVAL_WAIT + OPEN_WAIT,
-                        // A launch waits for its checkpoint, at most `[rewind] wait_s` (60 s), and
-                        // a checkpoint call for a take or a list (ADR-0050).
+                        // A launch waits for its checkpoint, at most `[rewind] wait_s` (60 s), a
+                        // checkpoint call for a take or a list, and a viewer of a checkpoint for
+                        // its view checkpoint (ADR-0050).
                         Method::AgentLaunch(_)
                         | Method::CheckpointTake { .. }
                         | Method::CheckpointList { .. } => APPROVAL_WAIT + OPEN_WAIT,
+                        Method::ToolOpen(open) if open.run.checkpoint.is_some() => {
+                            APPROVAL_WAIT + OPEN_WAIT
+                        }
+                        Method::CheckpointRestore { .. } => RESTORE_WAIT,
                         _ => OPEN_WAIT,
                     };
                     ask(Request {
@@ -837,6 +862,11 @@ pub fn ask(stream: &UnixStream, method: &str, params: &Value) -> Result<(Value, 
     let waits = waits
         .map_or(Duration::ZERO, Duration::from_millis)
         .min(MAX_WAIT);
+    // A restore waits on its plan, the window's prompt and the restore itself.
+    let waits = match method {
+        "checkpoint.restore" => RESTORE_WAIT.saturating_sub(REPLY_WAIT),
+        _ => waits,
+    };
     stream.set_read_timeout(Some(REPLY_WAIT + waits))?;
     stream.set_write_timeout(Some(REPLY_WAIT))?;
     let hello = json!({"version": VERSION});
@@ -1203,7 +1233,8 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
             | "agent.launch"
             | "tool.open"
             | "checkpoint.take"
-            | "checkpoint.list"),
+            | "checkpoint.list"
+            | "checkpoint.restore"),
         ) if *greeted < VERSION => refuse(
             Some(id),
             NO_METHOD,
@@ -1262,7 +1293,7 @@ fn answer(line: &[u8], greeted: &mut u64) -> Step {
         },
         Some(
             method @ ("pane.read" | "pane.last_output" | "pane.send" | "pane.close" | "pane.status"
-            | "checkpoint.take" | "checkpoint.list"),
+            | "checkpoint.take" | "checkpoint.list" | "checkpoint.restore"),
         ) => match pane_method(method, request.get("params")) {
             Ok(method) => Step::Ask(id.clone(), method),
             Err(reason) => refuse(Some(id), BAD_PARAMS, reason),
@@ -1406,8 +1437,55 @@ fn pane_method(method: &str, params: Option<&Value>) -> Result<Method, &'static 
         "pane.close" => Ok(Method::PaneClose { pane }),
         "checkpoint.take" => Ok(Method::CheckpointTake { pane }),
         "checkpoint.list" => Ok(Method::CheckpointList { pane }),
+        "checkpoint.restore" => restore(pane, params),
         _ => Ok(Method::PaneLastOutput { pane }),
     }
+}
+
+/// Checks `checkpoint.restore`'s `checkpoint` and `shown`, two checkpoint ids, and `paths`, absent
+/// for all, else 1 to [`MAX_RESTORE_PATHS`] relative paths with no `..`. An empty list is
+/// refused, as it would read as all.
+fn restore(pane: usize, params: Option<&Value>) -> Result<Method, &'static str> {
+    let field = |name| params.and_then(|params| params.get(name));
+    let id = |name| {
+        let id = field(name).and_then(Value::as_str)?;
+        let (run, n) = id.split_once('/')?;
+        let (start, count) = run.strip_prefix('r')?.split_once('-')?;
+        let digits = |text: &str| {
+            !text.is_empty() && text.len() <= 20 && text.bytes().all(|b| b.is_ascii_digit())
+        };
+        (digits(start) && digits(count) && digits(n)).then(|| id.to_owned())
+    };
+    let checkpoint =
+        id("checkpoint").ok_or("params.checkpoint must be a checkpoint id, <run>/<n>")?;
+    let shown = id("shown").ok_or("params.shown must be a checkpoint id, <run>/<n>")?;
+    let paths = match field("paths") {
+        None | Some(Value::Null) => None,
+        Some(paths) => {
+            let paths = paths
+                .as_array()
+                .filter(|paths| (1..=MAX_RESTORE_PATHS).contains(&paths.len()));
+            let paths =
+                paths.ok_or("params.paths must hold 1 to 1000 paths, or be left out for all")?;
+            let relative = |path: &&str| {
+                !path.is_empty()
+                    && !path.starts_with('/')
+                    && !path.contains('\0')
+                    && path.split('/').all(|part| part != ".." && !part.is_empty())
+            };
+            let paths: Option<Vec<String>> = paths
+                .iter()
+                .map(|path| path.as_str().filter(relative).map(str::to_owned))
+                .collect();
+            Some(paths.ok_or("params.paths must be relative paths with no `..`")?)
+        }
+    };
+    Ok(Method::CheckpointRestore {
+        pane,
+        checkpoint,
+        shown,
+        paths,
+    })
 }
 
 /// Checks a workspace method's `params`: an absolute `root`, a lowercase hex `sha256`, and for
@@ -1625,6 +1703,44 @@ mod tests {
             asked("checkpoint.list", json!({"pane": 4})),
             Step::Ask(json!(2), Method::CheckpointList { pane: 4 })
         );
+        let (c, n) = ("r100-0/0".to_owned(), "r100-0/3".to_owned());
+        assert_eq!(
+            asked(
+                "checkpoint.restore",
+                json!({"pane": 4, "checkpoint": c, "shown": n})
+            ),
+            Step::Ask(
+                json!(2),
+                Method::CheckpointRestore {
+                    pane: 4,
+                    checkpoint: c.clone(),
+                    shown: n.clone(),
+                    paths: None
+                }
+            )
+        );
+        let one = json!({"pane": 4, "checkpoint": c, "shown": n, "paths": ["src/a.rs"]});
+        let Step::Ask(_, Method::CheckpointRestore { paths, .. }) =
+            asked("checkpoint.restore", one)
+        else {
+            panic!("not asked");
+        };
+        assert_eq!(paths, Some(vec!["src/a.rs".to_owned()]));
+        // An empty list would read as all, so it is refused, as are paths that leave the tree.
+        let many: Vec<String> = (0..=MAX_RESTORE_PATHS).map(|n| n.to_string()).collect();
+        for bad in [
+            json!({"pane": 4, "checkpoint": c, "shown": n, "paths": []}),
+            json!({"pane": 4, "checkpoint": c, "shown": n, "paths": many}),
+            json!({"pane": 4, "checkpoint": c, "shown": n, "paths": ["../x"]}),
+            json!({"pane": 4, "checkpoint": c, "shown": n, "paths": ["/etc/passwd"]}),
+            json!({"pane": 4, "checkpoint": c, "shown": n, "paths": ["a//b"]}),
+            json!({"pane": 4, "checkpoint": "../r1-0/0", "shown": n}),
+            json!({"pane": 4, "checkpoint": c}),
+        ] {
+            let request = pane_request("checkpoint.restore", &bad);
+            let (reply, _) = replied(request.as_bytes(), &mut VERSION.clone());
+            assert_eq!(code(&reply), Some(BAD_PARAMS), "{bad}");
+        }
         let take = pane_request("checkpoint.take", &json!({"pane": "self"}));
         let (reply, _) = replied(take.as_bytes(), &mut VERSION.clone());
         assert_eq!(code(&reply), Some(BAD_PARAMS));

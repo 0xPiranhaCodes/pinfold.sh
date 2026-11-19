@@ -106,6 +106,10 @@ enum Notice {
     /// A webhook to this host is configured, whether `curl` was found, and how many alerts were
     /// given up on (ADR-0051).
     Webhook(String, bool, u32),
+    /// Why the run in this pane has no checkpoint, 0 once it has one (ADR-0050).
+    Checkpoint(u32, u8),
+    /// A restore the window allowed ended: files undone, skipped, and why it failed if it did.
+    Restored(u32, u32, String),
     /// The core is too old to take the theme's palette (ADR-0049).
     Unthemed,
     /// The config file or the theme file in use was saved, and this is the theme now.
@@ -141,6 +145,8 @@ struct Shown {
     inbox: bool,
     /// Whether it is new enough to answer an agent from it.
     answer: bool,
+    /// Whether it is new enough to open the viewer on an agent's run (ADR-0050).
+    rewind: bool,
     /// The inbox's panes, every pane's tab and the agents outside PinFold, only while the
     /// inbox is open.
     listed: Vec<Listed>,
@@ -194,6 +200,10 @@ fn publish(link: &mut Link, shown: &mut Shown) -> bool {
             choice: proto::Choice::Interrupt,
             profile: "",
             key: "",
+        });
+        shown.rewind = link.speaks(&proto::Request::OpenTool {
+            pane: 0,
+            tool: proto::Tool::Rewind,
         });
         shown.laid = true;
     }
@@ -252,6 +262,14 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
                 return;
             }
         }
+        while let Some((pane, missing)) = link.take_checkpoint() {
+            if proxy.send_event(Notice::Checkpoint(pane, missing)).is_err() {
+                return;
+            }
+        }
+        let restored = link
+            .take_restored()
+            .map(|(undid, skipped, error)| Notice::Restored(undid, skipped, error));
         while let Some(approval) = link.take_approval() {
             if proxy.send_event(Notice::Approval(approval)).is_err() {
                 return;
@@ -268,6 +286,7 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
             unhardened,
             secrets,
             webhook,
+            restored,
             refused,
             unthemed,
             none_waiting,
@@ -500,6 +519,9 @@ struct App {
     /// What restored panes were running, until answered. The focused one's strip takes the next
     /// key.
     was_running: was_running::Strips,
+    /// Each run's pane with no checkpoint and why, for the strip under it, at most
+    /// [`proto::MAX_PANES`] (ADR-0050).
+    no_checkpoint: Vec<(u32, u8)>,
     /// Cross-pane prompts, oldest first. Updates replace a batch in place.
     approvals: approval::Queue,
     /// The right-click menu, while open. Every key and press goes to it.
@@ -519,6 +541,8 @@ struct App {
     opening: Option<approval::OpenIn>,
     /// Whether the core is new enough to take one.
     answer_spoken: bool,
+    /// Whether the core is new enough to open the viewer on an agent's run.
+    rewind_spoken: bool,
     /// In a window `cargo xtask mem-gate` measures, whether to show a confirmation once the
     /// inbox it opens has drawn its rows.
     measuring_answer: bool,
@@ -617,6 +641,7 @@ impl App {
             clipboard: None,
             prompt: None,
             was_running: was_running::Strips::default(),
+            no_checkpoint: Vec::new(),
             approvals: {
                 // Matches `has_focus` below; `Focused` events keep them in step.
                 let mut queue = approval::Queue::default();
@@ -631,6 +656,7 @@ impl App {
             confirm: None,
             opening: None,
             answer_spoken: false,
+            rewind_spoken: false,
             measuring: size
                 .and(std::env::var_os("PINFOLD_MEASURE_INBOX"))
                 .map(|value| value == "closed"),
@@ -772,6 +798,11 @@ impl App {
             let middle = (self.area.0 / 2, self.area.1 / 2);
             self.menu = Some(Menu::open(middle, self.area, None));
         }
+        // And with a `Rewind` prompt at its largest over the strip (ADR-0050).
+        if self.size.is_some() && std::env::var_os("PINFOLD_MEASURE_REWIND").is_some() {
+            let _ = self.approvals.add(approval::largest_rewind());
+            self.no_checkpoint = vec![(self.focused, 1)];
+        }
     }
 
     /// Redraws the font for a new display. Winit sends `Resized` after this only sometimes.
@@ -841,6 +872,7 @@ impl App {
         self.total = shown.total;
         self.inbox_spoken = shown.inbox;
         self.answer_spoken = shown.answer;
+        self.rewind_spoken = shown.rewind;
         if self.measuring.is_some() && self.inbox.is_none() && self.inbox_spoken {
             self.toggle_inbox();
         }
@@ -1014,6 +1046,10 @@ impl App {
                 bar.draw(&mut self.composed, theme);
             } else if let Some(vi) = self.vi.filter(|_| self.flash.until().is_none()) {
                 vi.draw(&mut self.composed, theme);
+            } else if let Some(&(_, missing)) = (self.no_checkpoint.iter())
+                .find(|(pane, _)| *pane == self.focused && self.flash.until().is_none())
+            {
+                flash::no_checkpoint(&mut self.composed, missing, theme);
             } else {
                 self.flash.banner(&mut self.composed, theme);
             }
@@ -1175,8 +1211,23 @@ impl App {
             Command::OpenDocs => return launch(DOCS, false),
             Command::Inbox => return self.toggle_inbox(),
             Command::NextWaiting => return self.next_waiting(),
+            // The core picks the run and its launch checkpoint, and flashes if there is none.
+            Command::Rewind => proto::Request::OpenTool {
+                pane,
+                tool: proto::Tool::Rewind,
+            },
         };
         self.core(request);
+    }
+
+    /// Whether the palette offers "Rewind Agent Changes": the core speaks it and an agent
+    /// reported in the focused pane.
+    fn offers_rewind(&self) -> bool {
+        self.rewind_spoken
+            && self
+                .status
+                .as_ref()
+                .is_some_and(|(_, reported, _)| *reported)
     }
 
     /// Opens the inbox, or closes it if it is open (ADR-0051). A core too old for it says so.
@@ -1392,7 +1443,7 @@ impl App {
         let key = &event.logical_key;
         if input::is_palette(key, self.modifiers) {
             self.menu = None;
-            self.palette = Some(Palette::commands());
+            self.palette = Some(Palette::commands(self.offers_rewind()));
             self.picking = None;
             self.redraw_soon();
             return true;
@@ -2039,6 +2090,17 @@ impl ApplicationHandler<Notice> for App {
                 if self.webhook.replace((sender, failed)).is_none() {
                     self.flash.webhook(host, Instant::now());
                 }
+                self.redraw_soon();
+            }
+            Notice::Checkpoint(pane, missing) => {
+                self.no_checkpoint.retain(|(other, _)| *other != pane);
+                if missing != 0 && self.no_checkpoint.len() < proto::MAX_PANES {
+                    self.no_checkpoint.push((pane, missing));
+                }
+                self.redraw_soon();
+            }
+            Notice::Restored(undid, skipped, error) => {
+                self.flash.restored(undid, skipped, error, Instant::now());
                 self.redraw_soon();
             }
             Notice::Approval(approval) => {
@@ -2904,7 +2966,7 @@ mod tests {
         let text = |text: &str| Key::Character(text.into());
         let enter = Key::Named(NamedKey::Enter);
         for (query, tool) in [("files", proto::Tool::Files), ("diff", proto::Tool::Diff)] {
-            app.palette = Some(Palette::commands());
+            app.palette = Some(Palette::commands(false));
             assert_eq!(app.palette_key(&text(query), Some(query)), None);
             let command = app.palette_key(&enter, None).unwrap();
             assert!(app.palette.is_none());
@@ -2918,7 +2980,7 @@ mod tests {
                 "{query}"
             );
         }
-        app.palette = Some(Palette::commands());
+        app.palette = Some(Palette::commands(false));
         app.palette_key(&text("split d"), Some("split d"));
         let command = app.palette_key(&enter, None).unwrap();
         app.run(command);
@@ -2931,11 +2993,38 @@ mod tests {
             })]
         ));
         // Ctrl+Shift+P again closes it, and nothing reaches the pane.
-        app.palette = Some(Palette::commands());
+        app.palette = Some(Palette::commands(false));
         app.modifiers = ModifiersState::CONTROL | ModifiersState::SHIFT;
         assert_eq!(app.palette_key(&text("P"), Some("\u{10}")), None);
         assert!(app.palette.is_none());
         assert!(inbox.take().is_empty());
+    }
+
+    #[test]
+    fn the_palette_offers_rewind_only_on_a_core_that_speaks_it_with_an_agent_focused() {
+        let (mut app, inbox, _poll) = app();
+        let rewind = palette::COMMANDS.len() - 1;
+        let offered = |app: &App| app.offers_rewind();
+        assert!(!offered(&app));
+        app.rewind_spoken = true;
+        assert!(!offered(&app));
+        app.status = Some((1, false, String::new()));
+        assert!(!offered(&app), "a shell's marks are not an agent's run");
+        app.status = Some((1, true, String::new()));
+        assert!(offered(&app));
+        app.rewind_spoken = false;
+        assert!(!offered(&app));
+        assert_eq!(palette::COMMANDS[rewind].1, Command::Rewind);
+        assert_eq!(Palette::commands(false).label(rewind), None);
+        app.run(Command::Rewind);
+        let sent = inbox.take();
+        assert!(matches!(
+            sent[..],
+            [Request::Core(proto::Request::OpenTool {
+                pane: 1,
+                tool: proto::Tool::Rewind
+            })]
+        ));
     }
 
     #[test]
@@ -2948,7 +3037,7 @@ mod tests {
         app.modifiers = ModifiersState::empty();
         let command = app.pane_key(&text("m"), None, false).unwrap();
         app.run(command);
-        app.palette = Some(Palette::commands());
+        app.palette = Some(Palette::commands(false));
         app.palette_key(&text("markdown"), Some("markdown"));
         let command = app.palette_key(&enter, None).unwrap();
         app.run(command);

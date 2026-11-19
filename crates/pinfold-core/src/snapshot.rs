@@ -990,6 +990,7 @@ mod tests {
             path: "/".to_owned(),
             staged: false,
             range: None,
+            checkpoint: None,
         };
         let gone = Run {
             tool: Tool::Md,

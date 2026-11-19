@@ -227,6 +227,8 @@ pub struct Reactor {
     pub(crate) was_running: Vec<(usize, String)>,
     /// Answers accepted only from the inherited window link.
     pub(crate) approval_answers: Vec<(u64, ApprovalAnswer)>,
+    /// The pane whose run the window asked to rewind, the latest only (ADR-0050 slice 7).
+    pub(crate) rewind_asked: Option<usize>,
     pub(crate) protect: Protect,
     /// Set when this core lacks the hardened runtime: whether it could tell (ADR-0044).
     pub(crate) unhardened: Option<bool>,
@@ -285,6 +287,7 @@ impl Reactor {
             untrimmed: None,
             was_running: Vec::new(),
             approval_answers: Vec::new(),
+            rewind_asked: None,
             protect: Protect::default(),
             unhardened: None,
             exposed: None,

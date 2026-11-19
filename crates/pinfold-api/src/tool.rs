@@ -44,6 +44,9 @@ pub struct Run {
     pub staged: bool,
     /// `diff` only: a revision range of [`revision`] characters.
     pub range: Option<String>,
+    /// `diff` only: the checkpoint `<run>/<n>` the viewer shows the run's changes since, as
+    /// [`checkpoint`] checks it, instead of git's (ADR-0050 section 6).
+    pub checkpoint: Option<String>,
 }
 
 impl Run {
@@ -53,9 +56,9 @@ impl Run {
     /// ```
     /// use pinfold_api::tool::{Run, Tool};
     ///
-    /// let run = Run { tool: Tool::Diff, path: "/repo".into(), staged: true, range: Some("main..".into()) };
+    /// let run = Run { tool: Tool::Diff, path: "/repo".into(), staged: true, range: Some("main..".into()), checkpoint: None };
     /// assert_eq!(run.args(), ["diff", "--staged", "--", "main.."]);
-    /// let run = Run { tool: Tool::Md, path: "/repo/README.md".into(), staged: false, range: None };
+    /// let run = Run { tool: Tool::Md, path: "/repo/README.md".into(), staged: false, range: None, checkpoint: None };
     /// assert_eq!(run.args(), ["md", "--", "/repo/README.md"]);
     /// ```
     #[must_use]
@@ -73,15 +76,18 @@ impl Run {
     }
 
     /// Reads what [`Run::describe`] wrote, such as from a session snapshot, with every check
-    /// `tool.open` makes of its shape.
+    /// `tool.open` makes of its shape. A viewer of a checkpoint is not read back: its view
+    /// checkpoint lives only as long as it does.
     ///
     /// ```
     /// use pinfold_api::tool::{Run, Tool};
     ///
-    /// let run = Run { tool: Tool::Diff, path: "/r".into(), staged: true, range: Some("a..b".into()) };
-    /// assert_eq!(Run::from_described(&run.describe()), Some(run));
+    /// let run = Run { tool: Tool::Diff, path: "/r".into(), staged: true, range: Some("a..b".into()), checkpoint: None };
+    /// assert_eq!(Run::from_described(&run.describe()), Some(run.clone()));
     /// let bad = serde_json::json!({"name": "diff", "path": "/r", "range": "-p"});
     /// assert_eq!(Run::from_described(&bad), None);
+    /// let rewind = Run { staged: false, range: None, checkpoint: Some("r1-0/0".into()), ..run };
+    /// assert_eq!(Run::from_described(&rewind.describe()), None);
     /// ```
     #[must_use]
     pub fn from_described(described: &Value) -> Option<Self> {
@@ -91,13 +97,14 @@ impl Run {
         params(Some(&Value::Object(described)))
             .ok()
             .map(|open| open.run)
+            .filter(|run| run.checkpoint.is_none())
     }
 
     /// What `pane.list` shows of it.
     #[must_use]
     pub fn describe(&self) -> Value {
         json!({"name": self.tool.name(), "path": self.path, "staged": self.staged,
-               "range": self.range})
+               "range": self.range, "checkpoint": self.checkpoint})
     }
 }
 
@@ -137,12 +144,39 @@ pub fn revision(range: &str) -> bool {
     matches!(separators[..], [] | [2 | 3])
 }
 
+/// Whether `checkpoint` names a run's checkpoint, `r<start>-<n>/<n>`, at most 64 bytes.
+///
+/// ```
+/// use pinfold_api::tool::checkpoint;
+///
+/// assert!(checkpoint("r1700000000-3/0"));
+/// assert!(!checkpoint("r1-0") && !checkpoint("r1-0/") && !checkpoint("../r1-0/0"));
+/// ```
+#[must_use]
+pub fn checkpoint(checkpoint: &str) -> bool {
+    let digits = |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit());
+    let parts = checkpoint.strip_prefix('r').and_then(|rest| {
+        let (run, n) = rest.split_once('/')?;
+        Some((run.split_once('-')?, n))
+    });
+    checkpoint.len() <= 64
+        && parts.is_some_and(|((start, run), n)| digits(start) && digits(run) && digits(n))
+}
+
 /// Reads `tool.open`'s parameters, refusing any it does not know, such as a command.
 pub(crate) fn params(params: Option<&Value>) -> Result<Open, &'static str> {
     const SHAPE: &str = "tool.open takes tool (md, files or diff), an absolute path, \
-                         staged and range for diff, place and of";
+                         staged, range or checkpoint for diff, place and of";
     let params = params.and_then(Value::as_object).ok_or(SHAPE)?;
-    let known = ["tool", "path", "staged", "range", "place", "of"];
+    let known = [
+        "tool",
+        "path",
+        "staged",
+        "range",
+        "checkpoint",
+        "place",
+        "of",
+    ];
     if params.keys().any(|key| !known.contains(&key.as_str())) {
         return Err(SHAPE);
     }
@@ -176,6 +210,15 @@ pub(crate) fn params(params: Option<&Value>) -> Result<Open, &'static str> {
             );
         }
     };
+    let checkpoint = match params.get("checkpoint") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(id)) if diff && !staged && range.is_none() && checkpoint(id) => {
+            Some(id.clone())
+        }
+        Some(_) => {
+            return Err("only diff takes checkpoint, <run>/<n>, without staged or range");
+        }
+    };
     let place = match params.get("place").and_then(Value::as_str) {
         None | Some("right") => Place::SplitRight,
         Some("down") => Place::SplitDown,
@@ -195,6 +238,7 @@ pub(crate) fn params(params: Option<&Value>) -> Result<Open, &'static str> {
         path,
         staged,
         range,
+        checkpoint,
     };
     Ok(Open { run, place, of })
 }
@@ -216,6 +260,7 @@ mod tests {
             path: "/r".to_owned(),
             staged: true,
             range: Some("main...HEAD".to_owned()),
+            checkpoint: None,
         };
         let expected = Open {
             run,
@@ -272,6 +317,22 @@ mod tests {
             assert!(open(&staged).is_err() && open(&range).is_err(), "{tool}");
         }
         assert!(open(&json!({"tool": "diff", "path": "/r", "staged": "yes"})).is_err());
+    }
+
+    #[test]
+    fn only_diff_takes_a_checkpoint_and_never_with_staged_or_range() {
+        let opened = open(&json!({"tool": "diff", "path": "/r", "checkpoint": "r17-2/0"}));
+        assert_eq!(opened.unwrap().run.checkpoint.as_deref(), Some("r17-2/0"));
+        for params in [
+            json!({"tool": "files", "path": "/r", "checkpoint": "r17-2/0"}),
+            json!({"tool": "diff", "path": "/r", "checkpoint": "r17-2/0", "staged": true}),
+            json!({"tool": "diff", "path": "/r", "checkpoint": "r17-2/0", "range": "a"}),
+            json!({"tool": "diff", "path": "/r", "checkpoint": "r17-2"}),
+            json!({"tool": "diff", "path": "/r", "checkpoint": "-r17-2/0"}),
+            json!({"tool": "diff", "path": "/r", "checkpoint": 3}),
+        ] {
+            assert!(open(&params).is_err(), "{params}");
+        }
     }
 
     #[test]

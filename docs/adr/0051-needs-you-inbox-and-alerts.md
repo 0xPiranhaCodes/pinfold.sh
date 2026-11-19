@@ -598,12 +598,12 @@ Decided by the coordinator for the maintainer while building slice 11.
 
 - **The window tells the core, so off keeps no text in the core.** The window reads
   `program_notifications` and hot-reloads it, but only the core parses output. So **link version
-  24** (23 is ADR-0050's) adds `Request::Toasts { on }`, sent after the hello and on each change,
+  25** (23 and 24 are ADR-0050's) adds `Request::Toasts { on }`, sent after the hello and on each change,
   as `Request::Palette` is, beside section 2's `Notice::Toast`. The core starts with toasts off,
   and turns them off again when the window goes. While off, an OSC 99 or OSC 777 string is let go
   at its first bytes, as other strings are. OSC 9 is read only for ADR-0046's needs you count, and
   no text is built or sent. Any string's text, notifications' included, is cleared as soon as the
-  string ends or is let go, and a string cut off at the 4 KB limit is let go there. A core of 23
+  string ends or is let go, and a string cut off at the 4 KB limit is let go there. A core of 24
   never hears the request, so it keeps toasts off.
 - **Where the text is cut.** It is cut when the string ends, in `pinfold-core/src/marks.rs`. A
   tab or line end becomes a space. Control, bidi and zero-width characters and the state glyphs

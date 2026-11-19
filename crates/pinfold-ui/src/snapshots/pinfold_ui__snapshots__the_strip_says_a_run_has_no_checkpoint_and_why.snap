@@ -1,0 +1,11 @@
+---
+source: crates/pinfold-ui/src/snapshots.rs
+expression: cells(&frame)
+---
+|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
+|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
+| no checkpoint · took over wait_s                                               |
+0:0..80 fg e2e5ea bg 121212
+1:0..80 fg e2e5ea bg 121212
+2:0..33 fg 555a63 bg 12151a
+2:33..80 fg e2e5ea bg 12151a

@@ -20,7 +20,7 @@ const BUF: usize = 64 * 1024;
 /// it when that process dies, killed at `wait_s` included (ADR-0050, amendment of slice 3).
 pub(crate) const LOCK: &str = "pinfold.lock";
 /// Why a checkpoint is taken (ADR-0050 section 1).
-const REASONS: [&str; 6] = ["launch", "done", "exit", "api", "view", "restore"];
+pub(crate) const REASONS: [&str; 6] = ["launch", "done", "exit", "api", "view", "restore"];
 
 /// What a take wrote. Its JSON line, as `pinfold checkpoint take` prints it, is
 /// `{"checkpoint":"<run>/<n>","store":"<key>","files":F,"new_bytes":B,"complete":C,"changed":D}`.
@@ -280,7 +280,7 @@ const DIR: &str = "dir";
 
 /// The store with `key` under `state` and the working directory it records, checked to hash to
 /// `key` again, so a store can name no other directory.
-fn by_key(state: &Path, key: &str) -> io::Result<(PathBuf, PathBuf)> {
+pub(crate) fn by_key(state: &Path, key: &str) -> io::Result<(PathBuf, PathBuf)> {
     let store = super::plan::store_by_key(state, key)?;
     let mut path = Vec::new();
     let held = at::open_dir(&store).map_err(io_error)?;

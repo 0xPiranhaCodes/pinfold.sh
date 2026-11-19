@@ -42,6 +42,10 @@ pub struct Planned {
     /// The first 10: the path, lossily UTF-8 and cut to 256 bytes, what happens to it
     /// (`restore`, `delete`, `bring back` or `not covered`) and whether it is `later`.
     pub paths: Vec<(String, &'static str, bool)>,
+    /// Why `C` was taken, one of a take's reasons, or `unknown` for any other message text.
+    pub reason: &'static str,
+    /// When `C` was taken, Unix seconds, or 0 if its message has none.
+    pub time: u64,
 }
 
 impl Planned {
@@ -96,6 +100,8 @@ pub(crate) fn numbers(store: &Path, run: &str) -> io::Result<Vec<u64>> {
 /// What a restore needs from the checkpoint `C` it restores.
 pub(crate) struct Origin {
     complete: bool,
+    reason: &'static str,
+    time: u64,
     /// More paths were skipped than the message lists.
     more: bool,
     skipped: Vec<String>,
@@ -110,8 +116,13 @@ impl Origin {
                 let path = |pair: &serde_json::Value| pair[0].as_str().map(str::to_owned);
                 skipped.iter().filter_map(path).collect()
             });
+        // Only a take's own words, so a message an agent forged shows nothing of its own.
+        let reason = message["reason"].as_str().unwrap_or_default();
+        let reason = super::take::REASONS.iter().find(|known| **known == reason);
         Ok(Self {
             complete: message["complete"] == true,
+            reason: reason.copied().unwrap_or("unknown"),
+            time: message["time"].as_u64().unwrap_or(0),
             more: message["more"] != false,
             skipped,
         })
@@ -219,7 +230,7 @@ pub(crate) fn pair(input: &mut dyn BufRead, a: &mut Vec<u8>, b: &mut Vec<u8>) ->
 }
 
 /// The run's newest `done` or `exit` checkpoint before `shown`.
-fn stopped(store: &Path, run: &str, shown: u64) -> io::Result<Option<u64>> {
+pub(crate) fn stopped(store: &Path, run: &str, shown: u64) -> io::Result<Option<u64>> {
     let mut numbers = numbers(store, run)?;
     numbers.sort_unstable_by(|a, b| b.cmp(a));
     for n in numbers.into_iter().filter(|&n| n < shown) {
@@ -327,6 +338,8 @@ pub fn plan(
 
     let mut planned = Planned {
         complete: origin.complete(),
+        reason: origin.reason,
+        time: origin.time,
         ..Planned::default()
     };
     let (mut status, mut path) = (Vec::new(), Vec::new());

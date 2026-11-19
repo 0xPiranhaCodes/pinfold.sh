@@ -125,6 +125,11 @@ fn record(
         // No path is ever recorded, only the run's pane.
         Method::CheckpointTake { pane } => ("checkpoint.take", Some(*pane), scope(*pane)),
         Method::CheckpointList { pane } => ("checkpoint.list", Some(*pane), scope(*pane)),
+        Method::CheckpointRestore { pane, .. } => (
+            "checkpoint.restore",
+            Some(*pane),
+            own.map_or("outside", |_| "tool"),
+        ),
         Method::PaneStatus { pane, .. } => ("pane.status", Some(*pane), scope(*pane)),
         Method::AuditRead { pane, .. } => ("audit.read", *pane, "outside"),
         Method::SessionSave => ("session.save", None, "outside"),
