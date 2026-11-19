@@ -1317,7 +1317,6 @@ impl Reactor {
 mod tests {
     use std::collections::HashMap;
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::time::{Duration, Instant};
 
@@ -1899,14 +1898,12 @@ mod tests {
     /// A stand-in for `pinfold` in `root` that runs `body`, after `$@` and its environment are
     /// written beside it.
     fn stub_tools(root: &Path, body: &str) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let stub = root.join("pinfold");
         let script = format!(
             "#!/bin/sh\necho \"$@\" > '{0}/args'\nenv > '{0}/env'\necho $$ > '{0}/pid'\n{body}\n",
             root.display()
         );
-        fs::write(&stub, script).unwrap();
-        fs::set_permissions(&stub, fs::Permissions::from_mode(0o755)).unwrap();
+        pinfold_testkit::program(&stub, script, 0o755).unwrap();
         stub
     }
 
@@ -2760,8 +2757,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let (path, log) = (dir.join("window"), dir.join("log"));
         let script = format!("#!/bin/sh\necho \"$#\" >> '{}'\n{body}\n", log.display());
-        fs::write(&path, script).unwrap();
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        pinfold_testkit::program(&path, script, 0o700).unwrap();
         (path, log)
     }
 
@@ -3269,10 +3265,12 @@ mod tests {
         let _cleanup = Cleanup(dir.clone());
         let (pid, hup) = (dir.join("pid"), dir.join("hup"));
         // The loop outlives the hangup on purpose, so it ends once the directory goes, or
-        // after 1,200 turns if the test dies before removing it.
+        // after 1,200 turns if the test dies before removing it. It says ready once its trap is
+        // set, as a hangup before then would kill it unheard (#505).
         let script = format!(
-            "echo $$ > '{}'; (trap 'echo hup > {}' HUP; n=0; while [ -d '{}' ] && [ $n -lt 1200 ]; \
-             do sleep 0.05; n=$((n+1)); done) & echo $! > '{}'; echo ready; read line",
+            "echo $$ > '{}'; (trap 'echo hup > {}' HUP; echo ready; n=0; \
+             while [ -d '{}' ] && [ $n -lt 1200 ]; do sleep 0.05; n=$((n+1)); done) & \
+             echo $! > '{}'; read line",
             pid.display(),
             hup.display(),
             dir.display(),

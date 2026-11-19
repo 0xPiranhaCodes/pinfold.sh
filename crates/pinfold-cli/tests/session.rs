@@ -70,9 +70,7 @@ impl Session {
         )?;
         if let Some(window) = window {
             let script = directory.join("pinfold-window");
-            fs::write(&script, format!("#!/bin/sh\n{window}\n"))?;
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&script, fs::Permissions::from_mode(0o700))?;
+            pinfold_testkit::program(&script, format!("#!/bin/sh\n{window}\n"), 0o700)?;
         }
         Ok(session)
     }
@@ -90,7 +88,25 @@ impl Session {
     }
 
     fn launch(&self) -> Result<Output> {
-        Ok(self.launcher("/bin/sh").output()?)
+        self.output(self.launcher("/bin/sh"))
+    }
+
+    /// As [`Command::output`] for a launcher, which has no deadline: one that has not exited by
+    /// [`PATIENCE`] is killed and fails with the session's log, so a test never hangs (#493).
+    fn output(&self, mut launcher: Command) -> Result<Output> {
+        let mut child = launcher
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let start = Instant::now();
+        while child.try_wait()?.is_none() {
+            if start.elapsed() > PATIENCE {
+                let _ = child.kill();
+                return Err(format!("the launcher hung\n{}", self.read_log()).into());
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        Ok(child.wait_with_output()?)
     }
 
     /// Starts a core with `arguments` and a one-line shell, and notes the core.
@@ -109,9 +125,7 @@ impl Session {
         let script = self.directory.join("shell");
         // The core asks the shell for its PATH with `-i -c`, for sandboxed agents.
         let ask = "case $1 in -i) exec /bin/sh \"$@\";; esac";
-        fs::write(&script, format!("#!/bin/sh\n{ask}\n{shell}\n"))?;
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o700))?;
+        pinfold_testkit::program(&script, format!("#!/bin/sh\n{ask}\n{shell}\n"), 0o700)?;
         let core = Command::new(self.directory.join("pinfold-core"))
             .args(arguments)
             .envs(vars.iter().copied())
@@ -470,9 +484,7 @@ fn an_updated_window_restarts_a_core_at_a_prompt_and_opens() {
     // the window could ask before the prompt. This shell is at its prompt from the start.
     let shell = session.directory.join("shell");
     let ask = "case $1 in -i) exec /bin/sh \"$@\";; esac";
-    fs::write(&shell, format!("#!/bin/sh\n{ask}\nexec /bin/sh\n")).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
+    pinfold_testkit::program(&shell, format!("#!/bin/sh\n{ask}\nexec /bin/sh\n"), 0o700).unwrap();
     let launched = session.launcher(shell.to_str().unwrap()).output().unwrap();
     let error = String::from_utf8_lossy(&launched.stderr);
     assert!(launched.status.success(), "{error}");
@@ -546,9 +558,7 @@ fn a_core_killed_before_it_answers_fails_the_launcher_at_once() {
     let session = Session::new("kc", None).unwrap();
     let core = session.directory.join("pinfold-core");
     fs::remove_file(&core).unwrap();
-    fs::write(&core, "#!/bin/sh\nkill -9 $$\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&core, fs::Permissions::from_mode(0o700)).unwrap();
+    pinfold_testkit::program(&core, "#!/bin/sh\nkill -9 $$\n", 0o700).unwrap();
     let start = Instant::now();
     let error = launch_failure(&session).unwrap();
     assert!(
@@ -699,9 +709,7 @@ fn a_window_that_says_hello_is_a_success() {
 fn a_launcher_reports_a_core_with_no_window_and_that_core_exits_with_its_shell() {
     let session = Session::new("c", None).unwrap();
     let shell = session.directory.join("shell");
-    fs::write(&shell, "#!/bin/sh\nexec sleep 2\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
+    pinfold_testkit::program(&shell, "#!/bin/sh\nexec sleep 2\n", 0o700).unwrap();
 
     let launched = session.launcher(shell.to_str().unwrap()).output().unwrap();
     assert!(!launched.status.success());
@@ -1138,9 +1146,7 @@ fn a_caller_waits_on_its_pane_and_hears_panes_open_and_close() {
         "#!/bin/sh\nif mkdir \"$PINFOLD_TEST_CLIENT/first\"; then exec '{}' --exact --ignored api_process; fi\nsleep 1\n",
         exe.display()
     );
-    fs::write(&shell, script).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
+    pinfold_testkit::program(&shell, script, 0o700).unwrap();
     let mut launcher = session.launcher(shell.to_str().unwrap());
     let launched = launcher.env(API, &session.directory).output().unwrap();
     assert!(launched.status.success(), "{launched:?}");
@@ -1325,9 +1331,7 @@ fn only_the_window_answers_cross_pane_actions_and_ctl_revokes_grants() {
          while read -r line; do echo \"$line\" >> \"$PINFOLD_TEST_CLIENT/received\"; done; fi\n",
         exe.display()
     );
-    fs::write(&shell, script).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
+    pinfold_testkit::program(&shell, script, 0o700).unwrap();
     let launched = session
         .launcher(shell.to_str().unwrap())
         .env(API, &session.directory)
@@ -1824,14 +1828,10 @@ fn send_from_tool(name: &str, window: &str, cwd: impl Fn(&Path) -> PathBuf) -> S
          touch \"$PINFOLD_TEST_CLIENT/ready\"\nexec cat > \"$PINFOLD_TEST_CLIENT/received\"\n",
         session.directory.join("pinfold").display()
     );
-    fs::write(&shell, script).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
-    let launched = session
-        .launcher(shell.to_str().unwrap())
-        .current_dir(cwd(&session.directory))
-        .output()
-        .unwrap();
+    pinfold_testkit::program(&shell, script, 0o700).unwrap();
+    let mut launcher = session.launcher(shell.to_str().unwrap());
+    launcher.current_dir(cwd(&session.directory));
+    let launched = session.output(launcher).unwrap();
     assert!(launched.status.success(), "{launched:?}");
     assert!(session.wait_for("denied"), "{}", session.read_log());
     let asked = session.read("asked");
@@ -2325,9 +2325,7 @@ fn up_opens_a_workspace_as_shells_once_and_then_attaches_to_it() {
     // Each shell says where it is, as OSC 7, and stays.
     let shell = session.directory.join("shell");
     let script = "#!/bin/sh\nprintf '\\033]7;file://%s\\007' \"$(pwd -P)\"\nexec sleep 60\n";
-    fs::write(&shell, script).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&shell, fs::Permissions::from_mode(0o700)).unwrap();
+    pinfold_testkit::program(&shell, script, 0o700).unwrap();
     let pinfold = session.directory.join("pinfold");
     // Runs `arguments` in a terminal that is no pane, as a person would, and returns its output.
     let in_terminal = |arguments: &str| {
@@ -2839,7 +2837,13 @@ run = "echo work''space-ran | tee -a \"$PINFOLD_TEST_CLIENT/ran\""
     assert!(said.ends_with("not trusted\nexit 1\n"), "{said}");
     assert_eq!(up(&project), "exit 0\n");
     assert!(session.wait_for("shown"), "{}", session.read_log());
-    assert_eq!(session.read("ran"), "workspace-ran\n");
+    // `tee` may print the line before it writes the file, so the window's sight of it is no
+    // sign the file is written (#505).
+    let start = Instant::now();
+    while session.read("ran") != "workspace-ran\n" {
+        assert!(start.elapsed() < PATIENCE, "{:?}", session.read("ran"));
+        thread::sleep(Duration::from_millis(10));
+    }
 
     // The snapshot names the workspace and its hash, never its run line.
     let path = ctl(&session, "ctl session save", "saved").unwrap();
@@ -3586,9 +3590,7 @@ fn a_launch_checkpoint_past_wait_s_starts_the_agent_without_one() {
     fs::write(session.directory.join("config/pinfold/pinfold.toml"), toml).unwrap();
     // A take that never ends, as on a slow disk.
     let slow = session.directory.join("slow-checkpoint");
-    fs::write(&slow, "#!/bin/sh\nexec sleep 30\n").unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&slow, fs::Permissions::from_mode(0o700)).unwrap();
+    pinfold_testkit::program(&slow, "#!/bin/sh\nexec sleep 30\n", 0o700).unwrap();
     let pinfold = format!("'{}'", session.directory.join("pinfold").display());
     let client = "\"$PINFOLD_TEST_CLIENT\"";
     let shell = format!(

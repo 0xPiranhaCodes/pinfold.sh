@@ -1376,6 +1376,7 @@ dependencies = [
  "pinfold-core",
  "pinfold-proto",
  "pinfold-sys",
+ "pinfold-testkit",
  "pinfold-tools",
  "pinfold-ui",
  "serde_json",
@@ -1409,6 +1410,7 @@ dependencies = [
  "pinfold-mux",
  "pinfold-proto",
  "pinfold-sys",
+ "pinfold-testkit",
  "proptest",
  "regex-lite",
  "serde",
@@ -1466,6 +1468,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "pinfold-testkit"
+version = "0.1.0-beta.4"
+
+[[package]]
 name = "pinfold-tests"
 version = "0.1.0-beta.4"
 dependencies = [
@@ -1481,6 +1487,7 @@ dependencies = [
  "insta",
  "pinfold-api",
  "pinfold-sys",
+ "pinfold-testkit",
  "pulldown-cmark",
  "serde_json",
  "sha1",
@@ -1499,6 +1506,7 @@ dependencies = [
  "pinfold-proto",
  "pinfold-render",
  "pinfold-sys",
+ "pinfold-testkit",
  "pinfold-tools",
  "png",
  "thiserror 2.0.21",
