@@ -58,6 +58,7 @@ expression: said
             "source": "marks",
             "started": "[started]",
             "status": "idle",
+            "summary": null,
             "title": null
           },
           {
@@ -70,6 +71,7 @@ expression: said
             "source": "marks",
             "started": "[started]",
             "status": "done",
+            "summary": null,
             "title": null
           }
         ]

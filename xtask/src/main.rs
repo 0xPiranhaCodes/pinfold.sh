@@ -512,23 +512,41 @@ fn write_rewind_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
 /// `[timeline]` on or off, `[rewind]` off so no checkpoint is taken, an agent profile `fill`
 /// whose program prints 1,100 OSC 133 command pairs, so every ring of 1,024 fills and wraps,
 /// and then waits or, in `exited`, exits; `polling` and `polling-off`, on and off, then call
-/// `pinfold ctl list` 1,000 times from each agent, which adds no entry (slice 2), and wait; a
-/// `state` folder for the ring files; and `agent.sh`,
+/// `pinfold ctl list` 1,000 times from each agent, which adds no entry (slice 2), and wait;
+/// `reading`, on, where one agent then reads its own full ring with `pinfold ctl timeline
+/// --json` 100 times, 1,000 entries a read (slice 3), and `listing`, the same with 100 `pinfold
+/// ctl list` calls, so the two serve as many calls; a `state` folder for the ring files; and `agent.sh`,
 /// every pane's shell, which launches one `fill` in a tab and waits. 8 panes make 8 runs.
 fn write_timeline_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let quote = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', r"'\''"));
     let wait = "exec /bin/sleep 86400";
-    let poll = format!(
-        "i=0; while [ $i -lt 1000 ]; do {} ctl list >/dev/null; i=$((i + 1)); done\n{wait}",
-        quote(tools)
-    );
+    let calls = |count: u32, call: &str| {
+        format!(
+            "i=0; while [ $i -lt {count} ]; do {} ctl {call} >/dev/null; i=$((i + 1)); done\n{wait}",
+            quote(tools)
+        )
+    };
+    // One agent makes the 100 calls, one after another: pane 8, the first agent, as the core's
+    // 8 shells are panes 0 to 7. Each finds its own pane first, so each read is a `hello` and a
+    // call, as each `ctl list` is, and both rows add as many audit entries.
+    let one = |call: &str| {
+        format!(
+            "me=$({0} ctl list | grep -o '^[0-9]*\\*' | tr -d '*')\n\
+             if [ \"$me\" = 8 ]; then\n\
+             i=0; while [ $i -lt 100 ]; do {0} ctl {call} >/dev/null; i=$((i + 1)); done\nfi\n{wait}",
+            quote(tools)
+        )
+    };
+    let (poll, read, list) = (calls(1000, "list"), one("timeline $me --json"), one("list"));
     for (row, enabled, end) in [
         ("on", true, wait),
         ("exited", true, "exit 0"),
         ("off", false, wait),
         ("polling", true, poll.as_str()),
         ("polling-off", false, poll.as_str()),
+        ("reading", true, read.as_str()),
+        ("listing", true, list.as_str()),
     ] {
         let folder = dir.join(row);
         for sub in ["pinfold", "state"] {
@@ -852,6 +870,30 @@ fn mem_gate_task() -> ExitCode {
             limit: mem_gate::INFORMATION,
             settle: mem_gate::POLLING_SETTLE,
             agents: Some(&timeline_polling_off),
+            ..timelines
+        },
+    ]);
+    // ADR-0052 slice 3: one agent then reads its own ring of 1,024 with `run.timeline` 100
+    // times, 1,000 entries a read, which the core streams from the file and drops with the
+    // reply. Beside it the same number of `pane.list` calls, as serving any call keeps memory
+    // (#502): the reads should cost what the calls do. Information, as the polling rows are.
+    let (timeline_reading, timeline_listing) = (
+        timeline_inputs.join("reading"),
+        timeline_inputs.join("listing"),
+    );
+    budgets.extend([
+        mem_gate::Budget {
+            metric: "Core, 8 agent panes with full timelines, one reads its own 100 times, 1,000 entries a read",
+            limit: mem_gate::INFORMATION,
+            settle: mem_gate::POLLING_SETTLE,
+            agents: Some(&timeline_reading),
+            ..timelines
+        },
+        mem_gate::Budget {
+            metric: "Core, the same, 100 pane.list calls instead",
+            limit: mem_gate::INFORMATION,
+            settle: mem_gate::POLLING_SETTLE,
+            agents: Some(&timeline_listing),
             ..timelines
         },
     ]);

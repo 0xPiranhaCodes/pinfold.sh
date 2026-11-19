@@ -12,7 +12,7 @@ use pinfold_core::io::Reactor;
 use pinfold_core::rewind::Rewind;
 use pinfold_core::timeline::{Answer, Ended, Entry, METHODS, Outcome, REASONS, What};
 use pinfold_proto::link::ApprovalAction;
-use serde_json::json;
+use serde_json::{Value, json};
 
 /// Answers `run.timeline` for the run in `pane`: the caller's own, a child's it reaches, or any
 /// from a terminal outside every pane, which is not asked, as `audit.read` is not: it returns
@@ -60,16 +60,13 @@ pub fn read<T>(
     let run = timelines.newest(pane).ok_or("no agent run in that pane")?;
     let summary = run.summary();
     let started = u64::from(summary.started) * 1000;
+    let counters = counters(reactor, pane);
     let head = json!({
         "run": rewind.and_then(|rewind| Some(rewind.run(rewind.of_pane(pane)?)?.id())),
         "pane": pane,
         "started_ms": started,
         "ended_ms": (!run.is_live()).then(|| started + u64::from(summary.ended)),
-        "summary": {
-            "commands": summary.commands, "failed": summary.failed,
-            "approvals": summary.approvals, "denied": summary.denied, "calls": summary.calls,
-            "changed": summary.changed, "errors": summary.errors, "needs_you": summary.needs_you,
-        },
+        "summary": counters,
         "dropped": run.dropped(),
     })
     .to_string();
@@ -89,6 +86,31 @@ pub fn read<T>(
     read.map_err(|_| "the run's timeline cannot be read".to_owned())?;
     json.push_str("]}");
     Ok(json)
+}
+
+/// The counters of the newest run in `pane`, for `run.timeline` and `pane.list`, or null for a
+/// pane with none or with `[timeline]` off.
+///
+/// ```
+/// # fn listed(reactor: &pinfold_core::io::Reactor) {
+/// let summary = pinfold_cli::timeline::counters(reactor, 0);
+/// assert!(summary.is_null() || summary["commands"].is_u64());
+/// # }
+/// ```
+#[must_use]
+pub fn counters(reactor: &Reactor, pane: usize) -> Value {
+    let Some(run) = reactor
+        .timelines()
+        .and_then(|timelines| timelines.newest(pane))
+    else {
+        return Value::Null;
+    };
+    let summary = run.summary();
+    json!({
+        "commands": summary.commands, "failed": summary.failed,
+        "approvals": summary.approvals, "denied": summary.denied, "calls": summary.calls,
+        "changed": summary.changed, "errors": summary.errors, "needs_you": summary.needs_you,
+    })
 }
 
 /// The entry's place in `pinfold_api::control::TIMELINE_KINDS`.

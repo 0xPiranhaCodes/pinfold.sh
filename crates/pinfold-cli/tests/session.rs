@@ -3835,6 +3835,70 @@ fn a_timeline_holds_no_pane_text_whatever_the_pane_printed() {
 }
 
 #[test]
+fn ctl_timeline_prints_a_child_run_and_pane_list_counts_it() {
+    let session = Session::new("tc", None).unwrap();
+    fs::create_dir_all(session.directory.join("config/pinfold")).unwrap();
+    let client = "\"$PINFOLD_TEST_CLIENT\"";
+    let marks =
+        "printf '\\033]133;A\\007$ \\033]133;B\\007false\\r\\n\\033]133;C\\007\\033]133;D;1\\007'";
+    fs::write(
+        session.directory.join("marks.sh"),
+        format!("{marks}\ntouch {client}/marked; exec sleep 30\n"),
+    )
+    .unwrap();
+    let toml = format!(
+        "[rewind]\nenabled = false\n[agents.marks]\ncommand = [\"/bin/sh\", \"{}\"]\n",
+        session.directory.join("marks.sh").display()
+    );
+    fs::write(session.directory.join("config/pinfold/pinfold.toml"), toml).unwrap();
+    let pinfold = format!("'{}'", session.directory.join("pinfold").display());
+    let shell = format!(
+        "{pinfold} agent marks 2> {client}/e; until [ -e {client}/marked ]; do sleep 0.05; done; \
+         {pinfold} ctl timeline 2> {client}/own; {}; {}; exec sleep 30",
+        into(&format!("{pinfold} ctl timeline 1"), "table"),
+        into(&format!("{pinfold} ctl list --json"), "list")
+    );
+    let mut core = session.start_core(&["--idle", "1"], &shell).unwrap();
+    let ended = session.wait_beside("list", Some(&mut core));
+    assert!(ended, "{} {}", session.read("e"), session.read_log());
+    core.kill().unwrap();
+    core.wait().unwrap();
+
+    // The shell's own pane has no run.
+    assert!(
+        session.read("own").contains("no agent run"),
+        "{}",
+        session.read("own")
+    );
+    let table = session.read("table");
+    let lines: Vec<&str> = table.lines().collect();
+    assert!(
+        lines[0].starts_with("pane 1 · 1 command · 1 failed · 1 error"),
+        "{table}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains("command    failed, exit 1")),
+        "{table}"
+    );
+    assert!(!table.contains("false"), "the command's text: {table}");
+    let list: serde_json::Value = serde_json::from_str(&session.read("list")).unwrap();
+    let summary = |id: u64| {
+        let panes = list["panes"].as_array().unwrap();
+        let pane = panes.iter().find(|pane| pane["id"] == id).unwrap();
+        pane["summary"].clone()
+    };
+    assert_eq!(summary(0), serde_json::Value::Null);
+    let counted = summary(1);
+    assert_eq!(
+        (&counted["commands"], &counted["failed"]),
+        (&1.into(), &1.into()),
+        "{list}"
+    );
+}
+
+#[test]
 fn pinfold_rewind_opens_the_viewer_on_a_view_checkpoint_of_a_run_in_reach() {
     let session = Session::new("rv", None).unwrap();
     fs::create_dir_all(session.directory.join("config/pinfold")).unwrap();
