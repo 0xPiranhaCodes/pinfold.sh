@@ -514,7 +514,10 @@ paste and find.
 Ctrl+Shift+P, on every system, opens the command palette over the panes: type to filter
 the window's commands, Up and Down choose, Enter runs one, and Esc, a click or Ctrl+Shift+P
 again closes it. It offers Open Markdown, Open Files and Open Diff, which open the tools as `m`, `f` and `g` do,
-and every command in the menus above. Labels whose start matches what you typed come first,
+and every command in the menus above. With an agent in the focused pane, it also offers Rewind
+Agent Changes, which opens the diff viewer on that agent's run since its launch checkpoint;
+`u` and `U` in it ask to undo a file or every file, and PinFold's prompt decides
+([ADR-0050](adr/0050-rewind-an-agents-changes.md)). Labels whose start matches what you typed come first,
 then those containing it, then those with its letters in order. While it is open every key
 goes to it, and none to the program, which cannot draw over it.
 

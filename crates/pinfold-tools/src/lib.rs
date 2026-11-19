@@ -16,6 +16,7 @@ mod gitignore;
 pub mod keys;
 mod md;
 mod ops;
+mod rewind;
 pub mod screen;
 
 use std::io::{self, Read, Write};
@@ -48,6 +49,18 @@ pub enum Command {
         /// Run git again every 2 s, or 20 times as long as it took if that is longer.
         watch: bool,
     },
+    /// `pinfold diff --checkpoint <key> <checkpoint> <shown> <pane>`, as the core starts it for
+    /// `tool.open`'s `checkpoint` (ADR-0050 section 6).
+    Rewind {
+        /// The run's store, 16 hex digits.
+        key: String,
+        /// The checkpoint `C` the viewer shows the changes since, `<run>/<n>`.
+        checkpoint: String,
+        /// The view checkpoint `N` the core took as it opened, of the same run.
+        shown: String,
+        /// The agent's pane, which `u` and `U` name to `checkpoint.restore`.
+        pane: usize,
+    },
 }
 
 impl Command {
@@ -63,6 +76,19 @@ impl Command {
     /// assert_eq!(Command::parse(&["diff", "--stat"]), None);
     /// ```
     pub fn parse(words: &[&str]) -> Option<Self> {
+        if let ["diff", "--checkpoint", rest @ ..] = words {
+            let rest = rest.strip_prefix(&["--"]).unwrap_or(rest);
+            let &[key, checkpoint, shown, pane] = rest else {
+                return None;
+            };
+            let id = pinfold_api::tool::checkpoint;
+            return (id(checkpoint) && id(shown)).then_some(Self::Rewind {
+                key: key.to_owned(),
+                checkpoint: checkpoint.to_owned(),
+                shown: shown.to_owned(),
+                pane: pane.parse().ok()?,
+            });
+        }
         let (&tool, rest) = words.split_first()?;
         let (mut staged, mut watch, mut rest) = (false, false, rest);
         loop {
@@ -96,12 +122,34 @@ impl Command {
 
     /// Runs the tool in this process's terminal until it quits, and returns whether it started.
     /// One that could not start shows ✕ error with the reason, and quits on the next key.
+    /// `state` is PinFold's state directory, which holds the checkpoint stores.
     ///
     /// # Errors
     ///
     /// Returns an error if standard input or output is not a terminal, or writing to it fails.
-    pub fn run(&self) -> io::Result<bool> {
+    pub fn run(&self, state: Option<&Path>) -> io::Result<bool> {
         let (title, problem) = match self {
+            Self::Rewind {
+                key,
+                checkpoint,
+                shown,
+                pane,
+            } => {
+                let title = format!("rewind since {checkpoint}");
+                let state = state.ok_or_else(|| "no state directory: HOME is not set".to_owned());
+                match state.and_then(|state| rewind::load(state, key, (checkpoint, shown), *pane)) {
+                    Ok((diff, view)) => {
+                        let mut viewer = diff::Viewer::new(title.into_bytes(), diff).rewind(view);
+                        let ran = run(&mut viewer);
+                        if let Some(view) = &viewer.rewind {
+                            view.finish();
+                        }
+                        ran?;
+                        return Ok(true);
+                    }
+                    Err(problem) => (title, problem),
+                }
+            }
             Self::Md { file } => {
                 let read = problem(file, Path::is_file).map_or_else(
                     || {
@@ -431,6 +479,46 @@ mod tests {
             &["diff", "--watch", "--watch"],
             &["md", "--watch", "a"],
             &["diff", "a", "b"],
+        ] {
+            assert_eq!(Command::parse(wrong), None, "{wrong:?}");
+        }
+    }
+
+    #[test]
+    fn a_checkpoint_viewer_takes_a_key_two_checkpoints_and_a_pane() {
+        let rewind = Command::Rewind {
+            key: "0123456789abcdef".into(),
+            checkpoint: "r1-0/0".into(),
+            shown: "r1-0/3".into(),
+            pane: 4,
+        };
+        let words = [
+            "diff",
+            "--checkpoint",
+            "--",
+            "0123456789abcdef",
+            "r1-0/0",
+            "r1-0/3",
+            "4",
+        ];
+        assert_eq!(Command::parse(&words), Some(rewind.clone()));
+        let mut bare = words.to_vec();
+        bare.remove(2);
+        assert_eq!(Command::parse(&bare), Some(rewind));
+        for wrong in [
+            &["diff", "--checkpoint", "k", "r1-0/0", "r1-0/3"][..],
+            &["diff", "--checkpoint", "k", "r1-0/0", "-r1-0/3", "4"],
+            &["diff", "--checkpoint", "k", "r1-0", "r1-0/3", "4"],
+            &["diff", "--checkpoint", "k", "r1-0/0", "r1-0/3", "-4"],
+            &[
+                "diff",
+                "--staged",
+                "--checkpoint",
+                "k",
+                "r1-0/0",
+                "r1-0/3",
+                "4",
+            ],
         ] {
             assert_eq!(Command::parse(wrong), None, "{wrong:?}");
         }

@@ -20,7 +20,7 @@ const CLOSE_HINT: &str = "esc close";
 
 /// The window's commands, as the palette names them. Focus, resize and a tab by number are
 /// keys only, as in the menus.
-pub const COMMANDS: [(&str, Command); 22] = [
+pub const COMMANDS: [(&str, Command); 23] = [
     ("Open Markdown", Command::OpenMarkdown),
     ("Open Files", Command::OpenFiles),
     ("Open Diff", Command::OpenDiff),
@@ -43,6 +43,8 @@ pub const COMMANDS: [(&str, Command); 22] = [
     ("Detach", Command::Detach),
     ("Agents", Command::Inbox),
     ("Next Needs You", Command::NextWaiting),
+    // Last, so a palette without it keeps every other index.
+    ("Rewind Agent Changes", Command::Rewind),
 ];
 
 /// What a key did to the palette.
@@ -96,10 +98,11 @@ impl Palette {
         self.labels.get(index).map(String::as_str)
     }
 
-    /// Opens on the window's [`COMMANDS`].
-    pub fn commands() -> Self {
+    /// Opens on the window's [`COMMANDS`], the last, "Rewind Agent Changes", only with `rewind`.
+    pub fn commands(rewind: bool) -> Self {
+        let shown = COMMANDS.len() - usize::from(!rewind);
         Self::open(
-            COMMANDS
+            COMMANDS[..shown]
                 .iter()
                 .map(|(label, _)| (*label).to_owned())
                 .collect(),
@@ -323,7 +326,7 @@ mod tests {
     #[test]
     fn typing_each_label_chooses_its_command() {
         for (index, (label, _)) in COMMANDS.iter().enumerate() {
-            let mut palette = Palette::commands();
+            let mut palette = Palette::commands(true);
             assert_eq!(typed(&mut palette, label), Step::Stay);
             assert_eq!(
                 named(&mut palette, NamedKey::Enter),
@@ -335,7 +338,7 @@ mod tests {
 
     #[test]
     fn it_ranks_a_prefix_first_then_anywhere_then_letters_in_order() {
-        let mut palette = Palette::commands();
+        let mut palette = Palette::commands(false);
         typed(&mut palette, "pa");
         let shown: Vec<_> = palette
             .shown
@@ -363,7 +366,7 @@ mod tests {
 
     #[test]
     fn it_keeps_control_characters_and_ctrl_keys_out_and_caps_the_query() {
-        let mut palette = Palette::commands();
+        let mut palette = Palette::commands(false);
         typed(&mut palette, "\u{1b}[2J");
         assert_eq!(palette.query, "[2J");
         let ctrl = palette.key(
@@ -382,7 +385,7 @@ mod tests {
     fn it_fits_a_small_grid_and_keeps_the_selection_in_view() {
         let mut frame = Frame::default();
         crate::panes::blank(&mut frame, 5, 20);
-        let mut palette = Palette::commands();
+        let mut palette = Palette::commands(false);
         named(&mut palette, NamedKey::ArrowUp);
         palette.draw(&mut frame, &GRAPHITE);
         let row = |row: usize| -> String {

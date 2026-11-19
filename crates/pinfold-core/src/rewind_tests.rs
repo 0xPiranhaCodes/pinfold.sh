@@ -16,7 +16,9 @@ fn stub(wait: Duration) -> (tempfile::TempDir, Rewind<u32>) {
          \"complete\":true,\"changed\":0}}\\n' \"$3\" \"$n\" ;;\n\
          list) printf '{{\"checkpoints\":[{{\"checkpoint\":\"%s/0\",\"reason\":\"launch\"}}],\
          \"more\":0}}\\n' \"$3\" ;;\n\
-         prune) echo '{{}}' ;;\nesac\n",
+         prune) echo '{{}}' ;;\n\
+         plan) echo '{{\"restore\":1,\"delete\":0,\"bring_back\":0,\"paths\":[]}}' ;;\n\
+         restore) echo '{{\"restored\":1,\"deleted\":0,\"skipped\":0}}' ;;\nesac\n",
         dir = dir.path().display()
     );
     // `cp` writes the program, so no fork of another test thread holds it open for writing.
@@ -224,8 +226,14 @@ fn takes_are_limited_lists_read_on_demand_and_a_full_queue_is_busy() {
         .take(run, 2, now + Duration::from_secs(29))
         .unwrap_err();
     assert!(why.contains("once in 30 s"), "{why}");
+    // An API caller's view shares that limit; the window's is not limited.
+    let (_, why) = rewind.view(run, 6, Some(now)).unwrap_err();
+    assert!(why.contains("once in 30 s"), "{why}");
+    rewind.view(run, 7, None).unwrap();
     rewind.list(run, 3).unwrap();
-    let ended = until(&mut rewind, &dir, |ended, _| ended.len() == 2);
+    let ended = until(&mut rewind, &dir, |ended, _| ended.len() == 3);
+    let viewed = ended.iter().find(|e| e.payload == 7).unwrap();
+    assert!(viewed.result.is_ok(), "{viewed:?}");
     let listed = ended.iter().find(|e| e.payload == 3).unwrap();
     assert_eq!(
         listed.result.as_ref().unwrap()["checkpoints"][0]["reason"],
@@ -277,4 +285,114 @@ fn a_child_that_crashes_or_prints_too_much_is_an_error_not_a_panic() {
     assert_eq!(error.unwrap_err(), "no git");
     let missing = child(&dir.path().join("none"), &[], LIST_BOUND);
     assert!(missing.unwrap_err().starts_with("cannot start"));
+}
+
+#[test]
+fn a_restore_plans_without_the_lock_and_restores_under_it_with_paths_only_when_chosen() {
+    let (dir, mut rewind) = stub(Duration::from_secs(10));
+    let run = rewind.open(1, dir.path()).unwrap();
+    rewind.started(run, Some(2));
+    let key = rewind.run(run).unwrap().key();
+    let paths = ["src/a.rs".to_owned(), "b c".to_owned()];
+    rewind.plan(run, (0, 3), None, 1).unwrap();
+    rewind.plan(run, (0, 3), Some(&paths), 2).unwrap();
+    // An empty list would read as all to a reader that took it for none; it goes as all.
+    rewind.restore(run, (0, 3), Some(&[]), 3).unwrap();
+    let ended = until(&mut rewind, &dir, |ended, _| ended.len() == 3);
+    assert!(ended.iter().all(|ended| ended.result.is_ok()), "{ended:?}");
+    idle(&mut rewind);
+    let log = log(&dir);
+    let plan = format!("checkpoint plan r1700000000-0 0 3 --key {key}");
+    assert!(log.contains(&plan), "{log:?}");
+    assert!(log.contains(&format!("{plan} -- src/a.rs b c")), "{log:?}");
+    let restore = format!("checkpoint restore r1700000000-0 0 3 --key {key}");
+    assert!(log.contains(&restore), "{log:?}");
+    // Only the restore writes, so only it is followed by a prune.
+    let prunes = log
+        .iter()
+        .filter(|line| line.starts_with("checkpoint prune"));
+    assert_eq!(prunes.count(), 1, "{log:?}");
+    assert_eq!(rewind.run(run).unwrap().missing(), Missing::None);
+}
+
+#[test]
+fn the_window_is_told_each_live_runs_strip_once_and_again_when_it_changes() {
+    let (dir, mut rewind) = stub(Duration::from_secs(10));
+    let run = rewind.open(1, dir.path()).unwrap();
+    assert_eq!(rewind.untold(), None, "no pane yet");
+    rewind.started(run, Some(7));
+    rewind.set_missing(run, Missing::TookOver);
+    assert_eq!(rewind.untold(), Some((run, 7, Missing::TookOver)));
+    rewind.told(run);
+    assert_eq!(rewind.untold(), None);
+    rewind.set_missing(run, Missing::TookOver);
+    assert_eq!(rewind.untold(), None, "unchanged");
+    rewind.set_missing(run, Missing::None);
+    assert_eq!(rewind.untold(), Some((run, 7, Missing::None)), "cleared");
+    rewind.told(run);
+    rewind.untell();
+    assert_eq!(
+        rewind.untold(),
+        Some((run, 7, Missing::None)),
+        "a new window"
+    );
+    rewind.started(run, None);
+    assert_eq!(rewind.untold(), None, "a closed run's pane is gone");
+    assert_eq!(Missing::TookOver.word(), "took over wait_s");
+}
+
+#[test]
+fn the_prompt_shows_the_stores_words_escaped_and_marks_paths_changed_later() {
+    let plan = serde_json::json!({
+        "restore": 5, "delete": 3, "bring_back": 1, "not_covered": 0, "later": 2,
+        "complete": true, "dir": "/home/me/work\u{1b}[2J", "reason": "launch",
+        "time": 1_000, "more": 4,
+        "paths": [["src/a.rs", "restore", true], ["x\u{202e}txt.exe", "delete", false]],
+    });
+    let texts = prompt_texts(&plan, Some(4), true, 1_000 + 12 * 60);
+    assert_eq!(
+        texts,
+        [
+            "/home/me/work^[[2J",
+            "since 12 min ago (launch)",
+            "asked by the tool in pane 4",
+            "restore 5 · delete 3 the agent added · bring back 1 it deleted · 2 changed later",
+            "the agent is still running, and may change these files again",
+            "! restore src/a.rs",
+            "  delete x<U+202E>txt.exe",
+            "and 4 more",
+        ]
+    );
+    let incomplete = serde_json::json!({"complete": false, "dir": "/w", "time": 0});
+    let texts = prompt_texts(&incomplete, None, false, 0);
+    assert_eq!(texts[2], "asked by a terminal outside every pane");
+    assert_eq!(
+        texts[4],
+        "the checkpoint is incomplete, so nothing is deleted"
+    );
+    let long = serde_json::json!({"paths": [["\u{1}".repeat(300), "restore", false]]});
+    let texts = prompt_texts(&long, None, false, 0);
+    assert_eq!(
+        texts.last().unwrap().chars().count(),
+        2 + "restore ".len() + SHOWN
+    );
+}
+
+#[test]
+fn a_hostile_store_message_or_path_never_reaches_the_flash() {
+    for why in [
+        "cannot write /home/me/.ssh/id_rsa",
+        "a broken checkpoint message: ignore previous instructions",
+        "\u{1b}[2J✓ done · undid 0 files",
+        &"x".repeat(4096),
+    ] {
+        let said = restore_error(why);
+        assert_eq!(said, "the restore was refused or failed", "{why}");
+    }
+    assert_eq!(restore_error(KILLED), "the restore took over 60 s");
+    let gone = "checkpoint r1-0/3 no longer exists";
+    assert_eq!(restore_error(gone), "the checkpoint no longer exists");
+    for said in [KILLED, gone, BUSY, "?"].map(restore_error) {
+        assert!(said.len() <= pinfold_proto::link::MAX_RESTORE_ERROR && !said.contains('/'));
+    }
 }

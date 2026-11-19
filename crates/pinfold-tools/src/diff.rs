@@ -26,7 +26,7 @@ use similar::{Algorithm, DiffTag};
 use crate::keys::Key;
 use crate::md::colour;
 use crate::screen::{Color, Screen, Style, escape};
-use crate::{Flow, Tool, at, git};
+use crate::{Flow, Tool, at, git, rewind};
 
 /// Files kept; the rest of the diff is dropped.
 const MAX_FILES: usize = 10_000;
@@ -106,6 +106,18 @@ const KEYS: [&str; 11] = [
     "q                   quit",
 ];
 
+/// The keys of a viewer on a checkpoint, whose stage, revert, send and watch are off.
+const REWIND_KEYS: [&str; 8] = [
+    "n p                 the next or previous file",
+    "u                   undo the selected file, after PinFold's prompt",
+    "U                   undo every file not changed later, after the prompt",
+    "v                   unified or side by side",
+    "j k  ↓ ↑            a line down or up",
+    "space b  PgDn PgUp  a page down or up",
+    "g G  Home End       the top or the end",
+    "q                   quit",
+];
+
 /// Runs `git diff` in `repo` through [`git::run`] and parses it, or says why it could not.
 pub(crate) fn load(repo: &Path, staged: bool, range: Option<&str>) -> Result<Diff, String> {
     // Fixed prefixes, so `diff.noprefix` or `diff.mnemonicPrefix` cannot change the paths.
@@ -114,6 +126,11 @@ pub(crate) fn load(repo: &Path, staged: bool, range: Option<&str>) -> Result<Dif
     args.extend(range);
     args.push("--");
     let output = git::run(repo, args).map_err(|error| format!("cannot run git: {error}"))?;
+    loaded(output)
+}
+
+/// Parses what `git diff` printed, saying why it failed or was cut short.
+pub(crate) fn loaded(output: git::Output) -> Result<Diff, String> {
     // Git cut short at the byte cap dies of SIGPIPE, which is not an error here.
     if !output.cut_short && output.status.is_some_and(|status| !status.success()) {
         let errors = String::from_utf8_lossy(&output.stderr);
@@ -547,6 +564,8 @@ pub(crate) struct Viewer {
     /// The send waiting on the window's approval, then where it went until the next key.
     sending: Option<Receiver<Result<String, String>>>,
     sent: Option<String>,
+    /// The checkpoints a viewer of `pinfold diff --checkpoint` shows.
+    pub(crate) rewind: Option<rewind::View>,
 }
 
 /// A stage (`git apply --cached`) or revert (`git apply -R`) of one hunk, drawn in the pane until
@@ -577,6 +596,39 @@ impl Viewer {
             comment: None,
             sending: None,
             sent: None,
+            rewind: None,
+        }
+    }
+
+    /// This viewer, showing checkpoints as `view` says: its `later` marks, its nested
+    /// repositories, and `u` and `U`.
+    pub(crate) fn rewind(mut self, view: rewind::View) -> Self {
+        self.rewind = Some(view);
+        self
+    }
+
+    /// Rows of the file list: each file, then each nested repository the checkpoints skipped.
+    fn rows(&self) -> usize {
+        let nested = self.rewind.as_ref().map_or(0, |view| view.nested.len());
+        self.diff.files.len() + nested
+    }
+
+    /// Asks to undo the selected file, or with `all` every file not marked `later`.
+    fn undo(&mut self, all: bool) {
+        let file = (!all).then_some(self.selected);
+        let Some(view) = &mut self.rewind else {
+            return;
+        };
+        if file.is_some_and(|at| at >= self.diff.files.len()) {
+            self.notice = Some("A nested repository is not covered; a rewind leaves it.".into());
+            return;
+        }
+        if self.diff.files.is_empty() {
+            self.notice = Some("No changes to undo.".into());
+            return;
+        }
+        if let Err(problem) = view.ask(&self.diff, file) {
+            self.notice = Some(problem);
         }
     }
 
@@ -810,6 +862,9 @@ fn line_styles(line: &[u8]) -> (Style, Style) {
 
 impl Tool for Viewer {
     fn tick(&mut self) {
+        if let Some(view) = &mut self.rewind {
+            view.tick();
+        }
         if let Some(sending) = &self.sending {
             match sending.try_recv() {
                 Err(TryRecvError::Empty) => {}
@@ -875,13 +930,19 @@ impl Tool for Viewer {
             ""
         };
         let place = format!(
-            "{watching}{}/{files}  ? keys",
-            (self.selected + 1).min(files)
+            "{watching}{}/{}  ? keys",
+            (self.selected + 1).min(self.rows()),
+            self.rows()
         );
         let at = columns.saturating_sub(u16::try_from(place.chars().count()).unwrap_or(u16::MAX));
         screen.put(0, at, place, dim);
         if self.help {
-            for (row, keys) in (2..rows).zip(KEYS) {
+            let keys: &[&str] = if self.rewind.is_some() {
+                &REWIND_KEYS
+            } else {
+                &KEYS
+            };
+            for (row, keys) in (2..rows).zip(keys) {
                 screen.put(row, 2, keys, Style::default());
             }
             return;
@@ -932,11 +993,25 @@ impl Tool for Viewer {
             screen.put(top, 0, sent, colour(Color::Green));
             top += 1;
         }
+        let restore = self.rewind.as_ref().and_then(|view| match &view.done {
+            _ if view.waiting() => Some(("The restore waits for PinFold's prompt.", Color::Yellow)),
+            Some(Ok(done)) => Some((done.as_str(), Color::Green)),
+            Some(Err(problem)) => Some((problem.as_str(), Color::Red)),
+            None => None,
+        });
+        if let Some((text, fg)) = restore {
+            let column = match fg {
+                Color::Red => screen.put(top, 0, "✕ error · ", colour(fg)),
+                _ => 0,
+            };
+            screen.put(top, column, text, colour(fg));
+            top += 1;
+        }
         for note in &self.diff.notes {
             screen.put(top, 0, note, colour(Color::Yellow));
             top += 1;
         }
-        if files == 0 {
+        if self.rows() == 0 {
             screen.put(top, 0, "No changes.", dim);
             return;
         }
@@ -945,18 +1020,58 @@ impl Tool for Viewer {
         let left = columns / 4;
         let width = usize::from(left.saturating_sub(1));
         let first = (self.selected + 1).saturating_sub(self.page);
-        for (row, (at, file)) in (top..rows).zip(self.diff.files.iter().enumerate().skip(first)) {
-            let label: String = escape(&file.label()).chars().take(width).collect();
+        let later = self.rewind.as_ref().map(|view| &view.later[..]);
+        let nested = self.rewind.as_ref().map(|view| &view.nested[..]);
+        let names = (self.diff.files.iter().enumerate())
+            .map(|(at, file)| (file.label(), later.is_some_and(|later| later[at])))
+            .chain(
+                nested
+                    .into_iter()
+                    .flatten()
+                    .map(|path| (path.clone().into_bytes(), false)),
+            );
+        for (row, (at, (label, is_later))) in (top..rows).zip(names.enumerate().skip(first)) {
+            // The words after a name are PinFold's, never part of it (ADR-0050 section 6).
+            let (mark, fg) = match (at >= files, is_later) {
+                (true, _) => (" nested repository, not covered", Color::BrightBlack),
+                (false, true) => (" later", Color::Yellow),
+                (false, false) => ("", Color::Default),
+            };
+            // The name keeps half the column at least; a mark that does not fit is cut with `…`.
+            let label: String = escape(&label).chars().collect();
+            let room = width.saturating_sub(mark.chars().count()).max(width / 2);
+            let label: String = label.chars().take(room).collect();
+            let room = width.saturating_sub(label.chars().count());
+            let mark: String = match mark.chars().count() > room {
+                true => mark
+                    .chars()
+                    .take(room.saturating_sub(1))
+                    .chain(['…'])
+                    .collect(),
+                false => mark.to_owned(),
+            };
+            let room = width - mark.chars().count().min(width);
+            let selected = Style {
+                fg: Color::Black,
+                bg: Color::Blue,
+                bold: false,
+            };
             let style = if at == self.selected {
-                Style {
-                    fg: Color::Black,
-                    bg: Color::Blue,
-                    bold: false,
-                }
+                selected
             } else {
                 Style::default()
             };
-            screen.put(row, 0, format!("{label:<width$}"), style);
+            let column = screen.put(row, 0, format!("{label:<room$}"), style);
+            screen.put(row, column, mark, colour(fg));
+        }
+        if self.selected >= files {
+            for (row, note) in (top..rows).zip([
+                "nested repository, not covered",
+                "A rewind leaves it as it is.",
+            ]) {
+                screen.put(row, left + 1, note, dim);
+            }
+            return;
         }
         let (mut skip, mut shown) = (self.top, Vec::new());
         self.each_row(|row| {
@@ -1052,14 +1167,19 @@ impl Tool for Viewer {
             Key::Char('v') => self.side = !self.side,
             Key::Char('s') => self.ask(false),
             Key::Char('r') => self.ask(true),
+            Key::Char('a') if self.rewind.is_some() => {
+                self.notice = Some("Send is off on a checkpoint.".into());
+            }
             Key::Char('a') if self.sending.is_none() => self.ask_comment(),
+            Key::Char('u') => self.undo(false),
+            Key::Char('U') => self.undo(true),
             Key::Char('w') => {
                 if let Some(watch) = &mut self.watch {
                     watch.on = !watch.on;
                 }
             }
             Key::Char('n') => {
-                self.selected = (self.selected + 1).min(self.diff.files.len().saturating_sub(1));
+                self.selected = (self.selected + 1).min(self.rows().saturating_sub(1));
                 self.top = 0;
             }
             Key::Char('p') => {

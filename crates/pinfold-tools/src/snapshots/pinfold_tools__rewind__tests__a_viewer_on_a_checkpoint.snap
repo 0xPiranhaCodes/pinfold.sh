@@ -1,0 +1,73 @@
+---
+source: crates/pinfold-tools/src/rewind_tests.rs
+expression: screen.runs()
+---
+|rewind since r100-0/0                                                1/5  ? keys|
+|a.txt                index 7898192..b6b0be9 100644                              |
+|c.txt         later  --- a/a.txt                                                |
+|new.txt              +++ b/a.txt                                                |
+|src/b.rs             @@ -1 +1 @@                                                |
+|inner nested repos…  -a                                                         |
+|                     +agent                                                     |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+|                                                                                |
+0:0..21 Default Default bold
+0:21..69 Default Default
+0:69..80 BrightBlack Default
+1:0..19 Black Blue
+1:19..21 Default Default
+1:21..50 BrightBlack Default
+1:50..80 Default Default
+2:0..13 Default Default
+2:13..19 Yellow Default
+2:19..21 Default Default
+2:21..32 BrightBlack Default
+2:32..80 Default Default
+3:0..21 Default Default
+3:21..32 BrightBlack Default
+3:32..80 Default Default
+4:0..21 Default Default
+4:21..32 Cyan Default
+4:32..80 Default Default
+5:0..5 Default Default
+5:5..19 BrightBlack Default
+5:19..21 Default Default
+5:21..22 Red Default
+5:22..23 Black Red
+5:23..80 Default Default
+6:0..21 Default Default
+6:21..22 Green Default
+6:22..27 Black Green
+6:27..80 Default Default
+7:0..80 Default Default
+8:0..80 Default Default
+9:0..80 Default Default
+10:0..80 Default Default
+11:0..80 Default Default
+12:0..80 Default Default
+13:0..80 Default Default
+14:0..80 Default Default
+15:0..80 Default Default
+16:0..80 Default Default
+17:0..80 Default Default
+18:0..80 Default Default
+19:0..80 Default Default
+20:0..80 Default Default
+21:0..80 Default Default
+22:0..80 Default Default
+23:0..80 Default Default

@@ -2079,6 +2079,7 @@ fn mcp_lists_tools_calls_the_core_as_its_pane_and_reports_a_refusal_as_a_tool_er
             "tool_open_v1",
             "checkpoint_take_v1",
             "checkpoint_list_v1",
+            "checkpoint_restore_v1",
             "events_next_v1",
         ]
     );
@@ -3512,6 +3513,66 @@ fn an_agent_run_takes_and_lists_checkpoints_only_for_callers_in_reach() {
 }
 
 #[test]
+fn pinfold_rewind_opens_the_viewer_on_a_view_checkpoint_of_a_run_in_reach() {
+    let session = Session::new("rv", None).unwrap();
+    fs::create_dir_all(session.directory.join("config/pinfold")).unwrap();
+    let toml = "[agents.sleepy]\ncommand = [\"sleep\", \"30\"]\n";
+    fs::write(session.directory.join("config/pinfold/pinfold.toml"), toml).unwrap();
+    let mcp = format!("'{}' mcp", session.directory.join("pinfold").display());
+    let calls = mcp_lines(&[("checkpoint_list_v1", serde_json::json!({"pane": 1}))]);
+    let pinfold = format!("'{}'", session.directory.join("pinfold").display());
+    let client = "\"$PINFOLD_TEST_CLIENT\"";
+    let shell = format!(
+        "mkdir -p -m 700 \"$HOME/work/inner/.git\"; cd \"$HOME/work\"; echo a > a.txt; \
+         {pinfold} agent sleepy 2> {client}/e; echo agent > a.txt; echo new > new.txt; \
+         {pinfold} rewind 2> {client}/own; {pinfold} rewind 1 --down 2>> {client}/e; \
+         {pinfold} rewind 1 --checkpoint 7 2> {client}/again; \
+         {pinfold} ctl list --json > {client}/listed; \
+         {{ {calls} }} | {mcp} > {client}/o; mv {client}/o {client}/out; exec sleep 30"
+    );
+    let mut core = session.start_core(&["--idle", "1"], &shell).unwrap();
+    let ended = session.wait_beside("out", Some(&mut core));
+    assert!(ended, "{} {}", session.read("e"), session.read_log());
+    core.kill().unwrap();
+    core.wait().unwrap();
+
+    // The shell pane has no run and no agent reported from a pane, so there is none to rewind.
+    assert!(
+        session.read("own").contains("no agent run"),
+        "{}",
+        session.read("own")
+    );
+    // A second view of the run within 30 s is refused before any checkpoint is taken.
+    assert!(
+        session.read("again").contains("once in 30 s"),
+        "{}",
+        session.read("again")
+    );
+    let listed: serde_json::Value = serde_json::from_str(&session.read("listed")).unwrap();
+    let tools: Vec<_> = listed["panes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|pane| pane["kind"] == "tool")
+        .collect();
+    assert_eq!(tools.len(), 1, "{listed}");
+    let viewer = tools[0];
+    let launch = viewer["tool"]["checkpoint"].as_str().unwrap();
+    assert!(launch.ends_with("-0/0"), "{listed}");
+    assert_eq!(viewer["title"], "rewind work", "{listed}");
+    // The viewer's view checkpoint is the run's newest, taken for it before it started.
+    let out = mcp_results(&session.read("out"));
+    let checkpoints: serde_json::Value = serde_json::from_str(&out[0].1).unwrap();
+    let reasons: Vec<_> = checkpoints["checkpoints"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|checkpoint| checkpoint["reason"].as_str().unwrap())
+        .collect();
+    assert_eq!(reasons, ["view", "launch"], "{checkpoints}");
+}
+
+#[test]
 fn a_launch_checkpoint_past_wait_s_starts_the_agent_without_one() {
     let session = Session::new("cw", None).unwrap();
     fs::create_dir_all(session.directory.join("config/pinfold")).unwrap();
@@ -3560,5 +3621,313 @@ fn a_launch_checkpoint_past_wait_s_starts_the_agent_without_one() {
     assert!(
         log.contains("checkpoint=none") && log.contains("took over wait_s"),
         "{log}"
+    );
+}
+
+/// Names the directory of a run, in the terminal outside every pane that asks for a restore.
+const REWIND: &str = "PINFOLD_TEST_REWIND";
+
+/// Not a test: a terminal outside every pane. Once the agent edited its tree, it reads the run's
+/// launch checkpoint, takes a view checkpoint and asks for the restore, noting the reply in
+/// `restored`; with `windowless` noted it asks once and notes the refusal.
+#[test]
+#[ignore = "run by the checkpoint.restore session tests"]
+fn rewind_api_process() {
+    let Some(directory) = helper(REWIND) else {
+        return;
+    };
+    let directory = Path::new(&directory);
+    let start = Instant::now();
+    while !directory.join("edited").exists() {
+        assert!(start.elapsed() < PATIENCE, "the agent never edited");
+        thread::sleep(Duration::from_millis(20));
+    }
+    let listed = ask("checkpoint.list", serde_json::json!({"pane": 1})).unwrap();
+    let launch = listed["result"]["checkpoints"][0]["checkpoint"].clone();
+    assert!(launch.is_string(), "{listed}");
+    let shown = if directory.join("windowless").exists() {
+        launch.clone()
+    } else {
+        let taken = ask("checkpoint.take", serde_json::json!({"pane": 1})).unwrap();
+        taken["result"]["checkpoint"].clone()
+    };
+    let params = serde_json::json!({"pane": 1, "checkpoint": launch, "shown": shown});
+    let restored = ask("checkpoint.restore", params).unwrap();
+    note(directory.join("restored"), restored.to_string()).unwrap();
+}
+
+/// Not a test: the window. It answers the one `Rewind` prompt only after the pane printed the
+/// prompt's words and `y` and the tree stayed as the agent left it, then waits for the flash.
+#[test]
+#[ignore = "run by only_the_window_answers_a_rewind_and_the_restore_flashes_there"]
+fn rewind_window_process() {
+    let Some(directory) = helper(CLIENT) else {
+        return;
+    };
+    let directory = Path::new(&directory);
+    let mut link = Link::new(socket::take_link().unwrap()).unwrap();
+    assert!(link.resize(24, 80));
+    until(&mut link, |link| link.is_greeted()).unwrap();
+    let mut strips = Vec::new();
+    let mut prompt = None;
+    until(&mut link, |link| {
+        strips.extend(std::iter::from_fn(|| link.take_checkpoint()));
+        prompt = link.take_approval();
+        prompt.is_some()
+    })
+    .unwrap();
+    let prompt = prompt.unwrap();
+    let work = fs::canonicalize(directory.join("state/work")).unwrap();
+    assert_eq!((prompt.action, prompt.target), (ApprovalAction::Rewind, 1));
+    assert_eq!(prompt.texts[0], work.to_str().unwrap());
+    assert_eq!(prompt.texts[2], "asked by a terminal outside every pane");
+    assert!(
+        prompt.texts[3].starts_with("restore 1 · delete 1 the agent added"),
+        "{:?}",
+        prompt.texts
+    );
+    let paths = &prompt.texts[4..];
+    assert!(paths.contains(&"  restore a.txt".to_owned()), "{paths:?}");
+    assert!(paths.contains(&"  delete new.txt".to_owned()), "{paths:?}");
+    note(directory.join("prompted"), "yes").unwrap();
+    until(&mut link, |_| directory.join("printed").exists()).unwrap();
+    let settle = Instant::now() + Duration::from_secs(1);
+    until(&mut link, |_| Instant::now() > settle).unwrap();
+    let read = |name: &str| fs::read_to_string(work.join(name)).unwrap_or_default();
+    assert_eq!(read("a.txt"), "agent\n", "output answered the prompt");
+    assert!(directory.join("restored").metadata().is_err());
+    let (id, answer) = (prompt.id, ApprovalAnswer::AllowOnce);
+    assert!(link.send(Request::ApprovalAnswer { id, answer }));
+    let mut flashed = None;
+    until(&mut link, |link| {
+        strips.extend(std::iter::from_fn(|| link.take_checkpoint()));
+        flashed = link.take_restored();
+        flashed.is_some()
+    })
+    .unwrap();
+    assert_eq!(flashed, Some((2, 0, String::new())));
+    // The launch checkpoint was taken, so the agent's strip says nothing.
+    assert!(strips.contains(&(1, 0)), "{strips:?}");
+    note(directory.join("flashed"), "yes").unwrap();
+    until(&mut link, |_| directory.join("restored").exists()).unwrap();
+}
+
+/// The agent pane's own `checkpoint.restore`, and the shell pane's, through `pinfold mcp`.
+fn restore_lines(pane: u32) -> String {
+    let params = serde_json::json!({"pane": pane, "checkpoint": "r1-0/0", "shown": "r1-0/1"});
+    mcp_lines(&[("checkpoint_restore_v1", params)])
+}
+
+/// A session whose first pane launches `sleepy` in `$HOME/work`, then `peer`, which asks to
+/// restore its own run; the shell asks for the sleepy run, then the agent edits a file and adds
+/// one. `after` runs in the pane once `edited` is noted.
+fn rewind_session(name: &str, window: Option<&str>, after: &str) -> Result<(Session, Child)> {
+    let session = Session::new(name, window)?;
+    fs::create_dir_all(session.directory.join("config/pinfold"))?;
+    let mcp = format!("'{}' mcp", session.directory.join("pinfold").display());
+    let client = "\"$PINFOLD_TEST_CLIENT\"";
+    let peer = format!(
+        "{{ {} }} | {mcp} > {client}/p; mv {client}/p {client}/peer; exec sleep 60\n",
+        restore_lines(2)
+    );
+    fs::write(session.directory.join("peer.sh"), peer)?;
+    let toml = format!(
+        "[agents.sleepy]\ncommand = [\"sleep\", \"60\"]\n\
+         [agents.peer]\ncommand = [\"/bin/sh\", \"{}\"]\n",
+        session.directory.join("peer.sh").display()
+    );
+    fs::write(session.directory.join("config/pinfold/pinfold.toml"), toml)?;
+    let pinfold = format!("'{}'", session.directory.join("pinfold").display());
+    let shell = format!(
+        "mkdir -p -m 700 \"$HOME/work\"; cd \"$HOME/work\"; echo a > a.txt; \
+         {pinfold} agent sleepy 2> {client}/e; {pinfold} agent peer 2>> {client}/e; \
+         until [ -e {client}/peer ]; do sleep 0.05; done; \
+         {{ {} }} | {mcp} > {client}/s; mv {client}/s {client}/shell; \
+         echo agent > a.txt; echo new > new.txt; touch {client}/edited; {after} exec sleep 60",
+        restore_lines(1)
+    );
+    let arguments: &[&str] = match window {
+        Some(_) => &["--window", "1", "80x24"],
+        None => &["--idle", "1"],
+    };
+    let core = session.start_core(arguments, &shell)?;
+    Ok((session, core))
+}
+
+/// Starts [`rewind_api_process`] in a terminal outside every pane of `session`.
+fn outside_terminal(session: &Session) -> Result<pinfold_sys::pty::Pty> {
+    let mut outside = Command::new(env::current_exe()?);
+    outside
+        .args(["--exact", "--ignored", "rewind_api_process"])
+        .env("XDG_RUNTIME_DIR", session.directory.join("run"))
+        .env(REWIND, &session.directory);
+    Ok(pinfold_sys::pty::Pty::spawn(outside, 24, 80)?)
+}
+
+/// Asserts that the agent pane and the shell pane were refused before any prompt.
+fn refused_before_any_prompt(session: &Session) {
+    for (name, said) in [
+        ("peer", "needs a tool pane or a terminal outside every pane"),
+        (
+            "shell",
+            "needs a tool pane or a terminal outside every pane",
+        ),
+    ] {
+        let out = mcp_results(&session.read(name));
+        assert!(out[0].0 && out[0].1.contains(said), "{name}: {out:?}");
+    }
+}
+
+#[test]
+fn only_the_window_answers_a_rewind_and_the_restore_flashes_there() {
+    let exe = env::current_exe().unwrap();
+    let window = format!(
+        "exec '{}' --exact --ignored rewind_window_process",
+        exe.display()
+    );
+    // The pane prints the prompt's words and `y` once the window shows it.
+    let client = "\"$PINFOLD_TEST_CLIENT\"";
+    let after = format!(
+        "until [ -e {client}/prompted ]; do sleep 0.05; done; \
+         printf '◆ needs you  Undo changes in\\ny\\n'; touch {client}/printed;"
+    );
+    let (session, mut core) = rewind_session("rw", Some(&window), &after).unwrap();
+    let _terminal = outside_terminal(&session).unwrap();
+    let ended = session.wait_beside("restored", Some(&mut core)) && session.wait_for("flashed");
+    assert!(ended, "{} {}", session.read("e"), session.read_log());
+    core.kill().unwrap();
+    core.wait().unwrap();
+    let restored: serde_json::Value = serde_json::from_str(&session.read("restored")).unwrap();
+    let result = &restored["result"];
+    assert_eq!(
+        (result["restored"].as_u64(), result["deleted"].as_u64()),
+        (Some(1), Some(1))
+    );
+    assert!(result["restore_checkpoint"].is_string(), "{restored}");
+    let work = session.directory.join("state/work");
+    assert_eq!(fs::read_to_string(work.join("a.txt")).unwrap(), "a\n");
+    assert!(!work.join("new.txt").exists());
+    refused_before_any_prompt(&session);
+}
+
+#[test]
+fn a_restore_with_no_window_is_refused_and_restores_nothing() {
+    let (session, mut core) = rewind_session("rn", None, "").unwrap();
+    note(session.directory.join("windowless"), "yes").unwrap();
+    let _terminal = outside_terminal(&session).unwrap();
+    let ended = session.wait_beside("restored", Some(&mut core));
+    assert!(ended, "{} {}", session.read("e"), session.read_log());
+    core.kill().unwrap();
+    core.wait().unwrap();
+    let restored = session.read("restored");
+    assert!(
+        restored.contains("approval needs an open PinFold window"),
+        "{restored}"
+    );
+    let work = session.directory.join("state/work");
+    assert_eq!(fs::read_to_string(work.join("a.txt")).unwrap(), "agent\n");
+    refused_before_any_prompt(&session);
+}
+
+/// Not a test: the window. Once the agent edited, it chooses "Rewind Agent Changes" on the
+/// shell's pane, which is refused, then on the agent pane, waits for the viewer to list the nested repository, types `U`, and answers the one
+/// `Rewind` prompt `y`, then waits for the flash.
+#[test]
+#[ignore = "run by rewind_agent_changes_opens_the_viewer_and_u_then_y_puts_the_tree_back"]
+fn rewind_palette_window_process() {
+    let Some(directory) = helper(CLIENT) else {
+        return;
+    };
+    let directory = Path::new(&directory);
+    let mut link = Link::new(socket::take_link().unwrap()).unwrap();
+    // Wide enough for the viewer, a third of it, to show the nested row's whole name.
+    assert!(link.resize(24, 240));
+    until(&mut link, |link| link.is_greeted()).unwrap();
+    until(&mut link, |_| directory.join("edited").exists()).unwrap();
+    // The shell's pane has no run: a flash, never an empty viewer.
+    let shell = pinfold_proto::link::Tool::Rewind;
+    assert!(link.send(Request::OpenTool {
+        pane: 0,
+        tool: shell
+    }));
+    let mut refused = None;
+    until(&mut link, |link| {
+        refused = link.take_restored();
+        refused.is_some()
+    })
+    .unwrap();
+    let said = (0, 0, "no agent run in this pane".to_owned());
+    assert_eq!(refused, Some(said));
+    let open = Request::OpenTool {
+        pane: 1,
+        tool: pinfold_proto::link::Tool::Rewind,
+    };
+    assert!(link.speaks(&open) && link.send(open));
+    until(&mut link, |link| {
+        pane_shows(link, 2, "? keys") && pane_shows(link, 2, "inner nested")
+    })
+    .unwrap();
+    assert!(link.send(Request::Input {
+        pane: 2,
+        bytes: b"U"
+    }));
+    let prompt = approval(&mut link, directory).unwrap();
+    assert_eq!((prompt.action, prompt.target), (ApprovalAction::Rewind, 1));
+    note(directory.join("prompted"), prompt.texts.join("\n")).unwrap();
+    // The prompt arms after half a second.
+    let armed = Instant::now() + Duration::from_secs(1);
+    until(&mut link, |_| Instant::now() > armed).unwrap();
+    let (id, answer) = (prompt.id, ApprovalAnswer::AllowOnce);
+    assert!(link.send(Request::ApprovalAnswer { id, answer }));
+    let mut flashed = None;
+    until(&mut link, |link| {
+        flashed = link.take_restored();
+        flashed.is_some()
+    })
+    .unwrap();
+    note(directory.join("flashed"), format!("{flashed:?}")).unwrap();
+    until(&mut link, |_| directory.join("done").exists()).unwrap();
+}
+
+#[test]
+fn rewind_agent_changes_opens_the_viewer_and_u_then_y_puts_the_tree_back() {
+    let exe = env::current_exe().unwrap();
+    let window = format!(
+        "exec '{}' --exact --ignored rewind_palette_window_process",
+        exe.display()
+    );
+    let session = Session::new("rp", Some(&window)).unwrap();
+    fs::create_dir_all(session.directory.join("config/pinfold")).unwrap();
+    let toml = "[agents.sleepy]\ncommand = [\"sleep\", \"60\"]\n";
+    fs::write(session.directory.join("config/pinfold/pinfold.toml"), toml).unwrap();
+    let pinfold = format!("'{}'", session.directory.join("pinfold").display());
+    let client = "\"$PINFOLD_TEST_CLIENT\"";
+    let shell = format!(
+        "mkdir -p -m 700 \"$HOME/work/src\"; cd \"$HOME/work\"; echo a > a.txt; \
+         echo b > src/b.rs; {pinfold} agent sleepy 2> {client}/e; \
+         echo agent > a.txt; rm src/b.rs; echo new > new.txt; \
+         mkdir -p inner/.git; echo x > inner/code.rs; touch {client}/edited; exec sleep 60"
+    );
+    let mut core = session
+        .start_core(&["--window", "1", "80x24"], &shell)
+        .unwrap();
+    let ended = session.wait_beside("flashed", Some(&mut core));
+    note(session.directory.join("done"), "yes").unwrap();
+    assert!(ended, "{} {}", session.read("e"), session.read_log());
+    core.kill().unwrap();
+    core.wait().unwrap();
+    // U asked for every file, and the nested repository is the prompt's to skip, not to undo.
+    let prompted = session.read("prompted");
+    assert!(prompted.contains("restore a.txt"), "{prompted}");
+    assert!(prompted.contains("delete new.txt"), "{prompted}");
+    assert!(prompted.contains("bring back src/b.rs"), "{prompted}");
+    assert_eq!(session.read("flashed"), "Some((3, 0, \"\"))");
+    let work = session.directory.join("state/work");
+    assert_eq!(fs::read_to_string(work.join("a.txt")).unwrap(), "a\n");
+    assert_eq!(fs::read_to_string(work.join("src/b.rs")).unwrap(), "b\n");
+    assert!(!work.join("new.txt").exists());
+    assert!(
+        work.join("inner/code.rs").exists(),
+        "a rewind leaves a nested repository"
     );
 }
