@@ -63,6 +63,10 @@ const PEEK_LINE: usize = 1024;
 const PEEK_OUTPUT: usize = (64 + link::MAX_OUTSIDE as usize) * (PEEK_LINE + 1);
 /// One read from the socket, which lives on the stack and costs nothing when idle.
 const READ_CHUNK: usize = 16 * 1024;
+/// The least time between two program notifications from one pane, as between its alerts.
+const PANE_TOAST: Duration = Duration::from_secs(10);
+/// The least time between any two program notifications (ADR-0051 §9).
+const ANY_TOAST: Duration = Duration::from_secs(2);
 
 /// What [`Reactor::spawn_window`] did.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,6 +110,8 @@ struct PaneLink {
     message: String,
     /// The OSC 12 cursor colour and OSC 11 background the window last heard of.
     colours: (Option<u32>, Option<u32>),
+    /// When the window last got a program notification from this pane.
+    toasted: Option<Instant>,
 }
 
 /// A running `pinfold agents peek` and the listed panes it reads for, in the order of its
@@ -294,6 +300,8 @@ struct Session {
     inbox: Option<Instant>,
     /// The agents peek running for the open inbox, if `[inbox] agent_files` is on.
     peek: Option<Peek>,
+    /// When the window last got a program notification from any pane.
+    toasted: Option<Instant>,
     /// The version in the window's hello, which is never above the core's.
     version: u16,
 }
@@ -344,6 +352,7 @@ impl Session {
     fn apply(&mut self, request: Request<'_>, reactor: &mut Reactor) -> Result<(), Ended> {
         match request {
             Request::Hello { version } => (self.greeted, self.version) = (true, version),
+            Request::Toasts { on } => reactor.set_toasts(on),
             // A full frame, not a diff: a hidden pane with no output must not look like news.
             Request::Palette(palette) => {
                 if reactor.set_palette(palette) {
@@ -799,6 +808,26 @@ impl Session {
                 }
             }
         }
+        // Taken whether or not it is sent, so a pane holds at most one, and only in flight. One
+        // inside the limits is dropped, never queued (ADR-0051 §9).
+        if let Some(toast) = reactor.take_toast(pane) {
+            let now = Instant::now();
+            let soon = |last: Option<Instant>, gap| {
+                last.is_some_and(|last| now.saturating_duration_since(last) < gap)
+            };
+            let notice = Notice::Toast {
+                pane: pane as u32,
+                kind: toast.kind,
+                text: &toast.text,
+            };
+            if !soon(state.toasted, PANE_TOAST)
+                && !soon(self.toasted, ANY_TOAST)
+                && self.version >= notice.since()
+            {
+                (state.toasted, self.toasted) = (Some(now), Some(now));
+                notice.encode(&mut self.out).map_err(|_| Ended)?;
+            }
+        }
         let colours = reactor.engine(pane).map(|engine| engine.colours());
         if let Some((cursor, background)) = colours.filter(|colours| *colours != state.colours) {
             state.colours = (cursor, background);
@@ -1201,9 +1230,12 @@ impl Reactor {
                 told_webhook: None,
                 inbox: None,
                 peek: None,
+                toasted: None,
                 version: 0,
             },
         };
+        // A new window says whether it wants them, and until then none are kept.
+        self.set_toasts(false);
         let interest = Interest::READABLE | Interest::WRITABLE;
         let session = &mut window.session;
         let opened = session.socket.set_nonblocking(true).and_then(|()| {
@@ -1236,6 +1268,8 @@ impl Reactor {
         let fd = window.session.socket.as_raw_fd();
         let _ = self.poll.registry().deregister(&mut SourceFd(&fd));
         self.host.retire(window);
+        // With no window to show them, no pane keeps notification text.
+        self.set_toasts(false);
     }
 }
 
@@ -1301,6 +1335,8 @@ mod tests {
         outside: Vec<(u8, u8, u32, String)>,
         /// Each pane's OSC 12 cursor colour and OSC 11 background, as told.
         colours: Vec<(u32, Option<u32>, Option<u32>)>,
+        /// Each toast told: pane, kind and text.
+        toasts: Vec<(u32, u8, String)>,
         /// Each strip told: the run's pane and why it has no checkpoint.
         checkpoints: Vec<(u32, u8)>,
         /// Each restore's flash: undone, skipped and the error.
@@ -1347,6 +1383,7 @@ mod tests {
                 peeked: Vec::new(),
                 outside: Vec::new(),
                 colours: Vec::new(),
+                toasts: Vec::new(),
             }
         }
 
@@ -1458,7 +1495,10 @@ mod tests {
                             runnable,
                             command,
                         } => self.was_running.push((pane, runnable, command.to_owned())),
-                        Notice::Approval(_) | Notice::Toast { .. } => {}
+                        Notice::Approval(_) => {}
+                        Notice::Toast { pane, kind, text } => {
+                            self.toasts.push((pane, kind, text.to_owned()));
+                        }
                         Notice::Checkpoint { pane, missing } => {
                             self.checkpoints.push((pane, missing));
                         }
@@ -1709,6 +1749,47 @@ mod tests {
             .unwrap();
         serve(reactor, &mut peer, |_, p| p.status.is_some());
         (agent, peer)
+    }
+
+    /// ADR-0051 §9: off, a window gets no toast and no pane keeps text; on, a pane that floods
+    /// for longer than the 2 s gap still toasts once, as its own 10 s hold it, and another pane
+    /// toasts once the 2 s are past. A window that goes turns them off again.
+    #[test]
+    fn toasts_are_sent_only_when_on_and_once_a_pane_in_ten_seconds() {
+        let mut reactor = Reactor::new().unwrap();
+        let flood = "flood() { i=0; while [ $i -lt 50 ]; do printf '\\033]9;flood %d\\007' $i; \
+                     sleep 0.05; i=$((i+1)); done; echo $1; }; \
+                     flood flooded; read line; flood twice; read line";
+        let pane = reactor.open_tab(shell(flood), 24, 80).unwrap();
+        let mut peer = Peer::greet(&mut reactor);
+        serve(&mut reactor, &mut peer, |r, _| {
+            on_screen(r, pane, "flooded")
+        });
+        assert!(peer.toasts.is_empty());
+        assert_eq!(reactor.take_toast(pane), None, "off keeps no text");
+
+        peer.send(Request::Toasts { on: true });
+        reactor.write(pane, b"again\n");
+        let script = "read line; printf '\\033]777;notify;Build;done\\007'; read line";
+        let other = reactor.open_tab(shell(script), 24, 80).unwrap();
+        // Until the flood ends, at least 2.5 s on.
+        let start = Instant::now();
+        let flooded =
+            |r: &Reactor| on_screen(r, pane, "twice") && start.elapsed().as_millis() > 2500;
+        serve(&mut reactor, &mut peer, |r, _| flooded(r));
+        assert_eq!(peer.toasts.len(), 1, "{:?}", peer.toasts);
+        let (from, kind, text) = &peer.toasts[0];
+        assert_eq!((*from, *kind), (pane as u32, link::OSC_9));
+        assert!(text.starts_with("flood "), "{text}");
+        reactor.write(other, b"\n");
+        serve(&mut reactor, &mut peer, |_, p| p.toasts.len() == 2);
+        let told = (other as u32, link::OSC_777, "Build: done".to_owned());
+        assert_eq!(peer.toasts[1], told);
+
+        drop(peer);
+        assert!(turn_until(&mut reactor, |r| !r.has_window()));
+        reactor.write(other, b"\n");
+        assert_eq!(reactor.take_toast(other), None, "no window, no text");
     }
 
     /// A stand-in for `pinfold` in `root` that runs `body`, after `$@` and its environment are
