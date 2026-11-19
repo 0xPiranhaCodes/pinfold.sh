@@ -269,6 +269,9 @@ impl Default for Keys {
 /// assert!(!config.alerts.program_notifications);
 /// let config = pinfold_config::parse(b"[alerts]\nprogram_notifications = true")?;
 /// assert!(config.alerts.program_notifications);
+/// assert!(config.alerts.progress);
+/// let config = pinfold_config::parse(b"[alerts]\nprogress = false")?;
+/// assert!(!config.alerts.progress);
 /// # Ok::<(), pinfold_config::Error>(())
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -286,6 +289,9 @@ pub struct Alerts {
     /// Whether programs' OSC 9, 99 and 777 notifications show as toasts. Off by default, when
     /// the core keeps none of their text. Read by the window, which tells the core.
     pub program_notifications: bool,
+    /// Whether programs' OSC 9;4 progress shows on the tabs and the Dock tile. On by default, as
+    /// the core keeps one byte a pane for it whatever this says. Read by the window.
+    pub progress: bool,
 }
 
 impl Default for Alerts {
@@ -296,6 +302,7 @@ impl Default for Alerts {
             webhook_states: vec![Alert::NeedsYou, Alert::Error],
             webhook_format: WebhookFormat::Json,
             program_notifications: false,
+            progress: true,
         }
     }
 }

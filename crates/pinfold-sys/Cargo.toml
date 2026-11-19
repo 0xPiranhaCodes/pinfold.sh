@@ -37,10 +37,16 @@ objc2 = { version = "0.6.5", optional = true }
 objc2-app-kit = { version = "0.3.2", optional = true, default-features = false, features = [
   "std",
   "NSApplication",
+  "NSControl",
+  "NSDockTile",
   "NSEvent",
+  "NSImage",
+  "NSImageView",
   "NSMenu",
   "NSMenuItem",
+  "NSProgressIndicator",
   "NSResponder",
+  "NSView",
 ] }
 objc2-foundation = { version = "0.3.2", optional = true }
 objc2-metal = { version = "0.3.2", optional = true }

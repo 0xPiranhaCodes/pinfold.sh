@@ -345,6 +345,7 @@ fn themed(file: &str) -> (Frame, u32) {
         time: None,
         inset: 1,
         unhardened: None,
+        progress: &[],
     };
     top_bar::draw(&mut frame, &bar);
 
