@@ -511,15 +511,24 @@ fn write_rewind_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
 /// Writes `on`, `exited` and `off` under `dir` for ADR-0052's rows: each a config with
 /// `[timeline]` on or off, `[rewind]` off so no checkpoint is taken, an agent profile `fill`
 /// whose program prints 1,100 OSC 133 command pairs, so every ring of 1,024 fills and wraps,
-/// and then waits or, in `exited`, exits; a `state` folder for the ring files; and `agent.sh`,
+/// and then waits or, in `exited`, exits; `polling` and `polling-off`, on and off, then call
+/// `pinfold ctl list` 1,000 times from each agent, which adds no entry (slice 2), and wait; a
+/// `state` folder for the ring files; and `agent.sh`,
 /// every pane's shell, which launches one `fill` in a tab and waits. 8 panes make 8 runs.
 fn write_timeline_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let quote = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', r"'\''"));
+    let wait = "exec /bin/sleep 86400";
+    let poll = format!(
+        "i=0; while [ $i -lt 1000 ]; do {} ctl list >/dev/null; i=$((i + 1)); done\n{wait}",
+        quote(tools)
+    );
     for (row, enabled, end) in [
-        ("on", true, "exec /bin/sleep 86400"),
+        ("on", true, wait),
         ("exited", true, "exit 0"),
-        ("off", false, "exec /bin/sleep 86400"),
+        ("off", false, wait),
+        ("polling", true, poll.as_str()),
+        ("polling-off", false, poll.as_str()),
     ] {
         let folder = dir.join(row);
         for sub in ["pinfold", "state"] {
@@ -799,6 +808,29 @@ fn mem_gate_task() -> ExitCode {
             ..records
         },
         records,
+    ]);
+    // ADR-0052 slice 2: each agent then polls `pane.list` 1,000 times, which writes no entry,
+    // so these two read alike. Serving the calls keeps about 1.7 MB in the core with timelines
+    // on or off, on main as here, which puts both over the ceiling (#502): information only.
+    let (timeline_polling, timeline_polling_off) = (
+        timeline_inputs.join("polling"),
+        timeline_inputs.join("polling-off"),
+    );
+    budgets.extend([
+        mem_gate::Budget {
+            metric: "Core, 8 agent panes with full timelines, a polling agent each (#502)",
+            limit: mem_gate::INFORMATION,
+            settle: mem_gate::POLLING_SETTLE,
+            agents: Some(&timeline_polling),
+            ..timelines
+        },
+        mem_gate::Budget {
+            metric: "Core, the same polling, [timeline] off (#502)",
+            limit: mem_gate::INFORMATION,
+            settle: mem_gate::POLLING_SETTLE,
+            agents: Some(&timeline_polling_off),
+            ..timelines
+        },
     ]);
     budgets.extend([
         mem_gate::Budget {
@@ -1472,7 +1504,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("xtask-timeline-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         write_timeline_inputs(&dir, Path::new("/opt/it's/pinfold")).expect("inputs");
-        for (row, enabled) in [("on", true), ("exited", true), ("off", false)] {
+        for (row, enabled) in [
+            ("on", true),
+            ("exited", true),
+            ("off", false),
+            ("polling", true),
+            ("polling-off", false),
+        ] {
             let folder = dir.join(row);
             let checked = Command::new("sh")
                 .arg("-n")

@@ -50,6 +50,18 @@ fn the_entry_type_has_no_string_and_is_16_bytes() {
         What::Exit(Ended::Code(1)),
         What::Exit(Ended::Signal(9)),
         What::Exit(Ended::Closed),
+        What::Api {
+            seq: 7,
+            method: 6,
+            outcome: Outcome::Refused,
+            target: Some(3),
+        },
+        What::Api {
+            seq: u32::MAX,
+            method: 22,
+            outcome: Outcome::Error,
+            target: None,
+        },
     ];
     for what in entries {
         let entry = Entry { at: 5, what };
@@ -236,4 +248,81 @@ proptest! {
             prop_assert_eq!(Entry::decode(&entry.encode()), Some(entry));
         }
     }
+}
+
+fn call(seq: u64, caller: u64, method: &str, target: Option<u64>, ok: bool) -> pinfold_api::Record {
+    pinfold_api::Record {
+        seq,
+        at_ms: 0,
+        caller: Some(caller),
+        terminal: true,
+        method: method.to_owned(),
+        target,
+        scope: "self".to_owned(),
+        outcome: if ok {
+            pinfold_api::Outcome::Ok("allowed".to_owned())
+        } else {
+            pinfold_api::Outcome::Refused("only the caller's own pane".to_owned())
+        },
+    }
+}
+
+/// Decision 3: reads that succeed never reach the ring, so a polling agent cannot flush it;
+/// a refused read is recorded in the caller's run alone, so it cannot flush the target's, and
+/// a call that acts in each run it touches.
+#[test]
+fn a_polling_agent_adds_no_entries_and_a_refused_call_adds_one() {
+    let (_state, mut timelines) = timelines(64);
+    let mut log = Log::new();
+    let now = Instant::now();
+    timelines.open(2, now);
+    timelines.open(3, now);
+    for seq in 0..1_000 {
+        log.append(call(seq, 2, "pane.list", None, true)).unwrap();
+        timelines.calls(&log, now);
+    }
+    log.append(call(0, 2, "pane.wait", Some(2), true)).unwrap();
+    log.append(call(0, 2, "pane.read", Some(2), true)).unwrap();
+    log.append(call(0, 2, "hello", None, true)).unwrap();
+    timelines.calls(&log, now);
+    assert!(timelines.entries(2).unwrap().is_empty());
+    assert_eq!(timelines.of_pane(2).unwrap().summary().calls, 0);
+
+    log.append(call(0, 2, "pane.read", Some(3), false)).unwrap();
+    log.append(call(0, 2, "pane.send", Some(2), true)).unwrap();
+    log.append(call(0, 2, "pane.close", Some(3), true)).unwrap();
+    timelines.calls(&log, now);
+    // Looking again records nothing twice.
+    timelines.calls(&log, now);
+    let entries: Vec<What> = timelines
+        .entries(2)
+        .unwrap()
+        .iter()
+        .map(|e| e.what)
+        .collect();
+    let api = |seq, method, outcome, target| What::Api {
+        seq,
+        method,
+        outcome,
+        target,
+    };
+    assert_eq!(
+        entries,
+        [
+            api(1_003, 4, Outcome::Refused, Some(3)),
+            api(1_004, 6, Outcome::Ok, Some(2)),
+            api(1_005, 11, Outcome::Ok, Some(3)),
+        ]
+    );
+    assert_eq!(METHODS[4].0, "pane.read");
+    assert_eq!(METHODS[6].0, "pane.send");
+    let target: Vec<What> = timelines
+        .entries(3)
+        .unwrap()
+        .iter()
+        .map(|e| e.what)
+        .collect();
+    assert_eq!(target, [api(1_005, 11, Outcome::Ok, Some(3))]);
+    assert_eq!(timelines.of_pane(2).unwrap().summary().calls, 3);
+    assert_eq!(timelines.of_pane(3).unwrap().summary().calls, 1);
 }
