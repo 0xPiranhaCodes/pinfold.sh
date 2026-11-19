@@ -39,7 +39,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode, Palette};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 26;
+pub const VERSION: u16 = 27;
 
 /// The oldest version this side still speaks, one before [`VERSION`] (ADR-0043).
 pub const OLDEST: u16 = VERSION - 1;
@@ -107,6 +107,20 @@ pub const OSC_777: u8 = 2;
 
 /// The first version with [`Notice::Progress`] (ADR-0051 §9, slice 12).
 pub const PROGRESS: u16 = 26;
+
+/// The first version with [`Notice::Summary`], [`Request::Timeline`] and its notices,
+/// [`Request::RevealStored`] and [`Refusal::Evicted`], and a checkpoint on
+/// [`Request::OpenTool`] (ADR-0052, slice 4).
+pub const TIMELINE: u16 = 27;
+
+/// The most entries a [`Request::Timeline`] asks for and a [`Notice::Timeline`] carries.
+pub const MAX_PAGE: u8 = 64;
+
+/// Bytes of a timeline entry, on the wire as in the core's ring file (ADR-0052 section 2).
+pub const ENTRY: usize = 16;
+
+/// The longest label a [`Notice::TimelineLabel`] carries: 80 cells of four-byte characters.
+pub const MAX_LABEL: usize = 320;
 
 /// OSC 9;4 states, in ConEmu's numbering, which [`progress`] keeps in a progress byte's top
 /// three bits: no progress.
@@ -312,6 +326,8 @@ const INBOX_OPEN: u8 = 26;
 const ANSWER_KIND: u8 = 27;
 const OPEN_TAB_IN: u8 = 28;
 const TOASTS: u8 = 29;
+const TIMELINE_ASK: u8 = 30;
+const REVEAL_STORED: u8 = 31;
 
 const FRAME: u8 = 1;
 const CWD: u8 = 2;
@@ -336,6 +352,10 @@ const CHECKPOINT: u8 = 20;
 const RESTORED: u8 = 21;
 const TOAST_KIND: u8 = 22;
 const PROGRESS_KIND: u8 = 23;
+const SUMMARY: u8 = 24;
+const TIMELINE_PAGE: u8 = 25;
+const TIMELINE_ENTRY: u8 = 26;
+const TIMELINE_LABEL: u8 = 27;
 /// [`Notice::InboxExtra`]'s `ctx` byte when it has none.
 const NO_CTX: u8 = 255;
 
@@ -639,6 +659,10 @@ pub enum Refusal {
     /// a link, or writable by someone else (ADR-0051 §8). Since version 22.
     #[error("Not opened: the folder is missing, relative or not private")]
     Folder,
+    /// The row a timeline entry names has left the scrollback or was cleared (ADR-0052
+    /// section 4). Since version 27.
+    #[error("Output evicted: scrollback is capped at 2 MB")]
+    Evicted,
 }
 
 /// A rectangle of cells, from the top left of the space for panes.
@@ -789,6 +813,33 @@ pub enum Request<'a> {
         pane: u32,
         /// Which tool.
         tool: Tool,
+        /// For [`Tool::Rewind`] only, the run's checkpoint the viewer starts from instead of its
+        /// launch checkpoint (ADR-0052 section 6). Since version 27; none below it.
+        checkpoint: Option<u32>,
+    },
+    /// Asks for a page of the timeline of the newest run in `pane`: at most `count` entries,
+    /// up to [`MAX_PAGE`], whose `seq` is below `before`, the newest if none. The core answers
+    /// with [`Notice::Timeline`] and a [`Notice::TimelineLabel`] for each command in it, and
+    /// while `watch` sends each new entry as [`Notice::TimelineEntry`]. `count` 0 asks for no
+    /// page, so `watch` false with it closes the overlay (ADR-0052 section 6). Since version 27.
+    Timeline {
+        /// The pane.
+        pane: u32,
+        /// Whether new entries are wanted, while the overlay is open on this pane.
+        watch: bool,
+        /// The `seq` the page ends before.
+        before: Option<u32>,
+        /// At most [`MAX_PAGE`].
+        count: u8,
+    },
+    /// Scrolls `pane` to the row a timeline entry names, as [`Request::Reveal`] does, or is
+    /// refused with [`Refusal::Evicted`] once that row is gone (ADR-0052 section 4). Since
+    /// version 27.
+    RevealStored {
+        /// The pane.
+        pane: u32,
+        /// The row, as a `command` entry holds it.
+        number: u32,
     },
     /// Asks for the `*.md` files in the directory the system says `pane`'s shell is in, as
     /// [`Notice::Markdown`]. Since version 13.
@@ -1030,6 +1081,67 @@ pub enum Notice<'a> {
         pane: u32,
         /// A byte from [`progress`]; [`progress_parts`] reads it.
         progress: u8,
+    },
+    /// The counters of the newest run in a pane, sent when one changes, at most once a second
+    /// (ADR-0052 section 6). Since version 27.
+    Summary {
+        /// The run's pane.
+        pane: u32,
+        /// Seconds since the run started, as [`Notice::Status`]'s `started` counts.
+        started: u32,
+        /// Whether the run has ended.
+        ended: bool,
+        /// Commands closed.
+        commands: u32,
+        /// Of those, with a non-zero exit.
+        failed: u32,
+        /// Approvals answered.
+        approvals: u32,
+        /// Of those, denied.
+        denied: u32,
+        /// Paths the newest checkpoint changed since launch.
+        changed: u32,
+        /// Failed commands plus ✕ error states.
+        errors: u32,
+    },
+    /// A page of a run's timeline, oldest first, in answer to [`Request::Timeline`]. The last
+    /// entry's `seq` is one below the page's `before`, or `total` without one. Since version 27.
+    Timeline {
+        /// The run's pane.
+        pane: u32,
+        /// Which run of this core it is, so a new run in the pane is told apart.
+        run: u32,
+        /// Seconds since the run started.
+        started: u32,
+        /// Entries the ring dropped.
+        dropped: u32,
+        /// Entries the run wrote.
+        total: u32,
+        /// At most [`MAX_PAGE`] entries of [`ENTRY`] bytes, as ADR-0052 section 2 lays them
+        /// out, each of a known kind. Never text.
+        entries: &'a [u8],
+    },
+    /// An entry a watched run wrote, at most every 100 ms (ADR-0052 section 6). Since 27.
+    TimelineEntry {
+        /// The run's pane.
+        pane: u32,
+        /// Its `seq`.
+        seq: u32,
+        /// As in [`Notice::Timeline`].
+        entry: [u8; ENTRY],
+    },
+    /// The text of the row a `command` entry names, read live from the pane's own scrollback,
+    /// cleaned of control and bidi characters and cut to 80 cells. Sent after the entry and
+    /// kept by neither side's core (ADR-0052 section 5). Since version 27.
+    TimelineLabel {
+        /// The pane.
+        pane: u32,
+        /// The entry's row.
+        row: u32,
+        /// Whether the row is still held; `text` is empty when not.
+        held: bool,
+        /// At most [`MAX_LABEL`] bytes.
+        text: &'a str,
     },
     /// What an open inbox's row shows beside the pane's status, read when it opens and every
     /// 5 s while open, and kept by neither side once it closes (ADR-0051 §7). Since version 20.
@@ -1300,6 +1412,12 @@ impl Request<'_> {
     pub fn since(&self) -> u16 {
         match self {
             Self::OpenTool {
+                checkpoint: Some(_),
+                ..
+            }
+            | Self::Timeline { .. }
+            | Self::RevealStored { .. } => TIMELINE,
+            Self::OpenTool {
                 tool: Tool::Rewind, ..
             } => REWIND_VIEW,
             Self::OpenTool { .. } => 12,
@@ -1337,6 +1455,15 @@ impl Request<'_> {
         }
         if let Self::MoveBorder { cells, .. } = *self {
             check("cells", cells, 1..=MAX_DIMENSION)?;
+        }
+        if let Self::Timeline { count, .. } = *self {
+            check("count", count.into(), 0..=MAX_PAGE.into())?;
+        }
+        if let Self::OpenTool {
+            tool, checkpoint, ..
+        } = *self
+        {
+            only_rewind(tool, checkpoint)?;
         }
         let start = begin(out);
         let kind = match *self {
@@ -1400,11 +1527,30 @@ impl Request<'_> {
                 put!(out, MOVE_BORDER, cells)
             }
             Self::Zoom => ZOOM,
-            Self::OpenTool { pane, tool } => {
+            Self::OpenTool {
+                pane,
+                tool,
+                checkpoint,
+            } => {
                 put!(out; pane);
                 out.push(tool as u8);
+                // Left out when none, so version 26 reads the same bytes.
+                if let Some(checkpoint) = checkpoint {
+                    put!(out; checkpoint);
+                }
                 OPEN_TOOL
             }
+            Self::Timeline {
+                pane,
+                watch,
+                before,
+                count,
+            } => {
+                put!(out; pane);
+                out.extend_from_slice(&[u8::from(watch), count, u8::from(before.is_some())]);
+                put!(out, TIMELINE_ASK, before.unwrap_or(0))
+            }
+            Self::RevealStored { pane, number } => put!(out, REVEAL_STORED, pane, number),
             Self::ListMarkdown { pane } => put!(out, LIST_MARKDOWN, pane),
             Self::OpenMarkdown { pane, name } => put_tail(
                 out,
@@ -1548,9 +1694,44 @@ impl Request<'_> {
                 pane: body.u32()?,
                 name: body.text()?,
             },
-            OPEN_TOOL => Request::OpenTool {
+            OPEN_TOOL => {
+                let pane = body.u32()?;
+                let tool = body.tag("tool", &[Tool::Files, Tool::Diff, Tool::Rewind])?;
+                let checkpoint = if body.0.is_empty() {
+                    None
+                } else {
+                    Some(body.u32()?)
+                };
+                only_rewind(tool, checkpoint)?;
+                Request::OpenTool {
+                    pane,
+                    tool,
+                    checkpoint,
+                }
+            }
+            TIMELINE_ASK => {
+                let pane = body.u32()?;
+                let watch = body.tag("watch", &[false, true])?;
+                let count = body.u8()?;
+                check("count", count.into(), 0..=MAX_PAGE.into())?;
+                let some = body.tag("before", &[false, true])?;
+                let before = body.u32()?;
+                if !some && before != 0 {
+                    return Err(Error::OutOfBounds {
+                        field: "before",
+                        value: before.into(),
+                    });
+                }
+                Request::Timeline {
+                    pane,
+                    watch,
+                    before: some.then_some(before),
+                    count,
+                }
+            }
+            REVEAL_STORED => Request::RevealStored {
                 pane: body.u32()?,
-                tool: body.tag("tool", &[Tool::Files, Tool::Diff, Tool::Rewind])?,
+                number: body.u32()?,
             },
             WAS_RUNNING_ANSWER => Request::WasRunningAnswer {
                 pane: body.u32()?,
@@ -1646,6 +1827,13 @@ impl Notice<'_> {
             Self::InboxExtra { .. } => INBOX_EXTRA,
             Self::Toast { .. } => TOAST,
             Self::Progress { .. } => PROGRESS,
+            Self::Summary { .. }
+            | Self::Timeline { .. }
+            | Self::TimelineEntry { .. }
+            | Self::TimelineLabel { .. }
+            | Self::Refused {
+                reason: Refusal::Evicted,
+            } => TIMELINE,
             Self::Outside { .. }
             | Self::Refused {
                 reason: Refusal::Folder,
@@ -1811,6 +1999,63 @@ impl Notice<'_> {
             Self::Progress { pane, progress } => {
                 put!(out; *pane, *progress);
                 PROGRESS_KIND
+            }
+            Self::Summary {
+                pane,
+                started,
+                ended,
+                commands,
+                failed,
+                approvals,
+                denied,
+                changed,
+                errors,
+            } => {
+                put!(out; *pane, *started);
+                out.push(u8::from(*ended));
+                put!(
+                    out, SUMMARY, *commands, *failed, *approvals, *denied, *changed, *errors
+                )
+            }
+            Self::Timeline {
+                pane,
+                run,
+                started,
+                dropped,
+                total,
+                entries,
+            } => {
+                if let Err(error) = page(entries) {
+                    out.truncate(start);
+                    return Err(error);
+                }
+                put!(out; *pane, *run, *started, *dropped, *total);
+                out.extend_from_slice(entries);
+                TIMELINE_PAGE
+            }
+            Self::TimelineEntry { pane, seq, entry } => {
+                if let Err(error) = page(entry) {
+                    out.truncate(start);
+                    return Err(error);
+                }
+                put!(out; *pane, *seq);
+                out.extend_from_slice(entry);
+                TIMELINE_ENTRY
+            }
+            Self::TimelineLabel {
+                pane,
+                row,
+                held,
+                text,
+            } => {
+                if !label(*held, text) {
+                    out.truncate(start);
+                    return Err(Error::BadText);
+                }
+                put!(out; *pane, *row);
+                out.push(u8::from(*held));
+                out.extend_from_slice(text.as_bytes());
+                TIMELINE_LABEL
             }
             Self::Outside {
                 index,
@@ -2010,6 +2255,51 @@ impl Notice<'_> {
                 pane: body.u32()?,
                 progress: body.u8()?,
             },
+            SUMMARY => Notice::Summary {
+                pane: body.u32()?,
+                started: body.u32()?,
+                ended: body.tag("ended", &[false, true])?,
+                commands: body.u32()?,
+                failed: body.u32()?,
+                approvals: body.u32()?,
+                denied: body.u32()?,
+                changed: body.u32()?,
+                errors: body.u32()?,
+            },
+            TIMELINE_PAGE => {
+                let (pane, run, started) = (body.u32()?, body.u32()?, body.u32()?);
+                let (dropped, total) = (body.u32()?, body.u32()?);
+                let entries = body.rest();
+                page(entries)?;
+                Notice::Timeline {
+                    pane,
+                    run,
+                    started,
+                    dropped,
+                    total,
+                    entries,
+                }
+            }
+            TIMELINE_ENTRY => {
+                let (pane, seq, entry) = (body.u32()?, body.u32()?, body.array()?);
+                page(&entry)?;
+                Notice::TimelineEntry { pane, seq, entry }
+            }
+            TIMELINE_LABEL => {
+                let (pane, row) = (body.u32()?, body.u32()?);
+                let held = body.tag("held", &[false, true])?;
+                let text = body.text()?;
+                // The window draws it as chrome, so only text the core's cleaning lets through.
+                if !label(held, text) {
+                    return Err(Error::BadText);
+                }
+                Notice::TimelineLabel {
+                    pane,
+                    row,
+                    held,
+                    text,
+                }
+            }
             OUTSIDE_KIND => {
                 let (index, count, secs) = (body.u8()?, body.u8()?, body.u32()?);
                 let dir = body.text()?;
@@ -2139,6 +2429,7 @@ impl Notice<'_> {
                         Refusal::Protected,
                         Refusal::ProfileChanged,
                         Refusal::Folder,
+                        Refusal::Evicted,
                     ],
                 )?,
             },
@@ -2737,6 +3028,43 @@ fn toast(kind: u8, text: &str) -> bool {
     kind <= OSC_777 && !text.is_empty() && text.len() <= MAX_TOAST && plain
 }
 
+/// Checks timeline entries: at most [`MAX_PAGE`] of [`ENTRY`] bytes, each of a kind ADR-0052
+/// defines, `command` to `exit`. Their fields are numbers the window bounds as it draws them.
+fn page(entries: &[u8]) -> Result<(), Error> {
+    let (entries, rest) = entries.as_chunks::<ENTRY>();
+    if !rest.is_empty() || entries.len() > usize::from(MAX_PAGE) {
+        return Err(Error::OutOfBounds {
+            field: "entries",
+            value: entries.len() as u64,
+        });
+    }
+    match entries.iter().find(|entry| !(1..=6).contains(&entry[0])) {
+        Some(entry) => Err(Error::BadTag {
+            field: "entry kind",
+            tag: entry[0],
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Whether a [`Notice::TimelineLabel`]'s text is well formed: at most [`MAX_LABEL`] bytes, free
+/// of control and bidi characters, and empty for a row no longer held.
+fn label(held: bool, text: &str) -> bool {
+    let plain = text.chars().all(|c| !c.is_control() && !bidi(c));
+    (held || text.is_empty()) && text.len() <= MAX_LABEL && plain
+}
+
+/// A checkpoint names where the rewind viewer starts, so only [`Tool::Rewind`] takes one.
+fn only_rewind(tool: Tool, checkpoint: Option<u32>) -> Result<(), Error> {
+    if checkpoint.is_some() && tool != Tool::Rewind {
+        return Err(Error::BadTag {
+            field: "tool",
+            tag: tool as u8,
+        });
+    }
+    Ok(())
+}
+
 /// Whether `character` reorders text: the bidi controls and marks.
 fn bidi(character: char) -> bool {
     matches!(
@@ -2854,7 +3182,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 26, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 27, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -3117,11 +3445,88 @@ mod tests {
             kind: PROGRESS_KIND,
             since: PROGRESS,
         };
-        assert_eq!(
-            at_oldest(progress),
-            Err(newer),
-            "a window of 25 never gets it"
-        );
+        // 26, the oldest spoken, has progress.
+        assert_eq!(at_oldest(progress), Ok(true));
+        let _ = newer;
+        // ADR-0052 slice 4: a window of 26 never gets a summary, a page, an entry, a label or
+        // the evicted refusal.
+        let entry = [6, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let timeline = [
+            Notice::Summary {
+                pane: 1,
+                started: 2,
+                ended: false,
+                commands: 3,
+                failed: 1,
+                approvals: 0,
+                denied: 0,
+                changed: 4,
+                errors: 1,
+            },
+            Notice::Timeline {
+                pane: 1,
+                run: 0,
+                started: 2,
+                dropped: 0,
+                total: 1,
+                entries: &entry,
+            },
+            Notice::TimelineEntry {
+                pane: 1,
+                seq: 0,
+                entry,
+            },
+            Notice::TimelineLabel {
+                pane: 1,
+                row: 9,
+                held: true,
+                text: "$ make",
+            },
+            Notice::Refused {
+                reason: Refusal::Evicted,
+            },
+        ];
+        for (notice, kind) in timeline.into_iter().zip([
+            SUMMARY,
+            TIMELINE_PAGE,
+            TIMELINE_ENTRY,
+            TIMELINE_LABEL,
+            REFUSED,
+        ]) {
+            let since = TIMELINE;
+            assert_eq!(at_oldest(notice), Err(Error::Newer { kind, since }));
+        }
+        // Nor does a core of 26 get the requests.
+        for (request, kind) in [
+            (
+                Request::Timeline {
+                    pane: 1,
+                    watch: true,
+                    before: None,
+                    count: MAX_PAGE,
+                },
+                TIMELINE_ASK,
+            ),
+            (Request::RevealStored { pane: 1, number: 9 }, REVEAL_STORED),
+            (
+                Request::OpenTool {
+                    pane: 1,
+                    tool: Tool::Rewind,
+                    checkpoint: Some(2),
+                },
+                OPEN_TOOL,
+            ),
+        ] {
+            let mut wire = raw(HELLO, &OLDEST.to_le_bytes());
+            request.encode(&mut wire).unwrap();
+            let (mut decoder, mut input) = (Decoder::default(), wire.as_slice());
+            decoder.next_request(&mut input).unwrap();
+            let since = TIMELINE;
+            assert_eq!(
+                decoder.next_request(&mut input),
+                Err(Error::Newer { kind, since })
+            );
+        }
         assert_eq!(at_oldest(COLOURS_SEED), Ok(true));
         let secrets = Notice::Secrets {
             count: 1,
@@ -3159,6 +3564,7 @@ mod tests {
         let open = Request::OpenTool {
             pane: 2,
             tool: Tool::Rewind,
+            checkpoint: None,
         };
         open.encode(&mut wire).unwrap();
         let (mut decoder, mut input) = (Decoder::default(), wire.as_slice());
@@ -3193,6 +3599,151 @@ mod tests {
         let mut input = wire.as_slice();
         decoder.next_request(&mut input).unwrap();
         assert_eq!(decoder.next_request(&mut input), Ok(Some(PALETTE_SEED)));
+    }
+
+    /// ADR-0052 slice 4: a page is at most 64 entries of known kinds, a label is plain and cut,
+    /// and a checkpoint goes with the rewind viewer only.
+    #[test]
+    fn timeline_messages_refuse_oversized_and_malformed_bodies() {
+        let read_notice = |wire: Vec<u8>| {
+            let wire = [HELLO_WIRE.as_slice(), &wire].concat();
+            let (mut decoder, mut input) = (Decoder::default(), wire.as_slice());
+            decoder.next_notice(&mut input).unwrap();
+            decoder.next_notice(&mut input).map(|_| ())
+        };
+        let read_request = |wire: Vec<u8>| {
+            let wire = [HELLO_WIRE.as_slice(), &wire].concat();
+            let (mut decoder, mut input) = (Decoder::default(), wire.as_slice());
+            decoder.next_request(&mut input).unwrap();
+            decoder.next_request(&mut input).map(|_| ())
+        };
+        let head = [[1, 0, 0, 0]; 5].concat();
+        let mut command = [0; ENTRY];
+        command[0] = 1;
+        // 64 entries pass and 65 do not, from either side.
+        let full = command.repeat(usize::from(MAX_PAGE));
+        assert_eq!(
+            read_notice(raw(TIMELINE_PAGE, &[&head[..], &full].concat())),
+            Ok(())
+        );
+        let over = command.repeat(usize::from(MAX_PAGE) + 1);
+        let too_many = Error::OutOfBounds {
+            field: "entries",
+            value: 65,
+        };
+        assert_eq!(
+            read_notice(raw(TIMELINE_PAGE, &[&head[..], &over].concat())),
+            Err(too_many)
+        );
+        let page = |entries| Notice::Timeline {
+            pane: 1,
+            run: 1,
+            started: 1,
+            dropped: 0,
+            total: 65,
+            entries,
+        };
+        assert_eq!(page(&over).encode(&mut Vec::new()), Err(too_many));
+        // A part of an entry, or an unknown kind, is refused.
+        let short = [&head[..], &command[..ENTRY - 1]].concat();
+        assert!(matches!(
+            read_notice(raw(TIMELINE_PAGE, &short)),
+            Err(Error::OutOfBounds { .. })
+        ));
+        let mut unknown = command;
+        unknown[0] = 7;
+        let bad_kind = Error::BadTag {
+            field: "entry kind",
+            tag: 7,
+        };
+        let entry_body = [&[1, 0, 0, 0, 0, 0, 0, 0][..], &unknown].concat();
+        assert_eq!(read_notice(raw(TIMELINE_ENTRY, &entry_body)), Err(bad_kind));
+        assert_eq!(page(&unknown).encode(&mut Vec::new()), Err(bad_kind));
+        // A label with an escape or a bidi override, past the cap, or for an evicted row.
+        for (held, text) in [
+            (true, "rm \u{1b}[2J"),
+            (true, "a\u{202e}b"),
+            (false, "gone"),
+        ] {
+            let label = Notice::TimelineLabel {
+                pane: 1,
+                row: 2,
+                held,
+                text,
+            };
+            assert_eq!(label.encode(&mut Vec::new()), Err(Error::BadText));
+            let body = [
+                &[1, 0, 0, 0, 2, 0, 0, 0, u8::from(held)][..],
+                text.as_bytes(),
+            ]
+            .concat();
+            assert_eq!(read_notice(raw(TIMELINE_LABEL, &body)), Err(Error::BadText));
+        }
+        let long = "é".repeat(MAX_LABEL / 2 + 1);
+        let body = [&[1, 0, 0, 0, 2, 0, 0, 0, 1][..], long.as_bytes()].concat();
+        assert_eq!(read_notice(raw(TIMELINE_LABEL, &body)), Err(Error::BadText));
+        // A page over 64 is refused when asked, and a `before` must be flagged.
+        let ask = |count, flag, before: u32| {
+            let mut body = vec![1, 0, 0, 0, 1, count, flag];
+            body.extend_from_slice(&before.to_le_bytes());
+            raw(TIMELINE_ASK, &body)
+        };
+        assert_eq!(read_request(ask(MAX_PAGE, 1, 7)), Ok(()));
+        let over = Error::OutOfBounds {
+            field: "count",
+            value: 65,
+        };
+        assert_eq!(read_request(ask(MAX_PAGE + 1, 0, 0)), Err(over));
+        let asked = Request::Timeline {
+            pane: 1,
+            watch: false,
+            before: None,
+            count: MAX_PAGE + 1,
+        };
+        assert_eq!(asked.encode(&mut Vec::new()), Err(over));
+        assert!(matches!(
+            read_request(ask(1, 0, 7)),
+            Err(Error::OutOfBounds {
+                field: "before",
+                ..
+            })
+        ));
+        assert!(matches!(
+            read_request(ask(1, 2, 7)),
+            Err(Error::BadTag { .. })
+        ));
+        // Only the rewind viewer starts at a checkpoint, and a part of one is refused.
+        let diff = Request::OpenTool {
+            pane: 1,
+            tool: Tool::Diff,
+            checkpoint: Some(1),
+        };
+        let not_rewind = Error::BadTag {
+            field: "tool",
+            tag: Tool::Diff as u8,
+        };
+        assert_eq!(diff.encode(&mut Vec::new()), Err(not_rewind));
+        let open = |tool: Tool, tail: &[u8]| {
+            raw(OPEN_TOOL, &[&[1, 0, 0, 0, tool as u8][..], tail].concat())
+        };
+        assert_eq!(
+            read_request(open(Tool::Diff, &[1, 0, 0, 0])),
+            Err(not_rewind)
+        );
+        assert_eq!(read_request(open(Tool::Rewind, &[1, 0, 0, 0])), Ok(()));
+        assert_eq!(
+            read_request(open(Tool::Rewind, &[1, 0])),
+            Err(Error::Truncated)
+        );
+        // A version 26 core reads a checkpointless open as it always did.
+        let mut wire = Vec::new();
+        let plain = Request::OpenTool {
+            pane: 1,
+            tool: Tool::Rewind,
+            checkpoint: None,
+        };
+        plain.encode(&mut wire).unwrap();
+        assert_eq!(wire, open(Tool::Rewind, &[]));
     }
 
     /// ADR-0051: every version spoken gets a pane's times, whether it names its tab, and its
@@ -3702,7 +4253,7 @@ mod tests {
             let error = request_error(&raw(kind, body));
             assert!(matches!(error, Err(Error::BadTag { field: f, .. }) if f == field));
         }
-        let error = notice_error(&raw(REFUSED, &[11]));
+        let error = notice_error(&raw(REFUSED, &[12]));
         assert!(matches!(
             error,
             Err(Error::BadTag {
@@ -4418,7 +4969,9 @@ mod tests {
                 Request::MoveFocus { side },
                 Request::MoveBorder { side, cells },
                 Request::Zoom,
-                Request::OpenTool { pane, tool: if forward { Tool::Files } else { Tool::Diff } },
+                Request::OpenTool { pane, tool: if forward { Tool::Files } else { Tool::Diff }, checkpoint: None },
+                Request::OpenTool { pane, tool: Tool::Rewind, checkpoint: forward.then_some(pane) },
+                Request::RevealStored { pane, number: pane.rotate_left(7) },
                 Request::ListMarkdown { pane },
                 Request::WasRunningAnswer { pane, run: forward },
                 Request::Inbox { open: forward },
@@ -4467,6 +5020,70 @@ mod tests {
         }
 
         #[test]
+        fn timeline_messages_round_trip(
+            pane in any::<u32>(),
+            numbers in vec(any::<u32>(), 6),
+            ended in any::<bool>(),
+            kinds in vec(1_u8..=6, 0..=usize::from(MAX_PAGE)),
+            fields in vec(any::<u8>(), ENTRY - 1),
+            text in "[^\\p{Cc}\u{61c}\u{200e}\u{200f}\u{202a}-\u{202e}\u{2066}-\u{2069}]{0,80}",
+            before in proptest::option::of(any::<u32>()),
+            count in 0..=MAX_PAGE,
+            chunk in chunks(),
+        ) {
+            let entries: Vec<u8> = kinds
+                .iter()
+                .flat_map(|kind| std::iter::once(*kind).chain(fields.iter().copied()))
+                .collect();
+            let mut entry = [0; ENTRY];
+            entry.copy_from_slice(entries.get(..ENTRY).unwrap_or(&[3; ENTRY]));
+            let held = !text.is_empty() || ended;
+            for notice in [
+                Notice::Summary {
+                    pane,
+                    started: numbers[0],
+                    ended,
+                    commands: numbers[1],
+                    failed: numbers[2],
+                    approvals: numbers[3],
+                    denied: numbers[4],
+                    changed: numbers[5],
+                    errors: numbers[0] ^ numbers[1],
+                },
+                Notice::Timeline {
+                    pane,
+                    run: numbers[0],
+                    started: numbers[1],
+                    dropped: numbers[2],
+                    total: numbers[3],
+                    entries: &entries,
+                },
+                Notice::TimelineEntry { pane, seq: numbers[4], entry },
+                Notice::TimelineLabel { pane, row: numbers[5], held, text: if held { &text } else { "" } },
+            ] {
+                prop_assert!(notice_survives(&notice, chunk), "changed on the link");
+            }
+            let request = Request::Timeline { pane, watch: ended, before, count };
+            prop_assert!(request_survives(request, chunk), "changed on the link");
+        }
+
+        #[test]
+        fn timeline_bodies_never_panic_the_decoder(
+            kind in prop::sample::select(&[TIMELINE_PAGE, TIMELINE_ENTRY, TIMELINE_LABEL, SUMMARY][..]),
+            ask in prop::sample::select(&[TIMELINE_ASK, REVEAL_STORED, OPEN_TOOL][..]),
+            body in vec(any::<u8>(), 0..1200),
+        ) {
+            let notice = [HELLO_WIRE.as_slice(), &raw(kind, &body)].concat();
+            let (mut decoder, mut input) = (Decoder::default(), notice.as_slice());
+            decoder.next_notice(&mut input).unwrap();
+            let _ = decoder.next_notice(&mut input);
+            let request = [HELLO_WIRE.as_slice(), &raw(ask, &body)].concat();
+            let (mut decoder, mut input) = (Decoder::default(), request.as_slice());
+            decoder.next_request(&mut input).unwrap();
+            let _ = decoder.next_request(&mut input);
+        }
+
+        #[test]
         fn a_refusal_round_trips(
             reason in prop::sample::select(
                 &[
@@ -4480,6 +5097,8 @@ mod tests {
                     Refusal::NotAgent,
                     Refusal::Protected,
                     Refusal::ProfileChanged,
+                    Refusal::Folder,
+                    Refusal::Evicted,
                 ][..],
             ),
             chunk in chunks(),

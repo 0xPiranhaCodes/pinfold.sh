@@ -1780,7 +1780,11 @@ fn send_window(tool: pinfold_proto::link::Tool, ask: impl Fn(&mut Link, &Path) -
     assert!(link.resize(24, 80));
     until(&mut link, |link| link.is_greeted()).unwrap();
     until(&mut link, |_| directory.join("ready").exists()).unwrap();
-    assert!(link.send(Request::OpenTool { pane: 0, tool }));
+    assert!(link.send(Request::OpenTool {
+        pane: 0,
+        tool,
+        checkpoint: None,
+    }));
     let first = ask(&mut link, directory);
     assert_eq!(
         (first.caller, first.target, first.action),
@@ -4234,7 +4238,8 @@ fn rewind_palette_window_process() {
     let shell = pinfold_proto::link::Tool::Rewind;
     assert!(link.send(Request::OpenTool {
         pane: 0,
-        tool: shell
+        tool: shell,
+        checkpoint: None,
     }));
     let mut refused = None;
     until(&mut link, |link| {
@@ -4247,6 +4252,7 @@ fn rewind_palette_window_process() {
     let open = Request::OpenTool {
         pane: 1,
         tool: pinfold_proto::link::Tool::Rewind,
+        checkpoint: None,
     };
     assert!(link.speaks(&open) && link.send(open));
     until(&mut link, |link| {

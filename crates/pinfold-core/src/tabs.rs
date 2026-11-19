@@ -303,7 +303,8 @@ impl Reactor {
                 self.split(pane as usize, command, way)?;
                 false
             }
-            Request::OpenTool { pane, tool } => {
+            // The checkpoint a timeline entry names is ADR-0052 slice 4's core side.
+            Request::OpenTool { pane, tool, .. } => {
                 self.open_tool(pane as usize, tool)?;
                 false
             }

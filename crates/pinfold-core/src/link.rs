@@ -1554,6 +1554,10 @@ mod tests {
                             error,
                         } => self.restored.push((undid, skipped, error.to_owned())),
                         Notice::Unhardened { checked } => self.unhardened.push(checked),
+                        Notice::Summary { .. }
+                        | Notice::Timeline { .. }
+                        | Notice::TimelineEntry { .. }
+                        | Notice::TimelineLabel { .. } => {}
                         Notice::Secrets { count, names } => {
                             self.secrets.push((count, names.to_owned()));
                         }
@@ -1841,7 +1845,7 @@ mod tests {
     /// ADR-0051 §9: progress reaches the window on change only, a pass at most once a second, so
     /// a flood of 40 changes in under a second arrives as at most two notices ending in the
     /// last; the held one sets a deadline, and once sent none is left. An exit clears it. A
-    /// window of 25 never hears it and no deadline is set for it.
+    /// window of 26, the oldest spoken since link 27, hears it too.
     #[test]
     fn progress_is_sent_on_change_once_a_second_and_an_exit_clears_it() {
         let mut reactor = Reactor::new().unwrap();
@@ -1878,14 +1882,9 @@ mod tests {
         let script = "printf '\\033]9;4;1;50\\007'; echo set; sleep 30";
         let older = reactor.spawn(shell(script), 24, 80).unwrap();
         let mut peer = Peer::older(&mut reactor, OLDEST);
-        serve(&mut reactor, &mut peer, |r, _| on_screen(r, older, "set"));
-        for _ in 0..3 {
-            reactor.turn(Some(Duration::from_millis(50))).unwrap();
-        }
-        peer.read();
-        assert_ne!(reactor.osc_progress(older), 0);
-        assert!(peer.progress.is_empty(), "a window of 25 never gets it");
-        assert_eq!(reactor.host.deadline(), None);
+        let set = (older as u32, link::progress(link::NORMAL, 50));
+        serve(&mut reactor, &mut peer, |_, p| p.progress.contains(&set));
+        assert!(turn_until(&mut reactor, |r| r.host.deadline().is_none()));
 
         // A due time already past waits for a stalled socket to drain, rather than spin.
         let past = Instant::now() - PROGRESS_GAP;

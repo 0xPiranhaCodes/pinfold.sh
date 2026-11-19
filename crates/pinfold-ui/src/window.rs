@@ -209,6 +209,7 @@ fn publish(link: &mut Link, shown: &mut Shown) -> bool {
         shown.rewind = link.speaks(&proto::Request::OpenTool {
             pane: 0,
             tool: proto::Tool::Rewind,
+            checkpoint: None,
         });
         shown.laid = true;
     }
@@ -1242,10 +1243,12 @@ impl App {
             Command::OpenFiles => proto::Request::OpenTool {
                 pane,
                 tool: proto::Tool::Files,
+                checkpoint: None,
             },
             Command::OpenDiff => proto::Request::OpenTool {
                 pane,
                 tool: proto::Tool::Diff,
+                checkpoint: None,
             },
             // The picker opens when the core answers with the names.
             Command::OpenMarkdown => proto::Request::ListMarkdown { pane },
@@ -1280,6 +1283,7 @@ impl App {
             Command::Rewind => proto::Request::OpenTool {
                 pane,
                 tool: proto::Tool::Rewind,
+                checkpoint: None,
             },
         };
         self.core(request);
@@ -3133,7 +3137,7 @@ mod tests {
             assert!(
                 matches!(
                     sent[..],
-                    [Request::Core(proto::Request::OpenTool { pane: 1, tool: sent })] if sent == tool
+                    [Request::Core(proto::Request::OpenTool { pane: 1, tool: sent, checkpoint: None })] if sent == tool
                 ),
                 "{query}"
             );
@@ -3180,7 +3184,8 @@ mod tests {
             sent[..],
             [Request::Core(proto::Request::OpenTool {
                 pane: 1,
-                tool: proto::Tool::Rewind
+                tool: proto::Tool::Rewind,
+                checkpoint: None
             })]
         ));
     }
@@ -3242,7 +3247,7 @@ mod tests {
             assert!(
                 matches!(
                     sent[..],
-                    [Request::Core(proto::Request::OpenTool { pane: 1, tool: sent })] if sent == tool
+                    [Request::Core(proto::Request::OpenTool { pane: 1, tool: sent, checkpoint: None })] if sent == tool
                 ),
                 "{key}"
             );

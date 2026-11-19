@@ -505,10 +505,16 @@ impl State {
                     None => self.approvals.push(owned),
                 }
             }
+            // The timeline's notices come only when asked, and the overlay that asks is ADR-0052's
+            // slice 5.
             Notice::Copied { .. }
             | Notice::WasRunning { .. }
             | Notice::InboxExtra { .. }
-            | Notice::Outside { .. } => {}
+            | Notice::Outside { .. }
+            | Notice::Summary { .. }
+            | Notice::Timeline { .. }
+            | Notice::TimelineEntry { .. }
+            | Notice::TimelineLabel { .. } => {}
         }
         Ok(())
     }
