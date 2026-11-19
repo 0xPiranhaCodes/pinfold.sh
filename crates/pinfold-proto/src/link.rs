@@ -39,7 +39,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode, Palette};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 24;
+pub const VERSION: u16 = 25;
 
 /// The oldest version this side still speaks, one before [`VERSION`] (ADR-0043).
 pub const OLDEST: u16 = VERSION - 1;
@@ -65,13 +65,35 @@ const INBOX_EXTRA: u16 = 20;
 /// (ADR-0051, slice 9).
 pub const AGENT_FILES: u16 = 21;
 
+/// The first version with [`ApprovalAction::Rewind`], [`Notice::Checkpoint`] and
+/// [`Notice::Restored`] (ADR-0050).
+pub const REWIND: u16 = 23;
+
+/// The first version with [`Tool::Rewind`], the palette's "Rewind agent changes" (ADR-0050,
+/// slice 7).
+pub const REWIND_VIEW: u16 = 24;
+
+/// Why a run has no checkpoint, by [`Notice::Checkpoint`]'s `missing`: the words the strip shows
+/// after `no checkpoint ·`, none for 0, which clears it (ADR-0050 section 4).
+pub const MISSING: [&str; 6] = [
+    "",
+    "took over wait_s",
+    "git not found",
+    "the take failed",
+    "too many runs",
+    "busy",
+];
+
+/// The longest error a [`Notice::Restored`] carries, written by the core and naming no path.
+pub const MAX_RESTORE_ERROR: usize = 200;
+
 /// The first version with [`Notice::Outside`], [`Request::OpenTabIn`] and
 /// [`Refusal::Folder`] (ADR-0051, slice 10).
 pub const OUTSIDE: u16 = 22;
 
 /// The first version with [`Notice::Toast`] and [`Request::Toasts`] (ADR-0051 §9, slice 11).
-/// 23 is ADR-0050's.
-pub const TOAST: u16 = 24;
+/// 23 and 24 are ADR-0050's.
+pub const TOAST: u16 = 25;
 
 /// The most bytes of a [`Notice::Toast`]'s text: 120 cells of four-byte characters.
 pub const MAX_TOAST: usize = 480;
@@ -256,7 +278,8 @@ const SECRETS: u8 = 16;
 const WEBHOOK: u8 = 17;
 const INBOX_EXTRA_KIND: u8 = 18;
 const OUTSIDE_KIND: u8 = 19;
-// 20 and 21 are ADR-0050's.
+const CHECKPOINT: u8 = 20;
+const RESTORED: u8 = 21;
 const TOAST_KIND: u8 = 22;
 /// [`Notice::InboxExtra`]'s `ctx` byte when it has none.
 const NO_CTX: u8 = 255;
@@ -402,6 +425,9 @@ pub enum Tool {
     Files,
     /// `pinfold diff`, the git diff viewer.
     Diff,
+    /// The diff viewer on the run in the pane, since its launch checkpoint, which the core picks
+    /// (ADR-0050 section 6). Since [`REWIND_VIEW`].
+    Rewind,
 }
 
 /// Which way a search runs.
@@ -451,6 +477,12 @@ pub enum ApprovalAction {
     /// first text names the method and the rest what it touches; `caller` and `target` are 0.
     /// Only allowing once answers it.
     Owner,
+    /// Undo an agent run's changes from a checkpoint (ADR-0050 section 6). The texts, every one
+    /// escaped by the core, are the directory, when and why the checkpoint was taken, who asks,
+    /// the counts, notes, then each path shown, `! ` before one changed later and `  ` before
+    /// the rest, and `and N more`; `caller` is 0 and `target` the run's pane. Only allowing once
+    /// answers it. Since version 23.
+    Rewind,
 }
 
 impl ApprovalAction {
@@ -462,6 +494,7 @@ impl ApprovalAction {
             Self::Send => "send",
             Self::Trust => "trust",
             Self::Owner => "owner",
+            Self::Rewind => "rewind",
         }
     }
 
@@ -469,7 +502,7 @@ impl ApprovalAction {
     /// batches with another prompt.
     #[must_use]
     pub const fn is_once(self) -> bool {
-        matches!(self, Self::Trust | Self::Owner)
+        matches!(self, Self::Trust | Self::Owner | Self::Rewind)
     }
 
     /// The first link version that carries it.
@@ -477,6 +510,7 @@ impl ApprovalAction {
     pub const fn since(self) -> u16 {
         match self {
             Self::Owner => 10,
+            Self::Rewind => REWIND,
             Self::Read | Self::Send | Self::Trust => OLDEST,
         }
     }
@@ -749,7 +783,7 @@ pub enum Request<'a> {
     },
     /// Whether `[alerts] program_notifications` is on, sent after the hello and on each change.
     /// The core starts with it off and turns it off when the window goes; off, it keeps and sends
-    /// no program notification text (ADR-0051 §9). Since version 24.
+    /// no program notification text (ADR-0051 §9). Since version 25.
     Toasts {
         /// Whether it is on now.
         on: bool,
@@ -925,7 +959,7 @@ pub enum Notice<'a> {
     /// A program's notification, OSC 9, 99 or 777, with `[alerts] program_notifications` on:
     /// cleaned of control and bidi characters and cut to 120 cells by the core, which keeps
     /// none of it once sent. At most one per pane per 10 s and one per 2 s in all. Never a state
-    /// (ADR-0051 §9). Since version 24.
+    /// (ADR-0051 §9). Since version 25.
     Toast {
         /// The pane that printed it.
         pane: u32,
@@ -949,6 +983,26 @@ pub enum Notice<'a> {
         /// [`MAX_STEPS`] bytes, none empty and none holding a control or bidi character. Since
         /// version 21; empty below it.
         steps: &'a str,
+    },
+    /// Why the run in a pane has no checkpoint, for the strip under it, sent when that changes:
+    /// an index into [`MISSING`], 0 once a later checkpoint succeeded (ADR-0050). Since version
+    /// 23.
+    Checkpoint {
+        /// The run's agent pane.
+        pane: u32,
+        /// Below the length of [`MISSING`].
+        missing: u8,
+    },
+    /// A `checkpoint.restore` the window allowed has ended, for its flash (ADR-0050). Since
+    /// version 23.
+    Restored {
+        /// Files written back or deleted.
+        undid: u32,
+        /// Files skipped as changed since shown, or failed.
+        skipped: u32,
+        /// Empty on success; otherwise the core's own words, at most [`MAX_RESTORE_ERROR`]
+        /// bytes and never a path.
+        error: &'a str,
     },
 }
 
@@ -1182,6 +1236,9 @@ impl Request<'_> {
     #[must_use]
     pub fn since(&self) -> u16 {
         match self {
+            Self::OpenTool {
+                tool: Tool::Rewind, ..
+            } => REWIND_VIEW,
             Self::OpenTool { .. } => 12,
             Self::ListMarkdown { .. } | Self::OpenMarkdown { .. } => 13,
             Self::Palette(_) => 14,
@@ -1430,7 +1487,7 @@ impl Request<'_> {
             },
             OPEN_TOOL => Request::OpenTool {
                 pane: body.u32()?,
-                tool: body.tag("tool", &[Tool::Files, Tool::Diff])?,
+                tool: body.tag("tool", &[Tool::Files, Tool::Diff, Tool::Rewind])?,
             },
             WAS_RUNNING_ANSWER => Request::WasRunningAnswer {
                 pane: body.u32()?,
@@ -1529,6 +1586,7 @@ impl Notice<'_> {
             | Self::Refused {
                 reason: Refusal::Folder,
             } => OUTSIDE,
+            Self::Checkpoint { .. } | Self::Restored { .. } => REWIND,
             Self::Refused {
                 reason:
                     Refusal::Gone
@@ -1701,6 +1759,29 @@ impl Notice<'_> {
                 OUTSIDE_KIND
             }
             Self::Activity { tabs, alerts } => put!(out, ACTIVITY, tabs, alerts),
+            Self::Checkpoint { pane, missing } => {
+                if usize::from(*missing) >= MISSING.len() {
+                    out.truncate(start);
+                    let (field, tag) = ("missing", *missing);
+                    return Err(Error::BadTag { field, tag });
+                }
+                put!(out, CHECKPOINT, pane, missing)
+            }
+            Self::Restored {
+                undid,
+                skipped,
+                error,
+            } => {
+                put!(out; undid);
+                put_tail(
+                    out,
+                    start,
+                    MAX_RESTORE_ERROR,
+                    RESTORED,
+                    *skipped,
+                    error.as_bytes(),
+                )?
+            }
             Self::Refused { reason } => {
                 out.push(*reason as u8);
                 REFUSED
@@ -1820,6 +1901,29 @@ impl Notice<'_> {
                 count: body.u32()?,
                 names: body.text()?,
             },
+            CHECKPOINT => {
+                let pane = body.u32()?;
+                let missing = body.u8()?;
+                if usize::from(missing) >= MISSING.len() {
+                    let (field, tag) = ("missing", missing);
+                    return Err(Error::BadTag { field, tag });
+                }
+                Notice::Checkpoint { pane, missing }
+            }
+            RESTORED => {
+                let (undid, skipped) = (body.u32()?, body.u32()?);
+                let error = body.text()?;
+                if error.len() > MAX_RESTORE_ERROR {
+                    return Err(Error::TooLarge {
+                        size: error.len() as u64,
+                    });
+                }
+                Notice::Restored {
+                    undid,
+                    skipped,
+                    error,
+                }
+            }
             WEBHOOK => Notice::Webhook {
                 sender: body.tag("sender", &[false, true])?,
                 failed: body.u32()?,
@@ -1991,6 +2095,7 @@ impl Notice<'_> {
                         ApprovalAction::Send,
                         ApprovalAction::Trust,
                         ApprovalAction::Owner,
+                        ApprovalAction::Rewind,
                     ],
                 )?;
                 let count = body.u16()?;
@@ -2677,7 +2782,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 24, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 25, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -2911,7 +3016,7 @@ mod tests {
             ctx: Some(64),
             steps: "Bash",
         };
-        // 21, the oldest spoken, has its context use and steps.
+        // The oldest spoken has its context use and steps too.
         assert_eq!(at_oldest(extra), Ok(true));
         let outside = Notice::Outside {
             index: 0,
@@ -2919,7 +3024,7 @@ mod tests {
             secs: 3,
             dir: "/work",
         };
-        // 23, the oldest spoken, has outside rows and their refusal.
+        // 24, the oldest spoken, has outside rows and their refusal.
         assert_eq!(at_oldest(outside), Ok(true));
         let folder = Notice::Refused {
             reason: Refusal::Folder,
@@ -2934,7 +3039,7 @@ mod tests {
             kind: TOAST_KIND,
             since: TOAST,
         };
-        assert_eq!(at_oldest(toast), Err(newer), "a window of 23 never gets it");
+        assert_eq!(at_oldest(toast), Err(newer), "a window of 24 never gets it");
         assert_eq!(at_oldest(COLOURS_SEED), Ok(true));
         let secrets = Notice::Secrets {
             count: 1,
@@ -2947,6 +3052,41 @@ mod tests {
             failed: 0,
         };
         assert_eq!(at_oldest(webhook), Ok(true));
+        // ADR-0050: a window a version older still gets a rewind prompt, a strip and a flash.
+        let rewind = Notice::Approval(Approval {
+            id: 1,
+            caller: 2,
+            target: 2,
+            action: ApprovalAction::Rewind,
+            texts: vec!["/work"],
+        });
+        let strip = Notice::Checkpoint {
+            pane: 2,
+            missing: 1,
+        };
+        let flash = Notice::Restored {
+            undid: 1,
+            skipped: 0,
+            error: "",
+        };
+        for notice in [rewind, strip, flash] {
+            assert_eq!(at_oldest(notice), Ok(true));
+        }
+        // 24, the oldest spoken, opens the viewer on a run too.
+        let mut wire = raw(HELLO, &OLDEST.to_le_bytes());
+        let open = Request::OpenTool {
+            pane: 2,
+            tool: Tool::Rewind,
+        };
+        open.encode(&mut wire).unwrap();
+        let (mut decoder, mut input) = (Decoder::default(), wire.as_slice());
+        decoder.next_request(&mut input).unwrap();
+        assert_eq!(
+            decoder
+                .next_request(&mut input)
+                .map(|request| request.is_some()),
+            Ok(true)
+        );
         // Nothing is new in 16 but a layout, so a stand-in `since` checks the gate.
         let mut wire = raw(HELLO, &OLDEST.to_le_bytes());
         Notice::Raise.encode(&mut wire).unwrap();
@@ -4304,6 +4444,35 @@ mod tests {
         }
 
         #[test]
+        fn a_checkpoint_strip_round_trips_and_an_unknown_reason_is_refused(
+            pane in any::<u32>(),
+            missing in any::<u8>(),
+            chunk in chunks(),
+        ) {
+            let notice = Notice::Checkpoint { pane, missing };
+            let known = usize::from(missing) < MISSING.len();
+            prop_assert_eq!(notice_survives(&notice, chunk), known);
+            let mut wire = HELLO_WIRE.to_vec();
+            wire.extend(raw(CHECKPOINT, &[&pane.to_le_bytes()[..], &[missing]].concat()));
+            let mut input = wire.as_slice();
+            let mut decoder = Decoder::default();
+            decoder.next_notice(&mut input).unwrap();
+            prop_assert_eq!(decoder.next_notice(&mut input).is_ok(), known);
+        }
+
+        #[test]
+        fn a_restore_result_round_trips_only_with_a_short_error(
+            undid in any::<u32>(),
+            skipped in any::<u32>(),
+            error in ".{0,80}",
+            chunk in chunks(),
+        ) {
+            let short = error.len() <= MAX_RESTORE_ERROR;
+            let notice = Notice::Restored { undid, skipped, error: &error };
+            prop_assert_eq!(notice_survives(&notice, chunk), short);
+        }
+
+        #[test]
         fn webhook_round_trips(host in any::<String>(), sender in any::<bool>(), failed in any::<u32>(), chunk in chunks()) {
             let notice = Notice::Webhook { host: &host, sender, failed };
             prop_assert!(notice_survives(&notice, chunk), "changed on the link");
@@ -4441,7 +4610,7 @@ mod tests {
             caller in any::<u32>(),
             target in any::<u32>(),
             action in prop::sample::select(
-                &[ApprovalAction::Read, ApprovalAction::Send, ApprovalAction::Trust, ApprovalAction::Owner][..]
+                &[ApprovalAction::Read, ApprovalAction::Send, ApprovalAction::Trust, ApprovalAction::Owner, ApprovalAction::Rewind][..]
             ),
             owned in vec(".{0,32}", 0..4),
             chunk in chunks(),

@@ -192,7 +192,7 @@ impl Confirm {
     /// Draws the prompt over the bottom of the pane area, as a trust prompt is drawn.
     pub fn draw(&self, frame: &mut Frame, theme: &Theme) {
         let lines = self.lines(usize::from(frame.columns));
-        draw(frame, &lines, ("y send once", "n/Esc cancel"), theme);
+        draw(frame, &lines, &[], ("y send once", "n/Esc cancel"), theme);
     }
 }
 
@@ -241,7 +241,7 @@ impl OpenIn {
     /// Draws the prompt over the bottom of the pane area, as a trust prompt is drawn.
     pub fn draw(&self, frame: &mut Frame, theme: &Theme) {
         let lines = self.lines(usize::from(frame.columns));
-        draw(frame, &lines, ("y open once", "n/Esc cancel"), theme);
+        draw(frame, &lines, &[], ("y open once", "n/Esc cancel"), theme);
     }
 }
 
@@ -268,6 +268,7 @@ fn lines(prompt: &Approval, queued: usize, columns: usize) -> Vec<String> {
         ApprovalAction::Send => "send to",
         ApprovalAction::Trust => return trust_lines(prompt, queued, columns),
         ApprovalAction::Owner => return owner_lines(prompt, queued, columns),
+        ApprovalAction::Rewind => return rewind_lines(prompt, queued, columns).0,
     };
     let border = format!("{:─<columns$}", "── PinFold approval ");
     let mut lines: Vec<String> = vec![border.chars().take(columns.max(1)).collect()];
@@ -344,6 +345,64 @@ fn owner_lines(prompt: &Approval, queued: usize, columns: usize) -> Vec<String> 
     lines
 }
 
+/// A rewind prompt as rows (ADR-0050 section 6): a border, the directory and since when, who
+/// asks, the counts and notes, then each path, wrapped, and whether each row is red: a path
+/// changed later, probably by the person. The core escaped every text; the directory and paths,
+/// which name files an agent chose, are shown as [`visible`] shows a send.
+fn rewind_lines(prompt: &Approval, queued: usize, columns: usize) -> (Vec<String>, Vec<bool>) {
+    let border = format!("{:─<columns$}", "── PinFold rewind ");
+    let mut lines: Vec<String> = vec![border.chars().take(columns.max(1)).collect()];
+    let text = |at: usize| prompt.texts.get(at).map_or("", String::as_str);
+    let mut head = format!(
+        " ◆ needs you  Undo changes in {} {}",
+        visible(text(0)),
+        text(1)
+    );
+    if queued > 1 {
+        let _ = write!(head, " (1 of {queued})");
+    }
+    head.push('?');
+    lines.extend(wrap(&head, columns));
+    let mut red = vec![false; lines.len()];
+    for line in prompt.texts.iter().skip(2) {
+        let (shown, flagged) = match (line.strip_prefix("! "), line.strip_prefix("  ")) {
+            (Some(path), _) => (format!("  {}", visible(path)), true),
+            (_, Some(path)) => (format!("  {}", visible(path)), false),
+            _ => (line.clone(), false),
+        };
+        let rows = wrap(&shown, columns);
+        red.extend(std::iter::repeat_n(flagged, rows.len()));
+        lines.extend(rows);
+    }
+    (lines, red)
+}
+
+/// A `Rewind` prompt at its largest: the core's texts with 10 paths of 256 bytes, changed later
+/// every other one, for `cargo xtask mem-gate` and the snapshot (ADR-0050).
+pub fn largest_rewind() -> Approval {
+    let mut texts = vec![
+        "/Users/me/work/pinfold".to_owned(),
+        "since 12 min ago (launch)".to_owned(),
+        "asked by the tool in pane 3".to_owned(),
+        "restore 5 · delete 3 the agent added · bring back 2 it deleted · 2 changed later"
+            .to_owned(),
+        "the agent is still running, and may change these files again".to_owned(),
+    ];
+    for n in 0..10 {
+        let mark = if n % 2 == 0 { "!" } else { " " };
+        let path = format!("src/{n}/{}", "a".repeat(250));
+        texts.push(format!("{mark} restore {path}"));
+    }
+    texts.push("and 30 more".to_owned());
+    Approval {
+        id: 1,
+        caller: 0,
+        target: 3,
+        action: ApprovalAction::Rewind,
+        texts,
+    }
+}
+
 pub(crate) fn wrap(text: &str, columns: usize) -> Vec<String> {
     let characters: Vec<char> = text.chars().collect();
     characters
@@ -362,22 +421,36 @@ pub fn fits(prompt: &Approval, queued: usize, rows: u16, columns: u16) -> bool {
 /// row, and the key legend on its own chrome row, which is never cut. The legend says how many
 /// rows above are the prompt's. A request too long to show whole offers only denial.
 fn banner(frame: &mut Frame, prompt: &Approval, queued: usize, theme: &Theme) {
-    let lines = lines(prompt, queued, usize::from(frame.columns));
+    let (lines, red) = match prompt.action {
+        ApprovalAction::Rewind => rewind_lines(prompt, queued, usize::from(frame.columns)),
+        _ => (
+            lines(prompt, queued, usize::from(frame.columns)),
+            Vec::new(),
+        ),
+    };
     let keys = match prompt.action {
         ApprovalAction::Trust => ("y trust", "n/Esc don't trust"),
         ApprovalAction::Owner => ("y allow once", "n/Esc deny"),
+        ApprovalAction::Rewind => ("y undo once", "n/Esc keep the files"),
         ApprovalAction::Read | ApprovalAction::Send => {
             ("y allow once · a allow 30 min", "n/Esc deny")
         }
     };
-    draw(frame, &lines, keys, theme);
+    draw(frame, &lines, &red, keys, theme);
 }
 
-/// Mutes every pane cell, draws `lines` over the bottom of the pane area, and the `allow` and
-/// `deny` keys on a legend row that is never cut. Lines too many to show whole offer only deny.
-fn draw(frame: &mut Frame, lines: &[String], (allow, deny): (&str, &str), theme: &Theme) {
+/// Mutes every pane cell, draws `lines` over the bottom of the pane area, each one `red` says
+/// in red, and the `allow` and `deny` keys on a legend row that is never cut. Lines too many to
+/// show whole offer only deny.
+fn draw(
+    frame: &mut Frame,
+    lines: &[String],
+    red: &[bool],
+    (allow, deny): (&str, &str),
+    theme: &Theme,
+) {
     let (ground, text) = (theme.chrome.overlay, theme.prompt_text());
-    let (amber, red) = (theme.states.needs_you, theme.states.error);
+    let (amber, red_colour) = (theme.states.needs_you, theme.states.error);
     let columns = usize::from(frame.columns);
     let rows = usize::from(frame.rows);
     for cell in &mut frame.cells {
@@ -390,7 +463,11 @@ fn draw(frame: &mut Frame, lines: &[String], (allow, deny): (&str, &str), theme:
         let Some(cells) = frame.cells.get_mut(start..start + columns) else {
             break;
         };
-        let colour = if offset <= 1 { amber } else { text };
+        let colour = match offset {
+            0 | 1 => amber,
+            _ if red.get(offset) == Some(&true) => red_colour,
+            _ => text,
+        };
         let mut characters = line.chars();
         for cell in cells {
             *cell = Cell {
@@ -410,7 +487,7 @@ fn draw(frame: &mut Frame, lines: &[String], (allow, deny): (&str, &str), theme:
             format!(
                 " ✕ too long to show whole; only {deny} is offered · the {shown} rows above are this prompt"
             ),
-            red,
+            red_colour,
         )
     };
     paste::row(frame, &[legend], theme);
@@ -443,6 +520,30 @@ mod tests {
     use super::*;
     use pinfold_config::theme::GRAPHITE;
     use pinfold_proto::Cell;
+
+    #[test]
+    fn a_rewind_prompt_is_answered_once_and_never_for_thirty_minutes() {
+        let mut queue = Queue::default();
+        queue.focus(true);
+        assert_eq!(queue.add(largest_rewind()), None);
+        let mut frame = Frame {
+            rows: 40,
+            columns: 120,
+            ..Frame::default()
+        };
+        let start = Instant::now();
+        queue.draw(&mut frame, start, &GRAPHITE);
+        let later = start + ARMED_AFTER;
+        let a = Key::Character("a".into());
+        assert_eq!(queue.key(&a, later, 40, 120), None, "no lasting grant");
+        let y = Key::Character("y".into());
+        assert_eq!(queue.key(&y, start, 40, 120), None, "not armed yet");
+        assert_eq!(
+            queue.key(&y, later, 40, 120),
+            Some((1, ApprovalAnswer::AllowOnce))
+        );
+        assert!(queue.is_empty());
+    }
 
     #[test]
     fn only_the_documented_keys_answer() {

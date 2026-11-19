@@ -591,3 +591,76 @@ section 7's 48-byte record holds a store key but no path, and later takes need t
 7. **Scopes** (section 7). A caller in a pane reaches a run if it is the run's pane, reaches
    that pane as `children` while it is open, or launched it; a terminal outside every pane
    reaches any run of this core.
+
+## Amendment 2026-11-18, slice 6 as built
+
+Decided by the coordinator for the maintainer while building `checkpoint.restore`, the prompt
+and the strip:
+
+1. **`plan` and `restore` take `--key <key>`** and read the directory from `<store>/dir`, as a
+   later take does (slice 5, decision 1). The core always passes `--key`; `-- <dir>` stays for a
+   person at a terminal, with the same refusals.
+2. **`plan` names what the prompt shows**: its line adds `dir`, cut to 256 bytes, and checkpoint
+   `c`'s `reason` and `time` from its commit message, a reason outside take's list read as
+   `unknown`. All three come from the store, never from an agent's text, and are cut before the
+   line is fitted to 4 KiB. The core escapes each text and cuts it to 256 characters again.
+3. **`Notice::Restored { undid, skipped, error }`** carries the result flash: `undid` is
+   restored plus deleted, and `error`, at most 200 bytes, is one of the core's fixed phrases,
+   never a path or a word of a child's output, so a hostile commit message cannot reach it.
+4. **Who may ask** (section 7). A tool pane reaches any run of this core, as a terminal outside
+   every pane does. An agent pane, and a plain shell pane, are refused before any prompt, even
+   for their own run. Every restore still waits on the window's prompt whoever asks, so a tool
+   pane adds reach but no authority.
+5. **Waiting.** The plan has 10 s, the prompt 60 s and the restore 60 s, so the server and the
+   client's `ask` wait `RESTORE_WAIT`, 132 s. A client that gives up first leaves no restore
+   unseen: an unanswered prompt closes at 60 s, and a restore that runs still reaches the
+   window's flash.
+6. **The strip** under an agent's pane reads `no checkpoint · <missing>` in the muted chrome
+   colour, not in yellow as sections 4 and 6 say: in Graphite Grid ANSI yellow is `f5b544`,
+   the ◆ needs-you amber, whose meaning is reserved, and the strip is information, not a call
+   to act. The core tells the window
+   each live run's `missing` once and again when it changes, and again to a new window; the
+   window keeps a pane's entry only while it is not 0, at most one per pane.
+7. **Link version 23.** `ApprovalAction::Rewind`, `Notice::Checkpoint { pane, missing }` and
+   `Notice::Restored` have `since` 23, as 22 is the inbox's slice 10. ADR-0043 has the row.
+
+## Amendment 2026-11-19, slice 7 as built
+
+Decided by the coordinator for the maintainer while building the diff viewer on a checkpoint
+and `pinfold rewind`:
+
+1. **The viewer's arguments** (section 6). The core starts `pinfold diff --checkpoint -- <key>
+   <C> <N> <pane>`: the store by key, as slice 6's `plan` and `restore` take it, `C` and `N` as
+   `<run>/<n>`, and the agent's pane, which `checkpoint.restore` names. `tool.open`'s
+   `checkpoint` is `C`; the caller must reach the run as `checkpoint.take` does (slice 5,
+   decision 7), and a run whose agent never started is refused, both before the view take. The
+   view take shares `checkpoint.take`'s once in 30 s per run, so no caller takes checkpoints
+   faster this way; only the window's own entry, the person's, is not limited. The
+   server waits 62 s for it, as for a take. A session restore never brings a checkpoint viewer
+   back, as its view checkpoint lived with it.
+2. **The diff** is `git diff --no-renames` of the two commits through `git::store`, so each
+   file is one path a restore can name; the parser, caps and escaping are the existing ones.
+3. **`later`** marks each file `diff-tree -r --name-only -z` lists between the run's newest
+   `done` or `exit` checkpoint before `N` and `N`, streamed from an unlinked file in the store,
+   as `plan` reads it.
+4. **Nested repositories** come from the `skipped` lists of `C`'s and `N`'s commit messages,
+   reason `nested`, and follow the files. Selecting one says a rewind leaves it; `u` on one is
+   refused in the viewer.
+5. **`U`** sends no `paths`, meaning all, only when no file is `later` and the diff shows every
+   file; otherwise the shown files not `later`, at most 1,000, by name. The viewer refuses it
+   past that, when every file is `later`, or when the store's `later` list could not be read,
+   so it fails closed and never sends an empty list.
+6. **The view checkpoint goes when the viewer quits** with `q`, or fails to load, unless `u` or
+   `U` asked for a restore: its ref and stat list are deleted under the store's lock, waited for
+   up to 2 s, as the prune after every take holds it. A viewer killed by closing its pane leaves
+   it to `keep_per_run`.
+7. **`pinfold rewind [pane] [--checkpoint <n>] [--right | --down | --tab]`**: the run in the
+   caller's own pane, else in the agent pane focused last, as the viewer's `a` picks one; since
+   the run's oldest listed checkpoint, its launch one, unless `--checkpoint` names another. The
+   tool's `path` is the caller's working directory, which the viewer never reads.
+8. **The palette's Rewind Agent Changes** is `Tool::Rewind` on `Request::OpenTool`, link
+   version 24 (ADR-0043). The window offers it only on a core that speaks 24 with an agent
+   reported in the focused pane; the core picks the run in that pane and its launch
+   checkpoint, never the window, takes the view checkpoint without the API's rate limit, as the
+   person chose it, and opens the viewer right of the pane. A pane with no run, or a take that
+   fails, flashes `✕ error · <why>` and opens nothing.

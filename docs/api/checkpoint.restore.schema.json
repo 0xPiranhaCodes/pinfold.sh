@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "checkpoint.restore",
+  "description": "Undoes an agent run's changes since a checkpoint, as a view checkpoint showed them (ADR-0050). Only a tool pane or a terminal outside every pane may call it; an agent pane, or any other pane, is refused before any prompt. The core plans the restore from the store, never from the caller, and shows PinFold's own Rewind prompt in the window with the directory, the counts and up to 10 paths; only y in the window runs it, once. With no window, or a window too old to show the prompt, it is refused. One waiting restore per caller. Waits for the plan, the prompt and the restore, at most 132 s. Needs hello version 2. Never returns a path but those it skipped.",
+  "type": "object",
+  "properties": {
+    "params": {
+      "type": "object",
+      "required": ["pane", "checkpoint", "shown"],
+      "properties": {
+        "pane": { "type": "integer", "minimum": 0, "description": "The pane of the run, the agent's pane that agent.launch opened." },
+        "checkpoint": { "type": "string", "pattern": "^r[0-9]{1,20}-[0-9]{1,20}/[0-9]{1,20}$", "description": "The checkpoint to go back to, <run>/<n>, of the run in pane." },
+        "shown": { "type": "string", "pattern": "^r[0-9]{1,20}-[0-9]{1,20}/[0-9]{1,20}$", "description": "The view checkpoint the caller showed, of the same run. A file changed since it is skipped." },
+        "paths": { "type": "array", "minItems": 1, "maxItems": 1000, "items": { "type": "string", "minLength": 1 }, "description": "Paths relative to the run's directory, with no `..`. Left out, every path; an empty list is refused." }
+      }
+    },
+    "result": {
+      "type": "object",
+      "required": ["restored", "deleted", "skipped", "restore_checkpoint"],
+      "properties": {
+        "restored": { "type": "integer", "minimum": 0, "description": "Files and links written back or brought back." },
+        "deleted": { "type": "integer", "minimum": 0, "description": "Files the agent added, deleted." },
+        "skipped": { "type": "integer", "minimum": 0, "description": "Paths left as they were: changed since shown, or failed." },
+        "skipped_paths": { "type": "array", "maxItems": 10, "items": { "type": "array" }, "description": "Up to 10 [path, \"changed\" or \"failed\"]." },
+        "unlisted": { "type": "integer", "minimum": 0, "description": "Skipped paths not listed." },
+        "restore_checkpoint": { "type": "string", "description": "The checkpoint taken before the restore, <run>/<n>, which undoes it." }
+      },
+      "additionalProperties": false
+    }
+  }
+}

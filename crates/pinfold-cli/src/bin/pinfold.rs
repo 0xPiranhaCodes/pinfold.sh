@@ -37,6 +37,7 @@ Commands:
   up [dir]          Open a project's .pinfold/layout.toml as tabs and panes
   agent <name>      Open a pane running an agent profile from your config
   open <path>       Open a file in the markdown reader or a directory in the file manager
+  rewind [pane]     See and undo an agent's changes since it launched
   ctl list          List the session's panes
   ctl send          Type text into a pane
   ctl wait          Wait until a pane's command exits, it prints or it goes quiet
@@ -95,6 +96,29 @@ Options:
 Examples:
   pinfold agent claude
   pinfold agent codex --tab
+";
+
+const REWIND: &str = "\
+pinfold rewind: see and undo an agent's changes.
+
+Usage: pinfold rewind [pane] [--checkpoint <n>] [--right | --down | --tab]
+
+Run it in a PinFold pane. It opens the diff viewer beside that one on what the agent run in
+<pane> changed since its launch checkpoint, or since checkpoint <n>. In the viewer, u undoes the
+selected file and U every file not marked later; PinFold asks you first, in the window.
+
+Arguments:
+  [pane]  The agent's pane (default: this pane, else the agent pane focused last)
+
+Options:
+  --checkpoint <n>  Since the run's checkpoint <n> (default: its oldest, the launch one)
+  --right           Split to the right (the default)
+  --down            Split below
+  --tab             Open a new tab
+
+Examples:
+  pinfold rewind
+  pinfold rewind 3 --tab
 ";
 
 const OPEN: &str = "\
@@ -345,6 +369,7 @@ fn help(topic: &[&str]) -> Option<&'static str> {
         ["up"] => UP,
         ["agent"] => AGENT,
         ["open"] => OPEN,
+        ["rewind"] => REWIND,
         ["ctl"] => CTL,
         ["ctl", "list"] => LIST,
         ["ctl", "send"] => SEND,
@@ -818,6 +843,76 @@ fn open_tool(path: &str, place: &str) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// `pinfold rewind [pane] [--checkpoint <n>] [--right | --down | --tab]`: opens the diff
+/// viewer on an agent run's checkpoint, through `checkpoint.list` and `tool.open` (ADR-0050
+/// section 6). It starts no core.
+fn rewind(args: &[&str]) -> Result<(), Box<dyn Error>> {
+    let (mut pane, mut since, mut place) = (None, None, "right");
+    let mut words = args.iter();
+    while let Some(&word) = words.next() {
+        match word {
+            "--right" | "--down" | "--tab" => place = &word[2..],
+            "--checkpoint" => {
+                let n = words.next().and_then(|n| n.parse::<u64>().ok());
+                since = Some(n.ok_or_else(|| misuse("--checkpoint takes a number"))?);
+            }
+            _ if pane.is_none() => {
+                let number = word.parse::<u64>().ok();
+                pane = Some(number.ok_or_else(|| misuse("the pane must be a number"))?);
+            }
+            _ => return Err(misuse(wrong(&["rewind", word]))),
+        }
+    }
+    let (hello, listed) = control::list_panes(&running()?)?;
+    let own = hello["pane"]
+        .as_u64()
+        .ok_or("pinfold rewind runs in a PinFold pane")?;
+    let mut panes = vec![pane.unwrap_or(own)];
+    if pane.is_none() {
+        panes.extend(last_agent(own, &listed));
+    }
+    let mut refused = None;
+    for pane in panes {
+        let list = control::ask(&running()?, "checkpoint.list", &json!({"pane": pane}));
+        let listed = match list {
+            Ok((_, listed)) => listed,
+            Err(error) => {
+                refused.get_or_insert(error);
+                continue;
+            }
+        };
+        // Newest first, so the last is the oldest kept: the launch checkpoint.
+        let oldest = listed["checkpoints"].as_array().and_then(|all| all.last());
+        let oldest = oldest.and_then(|oldest| oldest["checkpoint"].as_str());
+        let oldest = oldest.ok_or("the run has no checkpoint")?;
+        let checkpoint = match (since, oldest.rsplit_once('/')) {
+            (Some(n), Some((run, _))) => format!("{run}/{n}"),
+            _ => oldest.to_owned(),
+        };
+        let path = std::env::current_dir()?;
+        let path = path
+            .to_str()
+            .ok_or_else(|| misuse("the directory is not UTF-8"))?;
+        let params =
+            json!({"tool": "diff", "path": path, "checkpoint": checkpoint, "place": place});
+        control::ask(&running()?, "tool.open", &params)?;
+        return Ok(());
+    }
+    Err(refused.map_or_else(|| "no agent run to rewind".into(), Into::into))
+}
+
+/// The agent pane focused last in `pane.list`'s result, other than `own`: one that is no tool
+/// and has had a status reported from inside it, as an agent's hooks report one.
+fn last_agent(own: u64, listed: &Value) -> Option<u64> {
+    let panes = listed["panes"].as_array()?;
+    panes
+        .iter()
+        .filter(|pane| pane["kind"].is_null() && pane["source"] == "reported")
+        .filter(|pane| pane["id"].as_u64().is_some_and(|id| id != own))
+        .max_by_key(|pane| pane["focused"].as_u64().unwrap_or(0))
+        .and_then(|pane| pane["id"].as_u64())
+}
+
 /// Whether the core refused a launch only because it has not yet read the user's `PATH`, which
 /// it does once, in the first seconds after it starts.
 fn reading_path(error: &control::Error) -> bool {
@@ -1100,6 +1195,7 @@ fn main() -> ExitCode {
         ["open", path] | ["open", path, "--right"] => open_tool(path, "right"),
         ["open", path, "--down"] => open_tool(path, "down"),
         ["open", path, "--tab"] => open_tool(path, "tab"),
+        ["rewind", ref rest @ ..] => rewind(rest),
         ["ctl", "list"] => list(false),
         ["ctl", "list", "--json"] => list(true),
         ["ctl", "send", pane, text] => send(pane, text),
@@ -1129,7 +1225,7 @@ fn main() -> ExitCode {
         ["ctl", "grants", "--json"] => grants(true),
         ["ctl", "grants", "revoke", id] => revoke(id),
         ["md" | "files" | "diff", ..] => match pinfold_tools::Command::parse(&words) {
-            Some(tool) => match tool.run() {
+            Some(tool) => match tool.run(pinfold_config::state_dir().as_deref()) {
                 Ok(true) => Ok(()),
                 Ok(false) => return ExitCode::FAILURE,
                 Err(error) => Err(error.into()),

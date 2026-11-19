@@ -173,6 +173,7 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                     "tool.open",
                     "checkpoint.take",
                     "checkpoint.list",
+                    "checkpoint.restore",
                 ],
                 (true, None) => &[
                     "window.open",
@@ -187,6 +188,7 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
                     "workspace.ask_trust",
                     "checkpoint.take",
                     "checkpoint.list",
+                    "checkpoint.restore",
                 ],
                 (false, _) => &["window.open"],
             };
@@ -275,14 +277,35 @@ fn immediate<T, C: pinfold_core::grants::Clock>(
         | Method::AgentLaunch(_)
         | Method::CheckpointTake { .. }
         | Method::CheckpointList { .. }
+        | Method::CheckpointRestore { .. }
         | Method::AuditRead { .. } => Err("not here".to_owned()),
     }
 }
 
-/// A launch whose agent waits for its checkpoint, or a checkpoint call waiting on a worker.
+/// A launch whose agent waits for its checkpoint, or a checkpoint call waiting on a worker: a
+/// take or list, a restore's plan, the restore the window allowed, or a `tool.open` of a
+/// checkpoint waiting on its view checkpoint.
 enum Parked {
     Launch(Request, Box<Prepared>),
     Call(Request),
+    Plan(Request),
+    Restore(Request),
+    View(Request),
+    /// The window's "Rewind agent changes" on the agent's pane, which no caller asked for.
+    Window(usize),
+}
+
+impl Parked {
+    fn request(&self) -> Option<&Request> {
+        Some(match self {
+            Self::Launch(request, _)
+            | Self::Call(request)
+            | Self::Plan(request)
+            | Self::Restore(request)
+            | Self::View(request) => request,
+            Self::Window(_) => return None,
+        })
+    }
 }
 
 /// An `agent.launch` checked and ready to start: its pane, directory and command are fixed.
@@ -545,15 +568,319 @@ fn checkpoint_call(
     }
 }
 
+/// `tool.open` of a run's checkpoint (ADR-0050 section 6): checked as `checkpoint.take` reaches
+/// a run and as `tool.open` opens a pane, then the run's `view` checkpoint is queued, and the
+/// viewer starts once it is taken, in [`viewed`].
+fn view_call(
+    reactor: &Reactor,
+    family: &mut Family,
+    rewind: Option<&mut Rewind<Parked>>,
+    log: &mut Log,
+    request: Request,
+) {
+    let Method::ToolOpen(open) = request.method() else {
+        return;
+    };
+    let own = request.caller().and_then(|caller| reactor.pane_of(caller));
+    let checked = (|| {
+        let rewind = rewind.ok_or("checkpoints are off: [rewind] enabled = false")?;
+        let own = own.ok_or("tool.open needs a caller in a pane")?;
+        family.reach(reactor, Some(own), open.of.unwrap_or(own))?;
+        family.contain(reactor, own, None)?;
+        reactor.tools().ok_or("the tools' binary is not known")?;
+        if !Path::new(&open.run.path).is_dir() {
+            return Err("files and diff open an existing directory");
+        }
+        let id = open
+            .run
+            .checkpoint
+            .as_deref()
+            .and_then(|id| id.rsplit_once('/'));
+        let run = id
+            .and_then(|(id, _)| rewind.of_id(id))
+            .ok_or("no such run")?;
+        let record = rewind.run(run).ok_or("no such run")?;
+        let pane = record.pane().ok_or("the run's agent never started")?;
+        if own != pane
+            && own != record.launcher()
+            && family.reach(reactor, Some(own), pane).is_err()
+        {
+            return Err("the run is neither the caller's own nor one it launched");
+        }
+        Ok((rewind, run))
+    })();
+    let (rewind, run) = match checked {
+        Ok(checked) => checked,
+        Err(reason) => return audit::reply(log, reactor, request, Err(reason.to_owned())),
+    };
+    // No caller takes checkpoints faster this way than with checkpoint.take.
+    let queued = rewind.view(run, Parked::View(request), Some(Instant::now()));
+    if let Err((Parked::View(request), reason)) = queued {
+        audit::reply(log, reactor, request, Err(reason.to_owned()));
+    }
+}
+
+/// Opens the viewer of a `tool.open` whose view checkpoint `taken` ended, or says why not.
+fn viewed(
+    reactor: &mut Reactor,
+    family: &mut Family,
+    rewind: &Rewind<Parked>,
+    request: &Request,
+    run: usize,
+    taken: Result<Value, String>,
+) -> Result<Value, String> {
+    let Method::ToolOpen(open) = request.method() else {
+        return Err("not here".to_owned());
+    };
+    let shown = taken.map_err(answered_error)?;
+    let shown = shown["checkpoint"].as_str().ok_or("no view checkpoint")?;
+    let own = request.caller().and_then(|caller| reactor.pane_of(caller));
+    let own = own.ok_or("tool.open needs a caller in a pane")?;
+    let record = rewind.run(run).ok_or("the run has gone")?;
+    let pane = record.pane().ok_or("the run has gone")?;
+    let binary = reactor.tools().ok_or("the tools' binary is not known")?;
+    let command = tool::rewind(binary, &open.run, &record.key(), shown, pane)?;
+    let of = open.of.unwrap_or(own);
+    let opened = family.spawn_command(reactor, own, of, way(open.place), None, command)?;
+    reactor.set_tool(opened, open.run.clone());
+    Ok(json!({"pane": opened}))
+}
+
+/// The window's "Rewind agent changes" on `pane` (ADR-0050 slice 7): the run's view
+/// checkpoint is queued, and the viewer opens since the launch checkpoint once it is taken. A
+/// pane with no run is refused with the window's flash, never an empty viewer.
+fn window_view(reactor: &mut Reactor, rewind: Option<&mut Rewind<Parked>>, pane: usize) {
+    let refused = match rewind.map(|rewind| (rewind.of_pane(pane), rewind)) {
+        None => "checkpoints are off",
+        Some((None, _)) => "no agent run in this pane",
+        Some((Some(run), rewind)) => match rewind.view(run, Parked::Window(pane), None) {
+            Ok(()) => return,
+            Err(_) => "the core is busy taking checkpoints",
+        },
+    };
+    reactor.tell_restored(0, 0, refused);
+}
+
+/// Opens the window's viewer of the run in `pane` once its view checkpoint `taken` ended, since
+/// the run's first checkpoint, its launch one, or flashes why not.
+fn window_viewed(
+    reactor: &mut Reactor,
+    rewind: &Rewind<Parked>,
+    pane: usize,
+    run: usize,
+    taken: &Result<Value, String>,
+) {
+    let opened = (|| {
+        let shown = taken.as_ref().ok()?["checkpoint"].as_str()?;
+        let record = rewind.run(run)?;
+        let launch = format!("{}/0", record.id());
+        reactor
+            .open_rewind(pane, &record.key(), &launch, shown)
+            .ok()
+    })();
+    if opened.is_none() {
+        reactor.tell_restored(0, 0, "the viewer could not open");
+    }
+}
+
+/// Whether `request` is a `checkpoint.restore` from `caller`.
+fn restore_from(request: &Request, caller: Option<pinfold_sys::Terminal>) -> bool {
+    matches!(request.method(), Method::CheckpointRestore { .. }) && request.caller() == caller
+}
+
+/// `checkpoint`'s number if it is a checkpoint of `run`, `<run>/<n>`.
+fn number_of(run: &rewind::Run, checkpoint: &str) -> Option<u32> {
+    let (id, n) = checkpoint.rsplit_once('/')?;
+    (id == run.id()).then(|| n.parse().ok())?
+}
+
+/// `checkpoint.restore` (ADR-0050 sections 6 and 7). Refused before any prompt unless the
+/// caller is a tool pane or a terminal outside every pane, the run is one of this core's and both
+/// checkpoints are its own, a window can show the `Rewind` prompt, and the caller has no other
+/// restore waiting. A tool pane reaches any run, as a terminal outside every pane does: the
+/// window's prompt still guards every restore. Then the plan is queued for a worker.
+fn restore_call(
+    reactor: &Reactor,
+    rewind: Option<&mut Rewind<Parked>>,
+    grants: &Grants<Request>,
+    log: &mut Log,
+    request: Request,
+) {
+    let Method::CheckpointRestore {
+        pane,
+        checkpoint,
+        shown,
+        paths,
+    } = request.method().clone()
+    else {
+        return;
+    };
+    let caller = request.caller();
+    let own = caller.and_then(|caller| reactor.pane_of(caller));
+    let tool = |own| {
+        reactor
+            .list()
+            .any(|listed| listed.id == own && listed.tool.is_some())
+    };
+    let checked = (|| {
+        let rewind = rewind.ok_or("checkpoints are off: [rewind] enabled = false")?;
+        caller.ok_or("checkpoint calls need a caller in a terminal")?;
+        if own.is_some_and(|own| !tool(own)) {
+            return Err("checkpoint.restore needs a tool pane or a terminal outside every pane");
+        }
+        let run = rewind.of_pane(pane).ok_or("no agent run in that pane")?;
+        let record = rewind.run(run).ok_or("no agent run in that pane")?;
+        let numbers = number_of(record, &checkpoint).zip(number_of(record, &shown));
+        let numbers = numbers.ok_or("the checkpoints are not that run's")?;
+        if !reactor.can_ask(ApprovalAction::Rewind) {
+            return Err("approval needs an open PinFold window");
+        }
+        let waiting = |parked: &Parked| parked.request().is_some_and(|r| restore_from(r, caller));
+        if grants.any(|ticket| restore_from(ticket, caller)) || rewind.any(waiting) {
+            return Err("a restore from this caller is already waiting");
+        }
+        Ok((rewind, run, numbers))
+    })();
+    let (rewind, run, numbers) = match checked {
+        Ok(checked) => checked,
+        Err(reason) => return audit::reply(log, reactor, request, Err(reason.to_owned())),
+    };
+    if let Err((parked, reason)) =
+        rewind.plan(run, numbers, paths.as_deref(), Parked::Plan(request))
+    {
+        let Parked::Plan(request) = parked else {
+            return;
+        };
+        audit::reply(log, reactor, request, Err(reason.to_owned()));
+    }
+}
+
+/// Asks the window about a restore whose plan ended, with texts from the store and never the
+/// caller, or refuses it. A caller that has gone is asked nothing.
+fn restore_planned(
+    reactor: &mut Reactor,
+    grants: &mut Grants<Request>,
+    log: &mut Log,
+    request: Request,
+    plan: Result<serde_json::Value, String>,
+) {
+    if request.is_gone() {
+        return;
+    }
+    let Method::CheckpointRestore { pane, .. } = request.method() else {
+        return;
+    };
+    let pane = *pane;
+    let plan = match plan {
+        Ok(plan) => plan,
+        Err(why) => return audit::reply(log, reactor, request, Err(answered_error(why))),
+    };
+    let own = request.caller().and_then(|caller| reactor.pane_of(caller));
+    let running = reactor
+        .status(pane)
+        .is_some_and(|(status, ..)| status == Status::Running);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| since.as_secs());
+    let texts = rewind::prompt_texts(&plan, own, running, now);
+    let ready = reactor.can_ask(ApprovalAction::Rewind);
+    match grants.ask_rewind(request, pane, texts, ready) {
+        Decision::Ask(prompt) if reactor.ask_approval(&prompt) => {}
+        Decision::Ask(prompt) => {
+            for released in grants.answer(prompt.id, ApprovalAnswer::Deny) {
+                let reason = "approval needs an open PinFold window".to_owned();
+                audit::reply(log, reactor, released.ticket, Err(reason));
+            }
+        }
+        Decision::Refuse(request, reason) => {
+            audit::reply(log, reactor, request, Err(reason.to_owned()));
+        }
+        Decision::Allow(request) => {
+            audit::reply(log, reactor, request, Err("not asked".to_owned()));
+        }
+    }
+}
+
+/// Queues the restore the window allowed, or answers one it refused, timed out or lost. Only the
+/// window's answer gets here.
+fn restore_answered(
+    reactor: &mut Reactor,
+    rewind: Option<&mut Rewind<Parked>>,
+    log: &mut Log,
+    released: Released<Request>,
+) {
+    let request = released.ticket;
+    if !released.allowed {
+        return audit::reply(log, reactor, request, Err(released.reason.to_owned()));
+    }
+    let Method::CheckpointRestore {
+        pane,
+        checkpoint,
+        shown,
+        paths,
+    } = request.method().clone()
+    else {
+        return;
+    };
+    // The run is found again, so a record reused while the prompt waited is never restored.
+    let queued = rewind.ok_or("checkpoints are off").and_then(|rewind| {
+        let run = rewind.of_pane(pane).ok_or("the run has gone")?;
+        let record = rewind.run(run).ok_or("the run has gone")?;
+        let numbers = number_of(record, &checkpoint).zip(number_of(record, &shown));
+        let numbers = numbers.ok_or("the run has gone")?;
+        Ok((rewind, run, numbers))
+    });
+    let failed = match queued {
+        Ok((rewind, run, numbers)) => {
+            match rewind.restore(run, numbers, paths.as_deref(), Parked::Restore(request)) {
+                Ok(()) => return,
+                Err((Parked::Restore(request), reason)) => (request, reason),
+                Err(_) => return,
+            }
+        }
+        Err(reason) => (request, reason),
+    };
+    let (request, reason) = failed;
+    reactor.tell_restored(0, 0, rewind::restore_error(reason));
+    audit::reply(log, reactor, request, Err(reason.to_owned()));
+}
+
+/// What a caller hears when checkpoint work failed: a path is never named.
+fn answered_error(why: String) -> String {
+    match why {
+        why if why == rewind::KILLED => "the checkpoint took over 60 s".to_owned(),
+        why if why.contains('/') && !why.starts_with("checkpoint r") => {
+            "the checkpoint was refused or failed".to_owned()
+        }
+        why => why,
+    }
+}
+
 /// Answers each launch and call whose checkpoint work ended.
 fn checkpoints_ended(
     reactor: &mut Reactor,
     family: &mut Family,
     rewind: &mut Rewind<Parked>,
+    grants: &mut Grants<Request>,
     log: &mut Log,
 ) {
     for ended in rewind.poll(Instant::now()) {
         match ended.payload {
+            Parked::Plan(request) => restore_planned(reactor, grants, log, request, ended.result),
+            Parked::Restore(request) => {
+                // The window's flash, whether or not the caller still waits.
+                match &ended.result {
+                    Ok(line) => {
+                        let count = |name: &str| {
+                            u32::try_from(line[name].as_u64().unwrap_or(0)).unwrap_or(u32::MAX)
+                        };
+                        let undid = count("restored").saturating_add(count("deleted"));
+                        reactor.tell_restored(undid, count("skipped"), "");
+                    }
+                    Err(why) => reactor.tell_restored(0, 0, rewind::restore_error(why)),
+                }
+                audit::reply(log, reactor, request, ended.result.map_err(answered_error));
+            }
             Parked::Launch(request, prepared) => {
                 let checkpoint = match ended.result {
                     Ok(line) => line["checkpoint"].as_str().map(str::to_owned),
@@ -569,6 +896,11 @@ fn checkpoints_ended(
                 let parked = (request, *prepared);
                 launched(reactor, family, rewind, log, parked, ended.run, checkpoint);
             }
+            Parked::View(request) => {
+                let answer = viewed(reactor, family, rewind, &request, ended.run, ended.result);
+                audit::reply(log, reactor, request, answer);
+            }
+            Parked::Window(pane) => window_viewed(reactor, rewind, pane, ended.run, &ended.result),
             Parked::Call(request) => {
                 let answer = ended.result.map(|mut line| {
                     if let Some(fields) = line.as_object_mut() {
@@ -577,13 +909,7 @@ fn checkpoints_ended(
                     line
                 });
                 // An error naming a path, such as a refused store, is never logged or answered.
-                let answer = answer.map_err(|why| match why {
-                    why if why == rewind::KILLED => "the checkpoint took over 60 s".to_owned(),
-                    why if why.contains('/') && !why.starts_with("checkpoint r") => {
-                        "the checkpoint was refused or failed".to_owned()
-                    }
-                    why => why,
-                });
+                let answer = answer.map_err(answered_error);
                 audit::reply(log, reactor, request, answer);
             }
         }
@@ -1337,10 +1663,19 @@ fn daemon(
         while let Some((id, answer)) = reactor.take_approval_answer() {
             released.extend(grants.answer(id, answer));
         }
+        if let Some(pane) = reactor.take_rewind() {
+            window_view(&mut reactor, checkpoints.as_mut(), pane);
+        }
         if !reactor.has_window() && grants.deadline().is_some() {
             released.extend(grants.window_closed());
         }
         released.extend(grants.expire());
+        let (restores, released): (Vec<_>, Vec<_>) = released.into_iter().partition(|released| {
+            matches!(released.ticket.method(), Method::CheckpointRestore { .. })
+        });
+        for released in restores {
+            restore_answered(&mut reactor, checkpoints.as_mut(), &mut log, released);
+        }
         answer_released(
             &mut reactor,
             &mut grants,
@@ -1416,6 +1751,14 @@ fn daemon(
                     let rewind = checkpoints.as_mut();
                     checkpoint_call(&reactor, &mut family, rewind, &mut log, request, pane);
                 }
+                Method::CheckpointRestore { .. } => {
+                    let rewind = checkpoints.as_mut();
+                    restore_call(&reactor, rewind, &grants, &mut log, request);
+                }
+                Method::ToolOpen(open) if open.run.checkpoint.is_some() => {
+                    let rewind = checkpoints.as_mut();
+                    view_call(&reactor, &mut family, rewind, &mut log, request);
+                }
                 _ => {
                     decide(
                         &mut reactor,
@@ -1436,7 +1779,17 @@ fn daemon(
                     .map(|(status, ..)| status == Status::Done);
                 (reactor.is_closed(pane), done == Some(true))
             });
-            checkpoints_ended(&mut reactor, &mut family, rewind, &mut log);
+            checkpoints_ended(&mut reactor, &mut family, rewind, &mut grants, &mut log);
+            // Each live run's strip, told once to each window as it changes (ADR-0050).
+            if !reactor.is_window_ready() {
+                rewind.untell();
+            }
+            while let Some((run, pane, missing)) = rewind.untold() {
+                if !reactor.tell_checkpoint(pane, missing as u8) {
+                    break;
+                }
+                rewind.told(run);
+            }
         }
         for (request, outcome) in waits.settle(&reactor, Instant::now()) {
             audit::reply(&mut log, &reactor, request, Ok(ended(outcome)));
@@ -1588,7 +1941,13 @@ fn replay(file: &str) -> io::Result<()> {
 /// Opens `panes` tabs of the built-in tool `name` on `path`, as `tool.open` starts one, says the
 /// first one's pid on stdout, then idles until killed. With `close`, it closes them after a
 /// second and says the pid of a tool that is gone. `cargo xtask mem-gate` measures this.
-fn tool_panes(panes: usize, name: &str, path: &str, close: bool) -> io::Result<()> {
+fn tool_panes(
+    panes: usize,
+    name: &str,
+    path: &str,
+    rewind: Option<[&str; 3]>,
+    close: bool,
+) -> io::Result<()> {
     let tool = [Tool::Md, Tool::Files, Tool::Diff]
         .into_iter()
         .find(|tool| tool.name() == name)
@@ -1598,12 +1957,17 @@ fn tool_panes(panes: usize, name: &str, path: &str, close: bool) -> io::Result<(
         path: path.to_owned(),
         staged: false,
         range: None,
+        checkpoint: rewind.map(|[_, checkpoint, _]| checkpoint.to_owned()),
     };
     let binary = sibling("pinfold")?;
     let mut reactor = Reactor::new()?;
     let mut opened = Vec::new();
     for _ in 0..panes {
-        let command = tool::command(&binary, &run).map_err(io::Error::other)?;
+        let command = match rewind {
+            Some([key, _, shown]) => tool::rewind(&binary, &run, key, shown, 0),
+            None => tool::command(&binary, &run),
+        };
+        let command = command.map_err(io::Error::other)?;
         opened.push(
             reactor
                 .open_tab(command, ROWS, COLUMNS)
@@ -1643,12 +2007,24 @@ fn run(args: &[&str]) -> io::Result<()> {
             None,
         ),
         ["--replay", file] => replay(file),
-        ["--tool", panes, name, path] => {
-            tool_panes(panes.parse().map_err(io::Error::other)?, name, path, false)
-        }
-        ["--tool-closed", name, path] => tool_panes(1, name, path, true),
+        ["--tool", panes, name, path] => tool_panes(
+            panes.parse().map_err(io::Error::other)?,
+            name,
+            path,
+            None,
+            false,
+        ),
+        // The diff viewer on a run's checkpoint, in the store `key` (ADR-0050 slice 7).
+        ["--tool", panes, "rewind", path, key, checkpoint, shown] => tool_panes(
+            panes.parse().map_err(io::Error::other)?,
+            "diff",
+            path,
+            Some([key, checkpoint, shown]),
+            false,
+        ),
+        ["--tool-closed", name, path] => tool_panes(1, name, path, None, true),
         _ => Err(io::Error::other(
-            "usage: pinfold-core [--no-shell | --idle <panes> | --window <panes> <width>x<height> | --replay <file> | --tool <panes> <md|files|diff> <path> | --tool-closed <md|files|diff> <path>]",
+            "usage: pinfold-core [--no-shell | --idle <panes> | --window <panes> <width>x<height> | --replay <file> | --tool <panes> <md|files|diff> <path> | --tool <panes> rewind <dir> <key> <checkpoint> <shown> | --tool-closed <md|files|diff> <path>]",
         )),
     }
 }

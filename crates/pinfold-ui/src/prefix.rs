@@ -104,6 +104,9 @@ pub enum Command {
     /// Go to the pane that has needed you longest, or from one that needs you to the next in the
     /// inbox's order (ADR-0051).
     NextWaiting,
+    /// Open the diff viewer on the focused agent pane's run, since its launch checkpoint
+    /// (ADR-0050).
+    Rewind,
 }
 
 impl Command {
@@ -142,7 +145,8 @@ impl Command {
             | Self::OpenDiff
             | Self::OpenMarkdown
             | Self::Inbox
-            | Self::NextWaiting => "",
+            | Self::NextWaiting
+            | Self::Rewind => "",
         }
     }
 }

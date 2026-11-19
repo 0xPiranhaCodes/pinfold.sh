@@ -32,6 +32,9 @@ enum Said {
     Webhook(String),
     /// PinFold's own words, such as what an older core cannot do.
     Note(&'static str),
+    /// A restore the window allowed: files undone and skipped, or the core's words for why it
+    /// failed (ADR-0050).
+    Restored(u32, u32, String),
 }
 
 // shortcut: writes stay blocked though the threat model allows them, until the core hands
@@ -75,6 +78,13 @@ impl Flash {
     pub fn webhook(&mut self, host: String, now: Instant) {
         self.until = Some(now + UNHARDENED_SHOWN);
         self.said = Said::Webhook(host);
+    }
+
+    /// Shows how a restore the window allowed ended: `undid` files and `skipped`, or with an
+    /// `error` the core's words for why it failed.
+    pub fn restored(&mut self, undid: u32, skipped: u32, error: String, now: Instant) {
+        self.until = Some(now + SHOWN);
+        self.said = Said::Restored(undid, skipped, error);
     }
 
     /// Shows PinFold's `text`.
@@ -143,6 +153,19 @@ impl Flash {
                 theme,
             ),
             Said::Note(note) => paste::row(frame, &[(format!(" {note}"), text)], theme),
+            Said::Restored(_, _, error) if !error.is_empty() => paste::row(
+                frame,
+                &[(format!(" ✕ error · {error}"), states.error)],
+                theme,
+            ),
+            Said::Restored(undid, skipped, _) => paste::row(
+                frame,
+                &[(
+                    format!(" ✓ done · undid {undid} files, {skipped} skipped"),
+                    states.done,
+                )],
+                theme,
+            ),
             Said::Blocked => paste::row(
                 frame,
                 &[
@@ -153,6 +176,18 @@ impl Flash {
             ),
         }
     }
+}
+
+/// Adds the strip under an agent's pane that says its run has no checkpoint, and why, in the
+/// muted chrome colour: information, not an agent state, so none of ◆ ● ✓ ✕ ○ nor their colours
+/// (ADR-0050, slice 6 amendment).
+pub fn no_checkpoint(frame: &mut Frame, missing: u8, theme: &Theme) {
+    let why = (pinfold_proto::link::MISSING.get(usize::from(missing))).unwrap_or(&"");
+    paste::row(
+        frame,
+        &[(format!(" no checkpoint · {why}"), theme.chrome.muted)],
+        theme,
+    );
 }
 
 /// Adds the row under the pane in `frame` that says the core has gone, and the panes with it.
@@ -261,6 +296,35 @@ mod tests {
         assert_eq!(frame.cells[1].foreground, VIOLET);
         flash.tick(start + UNHARDENED_SHOWN);
         assert_eq!(flash.until(), None);
+    }
+
+    #[test]
+    fn a_restore_says_what_it_undid_or_why_it_failed() {
+        let (mut flash, start) = (Flash::default(), Instant::now());
+        let text = |flash: &Flash| {
+            let mut frame = Frame {
+                rows: 1,
+                columns: 60,
+                ..Frame::default()
+            };
+            flash.banner(&mut frame, &GRAPHITE);
+            let text: String = frame.cells.iter().map(|cell| cell.character).collect();
+            (text, frame.cells[1].foreground)
+        };
+        flash.restored(8, 1, String::new(), start);
+        let (said, colour) = text(&flash);
+        assert!(
+            said.starts_with(" ✓ done · undid 8 files, 1 skipped"),
+            "{said}"
+        );
+        assert_eq!(colour, GRAPHITE.states.done);
+        flash.restored(0, 0, "the checkpoint no longer exists".to_owned(), start);
+        let (said, colour) = text(&flash);
+        assert!(
+            said.starts_with(" ✕ error · the checkpoint no longer exists"),
+            "{said}"
+        );
+        assert_eq!(colour, GRAPHITE.states.error);
     }
 
     #[test]

@@ -1,0 +1,30 @@
+---
+source: crates/pinfold-ui/src/snapshots.rs
+expression: cells(&rewind())
+---
+|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
+|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
+|xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
+|── PinFold rewind ──────────────────────────────────────────────────────────────|
+| ◆ needs you  Undo changes in /Users/me/work/pinfold since 12 min ago (launch)? |
+|asked by the tool in pane 3                                                     |
+|restore 1 · delete 1 the agent added · bring back 1 it deleted · 1 changed later|
+|the agent is still running, and may change these files again                    |
+|  restore src/main.rs                                                           |
+|  delete notes^[[2J.txt                                                         |
+|  bring back README.md                                                          |
+|and 2 more                                                                      |
+| y undo once · n/Esc keep the files · the 9 rows above are this prompt          |
+0:0..80 fg 555a63 bg 121212
+1:0..80 fg 555a63 bg 121212
+2:0..80 fg 555a63 bg 121212
+3:0..80 fg f5b544 bg 12151a
+4:0..80 fg f5b544 bg 12151a
+5:0..80 fg e2e5ea bg 12151a
+6:0..80 fg e2e5ea bg 12151a
+7:0..80 fg e2e5ea bg 12151a
+8:0..80 fg ff8a8a bg 12151a
+9:0..80 fg e2e5ea bg 12151a
+10:0..80 fg e2e5ea bg 12151a
+11:0..80 fg e2e5ea bg 12151a
+12:0..80 fg e2e5ea bg 12151a
