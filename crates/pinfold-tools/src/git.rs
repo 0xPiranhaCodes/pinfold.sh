@@ -737,8 +737,7 @@ mod tests {
         fs::create_dir_all(dir.join("empty")).expect("dir");
         fs::create_dir_all(&bin).expect("dir");
         let script = |path: PathBuf, text: String| {
-            fs::write(&path, format!("#!/bin/sh\n{text}\n")).expect("write");
-            fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("chmod");
+            pinfold_testkit::program(&path, format!("#!/bin/sh\n{text}\n"), 0o755).expect("write");
             path
         };
         let ran = dir.join("ran");

@@ -33,6 +33,7 @@ unicode-width = "0.2.3"
 insta = { version = "1.49.0", default-features = false }
 # The credential stores the sandbox hides, for its tests.
 pinfold-config = { path = "../pinfold-config", version = "0.1.0-beta.4" }
+pinfold-testkit = { path = "../pinfold-testkit", version = "0.1.0-beta.4" }
 proptest = "1.12.0"
 tempfile = "3.27.0"
 

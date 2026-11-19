@@ -57,9 +57,7 @@ fn sends_are_audited_by_size_and_only_a_terminal_outside_a_pane_reads_the_log() 
         at("inside"),
         at("done")
     );
-    fs::write(directory.join("shell"), shell).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(directory.join("shell"), fs::Permissions::from_mode(0o700)).unwrap();
+    pinfold_testkit::program(directory.join("shell"), shell, 0o700).unwrap();
     let environment = [
         ("XDG_RUNTIME_DIR", directory.join("run")),
         ("HOME", home.clone()),

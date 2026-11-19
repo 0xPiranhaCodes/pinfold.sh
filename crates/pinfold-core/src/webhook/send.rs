@@ -557,13 +557,7 @@ mod tests {
              http) printf '%s' \"$2\" ;;\n*) printf 200 ;;\nesac\n",
             dir = dir.path().display()
         );
-        // `cp` writes the program, so no fork of this process's other test threads can hold
-        // it open for writing, which makes running it fail with ETXTBSY.
-        let source = dir.path().join("curl.sh");
-        std::fs::write(&source, script).unwrap();
-        let copied = Command::new("/bin/cp").arg(&source).arg(&curl).status();
-        assert!(copied.unwrap().success());
-        std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+        pinfold_testkit::program(&curl, script, 0o755).unwrap();
         let hook = Webhook::new("https://ntfy.sh/secret-topic?t=1")
             .unwrap()
             .unwrap();
