@@ -583,6 +583,28 @@ fn write_timeline_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Writes `agent.sh` in `dir`, every pane's shell for #502's rows: the first pane makes 1,000
+/// `pinfold ctl list` calls through `tools` once `go1` appears and makes `done1`, then likewise
+/// for `go2` and `done2`; the others wait. A refused call ends it, so its row fails.
+fn write_api_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let quote = |path: &Path| format!("'{}'", path.display().to_string().replace('\'', r"'\''"));
+    fs::create_dir_all(dir)?;
+    let (dir_q, tools) = (quote(dir), quote(tools));
+    let script = dir.join("agent.sh");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncd {dir_q} && mkdir lock 2>/dev/null || exec /bin/sleep 86400\n\
+             for round in 1 2; do\n\
+             \x20 while [ ! -e go$round ]; do /bin/sleep 0.1; done\n\
+             \x20 i=0; while [ $i -lt 1000 ]; do {tools} ctl list >/dev/null || exit; i=$((i + 1)); done\n\
+             \x20 : > done$round\ndone\nexec /bin/sleep 86400\n"
+        ),
+    )?;
+    fs::set_permissions(script, fs::Permissions::from_mode(0o755))
+}
+
 /// Takes webhook posts on loopback and answers each 204 at once, for the burst row. Returns its
 /// port. Std only: it reads a request's headers and the body they announce, and nothing else.
 fn answer_posts() -> io::Result<u16> {
@@ -639,6 +661,7 @@ fn mem_gate_task() -> ExitCode {
                 ],
             )?;
             write_rewind_inputs(&inputs.join("rewind"), &tools)?;
+            write_api_inputs(&inputs.join("api"), &tools)?;
             write_timeline_inputs(&inputs.join("timeline"), &tools)
         })
     {
@@ -1392,6 +1415,7 @@ fn mem_gate_task() -> ExitCode {
         fs::canonicalize(inputs.join("repo")),
     );
     let passed = repo.is_ok_and(|repo| mem_gate::run_peek(&tools, &files, &repo)) && passed;
+    let passed = mem_gate::run_api_calls(&core, &inputs.join("api")) && passed;
     let _ = fs::remove_dir_all(&inputs);
     if passed {
         ExitCode::SUCCESS
