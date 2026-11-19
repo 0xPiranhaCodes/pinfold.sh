@@ -153,6 +153,7 @@ deletes a path that the checkpoint it restores did not cover.
 | A regular file over `rewind.max_file_mib` (16 MiB) | Large binaries. |
 | A regular file with more than one hard link | It may be a link to a file outside the directory, such as a hidden credential, whose text a checkpoint would copy and a restore write back. |
 | Fifos, sockets and devices | Not files. |
+| PinFold's state directory, matched by device and inode | It holds the stores; a run in `~` would copy its store into itself (amendment of slice 8). |
 | Anything outside the working directory | Not watched. The docs say an unsandboxed agent's writes elsewhere, such as to `~/.bashrc`, cannot be rewound. |
 | Everything past `rewind.max_files` (200,000) files and links, directories not counted, or `rewind.max_new_mib` (2048 MiB) of new content | Bounds time and disk. The checkpoint is marked incomplete; a restore from it deletes nothing. At the first values, 100,000 entries and 256 MiB, a launch checkpoint of the Linux tree stopped after 33,969 of 86,663 files; whole, it fits `wait_s` (amendment). |
 
@@ -664,3 +665,18 @@ and `pinfold rewind`:
    checkpoint, never the window, takes the view checkpoint without the API's rate limit, as the
    person chose it, and opens the viewer right of the pane. A pane with no run, or a take that
    fails, flashes `✕ error · <why>` and opens nothing.
+
+## Amendment 2026-11-19, slice 8
+
+Decided by the coordinator for the maintainer while writing the docs, as section 3's table missed
+a case:
+
+1. **PinFold's state directory is never entered** (section 3). An agent run in `~` holds the
+   state directory, and so every store, below its working directory; the walk copied the store
+   into itself. `take` now stats `<state>` and the walk skips the directory of that device and
+   inode, listed as `pinfold` among the paths not covered, so a restore leaves it alone. Matching
+   by device and inode, not by name, also catches a state directory moved by `XDG_STATE_HOME`.
+   Test: `a_run_in_home_never_walks_the_state_directory_that_holds_its_store`.
+2. **Where it is documented.** The how-to is `docs/rewind/README.md`, beside `docs/hooks/`; the
+   keys are under Checkpoints in `docs/configuration.md`; what rewind does not cover is in
+   `docs/beta/known-issues.md`.

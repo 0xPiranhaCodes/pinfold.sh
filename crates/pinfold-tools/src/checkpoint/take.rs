@@ -189,6 +189,7 @@ fn word(why: Why) -> &'static str {
         Why::Changed => "changed",
         Why::Unreadable => "unreadable",
         Why::Deep => "deep",
+        Why::Own => "pinfold",
     }
 }
 
@@ -396,7 +397,11 @@ pub(crate) fn take_in(
     let mut previous = base.as_ref().map(|(list, _)| open(list)).transpose()?;
     let mut stat = BufWriter::with_capacity(BUF, File::create(&list)?);
     let old = previous.as_mut().map(|p| p as &mut dyn BufRead);
-    let (walked, importers) = walk(dir, caps, old, &mut stat, importers)?;
+    let own = fs::metadata(state)
+        .ok()
+        .map(|meta| (meta.dev(), meta.ino()));
+    let caps = Caps { own, ..*caps };
+    let (walked, importers) = walk(dir, &caps, old, &mut stat, importers)?;
     stat.into_inner().map_err(io::IntoInnerError::into_error)?;
     // The commit names blobs from every reader's pack, so they must all be in first.
     for import in importers {

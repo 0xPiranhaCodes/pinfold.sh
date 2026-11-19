@@ -1235,6 +1235,14 @@ mod tests {
     }
 
     #[test]
+    fn private_dirs_hide_the_state_dir_that_holds_every_checkpoint_store() {
+        let (state, home) = (Some("/nowhere/state".into()), Some("/nowhere/home".into()));
+        let dirs = private_dirs_from(None, state.clone(), home.clone());
+        let held = state_dir_from(state, home).expect("state");
+        assert!(dirs.contains(&held), "{held:?} {dirs:?}");
+    }
+
+    #[test]
     fn the_state_dir_is_application_support_on_macos_and_xdg_elsewhere() {
         let some = |dir: &str| Some(OsString::from(dir));
         let found = state_dir_from(some("/xdg"), some("/home/me"));
