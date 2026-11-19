@@ -49,12 +49,39 @@ pub fn open(api: &pinfold_config::Api) -> Log {
 /// # }
 /// ```
 pub fn reply(log: &mut Log, reactor: &Reactor, request: Request, result: Result<Value, String>) {
+    append(log, reactor, &request, &result);
+    request.answer(result);
+}
+
+/// As [`reply`], for a result already written as JSON text, such as `run.timeline`'s, whose
+/// record needs no field of it.
+///
+/// ```
+/// # fn answer(log: &mut pinfold_api::Log, reactor: &pinfold_core::io::Reactor,
+/// #     request: pinfold_api::control::Request) {
+/// pinfold_cli::audit::reply_json(log, reactor, request, Ok("{}".to_owned()));
+/// # }
+/// ```
+pub fn reply_json(
+    log: &mut Log,
+    reactor: &Reactor,
+    request: Request,
+    result: Result<String, String>,
+) {
+    let shape = result.as_ref().map(|_| Value::Null).map_err(String::clone);
+    append(log, reactor, &request, &shape);
+    match result {
+        Ok(json) => request.answer_json(json),
+        Err(reason) => request.answer(Err(reason)),
+    }
+}
+
+fn append(log: &mut Log, reactor: &Reactor, request: &Request, result: &Result<Value, String>) {
     let own = request.caller().and_then(|caller| reactor.pane_of(caller));
-    let record = record(request.method(), request.caller().is_some(), own, &result);
+    let record = record(request.method(), request.caller().is_some(), own, result);
     if let Err(error) = log.append(record) {
         let _ = writeln!(io::stderr(), "pinfold-core: audit log: {error}");
     }
-    request.answer(result);
 }
 
 /// Answers `audit.read`: the newest entries, oldest first, and whether the chain in memory
