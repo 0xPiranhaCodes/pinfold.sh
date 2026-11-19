@@ -28,7 +28,8 @@ use crate::protect::Protect;
 use crate::search::{CopyStep, Copying, Direction, Position, Search, SearchStep, Selection};
 use crate::status::{self, Alert, Status, Tracker};
 use crate::tap::Tap;
-use crate::vt::{AlacrittyEngine, VtEngine};
+use crate::timeline::Timelines;
+use crate::vt::{AlacrittyEngine, Closed, VtEngine};
 use crate::{paste, shell, tool};
 
 pub use mio::Waker;
@@ -75,6 +76,7 @@ fn pump(
     buffer: &mut [u8],
     fed: &mut bool,
     mut tap: Option<&mut Tap>,
+    closed: &mut dyn FnMut(Closed),
 ) -> Pumped {
     let mut left = READ_BUDGET;
     while left > 0 {
@@ -84,7 +86,7 @@ fn pump(
             Ok(count) => {
                 left -= count;
                 *fed = true;
-                engine.feed(&buffer[..count], replies);
+                engine.feed_closing(&buffer[..count], replies, closed);
                 if let Some(tap) = tap.as_deref_mut() {
                     tap.feed(&buffer[..count]);
                 }
@@ -257,6 +259,8 @@ pub struct Reactor {
     /// Each agent profile's name and `approve` key name, in the config's order, as read when
     /// the core started, for the inbox's Approve and Interrupt (ADR-0051).
     profiles: Vec<(Box<str>, Option<Box<str>>)>,
+    /// Each agent run's records, unless `[timeline]` is off (ADR-0052).
+    timelines: Option<Timelines>,
 }
 
 impl Reactor {
@@ -298,6 +302,7 @@ impl Reactor {
             tools: None,
             agent_files: false,
             toasts: false,
+            timelines: None,
             markdown: None,
             posted: 0,
             posts: Vec::new(),
@@ -514,10 +519,12 @@ impl Reactor {
             }
         }
         self.send_due(Instant::now());
+        let timelines = &mut self.timelines;
         for pane in &mut self.panes {
             if pane.readable {
                 let mut master = pane.pty.master();
                 let mut fed = false;
+                let number = pane.number;
                 let pumped = pump(
                     &mut master,
                     pane.engine.as_mut(),
@@ -525,6 +532,11 @@ impl Reactor {
                     &mut self.buffer,
                     &mut fed,
                     pane.tap.as_deref_mut(),
+                    &mut |closed| {
+                        if let Some(timelines) = timelines.as_mut() {
+                            timelines.command(number, closed, Instant::now());
+                        }
+                    },
                 );
                 pane.dirty |= fed;
                 pane.output = pane.output.wrapping_add(u64::from(fed));
@@ -532,6 +544,10 @@ impl Reactor {
                 if pumped == Pumped::Closed && !pane.closed {
                     pane.closed = true;
                     pane.status.closed(Instant::now());
+                    if let Some(timelines) = timelines.as_mut() {
+                        let status = pane.pty.try_wait().ok().flatten();
+                        timelines.exit(number, status, Instant::now());
+                    }
                 }
                 if fed {
                     // Shell marks never say "needs you", so only an error can alert there, and
@@ -539,7 +555,13 @@ impl Reactor {
                     let now = Instant::now();
                     let shell = pane.status.observe_shell(pane.engine.shell_marks(), now);
                     keep_post(&mut self.posts, self.posted, pane, shell);
+                    let before = pane.status.status();
                     let alert = pane.status.observe_agent(pane.engine.agent_marks(), now);
+                    if let Some(timelines) = timelines.as_mut()
+                        && pane.status.status() != before
+                    {
+                        timelines.state(number, pane.status.status(), false, now);
+                    }
                     pane.alerted |= alert.is_some_and(|alert| alert.status() == Status::NeedsYou);
                     keep_post(&mut self.posts, self.posted, pane, alert);
                 }
@@ -653,7 +675,13 @@ impl Reactor {
             .filter(|pane| !pane.closed)
             .ok_or("no such pane")?;
         pane.message = status::sanitize(message);
+        let before = pane.status.status();
         let alert = pane.status.report(status, now);
+        if let Some(timelines) = self.timelines.as_mut()
+            && pane.status.status() != before
+        {
+            timelines.state(pane.number, status, true, now);
+        }
         pane.alerted |= alert.is_some_and(|alert| alert.status() == Status::NeedsYou);
         keep_post(&mut self.posts, self.posted, pane, alert);
         Ok(())
@@ -664,9 +692,23 @@ impl Reactor {
     /// from them alerts as a report does, and is still labelled as from output.
     /// `profile` is the profile's index in the config's, read when the core started.
     pub fn read_agent_signals(&mut self, pane: usize, profile: u8) {
-        if let Some(pane) = pane_mut(&mut self.panes, pane) {
-            pane.status.read_agent_signals(profile);
+        if let Some(entry) = pane_mut(&mut self.panes, pane) {
+            entry.status.read_agent_signals(profile);
+            if let Some(timelines) = self.timelines.as_mut() {
+                timelines.open(pane, Instant::now());
+            }
         }
+    }
+
+    /// Keeps a timeline for every agent run from now on, `[timeline] enabled` (ADR-0052).
+    pub fn keep_timelines(&mut self, timelines: Timelines) {
+        self.timelines = Some(timelines);
+    }
+
+    /// Each agent run's records, if `[timeline]` is on.
+    #[must_use]
+    pub fn timelines(&self) -> Option<&Timelines> {
+        self.timelines.as_ref()
     }
 
     /// Tells a pane's status that the person typed into it, which clears a "needs you" its
@@ -1088,7 +1130,11 @@ impl Reactor {
     pub(crate) fn drop_pane(&mut self, number: usize) {
         if let Ok(index) = self.panes.binary_search_by_key(&number, |pane| pane.number) {
             self.was_running.retain(|(pane, _)| *pane != number);
-            let pane = self.panes.remove(index);
+            let mut pane = self.panes.remove(index);
+            if let Some(timelines) = self.timelines.as_mut() {
+                let status = pane.pty.try_wait().ok().flatten();
+                timelines.exit(number, status, Instant::now());
+            }
             let fd = pane.pty.master().as_raw_fd();
             let _ = self.poll.registry().deregister(&mut SourceFd(&fd));
         }
@@ -1491,6 +1537,104 @@ mod tests {
         assert_eq!(reactor.status(agent), Some((Status::Idle, false, "")));
     }
 
+    /// ADR-0052 slice 1: an agent pane's marks make command entries, its CLI's signal and a
+    /// report make state entries, and the states its marks make write none (T4). A shell pane
+    /// gets no timeline.
+    #[test]
+    fn fake_marks_make_command_entries_labelled_from_output_and_never_a_state_entry() {
+        use crate::timeline::{Ended, Timelines, What};
+        let state = tempfile::tempdir().unwrap();
+        let mut reactor = Reactor::new().unwrap();
+        reactor.keep_timelines(Timelines::new(state.path().join("timeline"), 64).unwrap());
+        let script = r"m() { printf '\033]133;%s\007' $1; }
+            m A; m B; m C; m 'D;0'; m A; m B; m C; m 'D;0'; m A; m B; m C; m 'D;1'; sleep 0.3
+            printf '\033]7501;state=blocked\007end'; sleep 1; exit 3";
+        let shell_pane = reactor.spawn(shell(script), 24, 80).unwrap();
+        let agent = reactor.spawn(shell(script), 24, 80).unwrap();
+        reactor.read_agent_signals(agent, 0);
+        let done = |r: &Reactor| on_screen(r, shell_pane, "end") && on_screen(r, agent, "end");
+        assert!(turn_until(&mut reactor, done));
+        reactor
+            .report_status(agent, Status::Running, "", Instant::now())
+            .unwrap();
+        assert!(turn_until(&mut reactor, |r| r.is_closed(agent)));
+
+        let timelines = reactor.timelines().unwrap();
+        assert!(timelines.newest(shell_pane).is_none());
+        let kinds: Vec<What> = timelines
+            .entries(agent)
+            .unwrap()
+            .iter()
+            .map(|e| e.what)
+            .collect();
+        let command = |exit| What::Command {
+            row: 0,
+            ms: 0,
+            exit: Some(exit),
+        };
+        let commands: Vec<What> = kinds[..3]
+            .iter()
+            .map(|what| match *what {
+                What::Command { exit, .. } => What::Command {
+                    row: 0,
+                    ms: 0,
+                    exit,
+                },
+                other => other,
+            })
+            .collect();
+        assert_eq!(commands, [command(0), command(0), command(1)]);
+        assert_eq!(
+            kinds[3..5],
+            [
+                What::State {
+                    status: Status::NeedsYou,
+                    reported: false
+                },
+                What::State {
+                    status: Status::Running,
+                    reported: true
+                },
+            ]
+        );
+        // The end of output can come before the child is reaped.
+        assert!(matches!(
+            kinds[5],
+            What::Exit(Ended::Code(3) | Ended::Closed)
+        ));
+        assert_eq!(kinds.len(), 6);
+        let summary = timelines.newest(agent).unwrap().summary();
+        assert_eq!(
+            (
+                summary.commands,
+                summary.failed,
+                summary.errors,
+                summary.needs_you
+            ),
+            (3, 1, 1, 1)
+        );
+    }
+
+    #[test]
+    fn with_timelines_off_no_file_is_written() {
+        let state = tempfile::tempdir().unwrap();
+        let mut reactor = Reactor::new().unwrap();
+        let agent = reactor
+            .spawn(
+                shell(r"printf '\033]133;B\007\033]133;C\033]133;D;0\007end'; sleep 5"),
+                24,
+                80,
+            )
+            .unwrap();
+        reactor.read_agent_signals(agent, 0);
+        assert!(turn_until(&mut reactor, |r| on_screen(r, agent, "end")));
+        reactor
+            .report_status(agent, Status::NeedsYou, "", Instant::now())
+            .unwrap();
+        assert!(reactor.timelines().is_none());
+        assert_eq!(std::fs::read_dir(state.path()).unwrap().count(), 0);
+    }
+
     /// ADR-0051 §9: a program notification is text for a toast and nothing else. In any pane it
     /// sets no state, raises no alert and queues no post; a webhook's record has no field for
     /// text. Off, the same bytes leave nothing to take.
@@ -1629,6 +1773,7 @@ mod tests {
             &mut buffer,
             &mut fed,
             None,
+            &mut |_| {},
         );
         assert_eq!(pumped, Pumped::Budget);
         assert!(fed);
@@ -1647,6 +1792,7 @@ mod tests {
             &mut buffer,
             &mut false,
             None,
+            &mut |_| {},
         );
         assert_eq!(replies.len(), MAX_REPLIES);
     }

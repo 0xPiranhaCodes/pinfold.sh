@@ -2,6 +2,8 @@
 
 - **Status:** Accepted (accepted by the maintainer, 2026-11-18)
 - **Date:** 2026-11-14
+- **Amended 2026-11-19**, decided by the coordinator for the maintainer: where slice 1 keeps the
+  timeline and how its file is named; see "Amendment 2026-11-19" at the end.
 
 ## Context
 
@@ -392,3 +394,32 @@ does. The core gains six entry kinds, one method, five link messages and a small
 run. Revisit when spill files arrive, which would let a transcript replace the jump for
 evicted output; when runs outlive a restart in ADR-0050; or if agents stop using shells, which
 would leave the command column to their own tool calls.
+
+## Amendment 2026-11-19: slice 1, the ring file as built
+
+Decided by the coordinator for the maintainer while building slice 1.
+
+- **Where.** ADR-0050's run record exists only with `[rewind]` on for the profile, and lives in
+  the core's event loop, not in the `Reactor` that reads marks. Section 8 makes `[timeline]`
+  independent of `[rewind]`. So the timelines live in the `Reactor`
+  (`crates/pinfold-core/src/timeline.rs`), one per agent run: each pane `agent.launch` opens
+  from a profile, with `[rewind]` on or off. At most 64, as ADR-0050 keeps; at 64 the oldest
+  closed one is deleted with its file, and with all 64 live a new run gets none. Slice 2's
+  reporting panes and the join to ADR-0050's run id come with `run.rs`.
+- **Name.** `<state>/timeline/r<pane>-<n>`, `n` this core's count of launches, so a pane that
+  starts another run gets a new file and the old ring is closed first. It has the shape of
+  ADR-0050's run ids, so the later join renames nothing.
+- **Header.** Written when the file is made and when the run closes. Each entry is exactly one
+  `pwrite`; while a run is live the core's own head is the truth, and a read decodes only the
+  slots the core counts. A record that does not decode, or is short, is skipped.
+- **Core record, 56 bytes, asserted.** The summary's eight counters, `started` in whole seconds
+  since the core started, as ADR-0051's `since` counts, and `ended` in milliseconds after that
+  second (40 B); the launch count `n` and `dropped` (8 B); the pane and the head as `u16` each,
+  the pane as the `api` entry already holds it (4 B); and the file, open only while the run is
+  live (4 B). An entry's `at` counts from the second the run started. A pane numbered past
+  65,535 gets no timeline.
+- **Exit.** Written when the pane's output ends, with the status `try_wait` has then, or when
+  the pane is dropped while its program runs. A program whose end of output comes before it can
+  be reaped is recorded as its pane closing.
+- **Mem-gate.** `--idle 8` with an agent profile whose program prints 1,100 OSC 133 command
+  pairs, live and after it exits, and the same output with `[timeline]` off shown beside them.

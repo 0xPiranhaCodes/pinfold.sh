@@ -56,6 +56,8 @@ pub const WEBHOOK_SETTLE: Duration = Duration::from_secs(105);
 /// 64 launches, each with its launch, exit and API take and its prune, and 64 lists, two at a
 /// time, then the workers end (ADR-0050).
 pub const REWIND_SETTLE: Duration = Duration::from_secs(90);
+/// 8 launches, each printing 1,100 commands (ADR-0052).
+pub const TIMELINE_SETTLE: Duration = Duration::from_secs(5);
 /// Long enough for a process to finish starting.
 pub const SETTLE: Duration = Duration::from_secs(1);
 /// A window takes seconds to fall from its startup peak, and budgets are for idle windows.

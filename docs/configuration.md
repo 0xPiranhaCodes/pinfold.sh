@@ -185,6 +185,24 @@ deep or of more than 65,536 entries, a `.git`, a nested repository and PinFold's
 directory are never entered; a `.gitignore` over 64 KiB is not read.
 [Rewind an agent's changes](rewind/README.md) shows how to use them.
 
+### Timelines
+
+The core keeps a timeline for every agent run: a record of each command the shell's marks close
+(its exit status and how long it took), each state its agent reports or signals, and how its
+program ended ([ADR-0052](adr/0052-session-replay-a-timeline-per-agent-run.md)). It holds
+numbers, never text. The records are 16 bytes each in a file per run under the state directory,
+0600 in a 0700 folder, emptied when the core starts; the core itself keeps 56 bytes a run.
+
+```toml
+[timeline]
+enabled = true   # keep a timeline for every agent run
+entries = 1024   # per live run on disk, 64 to 4096; a closed run keeps 128
+```
+
+These are the defaults, read when the core starts. With `enabled = false` no file is written.
+Fixed, not keys: at most 64 runs, the oldest closed one going first. Nothing shows the timeline
+yet; the view and `pinfold ctl timeline` come in later releases.
+
 ### Webhooks
 
 `alerts.webhook` names where the core posts an alert, read when the core starts, so a change
