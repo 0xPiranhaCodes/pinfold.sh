@@ -1458,7 +1458,7 @@ mod tests {
                             runnable,
                             command,
                         } => self.was_running.push((pane, runnable, command.to_owned())),
-                        Notice::Approval(_) => {}
+                        Notice::Approval(_) | Notice::Toast { .. } => {}
                         Notice::Checkpoint { pane, missing } => {
                             self.checkpoints.push((pane, missing));
                         }

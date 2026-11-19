@@ -591,3 +591,41 @@ Decided by the coordinator for the maintainer while building slice 10.
   again on `Request::OpenTabIn`, never trusting the window's copy, and otherwise refuses with
   "Not opened: the folder is missing, relative or not private". The shell starts in it directly,
   as any new tab's does; the folder is never on a command line.
+
+## Amendment 2026-11-18: slice 11, program notifications as built
+
+Decided by the coordinator for the maintainer while building slice 11.
+
+- **The window tells the core, so off keeps no text in the core.** The window reads
+  `program_notifications` and hot-reloads it, but only the core parses output. So **link version
+  25** (23 and 24 are ADR-0050's) adds `Request::Toasts { on }`, sent after the hello and on each change,
+  as `Request::Palette` is, beside section 2's `Notice::Toast`. The core starts with toasts off,
+  and turns them off again when the window goes. While off, an OSC 99 or OSC 777 string is let go
+  at its first bytes, as other strings are. OSC 9 is read only for ADR-0046's needs you count, and
+  no text is built or sent. Any string's text, notifications' included, is cleared as soon as the
+  string ends or is let go, and a string cut off at the 4 KB limit is let go there. A core of 24
+  never hears the request, so it keeps toasts off.
+- **Where the text is cut.** It is cut when the string ends, in `pinfold-core/src/marks.rs`. A
+  tab or line end becomes a space. Control, bidi and zero-width characters and the state glyphs
+  ◆ ● ✓ ✕ ○ are dropped, as `status::sanitize` drops them for a reported message. The text is
+  then cut to 120 cells by `unicode-width`, and to 480 bytes (`link::MAX_TOAST`). A text left
+  empty is no toast. A pane keeps one such text, and only until the link takes it. The window
+  decodes only a known kind and text that meets these rules.
+- **OSC 777** `notify;<title>;<body>` shows as `title: body`, or as either part alone.
+- **OSC 99.** Only `p=title` (the default) and `p=body` are shown, from the keys `i`, `d`, `p`
+  and `e`; other keys are ignored. `p=?`, `close`, `alive`, `buttons`, `icon` and any other type
+  are dropped and never answered. A `d=0` chunk is held as the pane's one text, already cleaned
+  and cut, until the final chunk with the same `i`. Then a title and a body join as
+  `title: body`. Any other OSC 99 replaces the held chunk. `e=1` payloads are base64, as
+  kitty's own `kitten notify` sends them. At most 640 encoded bytes are decoded, enough for 480,
+  padded or not, through the `base64` crate (already built for `alacritty_terminal`). The decoded
+  text then goes through the same cleaning and cut. Invalid base64 drops the chunk.
+- **OSC 9;4** and any OSC 9 whose text starts with a digit are not notifications, as before.
+- **Limits** are applied by the core before `Notice::Toast` is sent: one per pane per 10 s, and
+  one per 2 s in all. A toast held back is dropped, not queued, so a flood never crosses the
+  link. Nothing reads a count of them, so none is kept. `Notice::Toast`'s `kind` is 0 for OSC 9, 1 for OSC 99 and 2 for OSC 777.
+- **Where it shows.** A toast for a pane the person can see, in a focused window with the pane
+  in the active tab, is drawn in the pane's top right. For any other pane, the same words,
+  `<label> says: <text>`, go to the desktop notification, under the existing limits that alerts
+  share: one per pane per 60 s and one per 10 s in all. Only `program_notifications` gates
+  toasts, not the `[alerts] desktop` list.
