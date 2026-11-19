@@ -1,5 +1,3 @@
-use std::os::unix::fs::PermissionsExt;
-
 use super::*;
 
 /// A stub `pinfold` in a fresh folder: each run appends its arguments to `log`; a take sleeps
@@ -23,12 +21,7 @@ fn stub(wait: Duration) -> (tempfile::TempDir, Rewind<u32>) {
          \"restore_checkpoint\":\"%s/7\"}}\\n' \"$3\" ;;\nesac\n",
         dir = dir.path().display()
     );
-    // `cp` writes the program, so no fork of another test thread holds it open for writing.
-    let source = dir.path().join("pinfold.sh");
-    std::fs::write(&source, script).unwrap();
-    let copied = Command::new("/bin/cp").arg(&source).arg(&program).status();
-    assert!(copied.unwrap().success());
-    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    pinfold_testkit::program(&program, script, 0o755).unwrap();
     let settings = Settings {
         on_done: true,
         wait,

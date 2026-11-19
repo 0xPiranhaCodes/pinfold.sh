@@ -24,3 +24,4 @@ workspace = true
 
 [dev-dependencies]
 insta = { version = "1.49.0", default-features = false }
+pinfold-testkit = { path = "../pinfold-testkit", version = "0.1.0-beta.4" }

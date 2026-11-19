@@ -1,0 +1,13 @@
+[package]
+name = "pinfold-testkit"
+description = "Helpers shared by the workspace's tests. Never a dependency of a binary."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true

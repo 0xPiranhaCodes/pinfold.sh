@@ -2725,9 +2725,8 @@ mod tests {
 
     /// Writes an executable script at `path` that writes `marker` when run.
     fn script(path: &std::path::Path, marker: &std::path::Path) {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::write(path, format!("#!/bin/sh\n: > '{}'\n", marker.display())).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let script = format!("#!/bin/sh\n: > '{}'\n", marker.display());
+        pinfold_testkit::program(path, script, 0o755).unwrap();
     }
 
     #[test]
