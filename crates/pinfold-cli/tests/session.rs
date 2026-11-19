@@ -3828,3 +3828,106 @@ fn a_restore_with_no_window_is_refused_and_restores_nothing() {
     assert_eq!(fs::read_to_string(work.join("a.txt")).unwrap(), "agent\n");
     refused_before_any_prompt(&session);
 }
+
+/// Not a test: the window. Once the agent edited, it chooses "Rewind Agent Changes" on the
+/// shell's pane, which is refused, then on the agent pane, waits for the viewer to list the nested repository, types `U`, and answers the one
+/// `Rewind` prompt `y`, then waits for the flash.
+#[test]
+#[ignore = "run by rewind_agent_changes_opens_the_viewer_and_u_then_y_puts_the_tree_back"]
+fn rewind_palette_window_process() {
+    let Some(directory) = helper(CLIENT) else {
+        return;
+    };
+    let directory = Path::new(&directory);
+    let mut link = Link::new(socket::take_link().unwrap()).unwrap();
+    // Wide enough for the viewer, a third of it, to show the nested row's whole name.
+    assert!(link.resize(24, 240));
+    until(&mut link, |link| link.is_greeted()).unwrap();
+    until(&mut link, |_| directory.join("edited").exists()).unwrap();
+    // The shell's pane has no run: a flash, never an empty viewer.
+    let shell = pinfold_proto::link::Tool::Rewind;
+    assert!(link.send(Request::OpenTool {
+        pane: 0,
+        tool: shell
+    }));
+    let mut refused = None;
+    until(&mut link, |link| {
+        refused = link.take_restored();
+        refused.is_some()
+    })
+    .unwrap();
+    let said = (0, 0, "no agent run in this pane".to_owned());
+    assert_eq!(refused, Some(said));
+    let open = Request::OpenTool {
+        pane: 1,
+        tool: pinfold_proto::link::Tool::Rewind,
+    };
+    assert!(link.speaks(&open) && link.send(open));
+    until(&mut link, |link| {
+        pane_shows(link, 2, "? keys") && pane_shows(link, 2, "inner nested")
+    })
+    .unwrap();
+    assert!(link.send(Request::Input {
+        pane: 2,
+        bytes: b"U"
+    }));
+    let prompt = approval(&mut link, directory).unwrap();
+    assert_eq!((prompt.action, prompt.target), (ApprovalAction::Rewind, 1));
+    note(directory.join("prompted"), prompt.texts.join("\n")).unwrap();
+    // The prompt arms after half a second.
+    let armed = Instant::now() + Duration::from_secs(1);
+    until(&mut link, |_| Instant::now() > armed).unwrap();
+    let (id, answer) = (prompt.id, ApprovalAnswer::AllowOnce);
+    assert!(link.send(Request::ApprovalAnswer { id, answer }));
+    let mut flashed = None;
+    until(&mut link, |link| {
+        flashed = link.take_restored();
+        flashed.is_some()
+    })
+    .unwrap();
+    note(directory.join("flashed"), format!("{flashed:?}")).unwrap();
+    until(&mut link, |_| directory.join("done").exists()).unwrap();
+}
+
+#[test]
+fn rewind_agent_changes_opens_the_viewer_and_u_then_y_puts_the_tree_back() {
+    let exe = env::current_exe().unwrap();
+    let window = format!(
+        "exec '{}' --exact --ignored rewind_palette_window_process",
+        exe.display()
+    );
+    let session = Session::new("rp", Some(&window)).unwrap();
+    fs::create_dir_all(session.directory.join("config/pinfold")).unwrap();
+    let toml = "[agents.sleepy]\ncommand = [\"sleep\", \"60\"]\n";
+    fs::write(session.directory.join("config/pinfold/pinfold.toml"), toml).unwrap();
+    let pinfold = format!("'{}'", session.directory.join("pinfold").display());
+    let client = "\"$PINFOLD_TEST_CLIENT\"";
+    let shell = format!(
+        "mkdir -p -m 700 \"$HOME/work/src\"; cd \"$HOME/work\"; echo a > a.txt; \
+         echo b > src/b.rs; {pinfold} agent sleepy 2> {client}/e; \
+         echo agent > a.txt; rm src/b.rs; echo new > new.txt; \
+         mkdir -p inner/.git; echo x > inner/code.rs; touch {client}/edited; exec sleep 60"
+    );
+    let mut core = session
+        .start_core(&["--window", "1", "80x24"], &shell)
+        .unwrap();
+    let ended = session.wait_beside("flashed", Some(&mut core));
+    note(session.directory.join("done"), "yes").unwrap();
+    assert!(ended, "{} {}", session.read("e"), session.read_log());
+    core.kill().unwrap();
+    core.wait().unwrap();
+    // U asked for every file, and the nested repository is the prompt's to skip, not to undo.
+    let prompted = session.read("prompted");
+    assert!(prompted.contains("restore a.txt"), "{prompted}");
+    assert!(prompted.contains("delete new.txt"), "{prompted}");
+    assert!(prompted.contains("bring back src/b.rs"), "{prompted}");
+    assert_eq!(session.read("flashed"), "Some((3, 0, \"\"))");
+    let work = session.directory.join("state/work");
+    assert_eq!(fs::read_to_string(work.join("a.txt")).unwrap(), "a\n");
+    assert_eq!(fs::read_to_string(work.join("src/b.rs")).unwrap(), "b\n");
+    assert!(!work.join("new.txt").exists());
+    assert!(
+        work.join("inner/code.rs").exists(),
+        "a rewind leaves a nested repository"
+    );
+}

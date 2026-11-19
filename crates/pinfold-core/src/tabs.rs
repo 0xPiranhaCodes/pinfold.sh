@@ -145,15 +145,16 @@ impl Reactor {
     /// Opens `tool` right of `pane`, in the directory the system says `pane`'s shell is in, as
     /// a split's shell starts there.
     fn open_tool(&mut self, pane: usize, tool: link::Tool) -> Result<(), Refusal> {
-        let cwd = self.shell_cwd(pane).ok_or(Refusal::Spawn)?;
-        let path = cwd
-            .into_os_string()
-            .into_string()
-            .map_err(|_| Refusal::Spawn)?;
         let tool = match tool {
             link::Tool::Files => Tool::Files,
             link::Tool::Diff => Tool::Diff,
+            // The runs are the event loop's, which takes this with [`Reactor::take_rewind`].
+            link::Tool::Rewind => {
+                self.rewind_asked = Some(pane);
+                return Ok(());
+            }
         };
+        let path = self.cwd_text(pane)?;
         let run = Run {
             tool,
             path,
@@ -220,6 +221,47 @@ impl Reactor {
     }
 
     /// Starts `run` in a new pane right of `pane`.
+    /// The directory the system says `pane`'s shell is in, as text.
+    fn cwd_text(&self, pane: usize) -> Result<String, Refusal> {
+        let cwd = self.shell_cwd(pane).ok_or(Refusal::Spawn)?;
+        cwd.into_os_string()
+            .into_string()
+            .map_err(|_| Refusal::Spawn)
+    }
+
+    /// The pane whose run the window last asked to rewind with [`link::Tool::Rewind`].
+    pub fn take_rewind(&mut self) -> Option<usize> {
+        self.rewind_asked.take()
+    }
+
+    /// Opens the diff viewer of the run in `pane` since `checkpoint` right of it, in its
+    /// directory, as [`tool::rewind`] starts it over the view checkpoint `shown` of the store
+    /// `key`, and returns the viewer's pane.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::Spawn`] if the pane, its directory or the tools' binary is gone.
+    pub fn open_rewind(
+        &mut self,
+        pane: usize,
+        key: &str,
+        checkpoint: &str,
+        shown: &str,
+    ) -> Result<usize, Refusal> {
+        let run = Run {
+            tool: Tool::Diff,
+            path: self.cwd_text(pane)?,
+            staged: false,
+            range: None,
+            checkpoint: Some(checkpoint.to_owned()),
+        };
+        let binary = self.tools().ok_or(Refusal::Spawn)?;
+        let command = tool::rewind(binary, &run, key, shown, pane).map_err(|_| Refusal::Spawn)?;
+        let opened = self.split(pane, command, SplitWay::Right)?;
+        self.set_tool(opened, run);
+        Ok(opened)
+    }
+
     fn start_tool(&mut self, pane: usize, run: Run) -> Result<(), Refusal> {
         let binary = self.tools().ok_or(Refusal::Spawn)?;
         let command = tool::command(binary, &run).map_err(|_| Refusal::Spawn)?;

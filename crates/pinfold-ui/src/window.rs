@@ -145,6 +145,8 @@ struct Shown {
     inbox: bool,
     /// Whether it is new enough to answer an agent from it.
     answer: bool,
+    /// Whether it is new enough to open the viewer on an agent's run (ADR-0050).
+    rewind: bool,
     /// The inbox's panes, every pane's tab and the agents outside PinFold, only while the
     /// inbox is open.
     listed: Vec<Listed>,
@@ -198,6 +200,10 @@ fn publish(link: &mut Link, shown: &mut Shown) -> bool {
             choice: proto::Choice::Interrupt,
             profile: "",
             key: "",
+        });
+        shown.rewind = link.speaks(&proto::Request::OpenTool {
+            pane: 0,
+            tool: proto::Tool::Rewind,
         });
         shown.laid = true;
     }
@@ -535,6 +541,8 @@ struct App {
     opening: Option<approval::OpenIn>,
     /// Whether the core is new enough to take one.
     answer_spoken: bool,
+    /// Whether the core is new enough to open the viewer on an agent's run.
+    rewind_spoken: bool,
     /// In a window `cargo xtask mem-gate` measures, whether to show a confirmation once the
     /// inbox it opens has drawn its rows.
     measuring_answer: bool,
@@ -648,6 +656,7 @@ impl App {
             confirm: None,
             opening: None,
             answer_spoken: false,
+            rewind_spoken: false,
             measuring: size
                 .and(std::env::var_os("PINFOLD_MEASURE_INBOX"))
                 .map(|value| value == "closed"),
@@ -863,6 +872,7 @@ impl App {
         self.total = shown.total;
         self.inbox_spoken = shown.inbox;
         self.answer_spoken = shown.answer;
+        self.rewind_spoken = shown.rewind;
         if self.measuring.is_some() && self.inbox.is_none() && self.inbox_spoken {
             self.toggle_inbox();
         }
@@ -1201,8 +1211,23 @@ impl App {
             Command::OpenDocs => return launch(DOCS, false),
             Command::Inbox => return self.toggle_inbox(),
             Command::NextWaiting => return self.next_waiting(),
+            // The core picks the run and its launch checkpoint, and flashes if there is none.
+            Command::Rewind => proto::Request::OpenTool {
+                pane,
+                tool: proto::Tool::Rewind,
+            },
         };
         self.core(request);
+    }
+
+    /// Whether the palette offers "Rewind Agent Changes": the core speaks it and an agent
+    /// reported in the focused pane.
+    fn offers_rewind(&self) -> bool {
+        self.rewind_spoken
+            && self
+                .status
+                .as_ref()
+                .is_some_and(|(_, reported, _)| *reported)
     }
 
     /// Opens the inbox, or closes it if it is open (ADR-0051). A core too old for it says so.
@@ -1418,7 +1443,7 @@ impl App {
         let key = &event.logical_key;
         if input::is_palette(key, self.modifiers) {
             self.menu = None;
-            self.palette = Some(Palette::commands());
+            self.palette = Some(Palette::commands(self.offers_rewind()));
             self.picking = None;
             self.redraw_soon();
             return true;
@@ -2941,7 +2966,7 @@ mod tests {
         let text = |text: &str| Key::Character(text.into());
         let enter = Key::Named(NamedKey::Enter);
         for (query, tool) in [("files", proto::Tool::Files), ("diff", proto::Tool::Diff)] {
-            app.palette = Some(Palette::commands());
+            app.palette = Some(Palette::commands(false));
             assert_eq!(app.palette_key(&text(query), Some(query)), None);
             let command = app.palette_key(&enter, None).unwrap();
             assert!(app.palette.is_none());
@@ -2955,7 +2980,7 @@ mod tests {
                 "{query}"
             );
         }
-        app.palette = Some(Palette::commands());
+        app.palette = Some(Palette::commands(false));
         app.palette_key(&text("split d"), Some("split d"));
         let command = app.palette_key(&enter, None).unwrap();
         app.run(command);
@@ -2968,11 +2993,38 @@ mod tests {
             })]
         ));
         // Ctrl+Shift+P again closes it, and nothing reaches the pane.
-        app.palette = Some(Palette::commands());
+        app.palette = Some(Palette::commands(false));
         app.modifiers = ModifiersState::CONTROL | ModifiersState::SHIFT;
         assert_eq!(app.palette_key(&text("P"), Some("\u{10}")), None);
         assert!(app.palette.is_none());
         assert!(inbox.take().is_empty());
+    }
+
+    #[test]
+    fn the_palette_offers_rewind_only_on_a_core_that_speaks_it_with_an_agent_focused() {
+        let (mut app, inbox, _poll) = app();
+        let rewind = palette::COMMANDS.len() - 1;
+        let offered = |app: &App| app.offers_rewind();
+        assert!(!offered(&app));
+        app.rewind_spoken = true;
+        assert!(!offered(&app));
+        app.status = Some((1, false, String::new()));
+        assert!(!offered(&app), "a shell's marks are not an agent's run");
+        app.status = Some((1, true, String::new()));
+        assert!(offered(&app));
+        app.rewind_spoken = false;
+        assert!(!offered(&app));
+        assert_eq!(palette::COMMANDS[rewind].1, Command::Rewind);
+        assert_eq!(Palette::commands(false).label(rewind), None);
+        app.run(Command::Rewind);
+        let sent = inbox.take();
+        assert!(matches!(
+            sent[..],
+            [Request::Core(proto::Request::OpenTool {
+                pane: 1,
+                tool: proto::Tool::Rewind
+            })]
+        ));
     }
 
     #[test]
@@ -2985,7 +3037,7 @@ mod tests {
         app.modifiers = ModifiersState::empty();
         let command = app.pane_key(&text("m"), None, false).unwrap();
         app.run(command);
-        app.palette = Some(Palette::commands());
+        app.palette = Some(Palette::commands(false));
         app.palette_key(&text("markdown"), Some("markdown"));
         let command = app.palette_key(&enter, None).unwrap();
         app.run(command);
