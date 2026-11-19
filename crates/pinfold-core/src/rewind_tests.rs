@@ -4,7 +4,8 @@ use super::*;
 
 /// A stub `pinfold` in a fresh folder: each run appends its arguments to `log`; a take sleeps
 /// for the seconds in `slow`, if there is one, and answers checkpoint `<run>/<n>` counting from
-/// 0, a list answers one checkpoint, and a prune nothing.
+/// 0 with `n * 3` changed, a list answers one checkpoint, a restore its checkpoint 7, and a
+/// prune nothing.
 fn stub(wait: Duration) -> (tempfile::TempDir, Rewind<u32>) {
     let dir = tempfile::tempdir().unwrap();
     let program = dir.path().join("pinfold");
@@ -13,12 +14,13 @@ fn stub(wait: Duration) -> (tempfile::TempDir, Rewind<u32>) {
          take) [ -f slow ] && sleep \"$(cat slow)\"; n=$(cat n.$3 2>/dev/null || echo 0); \
          echo $((n + 1)) > n.$3; \
          printf '{{\"checkpoint\":\"%s/%s\",\"store\":\"k\",\"files\":1,\"new_bytes\":2,\
-         \"complete\":true,\"changed\":0}}\\n' \"$3\" \"$n\" ;;\n\
+         \"complete\":true,\"changed\":%s}}\\n' \"$3\" \"$n\" $((n * 3)) ;;\n\
          list) printf '{{\"checkpoints\":[{{\"checkpoint\":\"%s/0\",\"reason\":\"launch\"}}],\
          \"more\":0}}\\n' \"$3\" ;;\n\
          prune) echo '{{}}' ;;\n\
          plan) echo '{{\"restore\":1,\"delete\":0,\"bring_back\":0,\"paths\":[]}}' ;;\n\
-         restore) echo '{{\"restored\":1,\"deleted\":0,\"skipped\":0}}' ;;\nesac\n",
+         restore) printf '{{\"restored\":1,\"deleted\":2,\"skipped\":0,\
+         \"restore_checkpoint\":\"%s/7\"}}\\n' \"$3\" ;;\nesac\n",
         dir = dir.path().display()
     );
     // `cp` writes the program, so no fork of another test thread holds it open for writing.
@@ -313,6 +315,44 @@ fn a_restore_plans_without_the_lock_and_restores_under_it_with_paths_only_when_c
         .filter(|line| line.starts_with("checkpoint prune"));
     assert_eq!(prunes.count(), 1, "{log:?}");
     assert_eq!(rewind.run(run).unwrap().missing(), Missing::None);
+    let restored = Taken {
+        run,
+        n: 7,
+        reason: "restore",
+        complete: true,
+        changed: 3,
+    };
+    assert_eq!(rewind.taken(), [restored], "plans take nothing");
+}
+
+/// ADR-0052 slice 2: each take's checkpoint and `changed`, as its line gave them, waits for
+/// the run's timeline.
+#[test]
+fn each_take_is_kept_for_the_timeline_with_its_changed_count() {
+    let (dir, mut rewind) = stub(Duration::from_secs(10));
+    let run = rewind.open(1, dir.path()).unwrap();
+    rewind
+        .launch(run, dir.path().to_owned(), 1, Instant::now())
+        .unwrap();
+    until(&mut rewind, &dir, |ended, _| !ended.is_empty());
+    rewind.started(run, Some(4));
+    rewind.observe(Instant::now(), |_| (false, true));
+    idle(&mut rewind);
+    rewind.take(run, 2, Instant::now()).unwrap();
+    until(&mut rewind, &dir, |ended, _| !ended.is_empty());
+    idle(&mut rewind);
+    let taken: Vec<_> = rewind
+        .taken()
+        .into_iter()
+        .map(|taken| (taken.n, taken.reason, taken.complete, taken.changed))
+        .collect();
+    let expected = [
+        (0, "launch", true, 0),
+        (1, "done", true, 3),
+        (2, "api", true, 6),
+    ];
+    assert_eq!(taken, expected);
+    assert!(rewind.taken().is_empty());
 }
 
 #[test]

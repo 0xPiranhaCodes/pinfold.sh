@@ -3,6 +3,7 @@ use std::os::unix::fs::PermissionsExt;
 use proptest::prelude::*;
 
 use super::*;
+use pinfold_proto::link::ApprovalAction;
 
 fn timelines(entries: u64) -> (tempfile::TempDir, Timelines) {
     let state = tempfile::tempdir().unwrap();
@@ -61,6 +62,24 @@ fn the_entry_type_has_no_string_and_is_16_bytes() {
             method: 22,
             outcome: Outcome::Error,
             target: None,
+        },
+        What::Approval {
+            action: ApprovalAction::Send,
+            answer: Answer::ThirtyMinutes,
+            other: Some(1),
+            grant: 9,
+        },
+        What::Approval {
+            action: ApprovalAction::Rewind,
+            answer: Answer::Expired,
+            other: None,
+            grant: 0,
+        },
+        What::Checkpoint {
+            n: 2,
+            reason: 5,
+            complete: false,
+            changed: 8,
         },
     ];
     for what in entries {
@@ -325,4 +344,94 @@ fn a_polling_agent_adds_no_entries_and_a_refused_call_adds_one() {
     assert_eq!(target, [api(1_005, 11, Outcome::Ok, Some(3))]);
     assert_eq!(timelines.of_pane(2).unwrap().summary().calls, 3);
     assert_eq!(timelines.of_pane(3).unwrap().summary().calls, 1);
+}
+
+#[test]
+fn approvals_are_recorded_in_the_runs_they_are_about_and_counted() {
+    let (_state, mut timelines) = timelines(64);
+    let now = Instant::now();
+    timelines.open(1, now);
+    timelines.open(2, now);
+    timelines.approval(1, 2, ApprovalAction::Send, Answer::Once, 5, now);
+    timelines.approval(1, 2, ApprovalAction::Read, Answer::Denied, 6, now);
+    timelines.approval(0, 2, ApprovalAction::Rewind, Answer::Expired, 7, now);
+    // A trust or owner prompt is about no pane, whatever its numbers.
+    timelines.approval(0, 1, ApprovalAction::Trust, Answer::Once, 8, now);
+    timelines.approval(0, 0, ApprovalAction::Owner, Answer::Denied, 9, now);
+    let approval = |action, answer, other, grant| What::Approval {
+        action,
+        answer,
+        other,
+        grant,
+    };
+    let kinds = |pane| -> Vec<What> {
+        timelines
+            .entries(pane)
+            .unwrap()
+            .iter()
+            .map(|e| e.what)
+            .collect()
+    };
+    assert_eq!(
+        kinds(1),
+        [
+            approval(ApprovalAction::Send, Answer::Once, Some(2), 5),
+            approval(ApprovalAction::Read, Answer::Denied, Some(2), 6),
+        ]
+    );
+    assert_eq!(
+        kinds(2),
+        [
+            approval(ApprovalAction::Send, Answer::Once, Some(1), 5),
+            approval(ApprovalAction::Read, Answer::Denied, Some(1), 6),
+            approval(ApprovalAction::Rewind, Answer::Expired, None, 7),
+        ]
+    );
+    let summary = |pane| {
+        let summary = timelines.of_pane(pane).unwrap().summary();
+        (summary.approvals, summary.denied)
+    };
+    assert_eq!((summary(1), summary(2)), ((2, 1), (3, 1)));
+}
+
+/// A checkpoint's `changed` becomes the summary's; a restore's counts what it undid and leaves
+/// it; an exit take that lands after its run closed is still kept, in the closed file.
+#[test]
+fn checkpoints_carry_their_changed_count_into_live_and_closed_runs() {
+    let (state, mut timelines) = timelines(64);
+    let now = Instant::now();
+    timelines.open(4, now);
+    timelines.checkpoint(4, 0, "launch", true, 0, now);
+    timelines.checkpoint(4, 1, "done", false, 8, now);
+    timelines.checkpoint(4, 2, "restore", true, 3, now);
+    timelines.checkpoint(4, 3, "unknown", true, 1, now);
+    timelines.checkpoint(5, 0, "launch", true, 1, now);
+    assert_eq!(timelines.of_pane(4).unwrap().summary().changed, 8);
+    timelines.exit(4, None, now);
+    timelines.checkpoint(4, 4, "exit", true, 9, now);
+    let checkpoint = |n, reason, complete, changed| What::Checkpoint {
+        n,
+        reason,
+        complete,
+        changed,
+    };
+    let kinds: Vec<What> = timelines
+        .entries(4)
+        .unwrap()
+        .iter()
+        .map(|e| e.what)
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            checkpoint(0, 0, true, 0),
+            checkpoint(1, 1, false, 8),
+            checkpoint(2, 5, true, 3),
+            What::Exit(Ended::Closed),
+            checkpoint(4, 2, true, 9),
+        ]
+    );
+    assert_eq!(timelines.newest(4).unwrap().summary().changed, 9);
+    assert_eq!(file_len(&state, "r4-0"), 16 + 5 * 16);
+    assert!(timelines.newest(5).is_none());
 }

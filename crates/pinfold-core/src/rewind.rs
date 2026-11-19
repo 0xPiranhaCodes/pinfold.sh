@@ -256,6 +256,22 @@ pub struct Finished<T> {
     pub result: Result<Value, String>,
 }
 
+/// A checkpoint a child took, as its line said, kept until [`Rewind::taken`] takes it for the
+/// run's timeline (ADR-0052). A restore's `changed` is what it restored plus what it deleted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Taken {
+    /// The run's index.
+    pub run: usize,
+    /// The checkpoint's number.
+    pub n: u32,
+    /// `launch`, `done`, `exit`, `api`, `view` or `restore`.
+    pub reason: &'static str,
+    /// Whether it covered every file.
+    pub complete: bool,
+    /// Paths that differ from the launch checkpoint.
+    pub changed: u32,
+}
+
 /// The runs of this core and their checkpoint work. Nothing is allocated until a launch.
 pub struct Rewind<T> {
     program: PathBuf,
@@ -270,6 +286,7 @@ pub struct Rewind<T> {
     waker: Option<Arc<Waker>>,
     /// One bit a record: the window was told its strip as it is now.
     told: u64,
+    taken: Vec<Taken>,
 }
 
 impl<T> Rewind<T> {
@@ -294,6 +311,7 @@ impl<T> Rewind<T> {
             notes: None,
             waker,
             told: 0,
+            taken: Vec::new(),
         }
     }
 
@@ -591,6 +609,11 @@ impl<T> Rewind<T> {
         }
     }
 
+    /// The checkpoints taken since the last call, as their answers came in.
+    pub fn taken(&mut self) -> Vec<Taken> {
+        std::mem::take(&mut self.taken)
+    }
+
     /// When the first queued launch gives up, for the event loop's wait.
     #[must_use]
     pub fn deadline(&self) -> Option<Instant> {
@@ -661,10 +684,39 @@ impl<T> Rewind<T> {
         busy.pruning = work.locks();
         let payload = busy.payload.take();
         if let Some(record) = self.runs.get_mut(run) {
-            let n = result.as_ref().ok().and_then(|line| {
-                let checkpoint = line["checkpoint"].as_str()?;
+            let number = |field: &str| {
+                let checkpoint = result.as_ref().ok()?[field].as_str()?;
                 checkpoint.rsplit_once('/')?.1.parse::<u32>().ok()
-            });
+            };
+            let n = number("checkpoint");
+            let count = |field: &str| {
+                let count = result.as_ref().ok().and_then(|line| line[field].as_u64());
+                u32::try_from(count.unwrap_or(0)).unwrap_or(u32::MAX)
+            };
+            let complete = result.as_ref().is_ok_and(|line| line["complete"] == true);
+            let taken = match (work, n) {
+                (Work::Launch, Some(n)) => Some((n, "launch", count("changed"))),
+                (Work::Take(reason), Some(n)) => Some((n, reason, count("changed"))),
+                (Work::Restore, _) => number("restore_checkpoint").map(|n| {
+                    (
+                        n,
+                        "restore",
+                        count("restored").saturating_add(count("deleted")),
+                    )
+                }),
+                _ => None,
+            };
+            if let Some((n, reason, changed)) = taken {
+                // A restore's line names no coverage: its count is what it undid.
+                let complete = complete || reason == "restore";
+                self.taken.push(Taken {
+                    run,
+                    n,
+                    reason,
+                    complete,
+                    changed,
+                });
+            }
             let missing = match (work, n, &result) {
                 (Work::List | Work::Plan | Work::Restore, ..) => record.missing,
                 (Work::Take("done" | "exit"), Some(n), _) => {
