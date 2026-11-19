@@ -102,6 +102,22 @@ pub struct Listed {
     pub remaining: Duration,
 }
 
+/// A prompt that ended: answered in the window, or with `answer` `None` timed out or lost with
+/// its window. Kept until [`Grants::answered`] takes it, for the runs' timelines (ADR-0052).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Answered {
+    /// The prompt's id, which a lasting grant keeps.
+    pub id: u64,
+    /// Pane asking, or 0 for an action asked from outside every pane.
+    pub caller: usize,
+    /// Pane being read, sent to or rewound.
+    pub target: usize,
+    /// The requested operation.
+    pub action: ApprovalAction,
+    /// The window's answer.
+    pub answer: Option<ApprovalAnswer>,
+}
+
 /// What checking one request decided.
 pub enum Decision<T> {
     /// A live grant covers it.
@@ -128,6 +144,7 @@ pub struct Grants<T, C = SystemClock> {
     next_id: u64,
     grants: Vec<Grant>,
     pending: Vec<Parked<T>>,
+    answered: Vec<Answered>,
 }
 
 impl<T> Default for Grants<T, SystemClock> {
@@ -144,6 +161,7 @@ impl<T, C: Clock> Grants<T, C> {
             next_id: 1,
             grants: Vec::new(),
             pending: Vec::new(),
+            answered: Vec::new(),
         }
     }
 
@@ -285,6 +303,7 @@ impl<T, C: Clock> Grants<T, C> {
             return Vec::new();
         };
         let pending = self.pending.swap_remove(index);
+        self.answered.push(answered(&pending, Some(answer)));
         let allowed = answer != ApprovalAnswer::Deny;
         let action = pending.key.action;
         if answer == ApprovalAnswer::AllowForThirtyMinutes && !action.is_once() {
@@ -338,6 +357,11 @@ impl<T, C: Clock> Grants<T, C> {
         self.pending.retain(|pending| !pending.tickets.is_empty());
     }
 
+    /// The prompts that ended since the last call, oldest first.
+    pub fn answered(&mut self) -> Vec<Answered> {
+        std::mem::take(&mut self.answered)
+    }
+
     /// Nearest prompt deadline.
     #[must_use]
     pub fn deadline(&self) -> Option<Instant> {
@@ -379,12 +403,23 @@ impl<T, C: Clock> Grants<T, C> {
         while let Some(pending) = self.pending.get(index) {
             if take(pending) {
                 let pending = self.pending.swap_remove(index);
+                self.answered.push(answered(&pending, None));
                 released.extend(release(pending.tickets, false, reason));
             } else {
                 index += 1;
             }
         }
         released
+    }
+}
+
+fn answered<T>(pending: &Parked<T>, answer: Option<ApprovalAnswer>) -> Answered {
+    Answered {
+        id: pending.id,
+        caller: pending.key.caller,
+        target: pending.key.target,
+        action: pending.key.action,
+        answer,
     }
 }
 
@@ -465,6 +500,16 @@ mod tests {
         );
         let released = grants.answer(second.id, ApprovalAnswer::AllowForThirtyMinutes);
         assert_eq!(released.len(), 2);
+        // One prompt for the batch, for the runs' timelines; a stale key press is none.
+        let answered = Answered {
+            id: second.id,
+            caller: 2,
+            target: 3,
+            action: ApprovalAction::Send,
+            answer: Some(ApprovalAnswer::AllowForThirtyMinutes),
+        };
+        assert_eq!(grants.answered(), [answered]);
+        assert!(grants.answered().is_empty());
         assert_eq!(grants.list().len(), 1);
         assert!(grants.revoke(second.id));
         assert!(grants.list().is_empty());
@@ -541,5 +586,6 @@ mod tests {
         assert_eq!(expired.len(), 1);
         assert!(!expired[0].allowed);
         assert!(expired[0].reason.contains("timed out"));
+        assert_eq!(grants.answered()[0].answer, None);
     }
 }
