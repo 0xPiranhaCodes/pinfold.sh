@@ -176,6 +176,15 @@ command = ["claude"]
 rewind = false          # this profile takes no checkpoints
 ```
 
+These are the defaults. A number outside its range, a value of the wrong type or an unknown key
+refuses the file. `enabled = false` also turns off `checkpoint.take`, `checkpoint.list`,
+`checkpoint.restore` and `pinfold rewind`, which answer "checkpoints are off". `on_done = false`
+keeps the launch and exit checkpoints. Fixed, not keys: a done checkpoint at most once in 60 s
+and an API one once in 30 s per run; at most 64 runs in a core; a directory more than 64 levels
+deep or of more than 65,536 entries, a `.git`, a nested repository and PinFold's own state
+directory are never entered; a `.gitignore` over 64 KiB is not read.
+[Rewind an agent's changes](rewind/README.md) shows how to use them.
+
 ### Webhooks
 
 `alerts.webhook` names where the core posts an alert, read when the core starts, so a change

@@ -60,6 +60,9 @@ pub struct Caps {
     pub max_new_bytes: u64,
     /// Whether what the tree's `.gitignore` files ignore is covered too, `include_ignored`.
     pub include_ignored: bool,
+    /// PinFold's state directory as device and inode, never entered: it holds the stores, so a
+    /// run in `~` would copy its store into itself.
+    pub own: Option<(u64, u64)>,
 }
 
 impl Default for Caps {
@@ -69,6 +72,7 @@ impl Default for Caps {
             max_file_bytes: 16 << 20,
             max_new_bytes: 2048 << 20,
             include_ignored: false,
+            own: None,
         }
     }
 }
@@ -95,6 +99,8 @@ pub enum Why {
     Unreadable,
     /// A directory more than 64 levels below the working directory.
     Deep,
+    /// PinFold's own state directory, [`Caps::own`].
+    Own,
 }
 
 /// What a walk covered and skipped.
@@ -647,6 +653,7 @@ impl<'s, 'p> Walk<'s, 'p> {
         }
         match stat.kind {
             Kind::Dir if depth + 1 > MAX_DEPTH => self.skip(Why::Deep),
+            Kind::Dir if self.caps.own == Some((stat.device, stat.inode)) => self.skip(Why::Own),
             Kind::Dir => {
                 while self.open.load(atomic::Ordering::Relaxed) >= MAX_OPEN_DIRS
                     && !self.pending.is_empty()
