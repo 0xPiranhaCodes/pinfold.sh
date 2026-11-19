@@ -79,7 +79,8 @@ pub fn read<T>(
     let mut comma = "";
     let keep = |entry: &Entry| kinds & 1 << kind(entry) != 0;
     let read = timelines.each(pane, before, count, keep, |seq, entry| {
-        let _ = write!(json, "{comma}{}", fields(reactor, pane, seq, entry));
+        json.push_str(comma);
+        write_entry(&mut json, reactor, pane, seq, entry);
         comma = ",";
     });
     read.map_err(|_| "the run's timeline cannot be read".to_owned())?;
@@ -124,76 +125,109 @@ fn kind(entry: &Entry) -> u8 {
     }
 }
 
-/// One entry as numbers and fixed words.
-fn fields(reactor: &Reactor, pane: usize, seq: u64, entry: Entry) -> Value {
-    let pane_number = |pane: Option<u16>| pane.map(u64::from);
-    let mut fields = match entry.what {
+/// A number, or `null`, as JSON.
+struct Or<T>(Option<T>);
+
+impl<T: std::fmt::Display> std::fmt::Display for Or<T> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Some(value) => value.fmt(formatter),
+            None => formatter.write_str("null"),
+        }
+    }
+}
+
+/// Writes one entry as a JSON object of numbers and fixed words, which need no escaping, with
+/// no allocation of its own.
+fn write_entry(json: &mut String, reactor: &Reactor, pane: usize, seq: u64, entry: Entry) {
+    let kind = pinfold_api::control::TIMELINE_KINDS[usize::from(kind(&entry))];
+    let _ = write!(
+        json,
+        r#"{{"seq":{seq},"at_ms":{},"kind":"{kind}","#,
+        entry.at
+    );
+    let _ = match entry.what {
         What::Command { row, ms, exit } => {
             let row = (row != u32::MAX).then_some(row);
             let held = row.is_some_and(|row| {
                 (reactor.engine(pane)).is_some_and(|engine| engine.holds_row(row as usize))
             });
-            json!({"row": row, "ms": ms, "exit": exit, "source": "marks", "held": held})
+            write!(
+                json,
+                r#""row":{},"ms":{ms},"exit":{},"source":"marks","held":{held}}}"#,
+                Or(row),
+                Or(exit)
+            )
         }
         What::Api {
             seq,
             method,
             outcome,
             target,
-        } => json!({
-            "audit_seq": seq,
-            "method": METHODS.get(usize::from(method)).map(|(name, _)| *name),
-            "outcome": match outcome {
+        } => {
+            let method = METHODS
+                .get(usize::from(method))
+                .map_or("hello", |(name, _)| name);
+            let outcome = match outcome {
                 Outcome::Ok => "ok",
                 Outcome::Refused => "refused",
                 Outcome::Error => "error",
-            },
-            "target": pane_number(target),
-        }),
+            };
+            write!(
+                json,
+                r#""audit_seq":{seq},"method":"{method}","outcome":"{outcome}","target":{}}}"#,
+                Or(target)
+            )
+        }
         What::Approval {
             action,
             answer,
             other,
             grant,
-        } => json!({
-            "action": match action {
+        } => {
+            let action = match action {
                 ApprovalAction::Read => "read",
                 ApprovalAction::Send => "send",
                 ApprovalAction::Trust => "trust",
                 ApprovalAction::Owner => "owner",
                 ApprovalAction::Rewind => "rewind",
-            },
-            "answer": match answer {
+            };
+            let answer = match answer {
                 Answer::Once => "once",
                 Answer::ThirtyMinutes => "thirty_minutes",
                 Answer::Denied => "denied",
                 Answer::Expired => "expired",
-            },
-            "other": pane_number(other),
-            "grant": grant,
-        }),
-        What::State { status, reported } => {
-            json!({"status": status.name(), "reported": reported})
+            };
+            write!(
+                json,
+                r#""action":"{action}","answer":"{answer}","other":{},"grant":{grant}}}"#,
+                Or(other)
+            )
         }
+        What::State { status, reported } => write!(
+            json,
+            r#""status":"{}","reported":{reported}}}"#,
+            status.name()
+        ),
         What::Checkpoint {
             n,
             reason,
             complete,
             changed,
-        } => json!({
-            "n": n,
-            "reason": REASONS.get(usize::from(reason)),
-            "complete": complete,
-            "changed": changed,
-        }),
-        What::Exit(ended) => match ended {
-            Ended::Code(code) => json!({"ended": "code", "exit": code}),
-            Ended::Signal(signal) => json!({"ended": "signal", "exit": signal}),
-            Ended::Closed => json!({"ended": "closed", "exit": null}),
-        },
+        } => {
+            let reason = REASONS.get(usize::from(reason)).unwrap_or(&"api");
+            write!(
+                json,
+                r#""n":{n},"reason":"{reason}","complete":{complete},"changed":{changed}}}"#
+            )
+        }
+        What::Exit(ended) => {
+            let (ended, exit) = match ended {
+                Ended::Code(code) => ("code", Some(code)),
+                Ended::Signal(signal) => ("signal", Some(signal)),
+                Ended::Closed => ("closed", None),
+            };
+            write!(json, r#""ended":"{ended}","exit":{}}}"#, Or(exit))
+        }
     };
-    fields["seq"] = json!(seq);
-    fields["at_ms"] = json!(entry.at);
-    fields["kind"] = json!(pinfold_api::control::TIMELINE_KINDS[usize::from(kind(&entry))]);
-    fields
 }
