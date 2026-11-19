@@ -357,6 +357,12 @@ impl Timeline {
         self.dropped
     }
 
+    /// Which launch of this core it was, so a new run in the same pane is told apart.
+    #[must_use]
+    pub fn run(&self) -> u32 {
+        self.n
+    }
+
     /// Whether its program still runs.
     #[must_use]
     pub fn is_live(&self) -> bool {
@@ -574,6 +580,14 @@ impl Timelines {
     pub fn newest(&self, pane: usize) -> Option<&Timeline> {
         let runs = self.runs.iter().filter(|run| usize::from(run.pane) == pane);
         runs.max_by_key(|run| run.n)
+    }
+
+    /// How many entries the newest run in `pane` wrote, kept or dropped: the next one's `seq`.
+    #[must_use]
+    pub fn total(&self, pane: usize) -> Option<u64> {
+        let run = self.newest(pane)?;
+        let slots = if run.is_live() { self.slots } else { CLOSED };
+        Some(u64::from(run.dropped) + u64::from(run.count(slots)))
     }
 
     /// Records a command the shell's marks closed in `pane`'s live run.

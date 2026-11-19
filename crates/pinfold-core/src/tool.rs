@@ -373,6 +373,17 @@ mod tests {
             [run(Tool::Files, &directory), run(Tool::Diff, &directory)]
         );
         assert!(tools.iter().all(|run| run.path == path));
+        // The rewind viewer opens in the event loop, since the launch checkpoint or the one a
+        // timeline entry named (ADR-0052 slice 4).
+        let rewind = |checkpoint| link::Request::OpenTool {
+            pane: shell as u32,
+            tool: link::Tool::Rewind,
+            checkpoint,
+        };
+        reactor.command(rewind(None)).unwrap();
+        assert_eq!(reactor.take_rewind(), Some((shell, 0)));
+        reactor.command(rewind(Some(3))).unwrap();
+        assert_eq!(reactor.take_rewind(), Some((shell, 3)));
         let opened: Vec<_> = reactor
             .list()
             .filter(|pane| pane.tool.is_some())
