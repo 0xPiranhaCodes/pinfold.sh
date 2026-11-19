@@ -1,0 +1,231 @@
+---
+source: crates/pinfold-ui/src/snapshots.rs
+expression: cells(&timeline(120))
+---
+|│ TIMELINE · ◆ needs you · ⏎ jump · d diff · y allow once │ │ TIMELINE · ◆ needs you · ⏎ jump · d diff · y allow once │ |
+|│ TIMELINE┌─ TIMELINE · api · tab 2 · pane 7 · ● running ────────────────────────────────────────────── esc ─┐ow once │ |
+|│ TIMELINE│ 4 commands · 2 approvals · 8 files changed · 2 errors · 3 older dropped                          │ow once │ |
+|│ TIMELINE│  09:00:00  files  0 changed since launch  launch                                                 │ow once │ |
+|│ TIMELINE│  09:00:00  ● running  reported                                                                   │ow once │ |
+|│ TIMELINE│  09:00:02  cmd    exit 0 · 2.3 s  $ cargo build                                                  │ow once │ |
+|│ TIMELINE│  09:00:09  ask    pane.send → pane 3  allowed once                                               │ow once │ |
+|│ TIMELINE│  09:00:15  cmd    failed · exit 2 · 0.4 s  $ cargo test                                          │ow once │ |
+|│ TIMELINE│  09:00:21  api    pane.close  refused  → pane 4                                                  │ow once │ |
+|│ TIMELINE│  09:00:30  ask    pane.read → pane 5  denied                                                     │ow once │ |
+|│ TIMELINE│  09:00:42  ◆ needs you  from output                                                              │ow once │ |
+|│ TIMELINE│  09:01:05  cmd    exit 0 · 1m01s  evicted                                                        │ow once │ |
+|│ TIMELINE│  09:02:10  files  8 changed since launch  done  incomplete                                       │ow once │ |
+|│ TIMELINE│  09:02:20  ✕ error  reported                                                                     │ow once │ |
+|│ TIMELINE│  09:03:20  cmd    exit 0 · 1.2 s  $ echo [31mok  needs you                                       │ow once │ |
+|│ TIMELINE│  09:04:20  files  3 undone  restore                                                              │ow once │ |
+|│ TIMELINE│▌ 10:01:40  exited signal 9                                                                       │ow once │ |
+|│ TIMELINE├──────────────────────────────────────────────────────────────────────────────────────────────────┤ow once │ |
+|│ TIMELINE│ ⏎ jump · d diff at checkpoint · a api calls · n/p next/previous error · esc                      │ow once │ |
+|│ TIMELINE│ commands and exit codes come from the shell's marks, which output can print                      │ow once │ |
+|│ TIMELINE└──────────────────────────────────────────────────────────────────────────────────────────────────┘ow once │ |
+|│ TIMELINE · ◆ needs you · ⏎ jump · d diff · y allow once │ │ TIMELINE · ◆ needs you · ⏎ jump · d diff · y allow once │ |
+|│ TIMELINE · ◆ needs you · ⏎ jump · d diff · y allow once │ │ TIMELINE · ◆ needs you · ⏎ jump · d diff · y allow once │ |
+|│ TIMELINE · ◆ needs you · ⏎ jump · d diff · y allow once │ │ TIMELINE · ◆ needs you · ⏎ jump · d diff · y allow once │ |
+0:0..120 fg e2e5ea bg 121212
+1:0..10 fg e2e5ea bg 121212
+1:10..12 fg 343a44 bg 151920
+1:12..21 fg 5cd6cb bg 151920
+1:21..47 fg 9aa1ac bg 151920
+1:47..56 fg 7aa7ff bg 151920
+1:56..57 fg 9aa1ac bg 151920
+1:57..103 fg 343a44 bg 151920
+1:103..108 fg 9aa1ac bg 151920
+1:108..110 fg 343a44 bg 151920
+1:110..120 fg e2e5ea bg 121212
+2:0..10 fg e2e5ea bg 121212
+2:10..12 fg 343a44 bg 151920
+2:12..65 fg e2e5ea bg 151920
+2:65..83 fg 9aa1ac bg 151920
+2:83..110 fg 343a44 bg 151920
+2:110..120 fg e2e5ea bg 121212
+3:0..10 fg e2e5ea bg 121212
+3:10..11 fg 343a44 bg 151920
+3:11..13 fg e2e5ea bg 151920
+3:13..21 fg 9aa1ac bg 151920
+3:21..23 fg e2e5ea bg 151920
+3:23..28 fg 9aa1ac bg 151920
+3:28..54 fg e2e5ea bg 151920
+3:54..60 fg 9aa1ac bg 151920
+3:60..109 fg e2e5ea bg 151920
+3:109..110 fg 343a44 bg 151920
+3:110..120 fg e2e5ea bg 121212
+4:0..10 fg e2e5ea bg 121212
+4:10..11 fg 343a44 bg 151920
+4:11..13 fg e2e5ea bg 151920
+4:13..21 fg 9aa1ac bg 151920
+4:21..23 fg e2e5ea bg 151920
+4:23..24 fg 7aa7ff bg 151920
+4:24..25 fg e2e5ea bg 151920
+4:25..32 fg 7aa7ff bg 151920
+4:32..34 fg e2e5ea bg 151920
+4:34..42 fg 9aa1ac bg 151920
+4:42..109 fg e2e5ea bg 151920
+4:109..110 fg 343a44 bg 151920
+4:110..120 fg e2e5ea bg 121212
+5:0..10 fg e2e5ea bg 121212
+5:10..11 fg 343a44 bg 151920
+5:11..13 fg e2e5ea bg 151920
+5:13..21 fg 9aa1ac bg 151920
+5:21..23 fg e2e5ea bg 151920
+5:23..26 fg 9aa1ac bg 151920
+5:26..109 fg e2e5ea bg 151920
+5:109..110 fg 343a44 bg 151920
+5:110..120 fg e2e5ea bg 121212
+6:0..10 fg e2e5ea bg 121212
+6:10..11 fg 343a44 bg 151920
+6:11..13 fg e2e5ea bg 151920
+6:13..21 fg 9aa1ac bg 151920
+6:21..23 fg e2e5ea bg 151920
+6:23..26 fg 9aa1ac bg 151920
+6:26..50 fg e2e5ea bg 151920
+6:50..62 fg 5cd6cb bg 151920
+6:62..109 fg e2e5ea bg 151920
+6:109..110 fg 343a44 bg 151920
+6:110..120 fg e2e5ea bg 121212
+7:0..10 fg e2e5ea bg 121212
+7:10..11 fg 343a44 bg 151920
+7:11..13 fg e2e5ea bg 151920
+7:13..21 fg 9aa1ac bg 151920
+7:21..23 fg e2e5ea bg 151920
+7:23..26 fg 9aa1ac bg 151920
+7:26..30 fg e2e5ea bg 151920
+7:30..53 fg ff8a8a bg 151920
+7:53..109 fg e2e5ea bg 151920
+7:109..110 fg 343a44 bg 151920
+7:110..120 fg e2e5ea bg 121212
+8:0..10 fg e2e5ea bg 121212
+8:10..11 fg 343a44 bg 151920
+8:11..13 fg e2e5ea bg 151920
+8:13..21 fg 9aa1ac bg 151920
+8:21..23 fg e2e5ea bg 151920
+8:23..26 fg 9aa1ac bg 151920
+8:26..42 fg e2e5ea bg 151920
+8:42..49 fg ff8a8a bg 151920
+8:49..51 fg e2e5ea bg 151920
+8:51..59 fg 9aa1ac bg 151920
+8:59..109 fg e2e5ea bg 151920
+8:109..110 fg 343a44 bg 151920
+8:110..120 fg e2e5ea bg 121212
+9:0..10 fg e2e5ea bg 121212
+9:10..11 fg 343a44 bg 151920
+9:11..13 fg e2e5ea bg 151920
+9:13..21 fg 9aa1ac bg 151920
+9:21..23 fg e2e5ea bg 151920
+9:23..26 fg 9aa1ac bg 151920
+9:26..50 fg e2e5ea bg 151920
+9:50..56 fg ff8a8a bg 151920
+9:56..109 fg e2e5ea bg 151920
+9:109..110 fg 343a44 bg 151920
+9:110..120 fg e2e5ea bg 121212
+10:0..10 fg e2e5ea bg 121212
+10:10..11 fg 343a44 bg 151920
+10:11..13 fg e2e5ea bg 151920
+10:13..21 fg 9aa1ac bg 151920
+10:21..23 fg e2e5ea bg 151920
+10:23..24 fg f5b544 bg 151920
+10:24..25 fg e2e5ea bg 151920
+10:25..34 fg f5b544 bg 151920
+10:34..36 fg e2e5ea bg 151920
+10:36..47 fg 9aa1ac bg 151920
+10:47..109 fg e2e5ea bg 151920
+10:109..110 fg 343a44 bg 151920
+10:110..120 fg e2e5ea bg 121212
+11:0..10 fg e2e5ea bg 121212
+11:10..11 fg 343a44 bg 151920
+11:11..13 fg e2e5ea bg 151920
+11:13..21 fg 9aa1ac bg 151920
+11:21..23 fg e2e5ea bg 151920
+11:23..26 fg 9aa1ac bg 151920
+11:26..46 fg e2e5ea bg 151920
+11:46..53 fg 9aa1ac bg 151920
+11:53..109 fg e2e5ea bg 151920
+11:109..110 fg 343a44 bg 151920
+11:110..120 fg e2e5ea bg 121212
+12:0..10 fg e2e5ea bg 121212
+12:10..11 fg 343a44 bg 151920
+12:11..13 fg e2e5ea bg 151920
+12:13..21 fg 9aa1ac bg 151920
+12:21..23 fg e2e5ea bg 151920
+12:23..28 fg 9aa1ac bg 151920
+12:28..54 fg e2e5ea bg 151920
+12:54..58 fg 9aa1ac bg 151920
+12:58..60 fg e2e5ea bg 151920
+12:60..70 fg f5b544 bg 151920
+12:70..109 fg e2e5ea bg 151920
+12:109..110 fg 343a44 bg 151920
+12:110..120 fg e2e5ea bg 121212
+13:0..10 fg e2e5ea bg 121212
+13:10..11 fg 343a44 bg 151920
+13:11..13 fg e2e5ea bg 151920
+13:13..21 fg 9aa1ac bg 151920
+13:21..23 fg e2e5ea bg 151920
+13:23..24 fg ff8a8a bg 151920
+13:24..25 fg e2e5ea bg 151920
+13:25..30 fg ff8a8a bg 151920
+13:30..32 fg e2e5ea bg 151920
+13:32..40 fg 9aa1ac bg 151920
+13:40..109 fg e2e5ea bg 151920
+13:109..110 fg 343a44 bg 151920
+13:110..120 fg e2e5ea bg 121212
+14:0..10 fg e2e5ea bg 121212
+14:10..11 fg 343a44 bg 151920
+14:11..13 fg e2e5ea bg 151920
+14:13..21 fg 9aa1ac bg 151920
+14:21..23 fg e2e5ea bg 151920
+14:23..26 fg 9aa1ac bg 151920
+14:26..109 fg e2e5ea bg 151920
+14:109..110 fg 343a44 bg 151920
+14:110..120 fg e2e5ea bg 121212
+15:0..10 fg e2e5ea bg 121212
+15:10..11 fg 343a44 bg 151920
+15:11..13 fg e2e5ea bg 151920
+15:13..21 fg 9aa1ac bg 151920
+15:21..23 fg e2e5ea bg 151920
+15:23..28 fg 9aa1ac bg 151920
+15:28..40 fg e2e5ea bg 151920
+15:40..47 fg 9aa1ac bg 151920
+15:47..109 fg e2e5ea bg 151920
+15:109..110 fg 343a44 bg 151920
+15:110..120 fg e2e5ea bg 121212
+16:0..10 fg e2e5ea bg 121212
+16:10..11 fg 343a44 bg 151920
+16:11..12 fg 5cd6cb bg 253c3b
+16:12..13 fg e2e5ea bg 253c3b
+16:13..21 fg 9aa1ac bg 253c3b
+16:21..23 fg e2e5ea bg 253c3b
+16:23..29 fg 9aa1ac bg 253c3b
+16:29..109 fg e2e5ea bg 253c3b
+16:109..110 fg 343a44 bg 151920
+16:110..120 fg e2e5ea bg 121212
+17:0..10 fg e2e5ea bg 121212
+17:10..110 fg 343a44 bg 151920
+17:110..120 fg e2e5ea bg 121212
+18:0..10 fg e2e5ea bg 121212
+18:10..12 fg 343a44 bg 151920
+18:12..13 fg e2e5ea bg 151920
+18:13..21 fg 9aa1ac bg 151920
+18:21..22 fg e2e5ea bg 151920
+18:22..44 fg 9aa1ac bg 151920
+18:44..45 fg e2e5ea bg 151920
+18:45..58 fg 9aa1ac bg 151920
+18:58..61 fg e2e5ea bg 151920
+18:61..84 fg 9aa1ac bg 151920
+18:84..87 fg e2e5ea bg 151920
+18:87..110 fg 343a44 bg 151920
+18:110..120 fg e2e5ea bg 121212
+19:0..10 fg e2e5ea bg 121212
+19:10..12 fg 343a44 bg 151920
+19:12..87 fg 9aa1ac bg 151920
+19:87..110 fg 343a44 bg 151920
+19:110..120 fg e2e5ea bg 121212
+20:0..10 fg e2e5ea bg 121212
+20:10..110 fg 343a44 bg 151920
+20:110..120 fg e2e5ea bg 121212
+21:0..120 fg e2e5ea bg 121212
+22:0..120 fg e2e5ea bg 121212
+23:0..120 fg e2e5ea bg 121212

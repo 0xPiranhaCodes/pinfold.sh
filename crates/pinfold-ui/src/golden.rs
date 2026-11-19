@@ -240,6 +240,12 @@ fn golden_inbox() {
     check("inbox", draw(&crate::snapshots::inbox(), false));
 }
 
+/// ADR-0052's control: the overlay drawn over output that prints a fake one.
+#[test]
+fn golden_timeline() {
+    check("timeline", draw(&crate::snapshots::timeline(120), false));
+}
+
 #[test]
 fn golden_answer_prompt() {
     check("answer", draw(&crate::snapshots::answer(), false));

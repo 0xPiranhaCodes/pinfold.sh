@@ -34,8 +34,8 @@ use std::time::{Duration, Instant};
 use mio::unix::SourceFd;
 use mio::{Events, Interest, Poll, Token, Waker};
 use pinfold_proto::link::{
-    ApprovalAction, Decoder, Error, Layout, MAX_DIMENSION, MAX_PANES, MAX_REQUEST, Notice, OLDEST,
-    Position, Rect, Refusal, Request, Selection, VERSION, progress_parts,
+    ApprovalAction, Decoder, ENTRY, Error, Layout, MAX_DIMENSION, MAX_PANES, MAX_REQUEST, Notice,
+    OLDEST, Position, Rect, Refusal, Request, Selection, VERSION, progress_parts,
 };
 use pinfold_proto::{Frame, Palette};
 
@@ -181,6 +181,35 @@ pub struct Listed {
     pub run: Option<RunSummary>,
 }
 
+/// What the core sent the open timeline (ADR-0052 §6): numbers, and a label already held.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Timeline {
+    /// A page of at most [`pinfold_proto::link::MAX_PAGE`] entries, oldest first.
+    Page {
+        /// The run's pane.
+        pane: u32,
+        /// Seconds since the run started.
+        started: u32,
+        /// Entries the ring dropped.
+        dropped: u32,
+        /// Entries the run wrote.
+        total: u32,
+        /// The entries, as the core sent them.
+        entries: Vec<[u8; ENTRY]>,
+    },
+    /// A command's label, cleaned and cut as the overlay holds it.
+    Label {
+        /// The pane.
+        pane: u32,
+        /// The command's stored row.
+        row: u32,
+        /// Whether the row is still held.
+        held: bool,
+        /// The text, empty when not held.
+        text: String,
+    },
+}
+
 /// An agent run's counters, as [`Notice::Summary`] told them: fixed numbers, never text.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RunSummary {
@@ -261,6 +290,8 @@ struct State {
     linked: Option<(u32, Position, String)>,
     /// The last markdown listing: the pane, and its escaped names one a line.
     markdown: Option<(u32, String)>,
+    /// What the core sent the open timeline, until the window takes it (ADR-0052 §5).
+    timeline: Vec<Timeline>,
     /// Copies asked for and not answered.
     copying: u32,
     raised: bool,
@@ -554,15 +585,43 @@ impl State {
                     self.relisted = true;
                 }
             }
-            // The timeline's pages, entries and labels come only when asked, and the overlay
-            // that asks is ADR-0052's slice 5.
+            // Only the open overlay asks, and it holds what comes; this keeps it only until the
+            // window takes it.
+            Notice::Timeline {
+                pane,
+                started,
+                dropped,
+                total,
+                entries,
+                ..
+            } => {
+                let entries = entries.as_chunks::<ENTRY>().0.to_vec();
+                (self.timeline).push(Timeline::Page {
+                    pane,
+                    started,
+                    dropped,
+                    total,
+                    entries,
+                });
+            }
+            Notice::TimelineLabel {
+                pane,
+                row,
+                held,
+                text,
+            } => self.timeline.push(Timeline::Label {
+                pane,
+                row,
+                held,
+                text: crate::timeline::hold(text),
+            }),
+            // Live entries come only to a watched overlay, which this window does not ask for
+            // yet.
             Notice::Copied { .. }
             | Notice::WasRunning { .. }
             | Notice::InboxExtra { .. }
             | Notice::Outside { .. }
-            | Notice::Timeline { .. }
-            | Notice::TimelineEntry { .. }
-            | Notice::TimelineLabel { .. } => {}
+            | Notice::TimelineEntry { .. } => {}
         }
         Ok(())
     }
@@ -1180,6 +1239,11 @@ impl Link {
     /// which is empty if the cell had no hyperlink.
     pub fn take_linked(&mut self) -> Option<(u32, Position, String)> {
         self.state.linked.take()
+    }
+
+    /// Takes what the core sent the open timeline, oldest first.
+    pub fn take_timeline(&mut self) -> Vec<Timeline> {
+        std::mem::take(&mut self.state.timeline)
     }
 
     /// Returns the markdown listing that came since the last call, if one did.

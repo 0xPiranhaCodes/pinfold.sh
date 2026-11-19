@@ -78,6 +78,10 @@ const INBOX_VARIABLE: &str = "PINFOLD_MEASURE_INBOX";
 /// `no checkpoint` (ADR-0050).
 const REWIND_VARIABLE: &str = "PINFOLD_MEASURE_REWIND";
 
+/// Likewise: `tab` goes to the second tab, where an agent's run is, `open` also opens the run's
+/// timeline, and `closed` closes it once its page has drawn (ADR-0052 §5).
+const TIMELINE_VARIABLE: &str = "PINFOLD_MEASURE_TIMELINE";
+
 /// ADR-0021 budgets with nothing to measure yet, and the issue that makes them measurable.
 const NOT_MEASURED: [(&str, &str); 2] = [
     ("Window on Wayland", "a compositor in CI"),
@@ -119,6 +123,9 @@ pub struct Budget<'a> {
     /// Asks a measured window to open its inbox, with `closed` to close it again, and with
     /// `answer` to show an answer prompt over it.
     pub inbox: Option<&'a str>,
+    /// Asks a measured window to go to its second tab, with `open` to open its run's timeline
+    /// there and `closed` to close it again.
+    pub timeline: Option<&'a str>,
     /// Runs the core with this folder as its config home and its `agent.sh` as every pane's
     /// shell.
     pub agents: Option<&'a Path>,
@@ -172,6 +179,9 @@ fn measure_once(budget: &Budget, args: &[&str]) -> io::Result<Reading> {
     }
     if let Some(inbox) = budget.inbox {
         command.env(INBOX_VARIABLE, inbox);
+    }
+    if let Some(timeline) = budget.timeline {
+        command.env(TIMELINE_VARIABLE, timeline);
     }
     // A core takes its session's socket, which a core the user is running holds.
     let runtime = std::env::temp_dir().join(format!("pinfold-gate-{}", std::process::id()));
@@ -574,6 +584,7 @@ mod tests {
             menu: false,
             rewind: false,
             inbox: None,
+            timeline: None,
             agents: None,
         }
     }
@@ -622,6 +633,7 @@ mod tests {
             menu: false,
             rewind: false,
             inbox: None,
+            timeline: None,
             agents: None,
         };
         assert!(!run(&[budget]));
