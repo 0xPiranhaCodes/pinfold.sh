@@ -1755,10 +1755,16 @@ fn at_window_process() {
 #[test]
 #[ignore = "run by a_hunk_from_diff_waits_on_the_windows_approval_and_a_denial_sends_nothing"]
 fn hunk_window_process() {
+    let asked = std::cell::Cell::new(false);
     send_window(pinfold_proto::link::Tool::Diff, |link, directory| {
-        // Drawn means in raw mode; asking again waits for the denial to show.
+        // Drawn means in raw mode. The approval can come before the frame that shows the wait,
+        // so asking again waits for the denial itself: a stale frame would take keys the
+        // waiting tool drops (#493).
+        let denied = asked.replace(true);
         until(link, |link| {
-            pane_shows(link, 1, "? keys") && !pane_shows(link, 1, "waits for the window")
+            pane_shows(link, 1, "? keys")
+                && !pane_shows(link, 1, "waits for the window")
+                && (!denied || pane_shows(link, 1, "✕ error"))
         })
         .unwrap();
         assert!(link.send(Request::Input {
