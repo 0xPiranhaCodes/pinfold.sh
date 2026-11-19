@@ -74,8 +74,10 @@ pub fn read<T>(
         "dropped": run.dropped(),
     })
     .to_string();
-    // About 130 bytes an entry; the head's `}` gives way to the entries.
-    let mut json = String::with_capacity(head.len() + 16 + page.len() * 160);
+    // About 130 bytes an entry. macOS keeps a freed allocation of under about 1 MiB dirty, so
+    // the reply reserves 2 MiB: one mapping, of which only the pages written count, framed in
+    // place and written out without a copy, and handed back whole when freed.
+    let mut json = String::with_capacity((head.len() + 64 + page.len() * 160).max(2 << 20));
     json.push_str(&head[..head.len() - 1]);
     json.push_str(r#","entries":["#);
     for (at, (seq, entry)) in page.into_iter().enumerate() {
