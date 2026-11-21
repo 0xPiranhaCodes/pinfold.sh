@@ -18,7 +18,7 @@ const cmds = {
   mem: () => [...document.querySelectorAll("#memory tbody tr")].map((tr) => { const c = tr.cells; return `${c[0].textContent.padEnd(26)}${c[2].textContent.padStart(9)} / ${c[3].textContent.padEnd(9)} (${c[1].textContent})`; }).join("\n") + "\nreproduce: cargo xtask mem-gate",
   themes: () => [...document.querySelectorAll("#themes .swatches b")].map((b) => b.textContent).join("\n") + '\nin pinfold.toml: theme = "Nord"   (since v0.1.0-beta.4)',
   config: () => '~/.config/pinfold/pinfold.toml, applied on save\nfont_size = 14\n[keys]\nprefix = "C-b"\n<a href="configuration.html">open every key, default and limit →</a>',
-  install: () => "macOS beta: PinFold.dmg from github.com/0xPiranhaCodes/pinfold.sh/releases/tag/v0.1.0-beta.4\nfrom source: cargo build --release -p pinfold-cli",
+  install: () => "macOS beta: PinFold.dmg from github.com/0xPiranhaCodes/pinfold.sh/releases/tag/v0.1.0-beta.5\nfrom source: cargo build --release -p pinfold-cli",
   about: () => "PinFold: a memory-first terminal for agentic coding, written in Rust.",
   ls: () => "why/  memory/  agents/  try/  themes/  configure/  install/",
   whoami: () => "you, the one the ◆ prompt is for",

@@ -57,6 +57,7 @@ Entries are generated from Conventional Commits with git-cliff
 
 ### Changed
 
+- The README and the site point at v0.1.0-beta.5: the download button, the release links and the banner. The site gains a `new` section for rewind, the inbox and the session timeline, each linked to its docs. Themes keep their "in v0.1.0-beta.4" note.
 - The version is 0.1.0-beta.5 for the fifth macOS beta, in the workspace, every internal path dependency, both lockfiles and the beta docs. The manual checks gain rewind, the inbox, toasts and progress, and the session timeline; the known issues gain the window's two memory readings (#454), the core's audit ring after a burst of calls (#506), and the timeline's missing live row and prefix `t`. The README and site keep pointing at beta.4 until beta.5 is published.
 - Prefix `t` opens the timeline (ADR-0052), so a config whose `keys.inbox` or `keys.next_waiting` is `t` is now refused; its message says so.
 - Link version 23 for rewind ([#442](https://github.com/0xPiranhaCodes/pinfold.sh/issues/442), [ADR-0050](docs/adr/0050-rewind-an-agents-changes.md), slice 6): `ApprovalAction::Rewind`, `Notice::Checkpoint { pane, missing }`, whose reason is an index into a fixed list, and `Notice::Restored { undid, skipped, error }`, the error at most 200 bytes. A window of 22 gets none of them and `checkpoint.restore` is refused for it ([ADR-0043](docs/adr/0043-window-serves-the-previous-link-version.md)).

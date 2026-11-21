@@ -47,7 +47,7 @@
     <div class="hero" id="top">
       <section class="pane" aria-labelledby="h1">
         <span class="pane-label">1 · about</span>
-        <div class="eyebrow"><span class="dot" aria-hidden="true"></span> macOS beta out · <b>◆ 0.1.0-beta.4</b> · Rust</div>
+        <div class="eyebrow"><span class="dot" aria-hidden="true"></span> macOS beta out · <b>◆ 0.1.0-beta.5</b> · Rust</div>
 <pre class="logo" aria-hidden="true">
  ██████╗ ██╗███╗   ██╗███████╗ ██████╗ ██╗     ██████╗
  ██╔══██╗██║████╗  ██║██╔════╝██╔═══██╗██║     ██╔══██╗
@@ -58,7 +58,7 @@
         <h1 id="h1">A memory-first terminal for <em>agentic coding</em>.</h1>
         <p class="lede">Tabs, splits and sessions built in. Agents drive panes through a <b>scoped, audited API</b>, and when one needs you, PinFold asks with a prompt <b>no program can fake</b>.</p>
         <div class="cta">
-          <a class="btn" href="https://github.com/0xPiranhaCodes/pinfold.sh/releases/download/v0.1.0-beta.4/PinFold.dmg">↓ macOS beta · PinFold.dmg</a>
+          <a class="btn" href="https://github.com/0xPiranhaCodes/pinfold.sh/releases/download/v0.1.0-beta.5/PinFold.dmg">↓ macOS beta · PinFold.dmg</a>
           <a class="btn ghost" href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/docs/beta/known-issues.md">known issues ↗</a>
           <a class="btn ghost" href="https://github.com/0xPiranhaCodes/pinfold.sh">GitHub ↗</a>
         </div>
@@ -166,6 +166,34 @@ $ pinfold  <span class="st-run">reopens the session</span></pre>
         <figcaption>A real trust prompt from <code>pinfold up</code>, drawn below the panes.</figcaption>
       </figure>
     </div>
+  </section>
+
+  <section id="new" class="block" aria-labelledby="new-h">
+    <div class="section-head"><h2 id="new-h">new</h2><span class="rule" aria-hidden="true"></span><span class="meta">in v0.1.0-beta.5</span></div>
+    <div class="grid3">
+      <article class="box hover">
+        <h3>rewind <span>/ undo an agent</span></h3>
+        <p>PinFold takes a <b>checkpoint</b> of the working directory when an agent starts. Open what it changed since, and undo one file or all of them, each restore behind PinFold's own prompt.</p>
+        <pre>$ pinfold rewind
+<span class="st-needs">◆ needs you  Undo changes since 12 min ago (launch)?</span>
+restore 1 · delete 1 the agent added
+y undo once · n/Esc keep the files</pre>
+      </article>
+      <article class="box hover">
+        <h3>inbox <span>/ every agent, one list</span></h3>
+        <p>Every agent that <b>needs you</b>, first, with its folder and branch. Programs' notifications can show as toasts, and progress fills the tab and the Dock tile, at <b>one byte a pane</b>.</p>
+        <pre>Ctrl+a !   <span class="m">open the inbox</span>
+Ctrl+a w   <span class="st-needs">next pane that needs you</span></pre>
+      </article>
+      <article class="box hover">
+        <h3>timeline <span>/ replay a run</span></h3>
+        <p>Each agent run keeps a <b>timeline</b> on disk: its commands with exit codes and times, approvals, calls that act and checkpoints. It holds 16-byte records and <b>no pane text</b>.</p>
+        <pre>Ctrl+a t   <span class="m">the run's timeline</span>
+Enter      <span class="st-run">jump to that output</span>
+d          <span class="m">diff since that checkpoint</span></pre>
+      </article>
+    </div>
+    <p class="hint">See the <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/docs/rewind/README.md">rewind how-to</a>, the <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/docs/configuration.md">configuration</a> and the <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/docs/beta/known-issues.md">known issues</a>.</p>
   </section>
 
   <section id="try" class="block" aria-labelledby="try-h">
@@ -291,7 +319,7 @@ keep_env = ["ANTHROPIC_API_KEY"]</pre>
     <div class="grid3">
       <article class="box hover">
         <h3>macOS beta <span>/ available now</span></h3>
-        <p>Download the signed, notarized <b>PinFold.dmg</b> and <b>SHA256SUMS</b> from the <a href="https://github.com/0xPiranhaCodes/pinfold.sh/releases/tag/v0.1.0-beta.4">v0.1.0-beta.4 release</a>, check one against the other, then drag PinFold to Applications. One app for Apple silicon and Intel: macOS 11 or later on Apple silicon, 10.13.4 or later on Intel. It has been run by hand only on macOS 27 on Apple silicon, so older versions are untested (<a href="https://github.com/0xPiranhaCodes/pinfold.sh/issues/190">#190</a>), and Intel is only partly checked until <a href="https://github.com/0xPiranhaCodes/pinfold.sh/issues/213">#213</a> is done. Read the <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/docs/beta/known-issues.md">known issues</a> and the <a href="https://github.com/0xPiranhaCodes/pinfold.sh#install-the-beta">install guide</a>.</p>
+        <p>Download the signed, notarized <b>PinFold.dmg</b> and <b>SHA256SUMS</b> from the <a href="https://github.com/0xPiranhaCodes/pinfold.sh/releases/tag/v0.1.0-beta.5">v0.1.0-beta.5 release</a>, check one against the other, then drag PinFold to Applications. One app for Apple silicon and Intel: macOS 11 or later on Apple silicon, 10.13.4 or later on Intel. It has been run by hand only on macOS 27 on Apple silicon, so older versions are untested (<a href="https://github.com/0xPiranhaCodes/pinfold.sh/issues/190">#190</a>), and Intel is only partly checked until <a href="https://github.com/0xPiranhaCodes/pinfold.sh/issues/213">#213</a> is done. Read the <a href="https://github.com/0xPiranhaCodes/pinfold.sh/blob/main/docs/beta/known-issues.md">known issues</a> and the <a href="https://github.com/0xPiranhaCodes/pinfold.sh#install-the-beta">install guide</a>.</p>
         <pre>shasum -a 256 -c SHA256SUMS --ignore-missing
 <span class="m"># optional: the pinfold command</span>
 sudo mkdir -p /usr/local/bin
