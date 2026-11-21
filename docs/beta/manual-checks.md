@@ -3,7 +3,7 @@
 [ADR-0031](../adr/0031-macos-beta-first.md) makes these checks a beta blocker. Run them on the
 signed, notarized `PinFold.dmg` from the draft release, after the checks in
 [Cutting the beta](../../packaging/README.md#cutting-the-beta), on at least one Apple Silicon Mac
-and one Intel Mac. Start each Mac with no earlier PinFold: do [Uninstall](#14-uninstall) first if
+and one Intel Mac. Start each Mac with no earlier PinFold: do [Uninstall](#18-uninstall) first if
 one was there. Record each run in the [results](#results) table.
 
 `bash tests/macos/manual-checks.sh` walks through these steps one at a time, read from this
@@ -27,7 +27,7 @@ ends with the results row to paste here. `--list` shows the sections it found.
 4. Quit with `⌘Q` and open PinFold again. Expected: no Gatekeeper prompt this time.
 5. Add the CLI, as the [README](../../README.md#install-the-beta) says, and run `pinfold ctl list`
    in a new Terminal.app window. Expected: the one pane is listed. `pinfold --version` prints
-   `pinfold 0.1.0-beta.4`, and `pinfold --help` lists every command.
+   `pinfold 0.1.0-beta.5`, and `pinfold --help` lists every command.
 
 ## 2. Menu bar
 
@@ -132,7 +132,7 @@ The steps from [#171](https://github.com/0xPiranhaCodes/pinfold.sh/pull/171). In
 
 ## 10. About panel
 
-PinFold > About PinFold. Expected: the icon, the name, `PinFold 0.1.0-beta.4` above the
+PinFold > About PinFold. Expected: the icon, the name, `PinFold 0.1.0-beta.5` above the
 copyright, the getting started text with coloured state glyphs, three working links, and the
 licenses. Check it in light and dark mode.
 
@@ -177,7 +177,58 @@ measures a build from the checkout, not the installed app.
    `kill -9` it. Expected: the window goes, and `pinfold ctl list` still lists the pane.
 2. Run `pinfold`. Expected: the window returns with `sleep` still running.
 
-## 14. Uninstall
+## 14. Rewind
+
+The checks from [#442](https://github.com/0xPiranhaCodes/pinfold.sh/issues/442) that no test
+makes on a real window ([how to use it](../rewind/README.md)). In a scratch git repository, start
+an agent with `pinfold agent` and ask it to edit two files and create one.
+
+1. Expected: the tab shows no `no checkpoint` strip, and `pinfold ctl timeline` in another pane
+   lists `checkpoint 0` with the reason `launch`.
+2. With the agent's pane focused, press Ctrl+Shift+P and choose **Rewind Agent Changes**.
+   Expected: the diff viewer opens beside it, listing the two edits and the new file.
+3. Select one file and press `u`. Expected: PinFold's own **Rewind** prompt names that file; `n`
+   leaves it as it is, `y` restores it and a flash says what was restored.
+4. Press `U` and answer `y`. Expected: the other edit is undone and the new file is deleted.
+   `git status` shows a clean tree.
+
+## 15. The inbox
+
+The checks from [#447](https://github.com/0xPiranhaCodes/pinfold.sh/issues/447). Start two agents
+with `pinfold agent` in two tabs, and make one ask for a permission.
+
+1. Expected: that tab shows ◆ in amber with the word `needs you`, and the Dock icon bounces once.
+2. Press the prefix (`Ctrl+A`), then `!`. Expected: the inbox lists both agents with their
+   state, folder and git branch, the one needing you first. Enter on it goes to its pane.
+3. From another tab, press the prefix, then `w`. Expected: focus moves to the pane that needs
+   you.
+
+## 16. Toasts and progress
+
+1. Set `[alerts] program_notifications = true` and save. In a pane run
+   `printf '\e]9;hello from the pane\a'`. Expected: a toast in the pane's top right reads
+   `<label> says: hello from the pane` for about 5 s, drawn as PinFold chrome. With PinFold in the
+   background, the same words come as a desktop notification.
+2. Remove that line and save, then repeat. Expected: nothing is shown.
+3. Run `printf '\e]9;4;1;40\a'`. Expected: a thin blue bar under that tab's label, and a
+   progress bar on the Dock tile. `printf '\e]9;4;2;40\a'` turns it red;
+   `printf '\e]9;4;0;0\a'` clears both.
+
+## 17. Session timeline
+
+The checks from [#450](https://github.com/0xPiranhaCodes/pinfold.sh/issues/450). Start an agent
+with `pinfold agent`, have it run a few commands, one of which fails, and approve one prompt.
+
+1. In the agent's pane press the prefix, then `t`. Expected: the timeline overlay lists the
+   commands with their exit codes and durations, the approval and the launch checkpoint.
+2. Move to a command and press Enter. Expected: the overlay closes and the pane scrolls to that
+   command's output.
+3. Move to an entry and press `d`. Expected: the diff viewer opens on the changes since the
+   nearest checkpoint.
+4. In a plain shell pane, press the prefix, then `t`. Expected: a flash says there is no agent
+   run, and no overlay opens.
+
+## 18. Uninstall
 
 Follow [Uninstall](../../README.md#uninstall) in the README. Expected: `pgrep -x pinfold-core`
 prints nothing, and none of the listed paths are left.
