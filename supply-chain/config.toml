@@ -196,11 +196,6 @@ version = "1.1.11"
 criteria = "safe-to-run"
 notes = "Added by Satheesh Kumar in #274, which brought it into the tree; #303 kept it because no import or trusted publisher covers this version. Tier 5 of #302: used only by tests, benches or xtask (safe-to-run), so it never ships. Awaiting maintainer review."
 
-[[exemptions.font-types]]
-version = "0.12.7"
-criteria = "safe-to-deploy"
-notes = "Kept by Satheesh Kumar because only the new unsafe TableDataRef::header in the 952-line diff from mozilla's 0.12.1 audit was read (sound: length checked, alignment 1, AnyBitPattern); the rest was not. Review in #302."
-
 [[exemptions.foreign-types-macros]]
 version = "0.2.4"
 criteria = "safe-to-deploy"
