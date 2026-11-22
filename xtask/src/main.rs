@@ -276,13 +276,17 @@ fn write_tool_inputs(dir: &Path, tools: &Path) -> io::Result<()> {
         ),
     )?;
     fs::set_permissions(script, fs::Permissions::from_mode(0o755))?;
-    // Every pane says its agent needs you, which lists it in the inbox (ADR-0051), then draws
-    // the heavy screen from a repository, so an open inbox reads each pane's branch.
+    // Every pane says its agent needs you, which lists it in the inbox (ADR-0051) and opens its
+    // run, then marks 12 commands, one failed, so each run has a summary (ADR-0052 §5), then
+    // draws the heavy screen from a repository, so an open inbox reads each pane's branch.
     let script = dir.join("agents-screen.sh");
     fs::write(
         &script,
         format!(
-            "#!/bin/sh\ncd {} || exit 1\n{} ctl status needs-you 'Allow edit to src/config.rs?'\nexec {}\n",
+            "#!/bin/sh\ncd {} || exit 1\n{} ctl status needs-you 'Allow edit to src/config.rs?'\n\
+             i=0; while [ $i -lt 12 ]; do\n\
+             \x20 printf '\\033]133;A\\007$ \\033]133;B\\007\\r\\n\\033]133;C\\007\\033]133;D;%d\\007' $((i == 0))\n\
+             \x20 i=$((i + 1))\ndone\nexec {}\n",
             quote(&repo),
             quote(tools),
             quote(&fs::canonicalize(HEAVY_SCREEN)?)

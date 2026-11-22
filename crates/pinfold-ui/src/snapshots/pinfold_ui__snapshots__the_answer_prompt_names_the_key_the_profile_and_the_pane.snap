@@ -1,5 +1,6 @@
 ---
 source: crates/pinfold-ui/src/snapshots.rs
+assertion_line: 416
 expression: cells(&answer())
 ---
 |xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
@@ -10,7 +11,7 @@ expression: cells(&answer())
 |xx│  ● running    2·1  docs-site     docs/limits     Writing guides/limit…     16m    6m │xx|
 |xx│  ✓ done       3·1  infra                         Turn complete  terra…     10m   <1m │xx|
 |xx├──────────────────────────────────────────────────────────────────────────────────────┤xx|
-|xx│ 5 agents · 1 needs you                        ⏎ jump · y approve · i interrupt · esc │xx|
+|xx│ 5 agents · 1 needs you           ⏎ jump · y approve · i interrupt · t timeline · esc │xx|
 |xx└──────────────────────────────────────────────────────────────────────────────────────┘xx|
 |xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|
 |xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx|

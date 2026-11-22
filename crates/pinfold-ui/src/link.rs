@@ -238,6 +238,25 @@ pub struct RunSummary {
     pub errors: u32,
 }
 
+impl RunSummary {
+    /// The counters in PinFold's words, a zero left out (ADR-0052 §5):
+    /// `12 commands · 3 approvals · 8 files changed · 1 error`. Empty when all are zero.
+    pub fn line(&self) -> String {
+        let counts = [
+            (self.commands, "command", "commands"),
+            (self.approvals, "approval", "approvals"),
+            (self.changed, "file changed", "files changed"),
+            (self.errors, "error", "errors"),
+        ];
+        let said = counts.into_iter().filter(|(count, ..)| *count > 0);
+        let said = said.map(|(count, one, many)| {
+            let word = if count == 1 { one } else { many };
+            format!("{count} {word}")
+        });
+        said.collect::<Vec<_>>().join(" · ")
+    }
+}
+
 /// An agent outside PinFold that the open inbox lists after its own rows (ADR-0051 §8).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Outside {

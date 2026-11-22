@@ -1463,11 +1463,17 @@ impl App {
         if self.timeline.is_some() {
             return self.close_timeline();
         }
+        let run = self.run.is_some_and(|(pane, _)| pane == self.focused);
+        self.open_timeline(self.focused, run);
+    }
+
+    /// Opens `pane`'s run's timeline, `run` saying whether it has one, or flashes why not.
+    fn open_timeline(&mut self, pane: u32, run: bool) {
         let said = if !self.timeline_spoken {
             Some("timeline needs the core updated")
         } else if !self.config.timeline.enabled {
             Some("timelines are off in pinfold.toml")
-        } else if self.run.is_none_or(|(pane, _)| pane != self.focused) {
+        } else if !run {
             Some("No agent run in this pane")
         } else {
             None
@@ -1478,7 +1484,7 @@ impl App {
         }
         (self.menu, self.palette, self.picking) = (None, None, None);
         self.close_inbox();
-        let (timeline, step) = Timeline::open(self.focused);
+        let (timeline, step) = Timeline::open(pane);
         self.timeline = Some(timeline);
         self.timeline_step(step);
     }
@@ -1593,6 +1599,15 @@ impl App {
                 self.opening = Some(approval::OpenIn::new(dir, Instant::now()));
                 self.redraw_soon();
             }
+            // The overlay draws over the pane's own tab, so the window goes there first.
+            inbox::Step::Timeline { tab, pane } => {
+                self.open_timeline(pane, true);
+                if self.timeline.is_some() {
+                    self.core(proto::Request::SwitchTab { index: tab.into() });
+                    self.core(proto::Request::Focus { pane });
+                }
+            }
+            inbox::Step::NoRun => self.open_timeline(0, false),
         }
     }
 
@@ -3471,6 +3486,52 @@ mod tests {
         // A page for a closed overlay is late, and dropped.
         page(&mut app);
         assert!(app.timeline.is_none());
+    }
+
+    /// ADR-0052 §5: `t` on an inbox row opens that pane's timeline over its own tab; on a row
+    /// with no run it flashes and the inbox stays.
+    #[test]
+    fn t_in_the_inbox_opens_the_rows_timeline_in_its_tab() {
+        let (mut app, inbox, _poll) = app();
+        (app.inbox_spoken, app.timeline_spoken) = (true, true);
+        app.labels = vec!["api".to_owned(), "docs".to_owned()];
+        app.run(Command::Inbox);
+        let now = Instant::now();
+        let mut listed = vec![
+            crate::inbox::tests::listed(7, 1, 9, "busy", now),
+            crate::inbox::tests::listed(1, 0, 3, "Allow?", now),
+        ];
+        listed[1].run = Some(RunSummary::default());
+        app.take(&mut Shown {
+            listed,
+            members: vec![(7, 0), (1, 1)],
+            relisted: true,
+            ..Shown::default()
+        });
+        inbox.take();
+        let t = Key::Character("t".into());
+        // The ● row, second, has no run.
+        app.inbox_key(&Key::Named(NamedKey::ArrowDown), false);
+        app.inbox_key(&t, false);
+        assert!(app.inbox.is_some() && app.timeline.is_none() && app.flash.until().is_some());
+        assert!(inbox.take().is_empty());
+        app.inbox_key(&Key::Named(NamedKey::ArrowUp), false);
+        app.inbox_key(&t, false);
+        assert!(app.inbox.is_none());
+        assert_eq!(app.timeline.as_ref().map(Timeline::pane), Some(1));
+        let sent = inbox.take();
+        assert!(
+            matches!(
+                sent.as_slice(),
+                [
+                    Request::Core(proto::Request::Inbox { open: false }),
+                    Request::Core(proto::Request::Timeline { pane: 1, .. }),
+                    Request::Core(proto::Request::SwitchTab { index: 1 }),
+                    Request::Core(proto::Request::Focus { pane: 1 }),
+                ]
+            ),
+            "closes the inbox, asks for the page, then goes to the pane"
+        );
     }
 
     /// ADR-0052's control: the overlay is drawn after the panes and takes every key, so a

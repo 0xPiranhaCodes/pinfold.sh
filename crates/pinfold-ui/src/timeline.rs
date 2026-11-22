@@ -596,30 +596,12 @@ impl Timeline {
         run: Option<RunSummary>,
     ) {
         let (ground, dim) = (theme.chrome.palette, theme.chrome.dim);
-        let run = run.unwrap_or_default();
-        let counts = [
-            (run.commands, "command", "commands"),
-            (run.approvals, "approval", "approvals"),
-            (run.changed, "file changed", "files changed"),
-            (run.errors, "error", "errors"),
-        ];
-        let mut at = start;
-        for (count, one, many) in counts.into_iter().filter(|(count, _, _)| *count > 0) {
-            let gap = if at == start { "" } else { " · " };
-            let word = if count == 1 { one } else { many };
-            at = write(
-                frame,
-                row,
-                at,
-                &format!("{gap}{count} {word}"),
-                theme.foreground,
-                ground,
-                end,
-            );
-        }
-        if at == start {
-            at = write(frame, row, at, "nothing counted yet", dim, ground, end);
-        }
+        let line = run.unwrap_or_default().line();
+        let at = if line.is_empty() {
+            write(frame, row, start, "nothing counted yet", dim, ground, end)
+        } else {
+            write(frame, row, start, &line, theme.foreground, ground, end)
+        };
         if self.dropped > 0 {
             write(
                 frame,
