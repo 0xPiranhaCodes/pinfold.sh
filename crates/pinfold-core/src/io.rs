@@ -225,8 +225,9 @@ pub struct Reactor {
     terminated: bool,
     /// When the first event since the heap was last trimmed came, if one has.
     untrimmed: Option<Instant>,
-    /// Restored panes and the redacted command each was running, until a window answers.
-    pub(crate) was_running: Vec<(usize, String)>,
+    /// Restored panes, the redacted command each was running and its run's counters, until a
+    /// window answers.
+    pub(crate) was_running: Vec<(usize, String, Option<crate::snapshot::RunSummary>)>,
     /// Answers accepted only from the inherited window link.
     pub(crate) approval_answers: Vec<(u64, ApprovalAnswer)>,
     /// The pane whose run the window asked to rewind, the latest only (ADR-0050 slice 7).
@@ -1144,7 +1145,7 @@ impl Reactor {
     /// Stops polling a pane and drops it, which ends its program and frees its terminal.
     pub(crate) fn drop_pane(&mut self, number: usize) {
         if let Ok(index) = self.panes.binary_search_by_key(&number, |pane| pane.number) {
-            self.was_running.retain(|(pane, _)| *pane != number);
+            self.was_running.retain(|(pane, ..)| *pane != number);
             let mut pane = self.panes.remove(index);
             if let Some(timelines) = self.timelines.as_mut() {
                 let status = pane.pty.try_wait().ok().flatten();

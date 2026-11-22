@@ -1,5 +1,6 @@
-//! The strip that says what a restored pane was running (ADR-0034), drawn in the row under the
-//! panes. That row is outside pane text, so program output cannot fake it.
+//! The strip that says what a restored pane was running (ADR-0034) and, for an agent run, what
+//! the run did (ADR-0052 §3), drawn in the row under the panes. That row is outside pane text,
+//! so program output cannot fake it.
 
 use pinfold_config::theme::Theme;
 use std::fmt::Write as _;
@@ -57,16 +58,23 @@ pub fn offers_run(runnable: bool, command: &str, columns: u16) -> bool {
     runnable && shown(command, room(columns)).1
 }
 
-/// Adds the strip for `command` under the panes in `frame`.
-pub fn banner(frame: &mut Frame, runnable: bool, command: &str, theme: &Theme) {
+/// Adds the strip for `command` under the panes in `frame`, with the run's `summary` line after
+/// it when it fits whole; the command keeps the room first.
+pub fn banner(frame: &mut Frame, runnable: bool, command: &str, summary: &str, theme: &Theme) {
     let (grey, plain) = (theme.states.idle, theme.prompt_text());
-    let (text, whole) = shown(command, room(frame.columns));
+    let room = room(frame.columns);
+    let (text, whole) = shown(command, room);
     let keys = if runnable && whole { RUN } else { DISMISS };
+    let mut said = String::new();
+    if !summary.is_empty() && text.chars().count() + 3 + summary.chars().count() <= room {
+        said = format!(" · {summary}");
+    }
     paste::row(
         frame,
         &[
             (LABEL.to_owned(), grey),
             (text, plain),
+            (said, grey),
             (keys.to_owned(), grey),
         ],
         theme,
@@ -87,7 +95,8 @@ pub enum Answer {
 /// What restored panes were running, until answered.
 #[derive(Default)]
 pub struct Strips {
-    waiting: Vec<(u32, bool, String)>,
+    /// Each pane, whether Enter may run its command, the command, and its run's summary line.
+    waiting: Vec<(u32, bool, String, String)>,
     /// The pane whose strip was first drawn in a focused window, and when; `None` until then.
     shown: Option<(u32, Instant)>,
     /// A window starts focused, as the window's own flag does.
@@ -95,10 +104,11 @@ pub struct Strips {
 }
 
 impl Strips {
-    /// Adds `pane`'s strip; past one per pane the link allows, it is dropped.
-    pub fn add(&mut self, pane: u32, runnable: bool, command: String) {
+    /// Adds `pane`'s strip, with its run's `summary` line or none if empty; past one per pane
+    /// the link allows, it is dropped.
+    pub fn add(&mut self, pane: u32, runnable: bool, command: String, summary: String) {
         if self.waiting.len() < MAX_PANES {
-            self.waiting.push((pane, runnable, command));
+            self.waiting.push((pane, runnable, command, summary));
         }
     }
 
@@ -116,11 +126,13 @@ impl Strips {
     /// Draws `pane`'s strip, if any, and starts its arming delay in a focused window. Returns
     /// whether it drew one.
     pub fn draw(&mut self, frame: &mut Frame, pane: u32, now: Instant, theme: &Theme) -> bool {
-        let Some((_, runnable, command)) = self.waiting.iter().find(|(at, ..)| *at == pane) else {
+        let Some((_, runnable, command, summary)) =
+            self.waiting.iter().find(|(at, ..)| *at == pane)
+        else {
             self.hide();
             return false;
         };
-        banner(frame, *runnable, command, theme);
+        banner(frame, *runnable, command, summary, theme);
         if !self.unfocused && self.shown.is_none_or(|(at, _)| at != pane) {
             self.shown = Some((pane, now));
         }
@@ -146,7 +158,7 @@ impl Strips {
         if enter && (repeat || !armed) {
             return Some(Answer::Held);
         }
-        let (pane, runnable, command) = self.waiting.swap_remove(index);
+        let (pane, runnable, command, _) = self.waiting.swap_remove(index);
         self.shown = None;
         let run = enter && offers_run(runnable, &command, columns);
         let used = run || *key == Key::Named(NamedKey::Escape);
@@ -164,7 +176,7 @@ mod tests {
             columns,
             ..Frame::default()
         };
-        banner(&mut frame, runnable, command, &GRAPHITE);
+        banner(&mut frame, runnable, command, "", &GRAPHITE);
         assert_eq!(frame.rows, 1);
         frame.cells.iter().map(|cell| cell.character).collect()
     }
@@ -196,6 +208,77 @@ mod tests {
         assert!(!offers_run(false, "ls", 80));
     }
 
+    /// ADR-0052 §3: a restored agent's strip says what its run did, in PinFold's words, and
+    /// gives way whole to the command when narrow, so Enter is offered as before.
+    #[test]
+    fn the_strip_says_what_the_run_did_and_drops_it_before_the_command() {
+        let line = "12 commands · 3 approvals · 8 files changed · 1 error";
+        let strip = |columns| {
+            let mut frame = Frame {
+                columns,
+                ..Frame::default()
+            };
+            banner(&mut frame, true, "claude", line, &GRAPHITE);
+            let text: String = frame.cells.iter().map(|cell| cell.character).collect();
+            (text, frame)
+        };
+        let (text, frame) = strip(120);
+        assert!(
+            text.starts_with(&format!(
+                " ○ was running: claude · {line}  Enter run · Esc dismiss"
+            )),
+            "{text}"
+        );
+        let at = text.chars().position(|c| c == '1').unwrap();
+        assert_eq!(frame.cells[at].foreground, GRAPHITE.states.idle);
+        let (narrow, _) = strip(60);
+        assert!(
+            narrow.starts_with(" ○ was running: claude  Enter run · Esc dismiss"),
+            "{narrow}"
+        );
+        assert!(offers_run(true, "claude", 60));
+    }
+
+    /// A program that prints a strip gets no answer: keys reach only a strip the core sent, and
+    /// the drawn one sits in its own row under the pane's text.
+    #[test]
+    fn output_that_prints_a_strip_cannot_answer_or_replace_it() {
+        let mut strips = Strips::default();
+        strips.add(2, true, "claude".to_owned(), "1 command".to_owned());
+        let mut frame = crate::snapshots::pane(' ', 1, 80);
+        let fake = " ○ was running: rm -rf ~ · 99 commands  Enter run · Esc dismiss";
+        for (cell, character) in frame.cells.iter_mut().zip(fake.chars()) {
+            cell.character = character;
+        }
+        let printed = frame.cells.clone();
+        let now = Instant::now();
+        assert!(
+            !strips.draw(&mut frame, 1, now, &GRAPHITE),
+            "pane 1 has none"
+        );
+        assert_eq!(strips.key(1, &ENTER, false, now + ARMED_AFTER, 80), None);
+        assert!(strips.draw(&mut frame, 2, now, &GRAPHITE));
+        assert_eq!(frame.rows, 2);
+        assert_eq!(
+            frame.cells[..80],
+            printed[..],
+            "the pane's row is untouched"
+        );
+        let row: String = frame.cells[80..]
+            .iter()
+            .map(|cell| cell.character)
+            .collect();
+        assert!(
+            row.starts_with(" ○ was running: claude · 1 command  Enter"),
+            "{row}"
+        );
+        assert!(
+            frame.cells[80..]
+                .iter()
+                .all(|cell| cell.background == GRAPHITE.chrome.overlay)
+        );
+    }
+
     #[test]
     fn only_printable_ascii_is_shown_as_is() {
         assert_eq!(
@@ -219,7 +302,7 @@ mod tests {
         let start = Instant::now();
         let mut strips = Strips::default();
         strips.focus(true);
-        strips.add(1, true, "htop".to_owned());
+        strips.add(1, true, "htop".to_owned(), String::new());
         // Not drawn yet, so not armed however late the key comes.
         assert_eq!(strips.key(1, &ENTER, false, start, 80), Some(Answer::Held));
         shown_at(&mut strips, 1, start);
@@ -243,7 +326,7 @@ mod tests {
         let start = Instant::now();
         let mut strips = Strips::default();
         strips.focus(false);
-        strips.add(1, true, "htop".to_owned());
+        strips.add(1, true, "htop".to_owned(), String::new());
         // Drawn in an unfocused window: the delay has not started.
         shown_at(&mut strips, 1, start);
         strips.focus(true);
@@ -264,8 +347,8 @@ mod tests {
     fn esc_and_other_keys_dismiss_at_once() {
         let start = Instant::now();
         let mut strips = Strips::default();
-        strips.add(1, true, "htop".to_owned());
-        strips.add(2, true, "top".to_owned());
+        strips.add(1, true, "htop".to_owned(), String::new());
+        strips.add(2, true, "top".to_owned(), String::new());
         assert_eq!(
             strips.key(1, &Key::Named(NamedKey::Escape), false, start, 80),
             Some(Answer::Answered {

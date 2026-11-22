@@ -372,6 +372,24 @@ fn the_inbox_shows_each_runs_summary() {
     insta::assert_snapshot!(cells(&inbox_runs()));
 }
 
+/// A restored agent's `was running` strip with its run's summary, under a pane whose program
+/// printed a fake strip (ADR-0052 §3): the real one is PinFold's own row.
+pub(crate) fn was_running() -> Frame {
+    let mut frame = pane(' ', 2, 120);
+    let fake = " ○ was running: rm -rf ~ · 99 commands · 0 errors  Enter run · Esc dismiss ";
+    for (cell, character) in frame.cells.iter_mut().zip(fake.chars().cycle()) {
+        cell.character = character;
+    }
+    let line = "12 commands · 3 approvals · 8 files changed · 1 error";
+    crate::was_running::banner(&mut frame, true, "claude", line, &GRAPHITE);
+    frame
+}
+
+#[test]
+fn the_was_running_strip_says_what_the_run_did() {
+    insta::assert_snapshot!(cells(&was_running()));
+}
+
 /// The timeline over a pane whose program printed a fake one, every row a hostile copy of
 /// its chrome and keys: a run with every kind, a hostile label and an evicted row (ADR-0052 §5).
 pub(crate) fn timeline(columns: u16) -> Frame {
@@ -532,7 +550,7 @@ fn a_light_theme_colours_every_piece_of_chrome() {
     crate::flash::ended(&mut frame, &theme);
     drawn.push(frame);
     let mut frame = screen(2, 80);
-    crate::was_running::banner(&mut frame, true, "cargo test", &theme);
+    crate::was_running::banner(&mut frame, true, "cargo test", "", &theme);
     drawn.push(frame);
 
     let graphite = [

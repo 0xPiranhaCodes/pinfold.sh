@@ -14,6 +14,9 @@
   `Tool::Rewind`; see "Amendment 2026-11-19: slice 4".
 - **Amended 2026-11-19 a fifth time**, decided by the coordinator for the maintainer: what the
   slice 5 overlay holds and draws; see "Amendment 2026-11-19: slice 5".
+- **Amended 2026-11-22**, decided by the coordinator for the maintainer: the strip's counters
+  need link 28, and how the inbox and the snapshot carry a run's summary; see "Amendment
+  2026-11-22: slice 6".
 
 ## Context
 
@@ -564,3 +567,29 @@ Decided by the coordinator for the maintainer while building slice 5.
   `next_waiting` is `t` is refused at upgrade, with a message that says why.
 - **Split.** Two PRs: the overlay with prefix `t`, its keys, Enter, `d` and the mem-gate rows;
   then live append, the palette entry and the mouse.
+
+## Amendment 2026-11-22: slice 6, the inbox, the snapshot and the strip as built
+
+Decided by the coordinator for the maintainer while building slice 6.
+
+- **Link 28.** Section 6 lists no field for the `was running` strip's counters, and
+  `Notice::WasRunning` at 27 carries only the pane, whether it may run and the command. So
+  version 28 (`link::RESTORED_SUMMARY`) gives it `summary: Option<Counts>`: after `runnable`, a
+  flag byte and, when set, six `u32` (commands, failed, approvals, denied, changed, errors), then
+  the command as before. The command is the rest of the message, so the counters cannot trail
+  it. A window of 27 is sent the 27 layout without them, and ADR-0043 gains the row for 28.
+  `Notice::Summary` is not reused: it is a live run's, and the window would have to guess.
+- **Snapshot.** Each pane gains `summary`, the eight counters of section 2 as JSON numbers, no
+  times, absent for a pane with no run and in a snapshot from before it. It is the pane's newest
+  run's, live or ended. A missing counter reads as 0 and a counter that is not a number fails the
+  snapshot as any bad field does. At most 8 counters of 10 digits, 180 bytes a pane with the
+  `summary` key (`a_summary_adds_at_most_200_bytes_a_pane_and_64_still_fit`).
+- **Strip.** Only a pane whose program was not the shell gets a strip, as before; its counters
+  follow the command in the strip's grey, `○ was running: claude · 12 commands · 3 approvals · 8
+  files changed · 1 error`, when they fit whole, and give way whole first, so a command that fits
+  is still offered to Enter.
+- **Inbox.** A row with a run and no message shows the counters in `chrome.dim` where the
+  message goes; a state from output shows `from output · ` before them, as ADR-0046 asks. The
+  agent's own message still wins. `t` on a row with a run closes the inbox, opens that run's
+  timeline and goes to its tab and pane; a row with none, an outside agent's included, flashes
+  `No agent run in this pane`.
