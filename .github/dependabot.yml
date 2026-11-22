@@ -7,6 +7,16 @@ updates:
     groups:
       cargo:
         patterns: ["*"]
+    # Version ranges, so each ignore holds whether Dependabot counts 0.x to 0.y as major or minor.
+    ignore:
+      # pinfold-sys calls x11-clipboard's connection through x11rb's traits, and x11-clipboard
+      # 0.9.3 needs x11rb ^0.13. Lift when an x11-clipboard release takes 0.14.
+      - dependency-name: "x11rb"
+        versions: [">= 0.14"]
+      # pinfold-core uses the base64 that vendored alacritty_terminal 0.26.0 already builds
+      # (0.22). Lift when alacritty_terminal moves to 0.23.
+      - dependency-name: "base64"
+        versions: [">= 0.23"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
