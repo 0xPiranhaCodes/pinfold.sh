@@ -1,0 +1,136 @@
+---
+source: crates/pinfold-ui/src/snapshots.rs
+assertion_line: 372
+expression: cells(&inbox_runs())
+---
+|│ ✓ done 3·1 infra 99 commands · 0 errors · t timeline │ │ ✓ done 3·1 infra 99 commands · 0 errors ·|
+| t┌─ AGENTS · needs you first ───────────────────────────────────────────────────────────── esc ─┐nd|
+|s │▌ ◆ needs you  1·1  api-refactor  Allow edit to src/config.rs?                      10m   <1m │in|
+|fr│  ✕ error      1·2  api-refactor  5 commands · 1 file changed · 1 error             11m    1m │ │|
+| ✓│  ● running    2·2  docs-site     npm run dev  watching                             32m   22m │· |
+|t │  ● running    2·1  docs-site     from output · 3 commands                          16m    6m │ds|
+| ·│  ✓ done       3·1  infra         12 commands · 3 approvals · 8 files changed       10m   <1m │nf|
+|ra├──────────────────────────────────────────────────────────────────────────────────────────────┤│ |
+|✓ │ 5 agents · 1 needs you                   ⏎ jump · y approve · i interrupt · t timeline · esc │ t|
+| t└──────────────────────────────────────────────────────────────────────────────────────────────┘s |
+|· 0 errors · t timeline │ │ ✓ done 3·1 infra 99 commands · 0 errors · t timeline │ │ ✓ done 3·1 infr|
+|a 99 commands · 0 errors · t timeline │ │ ✓ done 3·1 infra 99 commands · 0 errors · t timeline │ │ ✓|
+| done 3·1 infra 99 commands · 0 errors · t timeline │ │ ✓ done 3·1 infra 99 commands · 0 errors · t |
+|timeline │ │ ✓ done 3·1 infra 99 commands · 0 errors · t timeline │ │ ✓ done 3·1 infra 99 commands ·|
+0:0..100 fg e2e5ea bg 121212
+1:0..2 fg e2e5ea bg 121212
+1:2..4 fg 343a44 bg 151920
+1:4..11 fg 5cd6cb bg 151920
+1:11..30 fg 9aa1ac bg 151920
+1:30..91 fg 343a44 bg 151920
+1:91..96 fg 9aa1ac bg 151920
+1:96..98 fg 343a44 bg 151920
+1:98..100 fg e2e5ea bg 121212
+2:0..2 fg e2e5ea bg 121212
+2:2..3 fg 343a44 bg 151920
+2:3..4 fg 5cd6cb bg 253c3b
+2:4..5 fg e2e5ea bg 253c3b
+2:5..6 fg f5b544 bg 253c3b
+2:6..7 fg e2e5ea bg 253c3b
+2:7..16 fg f5b544 bg 253c3b
+2:16..18 fg e2e5ea bg 253c3b
+2:18..21 fg 9aa1ac bg 253c3b
+2:21..87 fg e2e5ea bg 253c3b
+2:87..90 fg 9aa1ac bg 253c3b
+2:90..93 fg e2e5ea bg 253c3b
+2:93..96 fg f5b544 bg 253c3b
+2:96..97 fg e2e5ea bg 253c3b
+2:97..98 fg 343a44 bg 151920
+2:98..100 fg e2e5ea bg 121212
+3:0..2 fg e2e5ea bg 121212
+3:2..3 fg 343a44 bg 151920
+3:3..5 fg e2e5ea bg 151920
+3:5..6 fg ff8a8a bg 151920
+3:6..7 fg e2e5ea bg 151920
+3:7..12 fg ff8a8a bg 151920
+3:12..18 fg e2e5ea bg 151920
+3:18..21 fg 9aa1ac bg 151920
+3:21..37 fg e2e5ea bg 151920
+3:37..74 fg 9aa1ac bg 151920
+3:74..87 fg e2e5ea bg 151920
+3:87..90 fg 9aa1ac bg 151920
+3:90..94 fg e2e5ea bg 151920
+3:94..96 fg 9aa1ac bg 151920
+3:96..97 fg e2e5ea bg 151920
+3:97..98 fg 343a44 bg 151920
+3:98..100 fg e2e5ea bg 121212
+4:0..2 fg e2e5ea bg 121212
+4:2..3 fg 343a44 bg 151920
+4:3..5 fg e2e5ea bg 151920
+4:5..6 fg 7aa7ff bg 151920
+4:6..7 fg e2e5ea bg 151920
+4:7..14 fg 7aa7ff bg 151920
+4:14..18 fg e2e5ea bg 151920
+4:18..21 fg 9aa1ac bg 151920
+4:21..87 fg e2e5ea bg 151920
+4:87..90 fg 9aa1ac bg 151920
+4:90..93 fg e2e5ea bg 151920
+4:93..96 fg 9aa1ac bg 151920
+4:96..97 fg e2e5ea bg 151920
+4:97..98 fg 343a44 bg 151920
+4:98..100 fg e2e5ea bg 121212
+5:0..2 fg e2e5ea bg 121212
+5:2..3 fg 343a44 bg 151920
+5:3..5 fg e2e5ea bg 151920
+5:5..6 fg 7aa7ff bg 151920
+5:6..7 fg e2e5ea bg 151920
+5:7..14 fg 7aa7ff bg 151920
+5:14..18 fg e2e5ea bg 151920
+5:18..21 fg 9aa1ac bg 151920
+5:21..37 fg e2e5ea bg 151920
+5:37..61 fg 9aa1ac bg 151920
+5:61..87 fg e2e5ea bg 151920
+5:87..90 fg 9aa1ac bg 151920
+5:90..94 fg e2e5ea bg 151920
+5:94..96 fg 9aa1ac bg 151920
+5:96..97 fg e2e5ea bg 151920
+5:97..98 fg 343a44 bg 151920
+5:98..100 fg e2e5ea bg 121212
+6:0..2 fg e2e5ea bg 121212
+6:2..3 fg 343a44 bg 151920
+6:3..5 fg e2e5ea bg 151920
+6:5..6 fg 63d29a bg 151920
+6:6..7 fg e2e5ea bg 151920
+6:7..11 fg 63d29a bg 151920
+6:11..18 fg e2e5ea bg 151920
+6:18..21 fg 9aa1ac bg 151920
+6:21..37 fg e2e5ea bg 151920
+6:37..80 fg 9aa1ac bg 151920
+6:80..87 fg e2e5ea bg 151920
+6:87..90 fg 9aa1ac bg 151920
+6:90..93 fg e2e5ea bg 151920
+6:93..96 fg 9aa1ac bg 151920
+6:96..97 fg e2e5ea bg 151920
+6:97..98 fg 343a44 bg 151920
+6:98..100 fg e2e5ea bg 121212
+7:0..2 fg e2e5ea bg 121212
+7:2..98 fg 343a44 bg 151920
+7:98..100 fg e2e5ea bg 121212
+8:0..2 fg e2e5ea bg 121212
+8:2..4 fg 343a44 bg 151920
+8:4..15 fg 9aa1ac bg 151920
+8:15..26 fg f5b544 bg 151920
+8:26..45 fg 343a44 bg 151920
+8:45..46 fg e2e5ea bg 151920
+8:46..54 fg 9aa1ac bg 151920
+8:54..55 fg e2e5ea bg 151920
+8:55..66 fg 9aa1ac bg 151920
+8:66..67 fg e2e5ea bg 151920
+8:67..80 fg 9aa1ac bg 151920
+8:80..81 fg e2e5ea bg 151920
+8:81..93 fg 9aa1ac bg 151920
+8:93..96 fg e2e5ea bg 151920
+8:96..98 fg 343a44 bg 151920
+8:98..100 fg e2e5ea bg 121212
+9:0..2 fg e2e5ea bg 121212
+9:2..98 fg 343a44 bg 151920
+9:98..100 fg e2e5ea bg 121212
+10:0..100 fg e2e5ea bg 121212
+11:0..100 fg e2e5ea bg 121212
+12:0..100 fg e2e5ea bg 121212
+13:0..100 fg e2e5ea bg 121212

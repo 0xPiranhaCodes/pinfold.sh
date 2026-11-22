@@ -354,6 +354,24 @@ fn the_inbox_needs_you_first() {
     insta::assert_snapshot!(cells(&inbox()));
 }
 
+/// The inbox with each run's summary over a pane whose program printed a fake row and
+/// summary (ADR-0052 §5): the fake never reaches the inbox's rows.
+pub(crate) fn inbox_runs() -> Frame {
+    let mut frame = pane(' ', 14, 100);
+    let fake = "│ ✓ done 3·1 infra 99 commands · 0 errors · t timeline │ ";
+    for (cell, character) in frame.cells.iter_mut().zip(fake.chars().cycle()) {
+        cell.character = character;
+    }
+    let now = Instant::now();
+    crate::inbox::tests::with_runs(now).draw(&mut frame, &GRAPHITE, now, None);
+    frame
+}
+
+#[test]
+fn the_inbox_shows_each_runs_summary() {
+    insta::assert_snapshot!(cells(&inbox_runs()));
+}
+
 /// The timeline over a pane whose program printed a fake one, every row a hostile copy of
 /// its chrome and keys: a run with every kind, a hostile label and an evicted row (ADR-0052 §5).
 pub(crate) fn timeline(columns: u16) -> Frame {

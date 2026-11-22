@@ -240,6 +240,15 @@ fn golden_inbox() {
     check("inbox", draw(&crate::snapshots::inbox(), false));
 }
 
+/// ADR-0052 §5: each run's summary, over output that prints a fake one.
+#[test]
+fn golden_inbox_summary() {
+    check(
+        "inbox-summary",
+        draw(&crate::snapshots::inbox_runs(), false),
+    );
+}
+
 /// ADR-0052's control: the overlay drawn over output that prints a fake one.
 #[test]
 fn golden_timeline() {

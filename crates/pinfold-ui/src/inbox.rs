@@ -5,7 +5,8 @@
 //! is the state's glyph and word in its colour, `tab·pane`, the tab's label, the git branch, the
 //! agent's message, the run time and the time in the state, which tick while the inbox is open.
 //! With `[inbox] agent_files` on, a second line gives the agent's context use and last steps,
-//! and Claude Code sessions running outside PinFold follow PinFold's own rows.
+//! and Claude Code sessions running outside PinFold follow PinFold's own rows. A row with an
+//! agent run and no message shows the run's counters, and `t` opens its timeline (ADR-0052 §5).
 //! Its rows live only while it is open: closing drops the whole value.
 
 use std::time::{Duration, Instant};
@@ -17,7 +18,7 @@ use unicode_width::UnicodeWidthChar;
 use winit::keyboard::{Key, NamedKey};
 
 use crate::approval::visible;
-use crate::link::{Listed, Outside};
+use crate::link::{Listed, Outside, RunSummary};
 use crate::top_bar::{self, STATES};
 
 /// The widest the inbox draws, border included.
@@ -81,6 +82,15 @@ pub enum Step {
         /// The folder, as the core's row named it.
         dir: String,
     },
+    /// It closes, and the window goes to this pane and opens its run's timeline (ADR-0052 §5).
+    Timeline {
+        /// The tab's index.
+        tab: u8,
+        /// The pane.
+        pane: u32,
+    },
+    /// It stays open, and the window flashes that the row has no agent run.
+    NoRun,
 }
 
 /// One listed pane, as a row shows it.
@@ -106,6 +116,8 @@ struct Row {
     steps: String,
     /// An outside agent's folder, a plain absolute path; empty for a pane's row.
     dir: String,
+    /// Its agent run's counters, none for a pane with no run: numbers, never text.
+    run: Option<RunSummary>,
 }
 
 impl Row {
@@ -182,7 +194,7 @@ impl Inbox {
             row.started = Some(listed.started);
             row.branch.clone_from(&listed.branch);
             row.steps.clone_from(&listed.steps);
-            (row.profile, row.ctx) = (listed.profile, listed.ctx);
+            (row.profile, row.ctx, row.run) = (listed.profile, listed.ctx, listed.run);
             row.label.clear();
             row.label
                 .push_str(labels.get(usize::from(tab)).map_or("", String::as_str));
@@ -270,6 +282,7 @@ impl Inbox {
                 let choice = match key.as_str() {
                     "y" => Choice::Approve,
                     "i" => Choice::Interrupt,
+                    "t" => return self.timeline(),
                     _ => return Step::Stay,
                 };
                 let waiting = |row: &&Row| row.state == 0 && row.dir.is_empty();
@@ -286,6 +299,18 @@ impl Inbox {
             _ => {}
         }
         Step::Stay
+    }
+
+    /// `t` on the selected row: its run's timeline, or a flash for a row with none.
+    fn timeline(&self) -> Step {
+        match self.rows.get(self.selected) {
+            Some(row) if row.run.is_some() && row.dir.is_empty() => Step::Timeline {
+                tab: row.tab,
+                pane: row.pane,
+            },
+            Some(_) => Step::NoRun,
+            None => Step::Stay,
+        }
     }
 
     /// Takes a press at a cell of the panes' grid, `rows` by `columns`: a row does what Enter
@@ -460,10 +485,11 @@ impl Inbox {
             }
         }
         let said = at.max(usize::from(left) + 28);
-        let keys: [(&str, &str); 4] = [
+        let keys: [(&str, &str); 5] = [
             ("⏎", " jump · "),
             ("y", " approve · "),
             ("i", " interrupt · "),
+            ("t", " timeline · "),
             ("esc", ""),
         ];
         let width: usize = keys
@@ -538,12 +564,15 @@ impl Inbox {
             column += columns.branch + 2;
         }
         if columns.message > 0 {
-            let (message, colour) = if row.reported {
-                (row.message.as_str(), theme.foreground)
-            } else {
-                ("from output", chrome.dim)
+            // A run's counters stand in for a missing message; "from output" still leads.
+            let summary = row.run.map(|run| run.line()).unwrap_or_default();
+            let (message, colour) = match (row.reported, row.message.is_empty()) {
+                (true, false) => (row.message.clone(), theme.foreground),
+                (true, true) => (summary, chrome.dim),
+                (false, _) if summary.is_empty() => ("from output".to_owned(), chrome.dim),
+                (false, _) => (format!("from output · {summary}"), chrome.dim),
             };
-            cut(frame, at, column, message, colour, ground, columns.message);
+            cut(frame, at, column, &message, colour, ground, columns.message);
         }
         let held = |since: Option<Instant>| {
             held_for(since.map_or(Duration::ZERO, |since| now.saturating_duration_since(since)))
@@ -883,6 +912,86 @@ pub(crate) mod tests {
         inbox
     }
 
+    /// The board with runs (ADR-0052 §5): the ✕ and ✓ rows have no message, so they show their
+    /// run's counters; the ◆ row's message wins over its run's; one ● row's state is from output,
+    /// and its message, a fake summary, is never drawn.
+    pub(crate) fn with_runs(now: Instant) -> Inbox {
+        let run = |commands, approvals, changed, errors| RunSummary {
+            commands,
+            approvals,
+            changed,
+            errors,
+            ..RunSummary::default()
+        };
+        let mut listed = [
+            listed(5, 1, 363, "99 commands · 0 errors", now),
+            listed(9, 2, 30, "", now),
+            listed(4, 3, 70, "", now),
+            listed(2, 0, 42, "Allow edit to src/config.rs?", now),
+            listed(6, 1, 1335, "npm run dev · watching", now),
+        ];
+        listed[0].reported = false;
+        for (index, summary) in [
+            (0, run(3, 0, 0, 0)),
+            (1, run(12, 3, 8, 0)),
+            (2, run(5, 0, 1, 1)),
+            (3, run(2, 1, 0, 0)),
+        ] {
+            listed[index].run = Some(summary);
+        }
+        let members = [(2, 0), (4, 0), (5, 1), (6, 1), (9, 2), (11, 2)];
+        let labels = ["api-refactor", "docs-site", "infra"].map(str::to_owned);
+        let mut inbox = Inbox::default();
+        inbox.refresh(&listed, &members, &labels, &[]);
+        inbox
+    }
+
+    #[test]
+    fn a_row_with_no_message_shows_its_runs_summary_and_output_cannot_fake_one() {
+        let now = Instant::now();
+        let lines = lines(&drawn(&with_runs(now), 14, 100, now));
+        let row = |pane: &str| lines.iter().find(|line| line.contains(pane)).unwrap();
+        assert!(
+            row("✓ done").contains("12 commands · 3 approvals · 8 files changed"),
+            "{lines:#?}"
+        );
+        assert!(row("✕ error").contains("5 commands · 1 file changed · 1 error"));
+        assert!(row("◆ needs you").contains("Allow edit") && !row("◆").contains("approval"));
+        let from_output = row("from output");
+        assert!(
+            from_output.contains("from output · 3 commands"),
+            "{from_output}"
+        );
+        assert!(lines.iter().all(|line| !line.contains("99 commands")));
+        // A summary is PinFold's record: drawn dim, as "from output" is.
+        let frame = drawn(&with_runs(now), 14, 100, now);
+        let twelve = frame
+            .cells
+            .windows(2)
+            .find(|pair| (pair[0].character, pair[1].character) == ('1', '2'));
+        assert_eq!(
+            twelve.map(|pair| pair[0].foreground),
+            Some(GRAPHITE.chrome.dim)
+        );
+    }
+
+    #[test]
+    fn t_on_a_row_with_a_run_opens_its_timeline_and_on_any_other_flashes() {
+        let now = Instant::now();
+        let mut inbox = with_runs(now);
+        let t = Key::Character("t".into());
+        assert_eq!(inbox.key(&t), Step::Timeline { tab: 0, pane: 2 });
+        // ✕, then the longer-held ● row, pane 6, which has no run.
+        for _ in 0..2 {
+            inbox.key(&Key::Named(NamedKey::ArrowDown));
+        }
+        assert_eq!(inbox.key(&t), Step::NoRun);
+        assert_eq!(Inbox::default().key(&t), Step::Stay, "no rows");
+        let mut outside = with_outside(now);
+        outside.key(&Key::Named(NamedKey::End));
+        assert_eq!(outside.key(&t), Step::NoRun, "an agent outside PinFold");
+    }
+
     /// ADR-0051 §6: `y` and `i` ask for a confirmation on a ◆ row only, naming its pane and
     /// profile; elsewhere they do nothing.
     #[test]
@@ -918,7 +1027,8 @@ pub(crate) mod tests {
         };
         let plain = footer(None).unwrap();
         assert!(
-            !plain.contains("webhook") && plain.contains("⏎ jump · y approve · i interrupt · esc"),
+            !plain.contains("webhook")
+                && plain.contains("⏎ jump · y approve · i interrupt · t timeline · esc"),
             "{plain}"
         );
         assert!(
