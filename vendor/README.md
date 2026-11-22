@@ -17,6 +17,12 @@ The patch does what history outside the grid needs (ADR-0006, #24):
 - `CSI 3J` no longer depends on the grid holding history. The guard would otherwise skip
   the clear, and a shell's `clear` would leave its rows in the store.
 
+It also fixes VT bugs that `crates/pinfold-core/tests/vt_conformance.rs` found, each marked
+with a `PinFold #` comment:
+
+- ED 1 with the cursor on row 1 erases row 0 as well (#443).
+- DECALN (`ESC # 8`) resets the scroll region and homes the cursor, not only filling the screen (#444).
+
 Upstream's `tests/` is left out because it is 46 MB of recordings, and its Cargo test targets
 go with it. The crate has `unsafe`, so it stays out of the workspace, whose crates forbid it.
 
