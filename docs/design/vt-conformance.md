@@ -10,7 +10,7 @@ Screens are the rows the window draws, without trailing spaces, between bars; a 
 character's second cell is a space. Cursors are `row,column` from 0.
 esctest2 runs as well, through `tests/conformance/esctest.sh`.
 
-**84 pass, 5 known gaps, 89 cases.**
+**85 pass, 4 known gaps, 89 cases.**
 
 | Area | Case | Bytes | Expected | PinFold | Status | Reference |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -33,7 +33,7 @@ esctest2 runs as well, through `tests/conformance/esctest.sh`.
 | Cursor | the last column leaves a wrap pending | `0123456789` | `0,9` | `0,9` | pass | [vttest](https://invisible-island.net/vttest/): 1 |
 | Cursor | CR clears a pending wrap | `0123456789\rX` | `X123456789\|\|\| @0,1` | `X123456789\|\|\| @0,1` | pass | [vttest](https://invisible-island.net/vttest/): 1 |
 | Erase | ED 0 erases to the end of the screen | `abc\r\ndefESC[1;2HESC[J` | `a\|\|\|` | `a\|\|\|` | pass | [Ghostty csi/ed](https://ghostty.org/docs/vt/csi/ed) |
-| Erase | ED 1 erases to the cursor | `abc\r\ndefESC[2;2HESC[1J` | `\|  f\|\|` | `abc\|  f\|\|` | gap [#443](https://github.com/0xPiranhaCodes/pinfold.sh/issues/443) | [Ghostty csi/ed](https://ghostty.org/docs/vt/csi/ed) |
+| Erase | ED 1 erases to the cursor | `abc\r\ndefESC[2;2HESC[1J` | `\|  f\|\|` | `\|  f\|\|` | pass | [Ghostty csi/ed](https://ghostty.org/docs/vt/csi/ed) |
 | Erase | ED 2 erases the screen, not moving the cursor | `abcESC[2J` | `\|\|\| @0,3` | `\|\|\| @0,3` | pass | [Ghostty csi/ed](https://ghostty.org/docs/vt/csi/ed) |
 | Erase | EL 0 erases to the end of the line | `abcdefESC[1;3HESC[K` | `ab\|\|\|` | `ab\|\|\|` | pass | [Ghostty csi/el](https://ghostty.org/docs/vt/csi/el) |
 | Erase | EL 1 erases to the cursor | `abcdefESC[1;3HESC[1K` | `   def\|\|\|` | `   def\|\|\|` | pass | [Ghostty csi/el](https://ghostty.org/docs/vt/csi/el) |
