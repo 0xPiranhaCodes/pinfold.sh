@@ -103,6 +103,12 @@ criteria = "safe-to-deploy"
 delta = "1.4.1 -> 1.4.8"
 notes = "AI-assisted review (Claude Code) for the maintainer; not yet spot-checked by a person. Replaces static mut GLOBAL_DATA with an AtomicPtr set once from Box::into_raw, swaps HashMap/BTreeMap for an insertion-ordered VecMap, saves and restores errno around the handler, and casts handler pointers through *const () for provenance. Adds the errno dependency. No new syscalls or I/O."
 
+[[audits.similar]]
+who = "Satheesh Kumar <22219814+0xPiranhaCodes@users.noreply.github.com>"
+criteria = "safe-to-deploy"
+delta = "2.7.0 -> 3.2.1"
+notes = "AI-assisted review (Claude Code) for the maintainer; not yet spot-checked by a person. Delta from mozilla's 2.7.0 audit, read for capabilities and soundness rather than proving every algorithm: no unsafe, build script, FFI, proc macro or file, network, process or environment access. std::thread appears only in #[cfg(test)] code and std::io only in the text feature's writers. New code is Histogram, Hunt, three-way merge and a rewritten Myers with Git-style bounded splits; with std its content hash is SipHash keyed from RandomState once per process, so colliding inputs cannot be prepared. Without std the deadline type is () and the deadline is ignored, so Pinfold enables std. Panics on malformed input would end pinfold-tools' process, never the core."
+
 [[audits.smithay-clipboard]]
 who = "Satheesh Kumar <22219814+0xPiranhaCodes@users.noreply.github.com>"
 criteria = "safe-to-deploy"
@@ -139,6 +145,13 @@ user-id = 189 # Andrew Gallant (BurntSushi)
 start = "2019-03-28"
 end = "2027-11-08"
 notes = "mozilla and bytecode-alliance trust this publisher for this crate."
+
+[[trusted.bstr]]
+criteria = "safe-to-deploy"
+user-id = 189 # Andrew Gallant (BurntSushi)
+start = "2019-05-11"
+end = "2027-11-22"
+notes = "Added by Satheesh Kumar because similar 3 lists bstr as an optional dependency, so it is in Cargo.lock although Pinfold never enables the feature that builds it. No import trusts this publisher for this crate; mozilla, bytecode-alliance and isrg trust them for others. Review in #519."
 
 [[trusted.itoa]]
 criteria = "safe-to-deploy"
