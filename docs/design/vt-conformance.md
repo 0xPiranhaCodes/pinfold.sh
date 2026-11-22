@@ -10,7 +10,7 @@ Screens are the rows the window draws, without trailing spaces, between bars; a 
 character's second cell is a space. Cursors are `row,column` from 0.
 esctest2 runs as well, through `tests/conformance/esctest.sh`.
 
-**82 pass, 6 known gaps, 88 cases.**
+**88 pass, 1 known gaps, 89 cases.**
 
 | Area | Case | Bytes | Expected | PinFold | Status | Reference |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -33,13 +33,14 @@ esctest2 runs as well, through `tests/conformance/esctest.sh`.
 | Cursor | the last column leaves a wrap pending | `0123456789` | `0,9` | `0,9` | pass | [vttest](https://invisible-island.net/vttest/): 1 |
 | Cursor | CR clears a pending wrap | `0123456789\rX` | `X123456789\|\|\| @0,1` | `X123456789\|\|\| @0,1` | pass | [vttest](https://invisible-island.net/vttest/): 1 |
 | Erase | ED 0 erases to the end of the screen | `abc\r\ndefESC[1;2HESC[J` | `a\|\|\|` | `a\|\|\|` | pass | [Ghostty csi/ed](https://ghostty.org/docs/vt/csi/ed) |
-| Erase | ED 1 erases to the cursor | `abc\r\ndefESC[2;2HESC[1J` | `\|  f\|\|` | `abc\|  f\|\|` | gap [#443](https://github.com/0xPiranhaCodes/pinfold.sh/issues/443) | [Ghostty csi/ed](https://ghostty.org/docs/vt/csi/ed) |
+| Erase | ED 1 erases to the cursor | `abc\r\ndefESC[2;2HESC[1J` | `\|  f\|\|` | `\|  f\|\|` | pass | [Ghostty csi/ed](https://ghostty.org/docs/vt/csi/ed) |
 | Erase | ED 2 erases the screen, not moving the cursor | `abcESC[2J` | `\|\|\| @0,3` | `\|\|\| @0,3` | pass | [Ghostty csi/ed](https://ghostty.org/docs/vt/csi/ed) |
 | Erase | EL 0 erases to the end of the line | `abcdefESC[1;3HESC[K` | `ab\|\|\|` | `ab\|\|\|` | pass | [Ghostty csi/el](https://ghostty.org/docs/vt/csi/el) |
 | Erase | EL 1 erases to the cursor | `abcdefESC[1;3HESC[1K` | `   def\|\|\|` | `   def\|\|\|` | pass | [Ghostty csi/el](https://ghostty.org/docs/vt/csi/el) |
 | Erase | EL 2 erases the line | `abcdefESC[2K` | `\|\|\|` | `\|\|\|` | pass | [Ghostty csi/el](https://ghostty.org/docs/vt/csi/el) |
 | Erase | ECH erases characters in place | `abcdefESC[1;2HESC[2X` | `a  def\|\|\| @0,1` | `a  def\|\|\| @0,1` | pass | [Ghostty csi/ech](https://ghostty.org/docs/vt/csi/ech) |
-| Erase | DECALN fills the screen with E | `abESC#8` | `EEEEEEEEEE\|EEEEEEEEEE\|EEEEEEEEEE\|EEEEEEEEEE @0,0` | `EEEEEEEEEE\|EEEEEEEEEE\|EEEEEEEEEE\|EEEEEEEEEE @0,2` | gap [#444](https://github.com/0xPiranhaCodes/pinfold.sh/issues/444) | [Ghostty esc/decaln](https://ghostty.org/docs/vt/esc/decaln) |
+| Erase | DECALN fills the screen with E | `abESC#8` | `EEEEEEEEEE\|EEEEEEEEEE\|EEEEEEEEEE\|EEEEEEEEEE @0,0` | `EEEEEEEEEE\|EEEEEEEEEE\|EEEEEEEEEE\|EEEEEEEEEE @0,0` | pass | [Ghostty esc/decaln](https://ghostty.org/docs/vt/esc/decaln) |
+| Erase | DECALN resets the scroll region | `ESC[1;2rESC#8ESC[2;1H\nX` | `EEEEEEEEEE\|EEEEEEEEEE\|XEEEEEEEEE\|EEEEEEEEEE` | `EEEEEEEEEE\|EEEEEEEEEE\|XEEEEEEEEE\|EEEEEEEEEE` | pass | [xterm](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html): DECALN |
 | Scroll | LF at the foot scrolls the screen | `1\r\n2\r\n3\r\n4\r\n5` | `2\|3\|4\|5` | `2\|3\|4\|5` | pass | [Ghostty control/lf](https://ghostty.org/docs/vt/control/lf) |
 | Scroll | DECSTBM homes the cursor | `abESC[2;3r` | `0,0` | `0,0` | pass | [Ghostty csi/decstbm](https://ghostty.org/docs/vt/csi/decstbm) |
 | Scroll | LF at a region's foot scrolls only the region | `top\r\na\r\nb\r\nfootESC[2;3rESC[3;1Hc\r\nd` | `top\|c\|d\|foot` | `top\|c\|d\|foot` | pass | [vttest](https://invisible-island.net/vttest/): 2 |
@@ -55,10 +56,10 @@ esctest2 runs as well, through `tests/conformance/esctest.sh`.
 | Insert/delete | IL outside the scroll region does nothing | `a\r\nbESC[2;3rESC[4;1HESC[L` | `a\|b\|\|` | `a\|b\|\|` | pass | [Ghostty csi/il](https://ghostty.org/docs/vt/csi/il) |
 | Insert/delete | IRM inserts text | `abcESC[1;1HESC[4hX` | `Xabc\|\|\|` | `Xabc\|\|\|` | pass | [xterm](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html): IRM |
 | Insert/delete | REP repeats the last character | `aESC[3b` | `aaaa\|\|\|` | `aaaa\|\|\|` | pass | [Ghostty csi/rep](https://ghostty.org/docs/vt/csi/rep) |
-| Tabs | HT goes to the next stop of eight | `\tx` | `        x\|\|\| @0,9` | `\t       x\|\|\| @0,9` | gap [#445](https://github.com/0xPiranhaCodes/pinfold.sh/issues/445) | [ecma48](https://ecma-international.org/publications-and-standards/standards/ecma-48/): HT |
+| Tabs | HT goes to the next stop of eight | `\tx` | `        x\|\|\| @0,9` | `        x\|\|\| @0,9` | pass | [ecma48](https://ecma-international.org/publications-and-standards/standards/ecma-48/): HT |
 | Tabs | HT stops at the right margin | `\t\t\t` | `0,9` | `0,9` | pass | [ecma48](https://ecma-international.org/publications-and-standards/standards/ecma-48/): HT |
-| Tabs | HTS sets a stop | `ESC[1;4HESCHESC[H\tx` | `   x\|\|\|` | `\t  x\|\|\|` | gap [#445](https://github.com/0xPiranhaCodes/pinfold.sh/issues/445) | [xterm](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html): HTS |
-| Tabs | TBC 3 clears every stop | `ESC[3g\tx` | `         x\|\|\|` | `\t        x\|\|\|` | gap [#445](https://github.com/0xPiranhaCodes/pinfold.sh/issues/445) | [Ghostty csi/tbc](https://ghostty.org/docs/vt/csi/tbc) |
+| Tabs | HTS sets a stop | `ESC[1;4HESCHESC[H\tx` | `   x\|\|\|` | `   x\|\|\|` | pass | [xterm](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html): HTS |
+| Tabs | TBC 3 clears every stop | `ESC[3g\tx` | `         x\|\|\|` | `         x\|\|\|` | pass | [Ghostty csi/tbc](https://ghostty.org/docs/vt/csi/tbc) |
 | Tabs | CBT goes back a stop | `ESC[1;10HESC[Z` | `0,8` | `0,8` | pass | [Ghostty csi/cbt](https://ghostty.org/docs/vt/csi/cbt) |
 | Tabs | CHT goes forward stops | `ESC[2I` | `0,9` | `0,9` | pass | [Ghostty csi/cht](https://ghostty.org/docs/vt/csi/cht) |
 | SGR | 38;2 sets a truecolor foreground | `ESC[38;2;1;2;3mX` | `010203 on default-bg` | `010203 on default-bg` | pass | [xterm](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html): SGR |

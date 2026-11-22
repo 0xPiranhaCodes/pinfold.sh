@@ -281,7 +281,29 @@ diff -ruN a/src/term/mod.rs b/src/term/mod.rs
              is_focused: Default::default(),
              selection: Default::default(),
              title: Default::default(),
-@@ -1802,7 +1844,7 @@
+@@ -1149,6 +1191,10 @@
+             }
+         }
+ 
++        // PinFold #444: DECALN also resets the margins and homes the cursor, as xterm does.
++        self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
++        self.goto(0, 0);
++
+         self.mark_fully_damaged();
+     }
+ 
+@@ -1757,8 +1803,8 @@
+             ansi::ClearMode::Above => {
+                 let cursor = self.grid.cursor.point;
+ 
+-                // If clearing more than one line.
+-                if cursor.line > 1 {
++                // PinFold #443: ED 1 on row 1 clears row 0 too.
++                if cursor.line > 0 {
+                     // Fully clear all lines before the current line.
+                     self.grid.reset_region(..cursor.line);
+                 }
+@@ -1802,7 +1848,7 @@
  
                  self.selection = None;
              },
@@ -290,7 +312,7 @@ diff -ruN a/src/term/mod.rs b/src/term/mod.rs
                  self.grid.clear_history();
  
                  self.vi_mode_cursor.point.line =
-@@ -1810,8 +1852,6 @@
+@@ -1810,8 +1856,6 @@
  
                  self.selection = self.selection.take().filter(|s| !s.intersects_range(..Line(0)));
              },
@@ -299,7 +321,7 @@ diff -ruN a/src/term/mod.rs b/src/term/mod.rs
          }
  
          self.mark_fully_damaged();
-@@ -1873,6 +1913,7 @@
+@@ -1873,6 +1917,7 @@
      #[inline]
      fn set_hyperlink(&mut self, hyperlink: Option<Hyperlink>) {
          trace!("Setting hyperlink: {hyperlink:?}");
@@ -307,7 +329,7 @@ diff -ruN a/src/term/mod.rs b/src/term/mod.rs
          self.grid.cursor.template.set_hyperlink(hyperlink.map(|e| e.into()));
      }
  
-@@ -2221,6 +2262,13 @@
+@@ -2221,6 +2266,13 @@
      fn set_title(&mut self, title: Option<String>) {
          trace!("Setting title to '{title:?}'");
  
