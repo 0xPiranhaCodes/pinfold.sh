@@ -12,7 +12,7 @@ publish.workspace = true
 [dependencies]
 alacritty_terminal = "=0.26.0"
 # kitty's OSC 99 notifications in base64 (ADR-0051 §9). Already built for alacritty_terminal.
-base64 = { version = "0.22.1", default-features = false, features = ["alloc"] }
+base64 = { version = "0.23.1", default-features = false, features = ["alloc"] }
 # The safe features make the crate forbid unsafe code. Off by default: its frame format.
 lz4_flex = { version = "=0.14.2", default-features = false, features = ["alloc", "checked-decode", "safe-decode", "safe-encode"] }
 mio = { version = "1.2.5", features = ["os-ext", "os-poll"] }
