@@ -10,7 +10,7 @@ Screens are the rows the window draws, without trailing spaces, between bars; a 
 character's second cell is a space. Cursors are `row,column` from 0.
 esctest2 runs as well, through `tests/conformance/esctest.sh`.
 
-**85 pass, 3 known gaps, 88 cases.**
+**87 pass, 2 known gaps, 89 cases.**
 
 | Area | Case | Bytes | Expected | PinFold | Status | Reference |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -39,7 +39,8 @@ esctest2 runs as well, through `tests/conformance/esctest.sh`.
 | Erase | EL 1 erases to the cursor | `abcdefESC[1;3HESC[1K` | `   def\|\|\|` | `   def\|\|\|` | pass | [Ghostty csi/el](https://ghostty.org/docs/vt/csi/el) |
 | Erase | EL 2 erases the line | `abcdefESC[2K` | `\|\|\|` | `\|\|\|` | pass | [Ghostty csi/el](https://ghostty.org/docs/vt/csi/el) |
 | Erase | ECH erases characters in place | `abcdefESC[1;2HESC[2X` | `a  def\|\|\| @0,1` | `a  def\|\|\| @0,1` | pass | [Ghostty csi/ech](https://ghostty.org/docs/vt/csi/ech) |
-| Erase | DECALN fills the screen with E | `abESC#8` | `EEEEEEEEEE\|EEEEEEEEEE\|EEEEEEEEEE\|EEEEEEEEEE @0,0` | `EEEEEEEEEE\|EEEEEEEEEE\|EEEEEEEEEE\|EEEEEEEEEE @0,2` | gap [#444](https://github.com/0xPiranhaCodes/pinfold.sh/issues/444) | [Ghostty esc/decaln](https://ghostty.org/docs/vt/esc/decaln) |
+| Erase | DECALN fills the screen with E | `abESC#8` | `EEEEEEEEEE\|EEEEEEEEEE\|EEEEEEEEEE\|EEEEEEEEEE @0,0` | `EEEEEEEEEE\|EEEEEEEEEE\|EEEEEEEEEE\|EEEEEEEEEE @0,0` | pass | [Ghostty esc/decaln](https://ghostty.org/docs/vt/esc/decaln) |
+| Erase | DECALN resets the scroll region | `ESC[1;2rESC#8ESC[2;1H\nX` | `EEEEEEEEEE\|EEEEEEEEEE\|XEEEEEEEEE\|EEEEEEEEEE` | `EEEEEEEEEE\|EEEEEEEEEE\|XEEEEEEEEE\|EEEEEEEEEE` | pass | [xterm](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html): DECALN |
 | Scroll | LF at the foot scrolls the screen | `1\r\n2\r\n3\r\n4\r\n5` | `2\|3\|4\|5` | `2\|3\|4\|5` | pass | [Ghostty control/lf](https://ghostty.org/docs/vt/control/lf) |
 | Scroll | DECSTBM homes the cursor | `abESC[2;3r` | `0,0` | `0,0` | pass | [Ghostty csi/decstbm](https://ghostty.org/docs/vt/csi/decstbm) |
 | Scroll | LF at a region's foot scrolls only the region | `top\r\na\r\nb\r\nfootESC[2;3rESC[3;1Hc\r\nd` | `top\|c\|d\|foot` | `top\|c\|d\|foot` | pass | [vttest](https://invisible-island.net/vttest/): 2 |
