@@ -169,7 +169,7 @@ fn ended_sync(engine: &mut AlacrittyEngine) -> String {
 }
 
 #[rustfmt::skip]
-const CASES: [Case; 88] = cases! {
+const CASES: [Case; 89] = cases! {
     "Cursor" "CUP moves to row;column" b"\x1b[2;3H" => cursor, "1,2", "ghostty csi/cup";
     "Cursor" "CUP with no parameters goes home" b"ab\x1b[H" => cursor, "0,0", "ghostty csi/cup";
     "Cursor" "CUP clamps to the screen" b"\x1b[99;99H" => cursor, "3,9", "ghostty csi/cup";
@@ -195,7 +195,8 @@ const CASES: [Case; 88] = cases! {
     "Erase" "EL 1 erases to the cursor" b"abcdef\x1b[1;3H\x1b[1K" => screen, "   def|||", "ghostty csi/el";
     "Erase" "EL 2 erases the line" b"abcdef\x1b[2K" => screen, "|||", "ghostty csi/el";
     "Erase" "ECH erases characters in place" b"abcdef\x1b[1;2H\x1b[2X" => screen_cursor, "a  def||| @0,1", "ghostty csi/ech";
-    "Erase" "DECALN fills the screen with E" b"ab\x1b#8" => screen_cursor, "EEEEEEEEEE|EEEEEEEEEE|EEEEEEEEEE|EEEEEEEEEE @0,0", "ghostty esc/decaln", gap 444;
+    "Erase" "DECALN fills the screen with E" b"ab\x1b#8" => screen_cursor, "EEEEEEEEEE|EEEEEEEEEE|EEEEEEEEEE|EEEEEEEEEE @0,0", "ghostty esc/decaln";
+    "Erase" "DECALN resets the scroll region" b"\x1b[1;2r\x1b#8\x1b[2;1H\nX" => screen, "EEEEEEEEEE|EEEEEEEEEE|XEEEEEEEEE|EEEEEEEEEE", "xterm DECALN";
     "Scroll" "LF at the foot scrolls the screen" b"1\r\n2\r\n3\r\n4\r\n5" => screen, "2|3|4|5", "ghostty control/lf";
     "Scroll" "DECSTBM homes the cursor" b"ab\x1b[2;3r" => cursor, "0,0", "ghostty csi/decstbm";
     "Scroll" "LF at a region's foot scrolls only the region" b"top\r\na\r\nb\r\nfoot\x1b[2;3r\x1b[3;1Hc\r\nd" => screen, "top|c|d|foot", "vttest 2";
