@@ -1191,6 +1191,10 @@ impl<T: EventListener> Handler for Term<T> {
             }
         }
 
+        // PinFold #444: DECALN also resets the margins and homes the cursor, as xterm does.
+        self.scroll_region = Line(0)..Line(self.screen_lines() as i32);
+        self.goto(0, 0);
+
         self.mark_fully_damaged();
     }
 
