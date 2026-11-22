@@ -10,7 +10,7 @@ Screens are the rows the window draws, without trailing spaces, between bars; a 
 character's second cell is a space. Cursors are `row,column` from 0.
 esctest2 runs as well, through `tests/conformance/esctest.sh`.
 
-**85 pass, 4 known gaps, 89 cases.**
+**88 pass, 1 known gaps, 89 cases.**
 
 | Area | Case | Bytes | Expected | PinFold | Status | Reference |
 | --- | --- | --- | --- | --- | --- | --- |
@@ -56,10 +56,10 @@ esctest2 runs as well, through `tests/conformance/esctest.sh`.
 | Insert/delete | IL outside the scroll region does nothing | `a\r\nbESC[2;3rESC[4;1HESC[L` | `a\|b\|\|` | `a\|b\|\|` | pass | [Ghostty csi/il](https://ghostty.org/docs/vt/csi/il) |
 | Insert/delete | IRM inserts text | `abcESC[1;1HESC[4hX` | `Xabc\|\|\|` | `Xabc\|\|\|` | pass | [xterm](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html): IRM |
 | Insert/delete | REP repeats the last character | `aESC[3b` | `aaaa\|\|\|` | `aaaa\|\|\|` | pass | [Ghostty csi/rep](https://ghostty.org/docs/vt/csi/rep) |
-| Tabs | HT goes to the next stop of eight | `\tx` | `        x\|\|\| @0,9` | `\t       x\|\|\| @0,9` | gap [#445](https://github.com/0xPiranhaCodes/pinfold.sh/issues/445) | [ecma48](https://ecma-international.org/publications-and-standards/standards/ecma-48/): HT |
+| Tabs | HT goes to the next stop of eight | `\tx` | `        x\|\|\| @0,9` | `        x\|\|\| @0,9` | pass | [ecma48](https://ecma-international.org/publications-and-standards/standards/ecma-48/): HT |
 | Tabs | HT stops at the right margin | `\t\t\t` | `0,9` | `0,9` | pass | [ecma48](https://ecma-international.org/publications-and-standards/standards/ecma-48/): HT |
-| Tabs | HTS sets a stop | `ESC[1;4HESCHESC[H\tx` | `   x\|\|\|` | `\t  x\|\|\|` | gap [#445](https://github.com/0xPiranhaCodes/pinfold.sh/issues/445) | [xterm](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html): HTS |
-| Tabs | TBC 3 clears every stop | `ESC[3g\tx` | `         x\|\|\|` | `\t        x\|\|\|` | gap [#445](https://github.com/0xPiranhaCodes/pinfold.sh/issues/445) | [Ghostty csi/tbc](https://ghostty.org/docs/vt/csi/tbc) |
+| Tabs | HTS sets a stop | `ESC[1;4HESCHESC[H\tx` | `   x\|\|\|` | `   x\|\|\|` | pass | [xterm](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html): HTS |
+| Tabs | TBC 3 clears every stop | `ESC[3g\tx` | `         x\|\|\|` | `         x\|\|\|` | pass | [Ghostty csi/tbc](https://ghostty.org/docs/vt/csi/tbc) |
 | Tabs | CBT goes back a stop | `ESC[1;10HESC[Z` | `0,8` | `0,8` | pass | [Ghostty csi/cbt](https://ghostty.org/docs/vt/csi/cbt) |
 | Tabs | CHT goes forward stops | `ESC[2I` | `0,9` | `0,9` | pass | [Ghostty csi/cht](https://ghostty.org/docs/vt/csi/cht) |
 | SGR | 38;2 sets a truecolor foreground | `ESC[38;2;1;2;3mX` | `010203 on default-bg` | `010203 on default-bg` | pass | [xterm](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html): SGR |
