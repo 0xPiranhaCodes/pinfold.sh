@@ -545,8 +545,10 @@ impl AlacrittyEngine {
             foreground |= ITALIC;
         }
         let spacer = cell.flags.contains(Flags::WIDE_CHAR_SPACER);
+        // alacritty keeps a tab in the first cell it crosses, for copying; it draws blank (#445).
+        let blank = spacer || cell.c == '\t';
         Cell {
-            character: if spacer { ' ' } else { cell.c },
+            character: if blank { ' ' } else { cell.c },
             foreground,
             background,
         }
@@ -873,6 +875,26 @@ mod tests {
         let mut text = String::new();
         assert!(engine.selection_text(selection, &mut text));
         assert_eq!(text.chars().filter(|&c| c == '\u{301}').count(), 16);
+    }
+
+    #[test]
+    fn a_tab_draws_as_blank_and_copies_as_a_tab() {
+        let mut engine = AlacrittyEngine::new(4, 20);
+        feed(&mut engine, b"a\tb");
+        let mut frame = Frame::default();
+        engine.frame(&mut frame);
+        let row: String = frame.cells[..10]
+            .iter()
+            .map(|cell| cell.character)
+            .collect();
+        assert_eq!(row, "a       b ");
+        let selection = Selection {
+            anchor: Position::default(),
+            focus: Position { row: 0, column: 8 },
+        };
+        let mut text = String::new();
+        assert!(engine.selection_text(selection, &mut text));
+        assert_eq!(text, "a\tb");
     }
 
     #[test]
