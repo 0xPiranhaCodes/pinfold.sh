@@ -8,8 +8,9 @@ use std::io::{self, Write};
 use std::os::unix::fs::DirBuilderExt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use pinfold_api::Log;
+use pinfold_api::audit::{Call, Detail, Verdict};
 use pinfold_api::control::{Method, Request};
-use pinfold_api::{Log, Outcome, Record};
 use pinfold_core::io::Reactor;
 use serde_json::{Value, json};
 
@@ -78,8 +79,8 @@ pub fn reply_json(
 
 fn append(log: &mut Log, reactor: &Reactor, request: &Request, result: &Result<Value, String>) {
     let own = request.caller().and_then(|caller| reactor.pane_of(caller));
-    let record = record(request.method(), request.caller().is_some(), own, result);
-    if let Err(error) = log.append(record) {
+    let call = call(request.method(), request.caller().is_some(), own, result);
+    if let Err(error) = log.record(&call) {
         let _ = writeln!(io::stderr(), "pinfold-core: audit log: {error}");
     }
 }
@@ -125,13 +126,14 @@ fn spawned(result: &Result<Value, String>) -> Option<usize> {
     usize::try_from(pane).ok()
 }
 
-/// The record of one answered request. `own` is the caller's pane, if it is in one.
-fn record(
+/// The record of one answered request, borrowed, so recording it allocates nothing. `own` is
+/// the caller's pane, if it is in one.
+fn call<'a>(
     method: &Method,
     terminal: bool,
     own: Option<usize>,
-    result: &Result<Value, String>,
-) -> Record {
+    result: &'a Result<Value, String>,
+) -> Call<'a> {
     let scope = |pane: usize| if own == Some(pane) { "self" } else { "other" };
     let (name, target, scope) = match method {
         Method::Hello => ("hello", None, "any"),
@@ -179,37 +181,48 @@ fn record(
         Method::WorkspaceTrustState(_) => ("workspace.trust_state", None, "outside"),
         Method::WorkspaceAskTrust(..) => ("workspace.ask_trust", None, "outside"),
     };
-    let mut reason = match result {
-        Ok(_) => "allowed".to_owned(),
-        Err(reason) => reason.clone(),
-    };
     // A send's text is never recorded, only its size.
-    match method {
-        Method::PaneSend { text, .. } => reason += &format!(", {} bytes", text.len()),
-        Method::GrantsRevoke { id } => reason += &format!(", grant {id}"),
-        _ => {}
-    }
+    let detail = match method {
+        Method::PaneSend { text, .. } => Detail::Bytes(text.len() as u64),
+        Method::GrantsRevoke { id } => Detail::Grant(*id),
+        _ => Detail::None,
+    };
     let at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default();
-    Record {
-        seq: 0,
+    let (verdict, reason) = match result {
+        Ok(_) => (Verdict::Ok, "allowed"),
+        Err(reason) => (Verdict::Refused, reason.as_str()),
+    };
+    Call {
         at_ms: u64::try_from(at.as_millis()).unwrap_or(u64::MAX),
         caller: own.map(|pane| pane as u64),
         terminal,
-        method: name.to_owned(),
+        method: name,
         target: target.map(|pane| pane as u64),
-        scope: scope.to_owned(),
-        outcome: match result {
-            Ok(_) => Outcome::Ok(reason),
-            Err(_) => Outcome::Refused(reason),
-        },
+        scope,
+        verdict,
+        reason,
+        detail,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pinfold_api::{Outcome, Record};
+
+    /// The call as `audit.read` gives it back.
+    fn recorded(
+        method: &Method,
+        terminal: bool,
+        own: Option<usize>,
+        result: &Result<Value, String>,
+    ) -> Record {
+        let mut log = Log::new();
+        log.record(&call(method, terminal, own, result)).unwrap();
+        log.iter().next().unwrap().record
+    }
 
     #[test]
     fn a_send_is_recorded_by_its_size_and_never_its_text() {
@@ -217,7 +230,7 @@ mod tests {
             pane: 2,
             text: "secret token\n".to_owned(),
         };
-        let record = record(&send, true, Some(2), &Ok(json!({})));
+        let record = recorded(&send, true, Some(2), &Ok(json!({})));
         assert_eq!(record.outcome, Outcome::Ok("allowed, 13 bytes".to_owned()));
         assert_eq!((record.caller, record.target), (Some(2), Some(2)));
         let names = (record.method.as_str(), record.scope.as_str());
@@ -232,17 +245,17 @@ mod tests {
             lines: None,
         };
         let refused = Err("only the caller's own pane".to_owned());
-        let record = record(&read, true, Some(1), &refused);
+        let record = recorded(&read, true, Some(1), &refused);
         let expected = Outcome::Refused("only the caller's own pane".to_owned());
         assert_eq!((record.outcome, record.scope.as_str()), (expected, "other"));
-        let unidentified = super::record(&Method::PaneList, false, None, &Ok(json!({})));
+        let unidentified = recorded(&Method::PaneList, false, None, &Ok(json!({})));
         assert_eq!((unidentified.caller, unidentified.terminal), (None, false));
     }
 
     #[test]
     fn a_save_is_recorded_without_its_path() {
         let saved = Ok(json!({"path": "/home/someone/.local/state/pinfold/default.json"}));
-        let record = record(&Method::SessionSave, true, None, &saved);
+        let record = recorded(&Method::SessionSave, true, None, &saved);
         let names = (record.method.as_str(), record.scope.as_str());
         assert_eq!((names, record.target), (("session.save", "outside"), None));
         assert_eq!(record.outcome, Outcome::Ok("allowed".to_owned()));
@@ -256,7 +269,7 @@ mod tests {
             sha256: None,
         });
         let refused = Err("workspace.open needs a caller outside any pane".to_owned());
-        let scope = |own| record(&open, true, own, &refused).scope;
+        let scope = |own| recorded(&open, true, own, &refused).scope;
         assert_eq!(
             (scope(None).as_str(), scope(Some(1)).as_str()),
             ("outside", "self")
@@ -266,7 +279,7 @@ mod tests {
     #[test]
     fn a_revoke_is_recorded_with_its_grant_id() {
         let revoke = Method::GrantsRevoke { id: 3 };
-        let record = record(&revoke, true, None, &Ok(json!({"revoked": true})));
+        let record = recorded(&revoke, true, None, &Ok(json!({"revoked": true})));
         let names = (record.method.as_str(), record.scope.as_str());
         assert_eq!(names, ("grants.revoke", "outside"));
         assert_eq!(record.outcome, Outcome::Ok("allowed, grant 3".to_owned()));

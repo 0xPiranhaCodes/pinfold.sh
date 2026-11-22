@@ -143,8 +143,13 @@ The core records each request it answers in a hash-chained audit log: when, the 
 with a short reason. It never records pane contents or sent text, only a send's size in bytes.
 Requests the API thread answers itself are not recorded: a malformed line, an unsupported
 `hello` version, and "the core is busy".
-The log is a 256 KiB ring in memory, which is the source of truth; `api.audit_log` in the
-[config file](../configuration.md) also writes it to disk. `audit.read` returns at most 1000 of
+The log is a ring of the newest 2,048 calls in memory, which is the source of truth;
+`api.audit_log` in the [config file](../configuration.md) also writes it to disk. Each call is a
+fixed 32-byte record, and the text is built when the log is read
+([ADR-0053](../adr/0053-audit-ring-holds-fixed-size-records.md)). A reason the core builds at
+run time, such as one with a path, is kept in an 8 KiB ring of its own. Once newer text replaces
+it, the entry stays and its reason reads `reason no longer held in memory (N bytes)`. The file
+keeps the full text. `audit.read` returns at most 1000 of
 the newest entries and whether the chain verifies. Only a terminal outside any pane may call it,
 so an agent in a pane cannot read what other agents did.
 

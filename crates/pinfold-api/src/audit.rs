@@ -9,6 +9,10 @@
 //! from the tail: a shortened chain is still a valid chain, and only a copy of the last hash kept
 //! elsewhere could tell the two apart.
 //!
+//! In memory each entry is a fixed 32-byte record with no string (ADR-0053): the method, scope
+//! and any fixed reason are indexes, and the text and hashes are built again when the log is
+//! read. A reason that is not in the table is kept in a fixed 8 KiB text ring, with its hash.
+//!
 //! A failed disk write is cut back off the file where the system allows, and the log then stops
 //! mirroring to disk for the rest of the run, so the file never holds a gap in the chain.
 //!
@@ -18,7 +22,7 @@
 //! let mut log = Log::new();
 //! log.append(Record {
 //!     seq: 0, at_ms: 42, caller: Some(1), terminal: true, method: "pane.read".into(),
-//!     target: Some(2), scope: "pane.read:other".into(), outcome: Outcome::Ok("allowed".into()),
+//!     target: Some(2), scope: "other".into(), outcome: Outcome::Ok("allowed".into()),
 //! })?;
 //! assert_eq!(log.for_pane(2).count(), 1);
 //! log.verify()?;
@@ -38,15 +42,22 @@ use sha2::{Digest, Sha256};
 
 pub use reasons::REASONS;
 
-const RING_BYTES: usize = 256 * 1024;
+/// Entries the ring keeps: about twice the 1,101 calls the 256 KiB ring of strings held, so a
+/// read of one pane reaches further back than `audit.read`'s 1,000.
+pub const ENTRIES: usize = 2_048;
+/// The ring of reasons that are not in the table. A power of two, so wrapping positions stay
+/// consistent.
+const TEXT_BYTES: usize = 8 * 1024;
+/// Longest reason recorded, as the 256 KiB ring of strings allowed.
+const REASON_BYTES: usize = 256 * 1024;
 const FILE_BYTES: u64 = 5 * 1024 * 1024;
 const HASH_BYTES: usize = 32;
 /// Longest legal line: JSON escapes a string byte to at most six bytes (`\u001f`), and a legal
-/// entry holds under [`RING_BYTES`] of strings, plus a margin for field names, hashes and numbers.
-const LINE_BYTES: u64 = 6 * RING_BYTES as u64 + 1024;
+/// entry holds under [`REASON_BYTES`] of strings, plus a margin for field names, hashes and numbers.
+const LINE_BYTES: u64 = 6 * REASON_BYTES as u64 + 1024;
 
-/// The method names an entry can hold as an index (ADR-0053), in the order of
-/// `pinfold_core::timeline`'s table, which a test checks. New methods are appended.
+/// The method names an entry holds as an index, in the order of `pinfold_core::timeline`'s
+/// table, which a test checks. New methods are appended.
 pub const METHODS: [&str; 24] = [
     "hello",
     "window.open",
@@ -73,6 +84,22 @@ pub const METHODS: [&str; 24] = [
     "workspace.ask_trust",
     "run.timeline",
 ];
+const SCOPES: [&str; 8] = [
+    "any",
+    "terminal",
+    "self",
+    "other",
+    "children",
+    "tool.open",
+    "outside",
+    "tool",
+];
+/// [`Slot::reason`] for a reason that is not in the table, kept whole in the text ring.
+const TEXT: u8 = u8::MAX;
+
+const _: () = assert!(size_of::<Slot>() == 32);
+const _: () = assert!(REASONS.len() < TEXT as usize);
+const _: () = assert!(TEXT_BYTES.is_power_of_two());
 
 /// The result of an audited call, with a short explanatory reason.
 ///
@@ -91,6 +118,62 @@ pub enum Outcome {
     Error(String),
 }
 
+/// An [`Outcome`] without its reason.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// The call succeeded.
+    Ok,
+    /// Policy refused the call.
+    Refused,
+    /// The call failed while being performed.
+    Error,
+}
+
+/// A number a reason ends with, held as a number rather than text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Detail {
+    /// Nothing follows the reason.
+    None,
+    /// `, <n> bytes`: the size of a send's text, never the text.
+    Bytes(u64),
+    /// `, grant <id>`.
+    Grant(u64),
+}
+
+/// One answered call, borrowed, so recording it allocates nothing.
+///
+/// ```
+/// use pinfold_api::audit::{Call, Detail, Verdict};
+/// let mut log = pinfold_api::Log::new();
+/// log.record(&Call { at_ms: 5, caller: Some(2), terminal: true, method: "pane.send",
+///     target: Some(2), scope: "self", verdict: Verdict::Ok, reason: "allowed",
+///     detail: Detail::Bytes(13) })?;
+/// let entry = log.iter().next().ok_or("missing entry")?;
+/// assert_eq!(entry.record.outcome, pinfold_api::Outcome::Ok("allowed, 13 bytes".into()));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct Call<'a> {
+    /// Unix time in milliseconds.
+    pub at_ms: u64,
+    /// Calling pane, as [`Record::caller`]. At most `u32::MAX`, as the core numbers its panes.
+    pub caller: Option<u64>,
+    /// As [`Record::terminal`].
+    pub terminal: bool,
+    /// One of [`METHODS`].
+    pub method: &'a str,
+    /// Target pane, when the call has one.
+    pub target: Option<u64>,
+    /// Scope used for the authorization decision, one of the scopes `audit.read` documents.
+    pub scope: &'a str,
+    /// Whether the call succeeded.
+    pub verdict: Verdict,
+    /// Short reason, without the [`Detail`].
+    pub reason: &'a str,
+    /// A number the recorded reason ends with.
+    pub detail: Detail,
+}
+
 /// The fields recorded for one API call.
 ///
 /// [`Log::append`] assigns `seq`, so whatever the caller puts there is replaced.
@@ -98,7 +181,7 @@ pub enum Outcome {
 /// ```
 /// use pinfold_api::{Outcome, Record};
 /// let record = Record { seq: 7, at_ms: 100, caller: None, terminal: false, method: "hello".into(),
-///     target: None, scope: "none".into(), outcome: Outcome::Ok("version matched".into()) };
+///     target: None, scope: "any".into(), outcome: Outcome::Ok("version matched".into()) };
 /// assert_eq!(record.seq, 7);
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,13 +205,13 @@ pub struct Record {
     pub outcome: Outcome,
 }
 
-/// A record and its links in the hash chain.
+/// A record and its links in the hash chain, built when the log is read.
 ///
 /// ```
 /// # use pinfold_api::{Log, Outcome, Record};
 /// # let mut log = Log::new();
 /// # log.append(Record { seq: 0, at_ms: 0, caller: None, terminal: false, method: "hello".into(),
-/// # target: None, scope: "none".into(), outcome: Outcome::Ok("ok".into()) })?;
+/// # target: None, scope: "any".into(), outcome: Outcome::Ok("ok".into()) })?;
 /// let entry = log.iter().next().ok_or("missing entry")?;
 /// assert_ne!(entry.hash, [0; 32]);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -141,7 +224,6 @@ pub struct Entry {
     pub prev: [u8; HASH_BYTES],
     /// SHA-256 of `prev` and the canonical record bytes.
     pub hash: [u8; HASH_BYTES],
-    cost: usize,
 }
 
 impl Entry {
@@ -173,6 +255,31 @@ impl Entry {
     }
 }
 
+/// What the timeline needs of a retained call, read without building any text.
+///
+/// ```
+/// # use pinfold_api::{Log, Outcome, Record};
+/// # let mut log = Log::new();
+/// # log.append(Record { seq: 0, at_ms: 0, caller: Some(2), terminal: true, method: "pane.list".into(),
+/// # target: None, scope: "terminal".into(), outcome: Outcome::Ok("allowed".into()) })?;
+/// let brief = log.briefs().next().ok_or("missing entry")?;
+/// assert_eq!(pinfold_api::audit::METHODS[usize::from(brief.method)], "pane.list");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Brief {
+    /// As [`Record::seq`].
+    pub seq: u64,
+    /// An index into [`METHODS`].
+    pub method: u8,
+    /// Whether the call succeeded.
+    pub verdict: Verdict,
+    /// As [`Record::caller`].
+    pub caller: Option<u64>,
+    /// As [`Record::target`].
+    pub target: Option<u64>,
+}
+
 /// Location of a broken link or invalid record hash.
 ///
 /// ```
@@ -197,11 +304,17 @@ pub enum Error {
     /// The system refused a file operation.
     #[error(transparent)]
     Io(#[from] io::Error),
-    /// One record alone cannot fit in the bounded ring.
+    /// One reason is too long to record.
     #[error("audit entry needs {bytes} bytes, over the 256 KiB limit")]
     EntryTooLarge {
-        /// Memory the entry would hold: the entry itself plus its strings' capacities.
+        /// The reason's length, with its detail.
         bytes: usize,
+    },
+    /// The method or scope is not one an entry can name, or the caller is over `u32::MAX`.
+    #[error("audit entry names an unknown {field}")]
+    Unlisted {
+        /// `method`, `scope` or `caller`.
+        field: &'static str,
     },
     /// A persisted line is not in the audit format.
     #[error("malformed audit log line {line}")]
@@ -220,27 +333,189 @@ struct Disk {
     bytes: u64,
 }
 
-/// A 256 KiB in-memory audit ring, optionally mirrored to a rotating private file.
+/// One retained call. `reason` indexes [`REASONS`], or is [`TEXT`], when `arg` is the text's
+/// position in the ring (high half) and its length (low half). Otherwise `arg` is the
+/// [`Detail`]'s number.
+#[derive(Clone, Copy)]
+struct Slot {
+    at_ms: u64,
+    target: u64,
+    arg: u64,
+    caller: u32,
+    method: u8,
+    scope: u8,
+    /// Bits 0-1 the verdict, 2 the terminal, 3 and 4 whether there is a caller and a target,
+    /// 5-6 the detail: none, bytes or grant.
+    flags: u8,
+    reason: u8,
+}
+
+impl Slot {
+    fn caller(&self) -> Option<u64> {
+        (self.flags & 1 << 3 != 0).then_some(u64::from(self.caller))
+    }
+
+    fn target(&self) -> Option<u64> {
+        (self.flags & 1 << 4 != 0).then_some(self.target)
+    }
+
+    fn verdict(&self) -> Verdict {
+        match self.flags & 3 {
+            0 => Verdict::Ok,
+            1 => Verdict::Refused,
+            _ => Verdict::Error,
+        }
+    }
+
+    fn detail(&self) -> Detail {
+        match (self.reason == TEXT, self.flags >> 5 & 3) {
+            (false, 1) => Detail::Bytes(self.arg),
+            (false, 2) => Detail::Grant(self.arg),
+            _ => Detail::None,
+        }
+    }
+
+    /// The text ring's position and length.
+    fn span(&self) -> (u32, u32) {
+        ((self.arg >> 32) as u32, self.arg as u32)
+    }
+}
+
+/// A detail written out, on the stack.
+struct Suffix {
+    bytes: [u8; 32],
+    len: usize,
+}
+
+impl Suffix {
+    fn new(detail: Detail) -> Self {
+        let mut bytes = [0; 32];
+        let mut rest = &mut bytes[..];
+        // ", grant " and a u64 take at most 27 bytes, so these cannot fail.
+        let _ = match detail {
+            Detail::None => Ok(()),
+            Detail::Bytes(n) => write!(rest, ", {n} bytes"),
+            Detail::Grant(id) => write!(rest, ", grant {id}"),
+        };
+        let len = 32 - rest.len();
+        Self { bytes, len }
+    }
+
+    fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.len]
+    }
+}
+
+/// The reasons that are not in the table, oldest first, and those entries' hashes, each in a
+/// buffer allocated at first use and never grown. New text overwrites the oldest, so an
+/// entry's text can go while the entry stays, and its hash still links the chain. Positions
+/// wrap at `u32`, which [`TEXT_BYTES`] divides; the retained entries span at most
+/// [`ENTRIES`] texts of [`TEXT_BYTES`], far below the wrap.
+#[derive(Default)]
+struct Text {
+    bytes: Box<[u8]>,
+    /// The hash of entry `seq` at `seq % ENTRIES`.
+    hashes: Box<[u8]>,
+    start: u32,
+    end: u32,
+}
+
+impl Text {
+    /// Appends `parts`, overwriting the oldest text if need be, and returns where they start.
+    /// Text longer than the ring is not kept.
+    fn push(&mut self, parts: [&[u8]; 2]) -> u32 {
+        let start = self.end;
+        let len = parts[0].len() + parts[1].len();
+        if len > TEXT_BYTES {
+            return start;
+        }
+        if self.bytes.is_empty() {
+            self.bytes = vec![0; TEXT_BYTES].into_boxed_slice();
+        }
+        if self.end.wrapping_sub(self.start) as usize + len > TEXT_BYTES {
+            self.start = (self.end.wrapping_add(len as u32)).wrapping_sub(TEXT_BYTES as u32);
+        }
+        for mut rest in parts {
+            while !rest.is_empty() {
+                let at = self.end as usize % TEXT_BYTES;
+                let n = rest.len().min(TEXT_BYTES - at);
+                self.bytes[at..at + n].copy_from_slice(&rest[..n]);
+                self.end = self.end.wrapping_add(n as u32);
+                rest = &rest[n..];
+            }
+        }
+        start
+    }
+
+    /// The text at `start`, unless newer text has overwritten any of it.
+    fn get(&self, (start, len): (u32, u32)) -> Option<[&[u8]; 2]> {
+        let from = start.wrapping_sub(self.start) as usize;
+        if from + len as usize > self.end.wrapping_sub(self.start) as usize {
+            return None;
+        }
+        let (at, len) = (start as usize % TEXT_BYTES, len as usize);
+        let first = len.min(TEXT_BYTES - at);
+        Some([&self.bytes[at..at + first], &self.bytes[..len - first]])
+    }
+
+    fn keep_hash(&mut self, seq: u64, hash: &[u8; HASH_BYTES]) {
+        if self.hashes.is_empty() {
+            self.hashes = vec![0; ENTRIES * HASH_BYTES].into_boxed_slice();
+        }
+        let at = (seq % ENTRIES as u64) as usize * HASH_BYTES;
+        self.hashes[at..at + HASH_BYTES].copy_from_slice(hash);
+    }
+
+    fn hash(&self, seq: u64) -> [u8; HASH_BYTES] {
+        let at = (seq % ENTRIES as u64) as usize * HASH_BYTES;
+        let mut hash = [0; HASH_BYTES];
+        if let Some(kept) = self.hashes.get(at..at + HASH_BYTES) {
+            hash.copy_from_slice(kept);
+        }
+        hash
+    }
+}
+
+/// The fields one hash covers, borrowed.
+struct Canonical<'a> {
+    seq: u64,
+    at_ms: u64,
+    caller: Option<u64>,
+    terminal: bool,
+    method: &'a str,
+    target: Option<u64>,
+    scope: &'a str,
+    /// The outcome's variant: 0 ok, 1 refused, 2 error.
+    tag: u8,
+    /// The reason, in parts that are hashed as one string.
+    reason: [&'a [u8]; 2],
+}
+
+/// A ring of at most [`ENTRIES`] fixed-size records, optionally mirrored to a rotating private
+/// file.
 ///
 /// ```
 /// let log = pinfold_api::Log::new();
 /// assert_eq!(log.iter().count(), 0);
 /// ```
 pub struct Log {
-    entries: VecDeque<Entry>,
-    bytes: usize,
+    slots: VecDeque<Slot>,
+    text: Text,
+    /// Hash of the entry before the oldest retained one, or zeroes.
+    base: [u8; HASH_BYTES],
     tail: [u8; HASH_BYTES],
     next_seq: u64,
     disk: Option<Disk>,
 }
 
 impl Log {
-    /// Creates an empty in-memory log.
+    /// Creates an empty in-memory log, which allocates nothing until the first call.
     #[must_use]
     pub fn new() -> Self {
         Self {
-            entries: VecDeque::new(),
-            bytes: 0,
+            slots: VecDeque::new(),
+            text: Text::default(),
+            base: [0; HASH_BYTES],
             tail: [0; HASH_BYTES],
             next_seq: 0,
             disk: None,
@@ -265,55 +540,134 @@ impl Log {
         let mut log = Self::new();
         let state = chain_state(&path)?;
         if let (Some(hash), Some(seq)) = (state.hash, state.seq) {
-            log.tail = hash;
+            (log.base, log.tail) = (hash, hash);
             log.next_seq = seq.saturating_add(1);
         }
         log.disk = Some(Disk { path, file, bytes });
         Ok(log)
     }
 
-    /// Appends a record and then mirrors it to disk when configured.
+    /// Appends an owned record, as [`Log::record`] does a borrowed one.
+    ///
+    /// # Errors
+    ///
+    /// As [`Log::record`].
+    pub fn append(&mut self, record: Record) -> Result<(), Error> {
+        let (verdict, reason) = match &record.outcome {
+            Outcome::Ok(reason) => (Verdict::Ok, reason),
+            Outcome::Refused(reason) => (Verdict::Refused, reason),
+            Outcome::Error(reason) => (Verdict::Error, reason),
+        };
+        self.record(&Call {
+            at_ms: record.at_ms,
+            caller: record.caller,
+            terminal: record.terminal,
+            method: &record.method,
+            target: record.target,
+            scope: &record.scope,
+            verdict,
+            reason,
+            detail: Detail::None,
+        })
+    }
+
+    /// Appends a call and then mirrors it to disk when configured. In memory it allocates only
+    /// at the first call and the first reason not in the table.
     ///
     /// A disk error is returned after the authoritative in-memory entry has been retained.
     /// After one, the log stops mirroring to disk and keeps only the in-memory ring.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::EntryTooLarge`] without appending, or [`Error::Io`] after appending.
-    pub fn append(&mut self, mut record: Record) -> Result<(), Error> {
-        record.seq = self.next_seq;
-        let cost = cost(&record);
-        if cost > RING_BYTES {
-            return Err(Error::EntryTooLarge { bytes: cost });
-        }
-        let prev = self.tail;
-        let hash = digest_record(&prev, &record);
-        let entry = Entry {
-            record,
-            prev,
-            hash,
-            cost,
+    /// Returns [`Error::EntryTooLarge`] or [`Error::Unlisted`] without appending, or
+    /// [`Error::Io`] after appending.
+    pub fn record(&mut self, call: &Call<'_>) -> Result<(), Error> {
+        let index = |table: &[&str], name, field| {
+            let found = table.iter().position(|known| *known == name);
+            found
+                .and_then(|at| u8::try_from(at).ok())
+                .ok_or(Error::Unlisted { field })
         };
-        self.tail = hash;
-        self.next_seq = self.next_seq.saturating_add(1);
-        while self.bytes + cost > RING_BYTES {
-            if let Some(oldest) = self.entries.pop_front() {
-                self.bytes -= oldest.cost;
+        let method = index(&METHODS, call.method, "method")?;
+        let scope = index(&SCOPES, call.scope, "scope")?;
+        let caller = call.caller.map(u32::try_from).transpose();
+        let caller = caller.map_err(|_| Error::Unlisted { field: "caller" })?;
+        let suffix = Suffix::new(call.detail);
+        let length = call.reason.len() + suffix.len;
+        if length > REASON_BYTES {
+            return Err(Error::EntryTooLarge { bytes: length });
+        }
+        let seq = self.next_seq;
+        let reason = [call.reason.as_bytes(), suffix.as_bytes()];
+        let hash = digest(
+            &self.tail,
+            &Canonical {
+                seq,
+                at_ms: call.at_ms,
+                caller: call.caller,
+                terminal: call.terminal,
+                method: METHODS[usize::from(method)],
+                target: call.target,
+                scope: SCOPES[usize::from(scope)],
+                tag: call.verdict as u8,
+                reason,
+            },
+        );
+        let detail = match call.detail {
+            Detail::None => (0, 0),
+            Detail::Bytes(bytes) => (1, bytes),
+            Detail::Grant(id) => (2, id),
+        };
+        let mut slot = Slot {
+            at_ms: call.at_ms,
+            target: call.target.unwrap_or(0),
+            arg: detail.1,
+            caller: caller.unwrap_or(0),
+            method,
+            scope,
+            flags: call.verdict as u8
+                | u8::from(call.terminal) << 2
+                | u8::from(caller.is_some()) << 3
+                | u8::from(call.target.is_some()) << 4
+                | detail.0 << 5,
+            reason: 0,
+        };
+        if self.slots.len() == ENTRIES {
+            self.evict();
+        }
+        match REASONS.binary_search(&call.reason) {
+            Ok(at) => slot.reason = at as u8,
+            Err(_) => {
+                // The hash is kept, as the text may be overwritten while the entry stays.
+                self.text.keep_hash(seq, &hash);
+                let start = self.text.push(reason);
+                slot.reason = TEXT;
+                slot.flags &= !(3 << 5);
+                slot.arg = u64::from(start) << 32 | length as u64;
             }
         }
-        // A full deque doubles, which past 1,024 entries is 432 KiB of slots for a 256 KiB ring
-        // (#502), so it grows no further than the most entries the ring can hold.
-        if self.entries.len() == self.entries.capacity() {
-            let most = RING_BYTES / size_of::<Entry>();
-            let len = self.entries.len();
-            self.entries
-                .reserve_exact(len.max(4).min(most.saturating_sub(len)));
+        if self.slots.capacity() == 0 {
+            self.slots.reserve_exact(ENTRIES);
         }
-        self.bytes += cost;
-        self.entries.push_back(entry);
+        self.slots.push_back(slot);
+        let prev = std::mem::replace(&mut self.tail, hash);
+        self.next_seq = self.next_seq.saturating_add(1);
         if let Some(disk) = &mut self.disk {
-            let entry = self.entries.back().ok_or(Error::Malformed { line: 0 })?;
-            if let Err(error) = write_entry(disk, entry) {
+            let entry = Entry {
+                record: Record {
+                    seq,
+                    at_ms: call.at_ms,
+                    caller: call.caller,
+                    terminal: call.terminal,
+                    method: call.method.to_owned(),
+                    target: call.target,
+                    scope: call.scope.to_owned(),
+                    outcome: outcome(call.verdict, joined(reason)),
+                },
+                prev,
+                hash,
+            };
+            if let Err(error) = write_entry(disk, &entry) {
                 // Later lines would follow a gap, and a later rotation could drop the only file.
                 self.disk = None;
                 return Err(error);
@@ -322,39 +676,118 @@ impl Log {
         Ok(())
     }
 
-    /// Iterates over retained entries from oldest to newest.
-    pub fn iter(&self) -> impl DoubleEndedIterator<Item = &Entry> + ExactSizeIterator {
-        self.entries.iter()
+    /// Drops the oldest entry, keeping its hash as the next one's link.
+    fn evict(&mut self) {
+        let seq = self.next_seq - self.slots.len() as u64;
+        if let Some(slot) = self.slots.pop_front() {
+            self.base = self.hash(&slot, seq, &self.base);
+        }
     }
 
-    /// Iterates over retained calls made by or targeting `pane`.
-    pub fn for_pane(&self, pane: u64) -> impl Iterator<Item = &Entry> {
-        self.iter().filter(move |entry: &&Entry| {
-            entry.record.caller == Some(pane) || entry.record.target == Some(pane)
+    fn hash(&self, slot: &Slot, seq: u64, prev: &[u8; HASH_BYTES]) -> [u8; HASH_BYTES] {
+        if slot.reason == TEXT {
+            return self.text.hash(seq);
+        }
+        let suffix = Suffix::new(slot.detail());
+        let reason = [
+            REASONS[usize::from(slot.reason)].as_bytes(),
+            suffix.as_bytes(),
+        ];
+        digest(
+            prev,
+            &Canonical {
+                seq,
+                at_ms: slot.at_ms,
+                caller: slot.caller(),
+                terminal: slot.flags & 1 << 2 != 0,
+                method: METHODS[usize::from(slot.method)],
+                target: slot.target(),
+                scope: SCOPES[usize::from(slot.scope)],
+                tag: slot.verdict() as u8,
+                reason,
+            },
+        )
+    }
+
+    /// Each retained slot from oldest to newest with its sequence, its link and its hash.
+    fn walk(&self) -> impl Iterator<Item = (u64, &Slot, [u8; HASH_BYTES], [u8; HASH_BYTES])> {
+        let first = self.next_seq - self.slots.len() as u64;
+        let mut prev = self.base;
+        self.slots.iter().zip(first..).map(move |(slot, seq)| {
+            let hash = self.hash(slot, seq, &prev);
+            (seq, slot, std::mem::replace(&mut prev, hash), hash)
         })
     }
 
-    /// Recomputes every retained hash and link.
+    fn entry(
+        &self,
+        seq: u64,
+        slot: &Slot,
+        prev: [u8; HASH_BYTES],
+        hash: [u8; HASH_BYTES],
+    ) -> Entry {
+        let suffix = Suffix::new(slot.detail());
+        let reason = match slot.reason {
+            TEXT => match self.text.get(slot.span()) {
+                Some(text) => joined(text),
+                None => format!("reason no longer held in memory ({} bytes)", slot.span().1),
+            },
+            at => joined([REASONS[usize::from(at)].as_bytes(), suffix.as_bytes()]),
+        };
+        Entry {
+            record: Record {
+                seq,
+                at_ms: slot.at_ms,
+                caller: slot.caller(),
+                terminal: slot.flags & 1 << 2 != 0,
+                method: METHODS[usize::from(slot.method)].to_owned(),
+                target: slot.target(),
+                scope: SCOPES[usize::from(slot.scope)].to_owned(),
+                outcome: outcome(slot.verdict(), reason),
+            },
+            prev,
+            hash,
+        }
+    }
+
+    /// Iterates over retained entries from oldest to newest, building each one's text.
+    pub fn iter(&self) -> impl Iterator<Item = Entry> {
+        self.walk()
+            .map(|(seq, slot, prev, hash)| self.entry(seq, slot, prev, hash))
+    }
+
+    /// Iterates over retained calls made by or targeting `pane`.
+    pub fn for_pane(&self, pane: u64) -> impl Iterator<Item = Entry> {
+        self.walk()
+            .filter(move |(_, slot, ..)| slot.caller() == Some(pane) || slot.target() == Some(pane))
+            .map(|(seq, slot, prev, hash)| self.entry(seq, slot, prev, hash))
+    }
+
+    /// Iterates over retained calls from oldest to newest without building text or hashes.
+    pub fn briefs(&self) -> impl DoubleEndedIterator<Item = Brief> + ExactSizeIterator {
+        let first = self.next_seq - self.slots.len() as u64;
+        self.slots.iter().enumerate().map(move |(at, slot)| Brief {
+            seq: first + at as u64,
+            method: slot.method,
+            verdict: slot.verdict(),
+            caller: slot.caller(),
+            target: slot.target(),
+        })
+    }
+
+    /// Recomputes every retained hash and link from the oldest entry's link to the newest hash.
     ///
     /// # Errors
     ///
-    /// Returns [`Broken`] at the first inconsistent retained entry.
+    /// Returns [`Broken`] at the newest entry when the recomputed chain does not end at it.
     pub fn verify(&self) -> Result<(), Broken> {
-        let mut prior: Option<[u8; HASH_BYTES]> = None;
-        let mut prior_seq: Option<u64> = None;
-        for entry in &self.entries {
-            if prior.is_some_and(|hash| hash != entry.prev)
-                || prior_seq.is_some_and(|seq| seq.checked_add(1) != Some(entry.record.seq))
-                || digest_record(&entry.prev, &entry.record) != entry.hash
-            {
-                return Err(Broken {
-                    seq: entry.record.seq,
-                });
-            }
-            prior = Some(entry.hash);
-            prior_seq = Some(entry.record.seq);
+        let end = self.walk().last().map_or(self.base, |(.., hash)| hash);
+        if end == self.tail {
+            return Ok(());
         }
-        Ok(())
+        Err(Broken {
+            seq: self.next_seq.saturating_sub(1),
+        })
     }
 }
 
@@ -362,6 +795,19 @@ impl Default for Log {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn outcome(verdict: Verdict, reason: String) -> Outcome {
+    match verdict {
+        Verdict::Ok => Outcome::Ok(reason),
+        Verdict::Refused => Outcome::Refused(reason),
+        Verdict::Error => Outcome::Error(reason),
+    }
+}
+
+/// The parts of a reason as one string. They come from `str`s, so a split character joins.
+fn joined([first, second]: [&[u8]; 2]) -> String {
+    String::from_utf8_lossy(&[first, second].concat()).into_owned()
 }
 
 /// Verifies a persisted audit chain and returns its entry count.
@@ -430,21 +876,6 @@ fn verify_one(path: &Path, state: &mut VerifyState, head: bool) -> Result<(), Er
     Ok(())
 }
 
-/// The fields one hash covers, borrowed, so hashing allocates nothing.
-struct Canonical<'a> {
-    seq: u64,
-    at_ms: u64,
-    caller: Option<u64>,
-    terminal: bool,
-    method: &'a str,
-    target: Option<u64>,
-    scope: &'a str,
-    /// The outcome's variant: 0 ok, 1 refused, 2 error.
-    tag: u8,
-    /// The reason, in parts that are hashed as one string.
-    reason: [&'a [u8]; 2],
-}
-
 fn digest_record(prev: &[u8; HASH_BYTES], record: &Record) -> [u8; HASH_BYTES] {
     let (tag, reason) = match &record.outcome {
         Outcome::Ok(reason) => (0, reason),
@@ -467,7 +898,7 @@ fn digest_record(prev: &[u8; HASH_BYTES], record: &Record) -> [u8; HASH_BYTES] {
     )
 }
 
-/// SHA-256 of `prev` and the canonical bytes, fed in pieces.
+/// SHA-256 of `prev` and the canonical bytes, fed in pieces so nothing is allocated.
 fn digest(prev: &[u8; HASH_BYTES], canonical: &Canonical<'_>) -> [u8; HASH_BYTES] {
     let option = |hasher: &mut Sha256, value: Option<u64>| match value {
         Some(value) => {
@@ -493,12 +924,6 @@ fn digest(prev: &[u8; HASH_BYTES], canonical: &Canonical<'_>) -> [u8; HASH_BYTES
     hasher.update([canonical.tag]);
     string(&mut hasher, &canonical.reason);
     hasher.finalize().into()
-}
-
-/// The memory an entry holds: its own size plus the heap capacity of its strings.
-fn cost(record: &Record) -> usize {
-    let (Outcome::Ok(reason) | Outcome::Refused(reason) | Outcome::Error(reason)) = &record.outcome;
-    size_of::<Entry>() + record.method.capacity() + record.scope.capacity() + reason.capacity()
 }
 
 /// Opens the log for appending without following a symlink at `path`, and keeps it only if it
@@ -639,13 +1064,7 @@ fn parse_line(line: &str, line_no: u64) -> Result<Entry, Error> {
         scope: text("scope")?,
         outcome,
     };
-    let cost = cost(&record);
-    Ok(Entry {
-        record,
-        prev,
-        hash,
-        cost,
-    })
+    Ok(Entry { record, prev, hash })
 }
 
 fn parse_hash(value: &str, line: u64) -> Result<[u8; HASH_BYTES], Error> {
@@ -677,7 +1096,6 @@ fn digit(value: u8) -> Option<u8> {
         _ => None,
     }
 }
-
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
@@ -696,7 +1114,7 @@ mod tests {
             method: "pane.send".into(),
             target: Some((seq + 1) % 3),
             scope: "children".into(),
-            outcome: Outcome::Ok("sent 12 bytes".into()),
+            outcome: Outcome::Ok("allowed".into()),
         }
     }
 
@@ -719,7 +1137,7 @@ mod tests {
         for seq in 0..10_000 {
             log.append(record(seq))?;
         }
-        assert!(log.bytes <= RING_BYTES);
+        assert_eq!(log.iter().count(), ENTRIES);
         assert!(log.iter().next().is_some_and(|entry| entry.record.seq > 0));
         log.verify()?;
         Ok(())
@@ -911,7 +1329,7 @@ mod tests {
         let path = path("long");
         let mut log = Log::with_file(&path)?;
         let mut largest = record(0);
-        let free = RING_BYTES - cost(&largest) + "sent 12 bytes".len();
+        let free = REASON_BYTES;
         // Control bytes take the longest JSON escape.
         largest.outcome = Outcome::Ok("\u{1}".repeat(free));
         log.append(largest)?;
@@ -948,37 +1366,6 @@ mod tests {
         ));
         assert!(Log::with_file(&path).is_err());
         fs::remove_file(path)?;
-        Ok(())
-    }
-
-    #[test]
-    fn the_ring_counts_string_capacity() -> Result<(), Error> {
-        let mut log = Log::new();
-        for seq in 0..1_000 {
-            let mut item = record(seq);
-            let mut method = String::with_capacity(4096);
-            method.push_str("pane.send");
-            item.method = method;
-            log.append(item)?;
-        }
-        let each = size_of::<Entry>() + 4096 + "children".len() + "sent 12 bytes".len();
-        assert_eq!(log.bytes, each * log.iter().count());
-        assert!(log.bytes <= RING_BYTES);
-        log.verify()?;
-        Ok(())
-    }
-
-    /// #502: past 1,024 entries a doubled deque held 432 KiB of slots for the 256 KiB ring.
-    #[test]
-    fn the_ring_never_holds_more_slots_than_it_can_fill() -> Result<(), Error> {
-        let most = RING_BYTES / size_of::<Entry>();
-        let mut log = Log::new();
-        for seq in 0..3_000 {
-            log.append(record(seq))?;
-            assert!(log.entries.capacity() <= most, "{}", log.entries.capacity());
-        }
-        assert!(log.iter().count() > 1_024);
-        log.verify()?;
         Ok(())
     }
 
@@ -1067,84 +1454,149 @@ mod tests {
     }
 
     #[test]
-    fn reports_typical_capacity() -> Result<(), Error> {
-        let typical_bytes = cost(&record(0));
-        let mut log = Log::new();
-        let mut seq = 0;
-        while log.bytes + typical_bytes <= RING_BYTES {
-            log.append(record(seq))?;
-            seq += 1;
-        }
-        eprintln!("typical_encoded_bytes={typical_bytes} ring_entries={seq}");
-        assert_eq!(log.bytes, typical_bytes * seq as usize);
-        Ok(())
+    fn the_entry_holds_no_string_and_is_32_bytes() {
+        assert_eq!(size_of::<Slot>(), 32);
     }
 
-    /// The calls of `golden.jsonl`, which this ring of strings wrote: every method with every
-    /// outcome, reasons in and out of the table, and both numbers a reason can end with.
-    /// ADR-0053's fixed-size records must read back the same lines.
-    fn golden() -> Vec<Record> {
-        let scopes = [
-            "any",
-            "terminal",
-            "self",
-            "other",
-            "children",
-            "tool.open",
-            "outside",
-            "tool",
-        ];
+    /// The calls of `golden.jsonl`, which the 256 KiB ring of strings wrote before ADR-0053:
+    /// every method with every outcome, reasons in and out of the table, and both details.
+    fn golden(each: &mut dyn FnMut(Call<'_>)) {
         let reasons = [
             "no such pane",
             "the pane is protected: ssh",
             "the sandbox will not start: \"/home/é/x\ny\" is not private",
             "",
         ];
-        let mut records = Vec::new();
-        for (i, (method, tag)) in (0_u64..).zip(
-            METHODS
-                .iter()
-                .flat_map(|method| (0..3).map(move |tag| (method, tag))),
-        ) {
-            let reason = match (tag, i % 4) {
-                (0, 1) if *method == "pane.send" => "allowed, 13 bytes".to_owned(),
-                (0, _) if *method == "grants.revoke" => format!("allowed, grant {}", u64::MAX - i),
-                (0, _) => "allowed".to_owned(),
-                (1, _) if *method == "pane.send" => {
-                    format!("{}, {} bytes", reasons[(i % 3) as usize], i * 1000)
-                }
-                (_, n) => reasons[n as usize].to_owned(),
-            };
-            records.push(Record {
-                seq: 0,
-                at_ms: 1_763_000_000_000 + i * 977,
-                caller: (!i.is_multiple_of(4)).then_some(i % 5),
-                terminal: !i.is_multiple_of(3),
-                method: (*method).to_owned(),
-                target: match i % 5 {
-                    0 => None,
-                    1 => Some(u64::MAX),
-                    n => Some(n * 7),
-                },
-                scope: scopes[(i % 8) as usize].to_owned(),
-                outcome: match tag {
-                    0 => Outcome::Ok(reason),
-                    1 => Outcome::Refused(reason),
-                    _ => Outcome::Error(reason),
-                },
-            });
+        let mut i = 0_u64;
+        for method in METHODS {
+            for verdict in [Verdict::Ok, Verdict::Refused, Verdict::Error] {
+                let (reason, detail) = match (verdict, i % 4) {
+                    (Verdict::Ok, 1) if method == "pane.send" => ("allowed", Detail::Bytes(13)),
+                    (Verdict::Ok, _) if method == "grants.revoke" => {
+                        ("allowed", Detail::Grant(u64::MAX - i))
+                    }
+                    (Verdict::Ok, _) => ("allowed", Detail::None),
+                    (Verdict::Refused, _) if method == "pane.send" => {
+                        (reasons[(i % 3) as usize], Detail::Bytes(i * 1000))
+                    }
+                    (_, n) => (reasons[n as usize], Detail::None),
+                };
+                each(Call {
+                    at_ms: 1_763_000_000_000 + i * 977,
+                    caller: (!i.is_multiple_of(4)).then_some(i % 5),
+                    terminal: !i.is_multiple_of(3),
+                    method,
+                    target: match i % 5 {
+                        0 => None,
+                        1 => Some(u64::MAX),
+                        n => Some(n * 7),
+                    },
+                    scope: SCOPES[(i % 8) as usize],
+                    verdict,
+                    reason,
+                    detail,
+                });
+                i += 1;
+            }
         }
-        records
     }
 
     #[test]
     fn every_method_and_outcome_reads_back_as_the_golden_lines() -> Result<(), Error> {
-        let mut log = Log::new();
-        for record in golden() {
-            log.append(record)?;
+        let expected = include_str!("audit/golden.jsonl");
+        let (mut borrowed, mut owned) = (Log::new(), Log::new());
+        let mut result = Ok(());
+        golden(&mut |call| {
+            let record = Record {
+                seq: 0,
+                at_ms: call.at_ms,
+                caller: call.caller,
+                terminal: call.terminal,
+                method: call.method.to_owned(),
+                target: call.target,
+                scope: call.scope.to_owned(),
+                outcome: outcome(
+                    call.verdict,
+                    joined([call.reason.as_bytes(), Suffix::new(call.detail).as_bytes()]),
+                ),
+            };
+            if result.is_ok() {
+                result = borrowed.record(&call).and_then(|()| owned.append(record));
+            }
+        });
+        result?;
+        for log in [borrowed, owned] {
+            let read: String = log.iter().map(|entry| format_line(&entry)).collect();
+            assert_eq!(read, expected);
+            log.verify()?;
         }
-        let read: String = log.iter().map(format_line).collect();
-        assert_eq!(read, include_str!("audit/golden.jsonl"));
+        Ok(())
+    }
+
+    #[test]
+    fn the_ring_wraps_at_its_cap() -> Result<(), Error> {
+        let mut log = Log::new();
+        // Reasons outside the table too, whose kept hashes share a slot with the evicted one.
+        for seq in 0..ENTRIES as u64 + 10 {
+            let mut item = record(seq);
+            if seq % 3 == 0 {
+                item.outcome = Outcome::Refused(format!("cannot save the session: {seq}"));
+            }
+            log.append(item)?;
+            assert_eq!(log.slots.capacity(), ENTRIES);
+        }
+        let seqs: Vec<u64> = log.briefs().map(|brief| brief.seq).collect();
+        assert_eq!((seqs.len(), seqs[0]), (ENTRIES, 10));
+        assert_eq!(log.iter().next().map(|entry| entry.prev), Some(log.base));
+        log.verify()?;
+        Ok(())
+    }
+
+    /// Long reasons outside the table fill the text ring past its cap, as an agent could make
+    /// them: no entry leaves early, each reads back its own reason or a marker, never another's
+    /// or an empty one, and each hash is the one recorded. One longer than the ring is marked.
+    #[test]
+    fn a_full_text_ring_marks_old_reasons_and_keeps_every_entry() -> Result<(), Error> {
+        let mut log = Log::new();
+        let reason = |seq: u64| {
+            format!(
+                "the sandbox will not start: \"/w/{seq}{}\"",
+                "x".repeat(1_000)
+            )
+        };
+        let mut expected = Vec::new();
+        for seq in 0..1_000 {
+            let mut item = record(seq);
+            if seq % 2 == 1 {
+                item.outcome = Outcome::Refused(reason(seq));
+            }
+            expected.push(item.clone());
+            log.append(item)?;
+        }
+        let mut long = record(0);
+        long.outcome = Outcome::Error("y".repeat(TEXT_BYTES + 1));
+        expected.push(long.clone());
+        log.append(long)?;
+        let entries: Vec<Entry> = log.iter().collect();
+        assert_eq!(entries.len(), expected.len());
+        let marker = |bytes: usize| format!("reason no longer held in memory ({bytes} bytes)");
+        let mut held = 0;
+        for (entry, mut want) in entries.iter().zip(expected) {
+            want.seq = entry.record.seq;
+            assert_eq!(entry.hash, digest_record(&entry.prev, &want));
+            let (Outcome::Ok(got) | Outcome::Refused(got) | Outcome::Error(got)) =
+                &entry.record.outcome;
+            let (Outcome::Ok(wanted) | Outcome::Refused(wanted) | Outcome::Error(wanted)) =
+                &want.outcome;
+            if got == wanted {
+                held += 1;
+            } else {
+                assert_eq!(got, &marker(wanted.len()));
+            }
+        }
+        // Every table reason, and the newest texts the ring holds.
+        assert_eq!(held, 500 + TEXT_BYTES / reason(999).len());
+        log.verify()?;
         Ok(())
     }
 

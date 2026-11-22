@@ -33,7 +33,7 @@
               "target": { "type": ["integer", "null"], "minimum": 0, "description": "The pane the call named, if any." },
               "scope": { "enum": ["any", "terminal", "self", "other", "outside"], "description": "What the call needed: any caller, a terminal, the caller's own pane, another pane, or a terminal outside any pane." },
               "outcome": { "enum": ["ok", "refused", "error"] },
-              "reason": { "type": "string", "description": "Short. For pane.send it ends with the text's size in bytes, never the text." }
+              "reason": { "type": "string", "description": "Short. For pane.send it ends with the text's size in bytes, never the text. A reason built at run time that the core no longer holds in memory reads `reason no longer held in memory (N bytes)`; the hash is still the one recorded, over the full reason (ADR-0053)." }
             }
           }
         },

@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 pub mod at;
 #[cfg(feature = "clipboard")]
 pub mod clipboard;
+pub mod counting;
 #[cfg(all(target_os = "macos", feature = "menu"))]
 pub mod dock_tile;
 pub mod foreground;
