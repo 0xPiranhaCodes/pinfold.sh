@@ -15,7 +15,7 @@ pinfold-proto = { path = "../pinfold-proto", version = "0.1.0-beta.5" }
 pinfold-sys = { path = "../pinfold-sys", version = "0.1.0-beta.5" }
 serde = { version = "1.0.229", default-features = false, features = ["derive"] }
 thiserror = "2.0.21"
-toml = { version = "1.1.8", default-features = false, features = ["parse", "serde", "std"] }
+toml = { version = "1.2.1", default-features = false, features = ["parse", "serde", "std"] }
 
 [dev-dependencies]
 proptest = "1.12.0"
