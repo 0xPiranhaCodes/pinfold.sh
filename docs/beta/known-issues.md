@@ -130,12 +130,16 @@ is new in this beta.
 
 ## Session timeline
 
-The timeline ([#450](https://github.com/0xPiranhaCodes/pinfold.sh/issues/450)) is new in this
-beta, with five of its six parts. The inbox summary line, the snapshot's run summary and the
-Agents board come in the next beta.
+The timeline ([#450](https://github.com/0xPiranhaCodes/pinfold.sh/issues/450)) has all six of
+its parts: the inbox shows each run's counters and opens its timeline on `t`, and a restored
+agent's `was running` strip says what its run did.
 
 - **The overlay shows no live "running" row or timer.** The link does not carry a command's start
   time yet, so a running command appears once it ends.
+- **A timeline ends with its core.** A restart keeps the run's counters for the strip, not its
+  entries, as the run itself does not survive it (ADR-0052 decision 10).
+- **The strip's counters need a window and core of link 28.** A window of beta.5 under a newer
+  core shows the strip without them.
 - **Prefix `t` is now taken.** A config that set `keys.inbox` or `keys.next_waiting` to `t` is
   refused when read, with a message naming the key. Choose another key.
 

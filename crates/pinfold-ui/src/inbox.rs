@@ -1484,6 +1484,26 @@ pub(crate) mod tests {
         assert_eq!(inbox.next_change(now), None);
     }
 
+    /// ADR-0052 §5: the board shows a run's summary where a row has no message, dim as the
+    /// inbox draws it, and the `t` key; each summary on it is one the inbox draws.
+    #[test]
+    fn the_agents_board_shows_run_summaries_and_the_timeline_key() {
+        let board = include_str!("../../../docs/design/ui/Agents.dc.html");
+        assert!(board.contains(r#"#E2E5EA">t</span> timeline"#));
+        let now = Instant::now();
+        let drawn = lines(&drawn(&with_runs(now), 14, 100, now));
+        let dim =
+            "color: #9AA1AC; overflow: hidden; text-overflow: ellipsis; white-space: nowrap\">";
+        let summaries: Vec<_> = (board.match_indices(dim))
+            .map(|(at, _)| &board[at + dim.len()..])
+            .map(|rest| &rest[..rest.find('<').unwrap()])
+            .collect();
+        assert_eq!(summaries.len(), 2, "{summaries:?}");
+        for summary in summaries {
+            assert!(drawn.iter().any(|line| line.contains(summary)), "{summary}");
+        }
+    }
+
     /// CLAUDE.md asks for glyph, colour and word, and the board is the design's view of this.
     #[test]
     fn the_agents_board_shows_the_word_beside_each_glyph() {

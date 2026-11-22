@@ -200,9 +200,16 @@ enabled = true   # keep a timeline for every agent run
 entries = 1024   # per live run on disk, 64 to 4096; a closed run keeps 128
 ```
 
-These are the defaults, read when the core starts. With `enabled = false` no file is written.
-Fixed, not keys: at most 64 runs, the oldest closed one going first. Nothing shows the timeline
-yet; the view and `pinfold ctl timeline` come in later releases.
+These are the defaults, read when the core starts. With `enabled = false` no file is written,
+prefix `t` flashes `timelines are off in pinfold.toml`, and the inbox shows messages only.
+Fixed, not keys: at most 64 runs, the oldest closed one going first.
+
+Prefix `t`, or Timeline in the palette, opens the focused pane's run as an overlay; in the inbox
+(prefix `!`), `t` opens the selected row's, and a row with a run and no message shows its
+counters, `12 commands · 3 approvals · 8 files changed · 1 error`. A session snapshot keeps each
+pane's counters, about 160 bytes and no text, so after a restart the `was running` strip under
+a restored agent's pane says what its run did. `pinfold ctl timeline [pane]`, `run.timeline` and
+the MCP tool `run_timeline_v1` read a run's record ([API](api/README.md)).
 
 ### Webhooks
 
