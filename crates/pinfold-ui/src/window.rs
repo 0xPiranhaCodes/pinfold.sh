@@ -120,8 +120,9 @@ enum Notice {
     Config(Config),
     /// A menu item was chosen.
     Command(Command),
-    /// A restored pane, whether the core would run what it was running, and that command.
-    WasRunning(u32, bool, String),
+    /// A restored pane, whether the core would run what it was running, that command, and its
+    /// run's summary line, empty if none.
+    WasRunning(u32, bool, String, String),
     /// A go to the next pane that needs you found none.
     NoneWaiting,
     /// A listed pane came to need you or to an error: the pane, the state and its tab's index.
@@ -306,7 +307,9 @@ fn run_io(mut link: Link, requests: &Inbox, latest: &Latest, proxy: &EventLoopPr
             }
         }
         let ran = link.take_was_running().into_iter();
-        let ran = ran.map(|(pane, runnable, command)| Notice::WasRunning(pane, runnable, command));
+        let ran = ran.map(|(pane, runnable, command, summary)| {
+            Notice::WasRunning(pane, runnable, command, summary)
+        });
         let notices = [
             searched,
             copied,
@@ -2450,8 +2453,8 @@ impl ApplicationHandler<Notice> for App {
             Notice::Unthemed => self.untheme(),
             Notice::Theme(theme) => self.retheme(theme),
             Notice::Config(config) => self.configure(config),
-            Notice::WasRunning(pane, runnable, command) => {
-                self.was_running.add(pane, runnable, command);
+            Notice::WasRunning(pane, runnable, command, summary) => {
+                self.was_running.add(pane, runnable, command, summary);
                 self.redraw_soon();
             }
             // A prompt keeps every key until it is answered, menu keys too; only Quit, which

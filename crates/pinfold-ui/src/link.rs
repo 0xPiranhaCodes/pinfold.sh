@@ -336,8 +336,9 @@ struct State {
     /// The OSC 12 and OSC 11 colours of each pane that has either, shown or not.
     colours: Vec<(u32, Option<u32>, Option<u32>)>,
     refused: Option<Refusal>,
-    /// Restored panes, whether Enter may run what each was running, and that command.
-    was_running: Vec<(u32, bool, String)>,
+    /// Restored panes, whether Enter may run what each was running, that command, and its
+    /// run's summary line, empty if none.
+    was_running: Vec<(u32, bool, String, String)>,
     approvals: Vec<Approval>,
     /// Each pane of the session and its tab's index, from a core of 17 or later.
     members: Vec<(u32, u8)>,
@@ -561,8 +562,20 @@ impl State {
                 pane,
                 runnable,
                 command,
+                summary,
             } if self.was_running.len() < MAX_PANES => {
-                self.was_running.push((pane, runnable, command.to_owned()));
+                // PinFold's words for the run's counters, never text from the snapshot.
+                let summary = summary.map(|counts| RunSummary {
+                    ended: true,
+                    commands: counts.commands,
+                    failed: counts.failed,
+                    approvals: counts.approvals,
+                    denied: counts.denied,
+                    changed: counts.changed,
+                    errors: counts.errors,
+                });
+                let line = summary.map(|run| run.line()).unwrap_or_default();
+                (self.was_running).push((pane, runnable, command.to_owned(), line));
             }
             Notice::Approval(approval) => {
                 let owned = Approval {
@@ -1244,7 +1257,7 @@ impl Link {
     }
 
     /// Returns what restored panes were running, once each.
-    pub fn take_was_running(&mut self) -> Vec<(u32, bool, String)> {
+    pub fn take_was_running(&mut self) -> Vec<(u32, bool, String, String)> {
         std::mem::take(&mut self.state.was_running)
     }
 
@@ -2110,7 +2123,7 @@ mod tests {
     /// dropped; pages, entries and labels decode without ending the link; and a core of 26 is
     /// never asked for a timeline, a reveal or a rewind at a checkpoint.
     #[test]
-    fn a_summary_lands_on_its_row_and_an_older_core_is_never_asked() {
+    fn a_summary_lands_on_its_row_and_the_oldest_core_is_asked() {
         use pinfold_proto::link::{ENTRY, Tool};
         let (mut link, mut peer) = answered().unwrap();
         link.state.list(10, Some((1, true, (5, 600), "")));
@@ -2186,7 +2199,8 @@ mod tests {
                 checkpoint: Some(2),
             },
         ] {
-            assert!(!link.speaks(&request));
+            // From link 28 the oldest spoken is 27, which has them; 26 is refused at its hello.
+            assert!(link.speaks(&request));
         }
     }
 

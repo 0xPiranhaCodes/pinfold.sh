@@ -927,15 +927,25 @@ impl Session {
         let pane = state.number;
         if !state.told_ran {
             state.told_ran = true;
-            let ran = reactor.was_running.iter().find(|(at, _)| *at == pane);
-            if let Some((_, command)) = ran {
+            let ran = reactor.was_running.iter().find(|(at, ..)| *at == pane);
+            if let Some((_, command, summary)) = ran {
                 let runnable = crate::snapshot::runnable(command);
+                let summary = summary.map(|run| link::Counts {
+                    commands: run.commands,
+                    failed: run.failed,
+                    approvals: run.approvals,
+                    denied: run.denied,
+                    changed: run.changed,
+                    errors: run.errors,
+                });
                 let notice = Notice::WasRunning {
                     pane: pane as u32,
                     runnable,
                     command,
+                    summary,
                 };
-                notice.encode(&mut self.out).map_err(|_| Ended)?;
+                // A window of 27 is sent the strip as before, without the counters.
+                (notice.encode_at(self.version, &mut self.out)).map_err(|_| Ended)?;
             }
         }
         let dirty = reactor.take_dirty(pane);
@@ -1592,7 +1602,7 @@ mod tests {
         /// Whether the last naming pane's status said it is in the inbox.
         naming_listed: Option<bool>,
         refused: Vec<Refusal>,
-        was_running: Vec<(u32, bool, String)>,
+        was_running: Vec<(u32, bool, String, Option<link::Counts>)>,
         unhardened: Vec<bool>,
         secrets: Vec<(u32, String)>,
         webhooks: Vec<(String, bool, u32)>,
@@ -1778,7 +1788,8 @@ mod tests {
                             pane,
                             runnable,
                             command,
-                        } => self.was_running.push((pane, runnable, command.to_owned())),
+                            summary,
+                        } => (self.was_running).push((pane, runnable, command.to_owned(), summary)),
                         Notice::Approval(_) => {}
                         Notice::Progress { pane, progress } => {
                             self.progress.push((pane, progress));
@@ -2170,7 +2181,7 @@ mod tests {
     /// last; once sent no deadline is left, and nothing comes again without a change. A window of
     /// 26 never hears one.
     #[test]
-    fn a_summary_is_sent_on_change_once_a_second_and_never_to_a_window_of_26() {
+    fn a_summary_is_sent_on_change_once_a_second() {
         let state = tempfile::tempdir().unwrap();
         let mut reactor = Reactor::new().unwrap();
         let flood = "i=0; while [ $i -lt 40 ]; do m B; m C; m \"D;$((i % 2))\"; i=$((i+1)); done
@@ -2193,22 +2204,10 @@ mod tests {
         serve(&mut reactor, &mut peer, |_, p| {
             p.summaries.last().is_some_and(|summary| summary.3)
         });
+        // A window of 26 never gets one: from link 28 it is below `OLDEST` and is refused at
+        // its hello (ADR-0043).
         drop(peer);
         assert!(turn_until(&mut reactor, |r| !r.has_window()));
-
-        let older = timed_agent(
-            &mut reactor,
-            state.path(),
-            "m B; m C; m 'D;0'; echo ran; sleep 30",
-        );
-        let mut peer = Peer::older(&mut reactor, OLDEST);
-        serve(&mut reactor, &mut peer, |r, _| on_screen(r, older, "ran"));
-        for _ in 0..3 {
-            reactor.turn(Some(Duration::from_millis(50))).unwrap();
-        }
-        peer.read();
-        assert!(peer.summaries.is_empty(), "a window of 26 never gets one");
-        assert_eq!(reactor.host.deadline(), None);
     }
 
     /// ADR-0052 slice 4: a page holds at most what was asked, entries as the file holds them,
@@ -2889,7 +2888,18 @@ mod tests {
             active: 0,
             panes: vec![
                 Pane::new(None, "/bin/sh"),
-                Pane::new(None, "rerun-me"),
+                Pane {
+                    summary: Some(crate::snapshot::RunSummary {
+                        commands: 12,
+                        failed: 1,
+                        approvals: 3,
+                        calls: 40,
+                        changed: 8,
+                        errors: 1,
+                        ..Default::default()
+                    }),
+                    ..Pane::new(None, "rerun-me")
+                },
                 Pane::new(None, "dismiss-me"),
                 Pane::new(
                     None,
@@ -2908,10 +2918,22 @@ mod tests {
         let told: Vec<_> = peer
             .was_running
             .iter()
-            .map(|(pane, ok, _)| (*pane, *ok))
+            .map(|(pane, ok, ..)| (*pane, *ok))
             .collect();
         assert_eq!(told, [(run, true), (esc, true), (redacted, false)]);
         assert_eq!(peer.was_running[0].2, "rerun-me");
+        // The run's counters from the snapshot ride with its strip (ADR-0052 §3), calls and
+        // needs-you aside as the strip says neither.
+        let counts = link::Counts {
+            commands: 12,
+            failed: 1,
+            approvals: 3,
+            denied: 0,
+            changed: 8,
+            errors: 1,
+        };
+        assert_eq!(peer.was_running[0].3, Some(counts));
+        assert!(peer.was_running[1..].iter().all(|ran| ran.3.is_none()));
 
         peer.send(Request::WasRunningAnswer {
             pane: esc,

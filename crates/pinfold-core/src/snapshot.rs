@@ -1,6 +1,6 @@
-//! Session snapshots (ADR-0034): the layout and, per pane, its directory (ADR-0040) and the
-//! program it started, redacted. No scrollback, no screen and no environment, so the file holds nothing
-//! secret by design.
+//! Session snapshots (ADR-0034): the layout and, per pane, its directory (ADR-0040), the
+//! program it started, redacted, and its agent run's counters (ADR-0052). No scrollback, no
+//! screen and no environment, so the file holds nothing secret by design.
 
 use std::env;
 use std::fs::{self, DirBuilder, File, OpenOptions};
@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::io::{Reactor, Waker};
 use crate::tabs::FIRST_SIZE;
+use crate::timeline::Summary;
 use crate::tool;
 
 /// The snapshot format this core writes.
@@ -131,6 +132,48 @@ pub struct Pane {
     /// passes `tool.open`'s checks (ADR-0045).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool: Option<serde_json::Value>,
+    /// Its agent run's counters when the snapshot was taken, for the `was running` strip
+    /// (ADR-0052 section 3). Absent in an older snapshot, which parses as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub summary: Option<RunSummary>,
+}
+
+/// A run's counters as a snapshot keeps them: numbers, never text, about 160 bytes of JSON.
+/// A missing counter reads as 0.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RunSummary {
+    /// Commands closed.
+    pub commands: u32,
+    /// Of those, with a non-zero exit.
+    pub failed: u32,
+    /// Approvals answered.
+    pub approvals: u32,
+    /// Of those, denied.
+    pub denied: u32,
+    /// Calls that wrote or acted, were refused or failed.
+    pub calls: u32,
+    /// Paths the newest checkpoint changed since launch.
+    pub changed: u32,
+    /// Failed commands plus ✕ error states.
+    pub errors: u32,
+    /// ◆ needs-you states.
+    pub needs_you: u32,
+}
+
+impl From<Summary> for RunSummary {
+    fn from(summary: Summary) -> Self {
+        Self {
+            commands: summary.commands,
+            failed: summary.failed,
+            approvals: summary.approvals,
+            denied: summary.denied,
+            calls: summary.calls,
+            changed: summary.changed,
+            errors: summary.errors,
+            needs_you: summary.needs_you,
+        }
+    }
 }
 
 impl Pane {
@@ -145,6 +188,7 @@ impl Pane {
                 .filter(|command| !command.is_empty())
                 .map(str::to_owned),
             tool: None,
+            summary: None,
         }
     }
 }
@@ -648,6 +692,9 @@ impl Reactor {
             let listed = self.list().find(|pane| pane.id == *id as usize);
             listed.map_or_else(Pane::default, |pane| Pane {
                 tool: pane.tool.map(Run::describe),
+                summary: (self.timelines())
+                    .and_then(|timelines| timelines.newest(pane.id))
+                    .map(|run| run.summary().into()),
                 ..Pane::new(self.cwd(pane.id).as_deref(), pane.command)
             })
         });
@@ -706,10 +753,11 @@ impl Reactor {
                 .map(ToOwned::to_owned);
             let ran = saved.and_then(|pane| pane.command.clone());
             let ran = ran.filter(|ran| Path::new(ran).file_name() != shell.as_deref());
+            let ran = ran.map(|ran| (ran, saved.and_then(|pane| pane.summary)));
             match self.spawn(command, FIRST_SIZE.rows, FIRST_SIZE.cols) {
                 Ok(pane) => match run {
                     Some(run) => self.set_tool(pane, run),
-                    None => was_running.extend(ran.map(|ran| (pane, ran))),
+                    None => was_running.extend(ran.map(|(ran, summary)| (pane, ran, summary))),
                 },
                 Err(error) => {
                     for started in first as usize..self.next_pane {
@@ -737,10 +785,10 @@ impl Reactor {
     /// newline into the pane's input queue, unless redaction changed it or it holds a control
     /// character. Returns whether it typed it.
     pub fn answer_was_running(&mut self, pane: usize, run: bool) -> bool {
-        let Some(index) = self.was_running.iter().position(|(at, _)| *at == pane) else {
+        let Some(index) = self.was_running.iter().position(|(at, ..)| *at == pane) else {
             return false;
         };
-        let (_, command) = self.was_running.swap_remove(index);
+        let (_, command, _) = self.was_running.swap_remove(index);
         run && runnable(&command) && self.write(pane, format!("{command}\n").as_bytes())
     }
 }
@@ -790,6 +838,81 @@ mod tests {
         assert!(json.contains(r#""version":1"#), "{json}");
         assert!(json.contains(r#""direction":"right""#), "{json}");
         assert_eq!(serde_json::from_str::<Snapshot>(&json).unwrap(), snapshot);
+    }
+
+    /// ADR-0052 §3: a pane's run's counters round-trip as numbers only, and a version 1
+    /// snapshot from before them parses as it did.
+    #[test]
+    fn a_summary_round_trips_and_a_snapshot_without_one_parses() {
+        let mut snapshot = sample();
+        snapshot.panes[0].summary = Some(RunSummary {
+            commands: 12,
+            approvals: 3,
+            changed: 8,
+            errors: 1,
+            ..RunSummary::default()
+        });
+        let json = serde_json::to_string(&snapshot).unwrap();
+        assert_eq!(serde_json::from_str::<Snapshot>(&json).unwrap(), snapshot);
+        let saved: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let summary = saved["panes"][0]["summary"].as_object().unwrap();
+        assert_eq!(summary.len(), 8);
+        assert!(
+            summary.values().all(serde_json::Value::is_u64),
+            "{summary:?}"
+        );
+        assert!(
+            saved["panes"][1].get("summary").is_none(),
+            "none is left out"
+        );
+        let old = r#"{"version":1,"tabs":[{"root":{"pane":0},"focus":0,"zoomed":false}],
+            "active":0,"panes":[{"cwd":"/tmp","command":"claude"}]}"#;
+        let old: Snapshot = serde_json::from_str(old).unwrap();
+        assert_eq!(old.panes[0].summary, None);
+        let part = r#"{"cwd":null,"command":null,"summary":{"commands":2}}"#;
+        let part: Pane = serde_json::from_str(part).unwrap();
+        assert_eq!(
+            part.summary.map(|run| (run.commands, run.errors)),
+            Some((2, 0))
+        );
+        let text = r#"{"cwd":null,"command":null,"summary":{"commands":"rm -rf"}}"#;
+        assert!(
+            serde_json::from_str::<Pane>(text).is_err(),
+            "a counter is never text"
+        );
+    }
+
+    /// ADR-0052's memory table: a run's counters add a bounded number of bytes a pane, and 64
+    /// panes with the longest command, directory and counters stay under the file's cap.
+    #[test]
+    fn a_summary_adds_at_most_200_bytes_a_pane_and_64_still_fit() {
+        let most = RunSummary {
+            commands: u32::MAX,
+            failed: u32::MAX,
+            approvals: u32::MAX,
+            denied: u32::MAX,
+            calls: u32::MAX,
+            changed: u32::MAX,
+            errors: u32::MAX,
+            needs_you: u32::MAX,
+        };
+        let pane = Pane::new(
+            Some(&format!("/{}", "d".repeat(MAX_CWD - 1))),
+            &"c".repeat(MAX_SEND),
+        );
+        let mut snapshot = Snapshot {
+            panes: vec![pane; 64],
+            ..Snapshot::default()
+        };
+        let without = serde_json::to_vec(&snapshot).unwrap().len();
+        for pane in &mut snapshot.panes {
+            pane.summary = Some(most);
+        }
+        let with = serde_json::to_vec(&snapshot).unwrap().len();
+        let per_run = (with - without) / 64;
+        eprintln!("snapshot: {without} B without summaries, {with} B with, {per_run} B a run");
+        assert!(per_run <= 200, "{per_run} B a run");
+        assert!(with <= MAX_BYTES, "{with} B");
     }
 
     #[test]
@@ -962,6 +1085,40 @@ mod tests {
         fs::remove_dir_all(&state).unwrap();
     }
 
+    /// ADR-0052 §3: a snapshot keeps the counters of each pane's newest run, and a restore
+    /// hands them to the pane's `was running` strip.
+    #[test]
+    fn a_snapshot_keeps_each_runs_summary_for_the_strip() {
+        let state = tempfile::tempdir().unwrap();
+        let mut reactor = Reactor::new().unwrap();
+        reactor.shell = || Command::new("/bin/sh");
+        let dir = state.path().join("timeline");
+        reactor.keep_timelines(crate::timeline::Timelines::new(dir, 64).unwrap());
+        let plain = reactor.open_tab(Command::new("/bin/sh"), 24, 80).unwrap();
+        let agent = reactor.open_tab(Command::new("/bin/cat"), 24, 80).unwrap();
+        // An agent profile's pane, which opens its run.
+        reactor.read_agent_signals(agent, 0);
+        let now = Instant::now();
+        reactor
+            .report_status(agent, crate::status::Status::NeedsYou, "", now)
+            .unwrap();
+        let mut snapshot = reactor.snapshot();
+        let summaries: Vec<_> = snapshot.panes.iter().map(|pane| pane.summary).collect();
+        assert_eq!(summaries.len(), 2, "{plain} and {agent}");
+        assert_eq!(summaries[0], None, "a shell with no run");
+        assert_eq!(summaries[1].map(|run| run.needs_you), Some(1));
+        let mut restored = Reactor::new().unwrap();
+        restored.shell = || Command::new("/bin/sh");
+        snapshot.panes[1].command = Some("claude".to_owned());
+        restored.restore(&snapshot).unwrap();
+        let strips: Vec<_> = restored
+            .was_running
+            .iter()
+            .map(|(_, ran, run)| (ran.as_str(), *run))
+            .collect();
+        assert_eq!(strips, [("claude", summaries[1])]);
+    }
+
     #[test]
     fn a_restore_starts_a_shell_per_pane_in_the_saved_layout() {
         let state = std::env::temp_dir().join(format!("pinfold-load-{}", std::process::id()));
@@ -1031,7 +1188,7 @@ mod tests {
             [("/bin/echo", Some(&files)), ("cat", None), ("cat", None)]
         );
         // The tool pane asks nothing: it is running what it ran.
-        assert!(reactor.was_running.iter().all(|(pane, _)| *pane != 0));
+        assert!(reactor.was_running.iter().all(|(pane, ..)| *pane != 0));
         let again = reactor.snapshot();
         assert_eq!(again.panes[0].tool, Some(files.describe()));
         assert_eq!(again.panes[1].tool, None);

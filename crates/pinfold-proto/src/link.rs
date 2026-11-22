@@ -39,7 +39,7 @@ use std::ops::{Range, RangeInclusive};
 use crate::{BOLD, Cell, Frame, ITALIC, MouseEncoding, MouseMode, Palette};
 
 /// The protocol's version. Any change to the format below raises it.
-pub const VERSION: u16 = 27;
+pub const VERSION: u16 = 28;
 
 /// The oldest version this side still speaks, one before [`VERSION`] (ADR-0043).
 pub const OLDEST: u16 = VERSION - 1;
@@ -112,6 +112,28 @@ pub const PROGRESS: u16 = 26;
 /// [`Request::RevealStored`] and [`Refusal::Evicted`], and a checkpoint on
 /// [`Request::OpenTool`] (ADR-0052, slice 4).
 pub const TIMELINE: u16 = 27;
+
+/// The first version whose [`Notice::WasRunning`] carries the restored run's [`Counts`]
+/// (ADR-0052, slice 6).
+pub const RESTORED_SUMMARY: u16 = 28;
+
+/// An agent run's counters as a session snapshot kept them, for the `was running` strip
+/// (ADR-0052 section 3): fixed numbers, never text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Counts {
+    /// Commands closed.
+    pub commands: u32,
+    /// Of those, with a non-zero exit.
+    pub failed: u32,
+    /// Approvals answered.
+    pub approvals: u32,
+    /// Of those, denied.
+    pub denied: u32,
+    /// Paths the newest checkpoint changed since launch.
+    pub changed: u32,
+    /// Failed commands plus ✕ error states.
+    pub errors: u32,
+}
 
 /// The most entries a [`Request::Timeline`] asks for and a [`Notice::Timeline`] carries.
 pub const MAX_PAGE: u8 = 64;
@@ -977,6 +999,9 @@ pub enum Notice<'a> {
         runnable: bool,
         /// The redacted command, which is only a hint. At most [`MAX_COMMAND`] bytes.
         command: &'a str,
+        /// Its agent run's counters from the snapshot, if it had a run (ADR-0052 section 3).
+        /// Since version 28; a window below it is sent none.
+        summary: Option<Counts>,
     },
     /// The state of a pane that names its tab, or, since version 16, of any pane in the inbox
     /// (ADR-0051). Below 16 the wire has no `naming` or times: a window reads them as `true`
@@ -1827,6 +1852,9 @@ impl Notice<'_> {
             Self::InboxExtra { .. } => INBOX_EXTRA,
             Self::Toast { .. } => TOAST,
             Self::Progress { .. } => PROGRESS,
+            Self::WasRunning {
+                summary: Some(_), ..
+            } => RESTORED_SUMMARY,
             Self::Summary { .. }
             | Self::Timeline { .. }
             | Self::TimelineEntry { .. }
@@ -2103,6 +2131,7 @@ impl Notice<'_> {
                 pane,
                 runnable,
                 command,
+                summary,
             } => {
                 // The decoder refuses a longer one, so it must not go out.
                 if command.len() > MAX_COMMAND {
@@ -2113,6 +2142,14 @@ impl Notice<'_> {
                 }
                 put!(out; pane);
                 out.push(u8::from(*runnable));
+                // From 28 a flag, then the counters when some; below it, none.
+                if version >= RESTORED_SUMMARY {
+                    out.push(u8::from(summary.is_some()));
+                    if let Some(counts) = summary {
+                        put!(out; counts.commands, counts.failed, counts.approvals, counts.denied,
+                            counts.changed, counts.errors);
+                    }
+                }
                 out.extend_from_slice(command.as_bytes());
                 WAS_RUNNING
             }
@@ -2435,6 +2472,19 @@ impl Notice<'_> {
             },
             WAS_RUNNING => {
                 let (pane, runnable) = (body.u32()?, body.tag("runnable", &[false, true])?);
+                let some = version >= RESTORED_SUMMARY && body.tag("summary", &[false, true])?;
+                let summary = if some {
+                    Some(Counts {
+                        commands: body.u32()?,
+                        failed: body.u32()?,
+                        approvals: body.u32()?,
+                        denied: body.u32()?,
+                        changed: body.u32()?,
+                        errors: body.u32()?,
+                    })
+                } else {
+                    None
+                };
                 let command = body.text()?;
                 if command.len() > MAX_COMMAND {
                     return Err(Error::TooLarge {
@@ -2445,6 +2495,7 @@ impl Notice<'_> {
                     pane,
                     runnable,
                     command,
+                    summary,
                 }
             }
             APPROVAL => {
@@ -3182,7 +3233,7 @@ mod tests {
     use super::*;
 
     /// Version 1's hello, spelled out because it must never change.
-    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 27, 0];
+    const HELLO_WIRE: [u8; 7] = [3, 0, 0, 0, HELLO, 28, 0];
     /// Where fields sit in a frame message.
     const FLAGS_AT: usize = 13;
     const MOUSE_AT: usize = 14;
@@ -3448,8 +3499,9 @@ mod tests {
         // 26, the oldest spoken, has progress.
         assert_eq!(at_oldest(progress), Ok(true));
         let _ = newer;
-        // ADR-0052 slice 4: a window of 26 never gets a summary, a page, an entry, a label or
-        // the evicted refusal.
+        // ADR-0052 slice 4: a window of 27, the oldest now spoken, gets a summary, a page, an
+        // entry, a label and the evicted refusal; slice 6's restored counters are 28's, checked
+        // in `a_restored_summary_goes_only_to_a_window_of_28_and_a_bad_one_is_refused`.
         let entry = [6, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let timeline = [
             Notice::Summary {
@@ -3493,10 +3545,10 @@ mod tests {
             TIMELINE_LABEL,
             REFUSED,
         ]) {
-            let since = TIMELINE;
-            assert_eq!(at_oldest(notice), Err(Error::Newer { kind, since }));
+            let _ = kind;
+            assert_eq!(at_oldest(notice), Ok(true));
         }
-        // Nor does a core of 26 get the requests.
+        // And a core of 27 the requests.
         for (request, kind) in [
             (
                 Request::Timeline {
@@ -3521,11 +3573,8 @@ mod tests {
             request.encode(&mut wire).unwrap();
             let (mut decoder, mut input) = (Decoder::default(), wire.as_slice());
             decoder.next_request(&mut input).unwrap();
-            let since = TIMELINE;
-            assert_eq!(
-                decoder.next_request(&mut input),
-                Err(Error::Newer { kind, since })
-            );
+            let _ = kind;
+            assert!(matches!(decoder.next_request(&mut input), Ok(Some(_))));
         }
         assert_eq!(at_oldest(COLOURS_SEED), Ok(true));
         let secrets = Notice::Secrets {
@@ -4406,12 +4455,74 @@ mod tests {
             pane: 0,
             runnable: true,
             command: &command,
+            summary: None,
         };
         assert!(matches!(
             message.encode(&mut out),
             Err(Error::TooLarge { .. })
         ));
         assert_eq!(out, [1]);
+    }
+
+    /// ADR-0052 slice 6: a window of 27 is sent the strip without the counters and reads it as
+    /// before; at 28 a summary that is cut short or has a bad flag is refused, never a panic.
+    #[test]
+    fn a_restored_summary_goes_only_to_a_window_of_28_and_a_bad_one_is_refused() {
+        let counts = Counts {
+            commands: 12,
+            failed: 1,
+            approvals: 3,
+            denied: 0,
+            changed: 8,
+            errors: 1,
+        };
+        let notice = Notice::WasRunning {
+            pane: 4,
+            runnable: true,
+            command: "claude",
+            summary: Some(counts),
+        };
+        let read = |version: u16, body: &[u8]| {
+            let mut wire = raw(HELLO, &version.to_le_bytes());
+            wire.extend(raw(WAS_RUNNING, body));
+            let mut decoder = Decoder::default();
+            let mut input = wire.as_slice();
+            decoder.next_notice(&mut input).unwrap();
+            decoder
+                .next_notice(&mut input)
+                .map(|notice| notice.map(|n| format!("{n:?}")))
+        };
+        let body_at = |version| {
+            let mut wire = Vec::new();
+            notice.encode_at(version, &mut wire).unwrap();
+            wire[4 + KIND..].to_vec()
+        };
+        let old = body_at(RESTORED_SUMMARY - 1);
+        assert_eq!(old, [&4u32.to_le_bytes()[..], &[1], b"claude"].concat());
+        let plain = Notice::WasRunning {
+            pane: 4,
+            runnable: true,
+            command: "claude",
+            summary: None,
+        };
+        assert_eq!(
+            read(RESTORED_SUMMARY - 1, &old),
+            Ok(Some(format!("{plain:?}")))
+        );
+        let new = body_at(RESTORED_SUMMARY);
+        assert_eq!(new.len(), old.len() + 1 + 24);
+        assert_eq!(
+            read(RESTORED_SUMMARY, &new),
+            Ok(Some(format!("{notice:?}")))
+        );
+        // Cut inside the counters, or a flag that is neither 0 nor 1.
+        assert!(read(RESTORED_SUMMARY, &new[..5 + 1 + 10]).is_err());
+        let mut bad = new.clone();
+        bad[5] = 2;
+        assert!(read(RESTORED_SUMMARY, &bad).is_err());
+        // A window of 27 refuses a counters-bearing notice as newer rather than misreading it.
+        assert_eq!(notice.since(), RESTORED_SUMMARY);
+        assert_eq!(plain.since(), OLDEST);
     }
 
     #[test]
@@ -5286,7 +5397,10 @@ mod tests {
             command in ".{0,64}",
             chunk in chunks(),
         ) {
-            let notice = Notice::WasRunning { pane, runnable, command: &command };
+            let notice = Notice::WasRunning { pane, runnable, command: &command, summary: None };
+            prop_assert!(notice_survives(&notice, chunk), "changed on the link");
+            let summary = Some(Counts { commands: pane, errors: u32::MAX, ..Counts::default() });
+            let notice = Notice::WasRunning { pane, runnable, command: &command, summary };
             prop_assert!(notice_survives(&notice, chunk), "changed on the link");
         }
 

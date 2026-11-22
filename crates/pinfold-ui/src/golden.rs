@@ -249,6 +249,12 @@ fn golden_inbox_summary() {
     );
 }
 
+/// ADR-0052 §3: a restored run's strip, under output that prints a fake one.
+#[test]
+fn golden_was_running() {
+    check("was-running", draw(&crate::snapshots::was_running(), false));
+}
+
 /// ADR-0052's control: the overlay drawn over output that prints a fake one.
 #[test]
 fn golden_timeline() {

@@ -1,0 +1,14 @@
+---
+source: crates/pinfold-ui/src/snapshots.rs
+assertion_line: 390
+expression: cells(&was_running())
+---
+| ○ was running: rm -rf ~ · 99 commands · 0 errors  Enter run · Esc dismiss  ○ was running: rm -rf ~ · 99 commands · 0 er|
+|rors  Enter run · Esc dismiss  ○ was running: rm -rf ~ · 99 commands · 0 errors  Enter run · Esc dismiss  ○ was running:|
+| ○ was running: claude · 12 commands · 3 approvals · 8 files changed · 1 error  Enter run · Esc dismiss                 |
+0:0..120 fg e2e5ea bg 121212
+1:0..120 fg e2e5ea bg 121212
+2:0..16 fg 9aa1ac bg 12151a
+2:16..22 fg e2e5ea bg 12151a
+2:22..103 fg 9aa1ac bg 12151a
+2:103..120 fg e2e5ea bg 12151a
