@@ -16,6 +16,7 @@ use std::process::ExitStatus;
 use std::time::Instant;
 
 use pinfold_api::Log;
+use pinfold_api::audit::Verdict;
 use pinfold_proto::link::ApprovalAction;
 
 use crate::status::{self, Status};
@@ -630,31 +631,29 @@ impl Timelines {
     /// calls that do nothing; a refused prompt shows in the target's as its approval.
     pub fn calls(&mut self, log: &Log, now: Instant) {
         let seen = self.seen;
-        let new = (log.iter().rev())
-            .take_while(|entry| entry.record.seq >= seen)
+        let new = (log.briefs().rev())
+            .take_while(|brief| brief.seq >= seen)
             .count();
-        for entry in log.iter().skip(log.iter().len() - new) {
-            let record = &entry.record;
-            self.seen = record.seq.saturating_add(1);
-            let Some((method, (_, acts))) =
-                (METHODS.iter().enumerate()).find(|(_, (name, _))| *name == record.method)
-            else {
+        for brief in log.briefs().skip(log.briefs().len() - new) {
+            self.seen = brief.seq.saturating_add(1);
+            // The audit log's methods are this table's, in the same order.
+            let Some((_, acts)) = METHODS.get(usize::from(brief.method)) else {
                 continue;
             };
-            let outcome = match record.outcome {
-                pinfold_api::Outcome::Ok(_) if !acts => continue,
-                pinfold_api::Outcome::Ok(_) => Outcome::Ok,
-                pinfold_api::Outcome::Refused(_) => Outcome::Refused,
-                pinfold_api::Outcome::Error(_) => Outcome::Error,
+            let outcome = match brief.verdict {
+                Verdict::Ok if !acts => continue,
+                Verdict::Ok => Outcome::Ok,
+                Verdict::Refused => Outcome::Refused,
+                Verdict::Error => Outcome::Error,
             };
             let what = What::Api {
-                seq: u32::try_from(record.seq & u64::from(u32::MAX)).unwrap_or(0),
-                method: u8::try_from(method).unwrap_or(u8::MAX),
+                seq: u32::try_from(brief.seq & u64::from(u32::MAX)).unwrap_or(0),
+                method: brief.method,
                 outcome,
-                target: record.target.and_then(|pane| u16::try_from(pane).ok()),
+                target: brief.target.and_then(|pane| u16::try_from(pane).ok()),
             };
             let pane = |pane: Option<u64>| pane.and_then(|pane| usize::try_from(pane).ok());
-            let (caller, target) = (pane(record.caller), pane(record.target));
+            let (caller, target) = (pane(brief.caller), pane(brief.target));
             let into_target = outcome == Outcome::Ok || caller.is_none();
             let target = target.filter(|target| into_target && caller != Some(*target));
             for pane in [caller, target].into_iter().flatten() {
