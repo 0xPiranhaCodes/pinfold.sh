@@ -25,6 +25,8 @@
 //! # Ok::<(), pinfold_api::audit::Error>(())
 //! ```
 
+mod reasons;
+
 use std::collections::VecDeque;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, Read, Write};
@@ -34,12 +36,43 @@ use std::path::{Path, PathBuf};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+pub use reasons::REASONS;
+
 const RING_BYTES: usize = 256 * 1024;
 const FILE_BYTES: u64 = 5 * 1024 * 1024;
 const HASH_BYTES: usize = 32;
 /// Longest legal line: JSON escapes a string byte to at most six bytes (`\u001f`), and a legal
 /// entry holds under [`RING_BYTES`] of strings, plus a margin for field names, hashes and numbers.
 const LINE_BYTES: u64 = 6 * RING_BYTES as u64 + 1024;
+
+/// The method names an entry can hold as an index (ADR-0053), in the order of
+/// `pinfold_core::timeline`'s table, which a test checks. New methods are appended.
+pub const METHODS: [&str; 24] = [
+    "hello",
+    "window.open",
+    "pane.list",
+    "events.subscribe",
+    "pane.read",
+    "pane.last_output",
+    "pane.send",
+    "pane.wait",
+    "pane.spawn",
+    "agent.launch",
+    "tool.open",
+    "pane.close",
+    "checkpoint.take",
+    "checkpoint.list",
+    "checkpoint.restore",
+    "pane.status",
+    "audit.read",
+    "session.save",
+    "workspace.open",
+    "grants.list",
+    "grants.revoke",
+    "workspace.trust_state",
+    "workspace.ask_trust",
+    "run.timeline",
+];
 
 /// The result of an audited call, with a short explanatory reason.
 ///
@@ -254,7 +287,7 @@ impl Log {
             return Err(Error::EntryTooLarge { bytes: cost });
         }
         let prev = self.tail;
-        let hash = digest(&prev, &encode_record(&record));
+        let hash = digest_record(&prev, &record);
         let entry = Entry {
             record,
             prev,
@@ -312,7 +345,7 @@ impl Log {
         for entry in &self.entries {
             if prior.is_some_and(|hash| hash != entry.prev)
                 || prior_seq.is_some_and(|seq| seq.checked_add(1) != Some(entry.record.seq))
-                || digest(&entry.prev, &encode_record(&entry.record)) != entry.hash
+                || digest_record(&entry.prev, &entry.record) != entry.hash
             {
                 return Err(Broken {
                     seq: entry.record.seq,
@@ -383,7 +416,7 @@ fn verify_one(path: &Path, state: &mut VerifyState, head: bool) -> Result<(), Er
             || state
                 .seq
                 .is_some_and(|seq| seq.checked_add(1) != Some(entry.record.seq))
-            || digest(&entry.prev, &encode_record(&entry.record)) != entry.hash
+            || digest_record(&entry.prev, &entry.record) != entry.hash
         {
             return Err(Broken {
                 seq: entry.record.seq,
@@ -397,44 +430,68 @@ fn verify_one(path: &Path, state: &mut VerifyState, head: bool) -> Result<(), Er
     Ok(())
 }
 
-fn encode_record(record: &Record) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    bytes.extend_from_slice(&record.seq.to_be_bytes());
-    bytes.extend_from_slice(&record.at_ms.to_be_bytes());
-    encode_option(&mut bytes, record.caller);
-    bytes.push(u8::from(record.terminal));
-    encode_string(&mut bytes, &record.method);
-    encode_option(&mut bytes, record.target);
-    encode_string(&mut bytes, &record.scope);
+/// The fields one hash covers, borrowed, so hashing allocates nothing.
+struct Canonical<'a> {
+    seq: u64,
+    at_ms: u64,
+    caller: Option<u64>,
+    terminal: bool,
+    method: &'a str,
+    target: Option<u64>,
+    scope: &'a str,
+    /// The outcome's variant: 0 ok, 1 refused, 2 error.
+    tag: u8,
+    /// The reason, in parts that are hashed as one string.
+    reason: [&'a [u8]; 2],
+}
+
+fn digest_record(prev: &[u8; HASH_BYTES], record: &Record) -> [u8; HASH_BYTES] {
     let (tag, reason) = match &record.outcome {
-        Outcome::Ok(reason) => (0_u8, reason),
-        Outcome::Refused(reason) => (1_u8, reason),
-        Outcome::Error(reason) => (2_u8, reason),
+        Outcome::Ok(reason) => (0, reason),
+        Outcome::Refused(reason) => (1, reason),
+        Outcome::Error(reason) => (2, reason),
     };
-    bytes.push(tag);
-    encode_string(&mut bytes, reason);
-    bytes
+    digest(
+        prev,
+        &Canonical {
+            seq: record.seq,
+            at_ms: record.at_ms,
+            caller: record.caller,
+            terminal: record.terminal,
+            method: &record.method,
+            target: record.target,
+            scope: &record.scope,
+            tag,
+            reason: [reason.as_bytes(), &[]],
+        },
+    )
 }
 
-fn encode_option(bytes: &mut Vec<u8>, value: Option<u64>) {
-    match value {
+/// SHA-256 of `prev` and the canonical bytes, fed in pieces.
+fn digest(prev: &[u8; HASH_BYTES], canonical: &Canonical<'_>) -> [u8; HASH_BYTES] {
+    let option = |hasher: &mut Sha256, value: Option<u64>| match value {
         Some(value) => {
-            bytes.push(1);
-            bytes.extend_from_slice(&value.to_be_bytes());
+            hasher.update([1]);
+            hasher.update(value.to_be_bytes());
         }
-        None => bytes.push(0),
-    }
-}
-
-fn encode_string(bytes: &mut Vec<u8>, value: &str) {
-    bytes.extend_from_slice(&(value.len() as u64).to_be_bytes());
-    bytes.extend_from_slice(value.as_bytes());
-}
-
-fn digest(prev: &[u8; HASH_BYTES], canonical: &[u8]) -> [u8; HASH_BYTES] {
+        None => hasher.update([0]),
+    };
+    let string = |hasher: &mut Sha256, parts: &[&[u8]]| {
+        let len: usize = parts.iter().map(|part| part.len()).sum();
+        hasher.update((len as u64).to_be_bytes());
+        parts.iter().for_each(|part| hasher.update(part));
+    };
     let mut hasher = Sha256::new();
     hasher.update(prev);
-    hasher.update(canonical);
+    hasher.update(canonical.seq.to_be_bytes());
+    hasher.update(canonical.at_ms.to_be_bytes());
+    option(&mut hasher, canonical.caller);
+    hasher.update([u8::from(canonical.terminal)]);
+    string(&mut hasher, &[canonical.method.as_bytes()]);
+    option(&mut hasher, canonical.target);
+    string(&mut hasher, &[canonical.scope.as_bytes()]);
+    hasher.update([canonical.tag]);
+    string(&mut hasher, &canonical.reason);
     hasher.finalize().into()
 }
 
@@ -1020,6 +1077,133 @@ mod tests {
         }
         eprintln!("typical_encoded_bytes={typical_bytes} ring_entries={seq}");
         assert_eq!(log.bytes, typical_bytes * seq as usize);
+        Ok(())
+    }
+
+    /// The calls of `golden.jsonl`, which this ring of strings wrote: every method with every
+    /// outcome, reasons in and out of the table, and both numbers a reason can end with.
+    /// ADR-0053's fixed-size records must read back the same lines.
+    fn golden() -> Vec<Record> {
+        let scopes = [
+            "any",
+            "terminal",
+            "self",
+            "other",
+            "children",
+            "tool.open",
+            "outside",
+            "tool",
+        ];
+        let reasons = [
+            "no such pane",
+            "the pane is protected: ssh",
+            "the sandbox will not start: \"/home/é/x\ny\" is not private",
+            "",
+        ];
+        let mut records = Vec::new();
+        for (i, (method, tag)) in (0_u64..).zip(
+            METHODS
+                .iter()
+                .flat_map(|method| (0..3).map(move |tag| (method, tag))),
+        ) {
+            let reason = match (tag, i % 4) {
+                (0, 1) if *method == "pane.send" => "allowed, 13 bytes".to_owned(),
+                (0, _) if *method == "grants.revoke" => format!("allowed, grant {}", u64::MAX - i),
+                (0, _) => "allowed".to_owned(),
+                (1, _) if *method == "pane.send" => {
+                    format!("{}, {} bytes", reasons[(i % 3) as usize], i * 1000)
+                }
+                (_, n) => reasons[n as usize].to_owned(),
+            };
+            records.push(Record {
+                seq: 0,
+                at_ms: 1_763_000_000_000 + i * 977,
+                caller: (!i.is_multiple_of(4)).then_some(i % 5),
+                terminal: !i.is_multiple_of(3),
+                method: (*method).to_owned(),
+                target: match i % 5 {
+                    0 => None,
+                    1 => Some(u64::MAX),
+                    n => Some(n * 7),
+                },
+                scope: scopes[(i % 8) as usize].to_owned(),
+                outcome: match tag {
+                    0 => Outcome::Ok(reason),
+                    1 => Outcome::Refused(reason),
+                    _ => Outcome::Error(reason),
+                },
+            });
+        }
+        records
+    }
+
+    #[test]
+    fn every_method_and_outcome_reads_back_as_the_golden_lines() -> Result<(), Error> {
+        let mut log = Log::new();
+        for record in golden() {
+            log.append(record)?;
+        }
+        let read: String = log.iter().map(format_line).collect();
+        assert_eq!(read, include_str!("audit/golden.jsonl"));
+        Ok(())
+    }
+
+    /// Every literal reason in the sources of the core's replies is in the table (ADR-0053).
+    /// Reasons built at run time, with a path or an error, are not literals.
+    #[test]
+    fn every_literal_reason_is_in_the_table() -> io::Result<()> {
+        assert!(REASONS.windows(2).all(|pair| pair[0] < pair[1]));
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut files: Vec<PathBuf> = ["bin/pinfold-core.rs", "audit.rs", "timeline.rs"]
+            .iter()
+            .map(|name| root.join("crates/pinfold-cli/src").join(name))
+            .collect();
+        let mut dirs: Vec<PathBuf> = ["pinfold-core", "pinfold-api", "pinfold-proto"]
+            .iter()
+            .map(|name| root.join("crates").join(name).join("src"))
+            .collect();
+        while let Some(dir) = dirs.pop() {
+            for item in fs::read_dir(dir)? {
+                let path = item?.path();
+                let name = path.file_name().unwrap_or_default().to_string_lossy();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else if name.ends_with(".rs") && !name.contains("test") {
+                    files.push(path);
+                }
+            }
+        }
+        let mut missing = Vec::new();
+        for file in files {
+            let source = fs::read_to_string(&file)?;
+            let source = source
+                .split("#[cfg(test)]\nmod tests")
+                .next()
+                .unwrap_or_default();
+            for opener in [
+                "Err(\"",
+                "ok_or(\"",
+                "ok_or_else(|| \"",
+                "map_err(|_| \"",
+                "#[error(\"",
+            ] {
+                for (at, _) in source.match_indices(opener) {
+                    let literal = source[at + opener.len()..]
+                        .split('"')
+                        .next()
+                        .unwrap_or_default();
+                    if !literal.contains(['\\', '{', '}'])
+                        && REASONS.binary_search(&literal).is_err()
+                    {
+                        missing.push(format!("{}: {literal}", file.display()));
+                    }
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "add these to audit/reasons.rs: {missing:#?}"
+        );
         Ok(())
     }
 }

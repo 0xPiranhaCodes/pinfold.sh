@@ -380,8 +380,8 @@ fn a_polling_agent_adds_no_entries_and_a_refused_call_adds_one() {
             api(1_005, 11, Outcome::Ok, Some(3)),
         ]
     );
-    assert_eq!(METHODS[4].0, "pane.read");
-    assert_eq!(METHODS[6].0, "pane.send");
+    // An `api` entry's method index is also the audit log's (ADR-0053).
+    assert_eq!(METHODS.map(|(name, _)| name), pinfold_api::audit::METHODS);
     let target: Vec<What> = timelines
         .entries(3)
         .unwrap()
