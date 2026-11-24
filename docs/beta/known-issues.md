@@ -56,9 +56,9 @@ still welcome if it adds a case not listed here. Report bugs with the
 - **On some runs the window reads about 59 to 61 MB**, over its 55.86 MB budget, on `main` and
   branches alike. Which of two Metal pool layouts a run gets decides it
   ([#454](https://github.com/0xPiranhaCodes/pinfold.sh/issues/454)).
-- **The core keeps about 0.5 MB after a burst of API calls.** After 1,000 calls it reads about
-  3.5 MB against 2.8 MB idle, and further calls add nothing. The audit ring holds most of it by
-  design, and its redesign is [#506](https://github.com/0xPiranhaCodes/pinfold.sh/issues/506).
+- **The core keeps about 0.25 MB after a burst of API calls.** After 1,000 calls it reads about
+  3.2 MB against 2.9 MB idle, and further calls add nothing. The audit ring is 64 KiB of it
+  ([ADR-0053](../adr/0053-audit-ring-holds-fixed-size-records.md)); the rest is not yet traced.
 
 ## Panes and sessions
 

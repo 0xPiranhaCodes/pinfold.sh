@@ -71,8 +71,9 @@ ADR-0052's timeline pattern.
 
 ## Consequences
 
-- The `Core after 1,000 API calls` mem-gate row falls to within noise of the idle core, and its
-  budget is lowered to match.
+- The `Core after 1,000 API calls` mem-gate row falls from about 0.65 MB over the idle core
+  to about 0.25 MB over it on an M1 Pro, not to within noise as #506 hoped. The rest is not the
+  ring, whose slots are 64 KiB for these calls, so its 4 MB budget stays until that is traced.
 - A new literal reason must be added to `audit/reasons.rs`, and the test says so. A new method
   is appended to `METHODS` and to the timeline's table in the same order, which a test checks.
 - `Log::iter` builds entries, with their text and hashes, on each read. That is about 2,048
