@@ -211,6 +211,7 @@ Sessions survive at two levels. While the daemon runs, nothing is lost: detach a
 - The layout tree (tabs, splits, ratios, zoom, focused pane).
 - Per pane: kind, title, cwd (tracked via OSC 7), the command line, the agent profile, and a small allowlisted part of the environment.
 - Tool pane state: the tool and its argument (the file, directory or diff range).
+- An agent run's counters, numbers and no text, for the `was running` strip ([ADR-0052](../adr/0052-session-replay-a-timeline-per-agent-run.md)).
 - Scrollback, off by default (opt-in per session) and redacted before saving: the last N lines (default 2,000) per pane, zstd-compressed, with a per-session cap (default 5 MB).
 
 Snapshots are written on detach, on clean exit, every 60 seconds if something changed, and on `pinfold ctl session save`. They are written atomically (write to a temp file, then rename).
